@@ -1,0 +1,10 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tinfoil"
+version = "0.0.1"
+description = "Python client for the Tinfoil API"
+readme = "README.md"
+requires-python = ">=3.8"
