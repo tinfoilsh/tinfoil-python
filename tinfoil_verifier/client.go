@@ -3566,6 +3566,44 @@ func Map_string_string_keys(handle CGoHandle) CGoHandle {
 
 // ---- Structs ---
 
+// --- wrapping struct: client.TLSBoundRoundTripper ---
+//
+//export client_TLSBoundRoundTripper_CTor
+func client_TLSBoundRoundTripper_CTor() CGoHandle {
+	return CGoHandle(handleFromPtr_client_TLSBoundRoundTripper(&client.TLSBoundRoundTripper{}))
+}
+
+//export client_TLSBoundRoundTripper_ExpectedCertFP_Get
+func client_TLSBoundRoundTripper_ExpectedCertFP_Get(handle CGoHandle) CGoHandle {
+	op := ptrFromHandle_client_TLSBoundRoundTripper(handle)
+	return handleFromPtr_Slice_byte(&op.ExpectedCertFP)
+}
+
+//export client_TLSBoundRoundTripper_ExpectedCertFP_Set
+func client_TLSBoundRoundTripper_ExpectedCertFP_Set(handle CGoHandle, val CGoHandle) {
+	op := ptrFromHandle_client_TLSBoundRoundTripper(handle)
+	op.ExpectedCertFP = deptrFromHandle_Slice_byte(val)
+}
+
+//export client_TLSBoundRoundTripper_RoundTrip
+func client_TLSBoundRoundTripper_RoundTrip(_handle CGoHandle, r CGoHandle) CGoHandle {
+	_saved_thread := C.PyEval_SaveThread()
+	vifc, __err := gopyh.VarFromHandleTry((gopyh.CGoHandle)(_handle), "*client.TLSBoundRoundTripper")
+	if __err != nil {
+		return handleFromPtr_Ptr_http_Response(nil)
+	}
+	cret, __err := gopyh.Embed(vifc, reflect.TypeOf(client.TLSBoundRoundTripper{})).(*client.TLSBoundRoundTripper).RoundTrip(ptrFromHandle_Ptr_http_Request(r))
+
+	C.PyEval_RestoreThread(_saved_thread)
+	if __err != nil {
+		estr := C.CString(__err.Error())
+		C.PyErr_SetString(C.PyExc_RuntimeError, estr)
+		C.free(unsafe.Pointer(estr))
+		return handleFromPtr_Ptr_http_Response(nil)
+	}
+	return handleFromPtr_Ptr_http_Response(cret)
+}
+
 // --- wrapping struct: client.GroundTruth ---
 //
 //export client_GroundTruth_CTor
@@ -3757,44 +3795,6 @@ func client_SecureClient_Get(_handle CGoHandle, url *C.char, headers CGoHandle) 
 		return handleFromPtr_Ptr_client_Response(nil)
 	}
 	return handleFromPtr_Ptr_client_Response(cret)
-}
-
-// --- wrapping struct: client.TLSBoundRoundTripper ---
-//
-//export client_TLSBoundRoundTripper_CTor
-func client_TLSBoundRoundTripper_CTor() CGoHandle {
-	return CGoHandle(handleFromPtr_client_TLSBoundRoundTripper(&client.TLSBoundRoundTripper{}))
-}
-
-//export client_TLSBoundRoundTripper_ExpectedCertFP_Get
-func client_TLSBoundRoundTripper_ExpectedCertFP_Get(handle CGoHandle) CGoHandle {
-	op := ptrFromHandle_client_TLSBoundRoundTripper(handle)
-	return handleFromPtr_Slice_byte(&op.ExpectedCertFP)
-}
-
-//export client_TLSBoundRoundTripper_ExpectedCertFP_Set
-func client_TLSBoundRoundTripper_ExpectedCertFP_Set(handle CGoHandle, val CGoHandle) {
-	op := ptrFromHandle_client_TLSBoundRoundTripper(handle)
-	op.ExpectedCertFP = deptrFromHandle_Slice_byte(val)
-}
-
-//export client_TLSBoundRoundTripper_RoundTrip
-func client_TLSBoundRoundTripper_RoundTrip(_handle CGoHandle, r CGoHandle) CGoHandle {
-	_saved_thread := C.PyEval_SaveThread()
-	vifc, __err := gopyh.VarFromHandleTry((gopyh.CGoHandle)(_handle), "*client.TLSBoundRoundTripper")
-	if __err != nil {
-		return handleFromPtr_Ptr_http_Response(nil)
-	}
-	cret, __err := gopyh.Embed(vifc, reflect.TypeOf(client.TLSBoundRoundTripper{})).(*client.TLSBoundRoundTripper).RoundTrip(ptrFromHandle_Ptr_http_Request(r))
-
-	C.PyEval_RestoreThread(_saved_thread)
-	if __err != nil {
-		estr := C.CString(__err.Error())
-		C.PyErr_SetString(C.PyExc_RuntimeError, estr)
-		C.free(unsafe.Pointer(estr))
-		return handleFromPtr_Ptr_http_Response(nil)
-	}
-	return handleFromPtr_Ptr_http_Response(cret)
 }
 
 // ---- Slices ---

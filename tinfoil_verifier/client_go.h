@@ -538,6 +538,13 @@ extern void Map_string_string_set(long long handle, char* _ky, char* _vl);
 extern void Map_string_string_delete(long long handle, char* _ky);
 extern long long Map_string_string_keys(long long handle);
 
+// --- wrapping struct: client.TLSBoundRoundTripper ---
+//
+extern long long client_TLSBoundRoundTripper_CTor();
+extern long long client_TLSBoundRoundTripper_ExpectedCertFP_Get(long long handle);
+extern void client_TLSBoundRoundTripper_ExpectedCertFP_Set(long long handle, long long val);
+extern long long client_TLSBoundRoundTripper_RoundTrip(long long _handle, long long r);
+
 // --- wrapping struct: client.GroundTruth ---
 //
 extern long long client_GroundTruth_CTor();
@@ -568,13 +575,6 @@ extern long long client_SecureClient_Verify(long long _handle);
 extern long long client_SecureClient_HTTPClient(long long _handle);
 extern long long client_SecureClient_Post(long long _handle, char* url, long long headers, long long body);
 extern long long client_SecureClient_Get(long long _handle, char* url, long long headers);
-
-// --- wrapping struct: client.TLSBoundRoundTripper ---
-//
-extern long long client_TLSBoundRoundTripper_CTor();
-extern long long client_TLSBoundRoundTripper_ExpectedCertFP_Get(long long handle);
-extern void client_TLSBoundRoundTripper_ExpectedCertFP_Set(long long handle, long long val);
-extern long long client_TLSBoundRoundTripper_RoundTrip(long long _handle, long long r);
 extern long long client_NewSecureClient(char* enclave, char* repo);
 
 #ifdef __cplusplus

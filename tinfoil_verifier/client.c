@@ -5126,6 +5126,78 @@ PyObject * _wrap__client_Map_string_string_keys(PyObject * PYBINDGEN_UNUSED(dumm
 
 
 PyObject *
+_wrap__client_client_TLSBoundRoundTripper_CTor(PyObject *PYBINDGEN_UNUSED(_args), PyObject *PYBINDGEN_UNUSED(_kwargs))
+{
+    PyObject *py_retval;
+    int64_t retval;
+
+    retval = client_TLSBoundRoundTripper_CTor();
+    py_retval = Py_BuildValue((char *) "L", retval);
+    return py_retval;
+}
+PyObject * _wrap__client_client_TLSBoundRoundTripper_CTor(PyObject *PYBINDGEN_UNUSED(_args), PyObject *PYBINDGEN_UNUSED(_kwargs));
+
+
+PyObject *
+_wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Get(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs)
+{
+    PyObject *py_retval;
+    int64_t retval;
+    int64_t handle;
+    const char *keywords[] = {"handle", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, (char *) "L", (char **) keywords, &handle)) {
+        return NULL;
+    }
+    retval = client_TLSBoundRoundTripper_ExpectedCertFP_Get(handle);
+    py_retval = Py_BuildValue((char *) "L", retval);
+    return py_retval;
+}
+PyObject * _wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Get(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs);
+
+
+PyObject *
+_wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Set(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs)
+{
+    PyObject *py_retval;
+    int64_t handle;
+    int64_t val;
+    const char *keywords[] = {"handle", "val", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, (char *) "LL", (char **) keywords, &handle, &val)) {
+        return NULL;
+    }
+    client_TLSBoundRoundTripper_ExpectedCertFP_Set(handle, val);
+    Py_INCREF(Py_None);
+    py_retval = Py_None;
+    return py_retval;
+}
+PyObject * _wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Set(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs);
+
+
+PyObject *
+_wrap__client_client_TLSBoundRoundTripper_RoundTrip(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs)
+{
+    PyObject *py_retval;
+    int64_t retval;
+    int64_t _handle;
+    int64_t r;
+    const char *keywords[] = {"_handle", "r", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, (char *) "LL", (char **) keywords, &_handle, &r)) {
+        return NULL;
+    }
+    retval = client_TLSBoundRoundTripper_RoundTrip(_handle, r);
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
+    py_retval = Py_BuildValue((char *) "L", retval);
+    return py_retval;
+}
+PyObject * _wrap__client_client_TLSBoundRoundTripper_RoundTrip(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs);
+
+
+PyObject *
 _wrap__client_client_GroundTruth_CTor(PyObject *PYBINDGEN_UNUSED(_args), PyObject *PYBINDGEN_UNUSED(_kwargs))
 {
     PyObject *py_retval;
@@ -5534,78 +5606,6 @@ PyObject * _wrap__client_client_SecureClient_Get(PyObject * PYBINDGEN_UNUSED(dum
 
 
 PyObject *
-_wrap__client_client_TLSBoundRoundTripper_CTor(PyObject *PYBINDGEN_UNUSED(_args), PyObject *PYBINDGEN_UNUSED(_kwargs))
-{
-    PyObject *py_retval;
-    int64_t retval;
-
-    retval = client_TLSBoundRoundTripper_CTor();
-    py_retval = Py_BuildValue((char *) "L", retval);
-    return py_retval;
-}
-PyObject * _wrap__client_client_TLSBoundRoundTripper_CTor(PyObject *PYBINDGEN_UNUSED(_args), PyObject *PYBINDGEN_UNUSED(_kwargs));
-
-
-PyObject *
-_wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Get(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs)
-{
-    PyObject *py_retval;
-    int64_t retval;
-    int64_t handle;
-    const char *keywords[] = {"handle", NULL};
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, (char *) "L", (char **) keywords, &handle)) {
-        return NULL;
-    }
-    retval = client_TLSBoundRoundTripper_ExpectedCertFP_Get(handle);
-    py_retval = Py_BuildValue((char *) "L", retval);
-    return py_retval;
-}
-PyObject * _wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Get(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs);
-
-
-PyObject *
-_wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Set(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs)
-{
-    PyObject *py_retval;
-    int64_t handle;
-    int64_t val;
-    const char *keywords[] = {"handle", "val", NULL};
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, (char *) "LL", (char **) keywords, &handle, &val)) {
-        return NULL;
-    }
-    client_TLSBoundRoundTripper_ExpectedCertFP_Set(handle, val);
-    Py_INCREF(Py_None);
-    py_retval = Py_None;
-    return py_retval;
-}
-PyObject * _wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Set(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs);
-
-
-PyObject *
-_wrap__client_client_TLSBoundRoundTripper_RoundTrip(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs)
-{
-    PyObject *py_retval;
-    int64_t retval;
-    int64_t _handle;
-    int64_t r;
-    const char *keywords[] = {"_handle", "r", NULL};
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, (char *) "LL", (char **) keywords, &_handle, &r)) {
-        return NULL;
-    }
-    retval = client_TLSBoundRoundTripper_RoundTrip(_handle, r);
-    if (PyErr_Occurred()) {
-        return NULL;
-    }
-    py_retval = Py_BuildValue((char *) "L", retval);
-    return py_retval;
-}
-PyObject * _wrap__client_client_TLSBoundRoundTripper_RoundTrip(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs);
-
-
-PyObject *
 _wrap__client_client_NewSecureClient(PyObject * PYBINDGEN_UNUSED(dummy), PyObject *args, PyObject *kwargs)
 {
     PyObject *py_retval;
@@ -5904,6 +5904,10 @@ static PyMethodDef _client_functions[] = {
     {(char *) "Map_string_string_set", (PyCFunction) _wrap__client_Map_string_string_set, METH_KEYWORDS|METH_VARARGS, "Map_string_string_set(handle, key, value)\n\ntype: handle: int64_t\ntype: key: char *\ntype: value: char *" },
     {(char *) "Map_string_string_delete", (PyCFunction) _wrap__client_Map_string_string_delete, METH_KEYWORDS|METH_VARARGS, "Map_string_string_delete(handle, _ky)\n\ntype: handle: int64_t\ntype: _ky: char *" },
     {(char *) "Map_string_string_keys", (PyCFunction) _wrap__client_Map_string_string_keys, METH_KEYWORDS|METH_VARARGS, "Map_string_string_keys(handle)\n\ntype: handle: int64_t" },
+    {(char *) "client_TLSBoundRoundTripper_CTor", (PyCFunction) _wrap__client_client_TLSBoundRoundTripper_CTor, METH_NOARGS, "client_TLSBoundRoundTripper_CTor()\n\n" },
+    {(char *) "client_TLSBoundRoundTripper_ExpectedCertFP_Get", (PyCFunction) _wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Get, METH_KEYWORDS|METH_VARARGS, "client_TLSBoundRoundTripper_ExpectedCertFP_Get(handle)\n\ntype: handle: int64_t" },
+    {(char *) "client_TLSBoundRoundTripper_ExpectedCertFP_Set", (PyCFunction) _wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Set, METH_KEYWORDS|METH_VARARGS, "client_TLSBoundRoundTripper_ExpectedCertFP_Set(handle, val)\n\ntype: handle: int64_t\ntype: val: int64_t" },
+    {(char *) "client_TLSBoundRoundTripper_RoundTrip", (PyCFunction) _wrap__client_client_TLSBoundRoundTripper_RoundTrip, METH_KEYWORDS|METH_VARARGS, "client_TLSBoundRoundTripper_RoundTrip(_handle, r)\n\ntype: _handle: int64_t\ntype: r: int64_t" },
     {(char *) "client_GroundTruth_CTor", (PyCFunction) _wrap__client_client_GroundTruth_CTor, METH_NOARGS, "client_GroundTruth_CTor()\n\n" },
     {(char *) "client_GroundTruth_CertFingerprint_Get", (PyCFunction) _wrap__client_client_GroundTruth_CertFingerprint_Get, METH_KEYWORDS|METH_VARARGS, "client_GroundTruth_CertFingerprint_Get(handle)\n\ntype: handle: int64_t" },
     {(char *) "client_GroundTruth_CertFingerprint_Set", (PyCFunction) _wrap__client_client_GroundTruth_CertFingerprint_Set, METH_KEYWORDS|METH_VARARGS, "client_GroundTruth_CertFingerprint_Set(handle, val)\n\ntype: handle: int64_t\ntype: val: int64_t" },
@@ -5926,10 +5930,6 @@ static PyMethodDef _client_functions[] = {
     {(char *) "client_SecureClient_HTTPClient", (PyCFunction) _wrap__client_client_SecureClient_HTTPClient, METH_KEYWORDS|METH_VARARGS, "client_SecureClient_HTTPClient(_handle)\n\ntype: _handle: int64_t" },
     {(char *) "client_SecureClient_Post", (PyCFunction) _wrap__client_client_SecureClient_Post, METH_KEYWORDS|METH_VARARGS, "client_SecureClient_Post(_handle, url, headers, body)\n\ntype: _handle: int64_t\ntype: url: char *\ntype: headers: int64_t\ntype: body: int64_t" },
     {(char *) "client_SecureClient_Get", (PyCFunction) _wrap__client_client_SecureClient_Get, METH_KEYWORDS|METH_VARARGS, "client_SecureClient_Get(_handle, url, headers)\n\ntype: _handle: int64_t\ntype: url: char *\ntype: headers: int64_t" },
-    {(char *) "client_TLSBoundRoundTripper_CTor", (PyCFunction) _wrap__client_client_TLSBoundRoundTripper_CTor, METH_NOARGS, "client_TLSBoundRoundTripper_CTor()\n\n" },
-    {(char *) "client_TLSBoundRoundTripper_ExpectedCertFP_Get", (PyCFunction) _wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Get, METH_KEYWORDS|METH_VARARGS, "client_TLSBoundRoundTripper_ExpectedCertFP_Get(handle)\n\ntype: handle: int64_t" },
-    {(char *) "client_TLSBoundRoundTripper_ExpectedCertFP_Set", (PyCFunction) _wrap__client_client_TLSBoundRoundTripper_ExpectedCertFP_Set, METH_KEYWORDS|METH_VARARGS, "client_TLSBoundRoundTripper_ExpectedCertFP_Set(handle, val)\n\ntype: handle: int64_t\ntype: val: int64_t" },
-    {(char *) "client_TLSBoundRoundTripper_RoundTrip", (PyCFunction) _wrap__client_client_TLSBoundRoundTripper_RoundTrip, METH_KEYWORDS|METH_VARARGS, "client_TLSBoundRoundTripper_RoundTrip(_handle, r)\n\ntype: _handle: int64_t\ntype: r: int64_t" },
     {(char *) "client_NewSecureClient", (PyCFunction) _wrap__client_client_NewSecureClient, METH_KEYWORDS|METH_VARARGS, "client_NewSecureClient(enclave, repo)\n\ntype: enclave: char *\ntype: repo: char *" },
     {NULL, NULL, 0, NULL}
 };

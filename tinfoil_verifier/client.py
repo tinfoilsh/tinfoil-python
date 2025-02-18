@@ -1541,6 +1541,63 @@ class Map_string_string(go.GoClass):
 
 # ---- Structs ---
 
+# Python type for struct client.TLSBoundRoundTripper
+class TLSBoundRoundTripper(go.GoClass):
+	""""""
+	def __init__(self, *args, **kwargs):
+		"""
+		handle=A Go-side object is always initialized with an explicit handle=arg
+		otherwise parameters can be unnamed in order of field names or named fields
+		in which case a new Go object is constructed first
+		"""
+		if len(kwargs) == 1 and 'handle' in kwargs:
+			self.handle = kwargs['handle']
+			_client.IncRef(self.handle)
+		elif len(args) == 1 and isinstance(args[0], go.GoClass):
+			self.handle = args[0].handle
+			_client.IncRef(self.handle)
+		else:
+			self.handle = _client.client_TLSBoundRoundTripper_CTor()
+			_client.IncRef(self.handle)
+			if  0 < len(args):
+				self.ExpectedCertFP = args[0]
+			if "ExpectedCertFP" in kwargs:
+				self.ExpectedCertFP = kwargs["ExpectedCertFP"]
+	def __del__(self):
+		_client.DecRef(self.handle)
+	def __str__(self):
+		pr = [(p, getattr(self, p)) for p in dir(self) if not p.startswith('__')]
+		sv = 'client.TLSBoundRoundTripper{'
+		first = True
+		for v in pr:
+			if callable(v[1]):
+				continue
+			if first:
+				first = False
+			else:
+				sv += ', '
+			sv += v[0] + '=' + str(v[1])
+		return sv + '}'
+	def __repr__(self):
+		pr = [(p, getattr(self, p)) for p in dir(self) if not p.startswith('__')]
+		sv = 'client.TLSBoundRoundTripper ( '
+		for v in pr:
+			if not callable(v[1]):
+				sv += v[0] + '=' + str(v[1]) + ', '
+		return sv + ')'
+	@property
+	def ExpectedCertFP(self):
+		return go.Slice_byte(handle=_client.client_TLSBoundRoundTripper_ExpectedCertFP_Get(self.handle))
+	@ExpectedCertFP.setter
+	def ExpectedCertFP(self, value):
+		if isinstance(value, go.GoClass):
+			_client.client_TLSBoundRoundTripper_ExpectedCertFP_Set(self.handle, value.handle)
+		else:
+			raise TypeError("supplied argument type {t} is not a go.GoClass".format(t=type(value)))
+	def RoundTrip(self, r):
+		"""RoundTrip(object r) object, str"""
+		return go.Ptr_http_Response(handle=_client.client_TLSBoundRoundTripper_RoundTrip(self.handle, r.handle))
+
 # Python type for struct client.GroundTruth
 class GroundTruth(go.GoClass):
 	"""GroundTruth represents the \"known good\" verified of the enclave\n"""
@@ -1784,63 +1841,6 @@ class SecureClient(go.GoClass):
 		Get makes an HTTP GET request
 		"""
 		return Response(handle=_client.client_SecureClient_Get(self.handle, url, headers.handle))
-
-# Python type for struct client.TLSBoundRoundTripper
-class TLSBoundRoundTripper(go.GoClass):
-	""""""
-	def __init__(self, *args, **kwargs):
-		"""
-		handle=A Go-side object is always initialized with an explicit handle=arg
-		otherwise parameters can be unnamed in order of field names or named fields
-		in which case a new Go object is constructed first
-		"""
-		if len(kwargs) == 1 and 'handle' in kwargs:
-			self.handle = kwargs['handle']
-			_client.IncRef(self.handle)
-		elif len(args) == 1 and isinstance(args[0], go.GoClass):
-			self.handle = args[0].handle
-			_client.IncRef(self.handle)
-		else:
-			self.handle = _client.client_TLSBoundRoundTripper_CTor()
-			_client.IncRef(self.handle)
-			if  0 < len(args):
-				self.ExpectedCertFP = args[0]
-			if "ExpectedCertFP" in kwargs:
-				self.ExpectedCertFP = kwargs["ExpectedCertFP"]
-	def __del__(self):
-		_client.DecRef(self.handle)
-	def __str__(self):
-		pr = [(p, getattr(self, p)) for p in dir(self) if not p.startswith('__')]
-		sv = 'client.TLSBoundRoundTripper{'
-		first = True
-		for v in pr:
-			if callable(v[1]):
-				continue
-			if first:
-				first = False
-			else:
-				sv += ', '
-			sv += v[0] + '=' + str(v[1])
-		return sv + '}'
-	def __repr__(self):
-		pr = [(p, getattr(self, p)) for p in dir(self) if not p.startswith('__')]
-		sv = 'client.TLSBoundRoundTripper ( '
-		for v in pr:
-			if not callable(v[1]):
-				sv += v[0] + '=' + str(v[1]) + ', '
-		return sv + ')'
-	@property
-	def ExpectedCertFP(self):
-		return go.Slice_byte(handle=_client.client_TLSBoundRoundTripper_ExpectedCertFP_Get(self.handle))
-	@ExpectedCertFP.setter
-	def ExpectedCertFP(self, value):
-		if isinstance(value, go.GoClass):
-			_client.client_TLSBoundRoundTripper_ExpectedCertFP_Set(self.handle, value.handle)
-		else:
-			raise TypeError("supplied argument type {t} is not a go.GoClass".format(t=type(value)))
-	def RoundTrip(self, r):
-		"""RoundTrip(object r) object, str"""
-		return go.Ptr_http_Response(handle=_client.client_TLSBoundRoundTripper_RoundTrip(self.handle, r.handle))
 
 
 # ---- Slices ---
