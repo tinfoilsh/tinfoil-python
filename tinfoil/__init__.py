@@ -3,6 +3,7 @@ import httpx
 import openai
 import ssl
 from openai import OpenAI
+
 from tinfoil_verifier import client as tinfoil_verifier_client
 
 
@@ -14,12 +15,21 @@ class Chat:
         return getattr(self._client.chat, name)
 
 
+class Embeddings:
+    def __init__(self, client):
+        self._client = client
+
+    def __getattr__(self, name):
+        return getattr(self._client.embeddings, name)
+
+
 class TinfoilAI:
     def __init__(self, enclave: str, repo: str):
         self._enclave = enclave
         self._repo = repo
         self._client = self._create_client()
         self.chat = Chat(self._client)
+        self.embeddings = Embeddings(self._client)
 
     def _create_client(self) -> OpenAI:
         tf_client = tinfoil_verifier_client.NewSecureClient(self._enclave, self._repo)
