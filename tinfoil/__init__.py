@@ -1,41 +1,32 @@
 import hashlib
-import httpx
-import openai
 import ssl
+
+import httpx
 from openai import OpenAI
+from openai.resources.chat import Chat as OpenAIChat
+from openai.resources.embeddings import Embeddings as OpenAIEmbeddings
 
 from tinfoil_verifier import client as tinfoil_verifier_client
 
 
-class Chat:
-    def __init__(self, client):
-        self._client = client
-
-    def __getattr__(self, name):
-        return getattr(self._client.chat, name)
-
-
-class Embeddings:
-    def __init__(self, client):
-        self._client = client
-
-    def __getattr__(self, name):
-        return getattr(self._client.embeddings, name)
-
-
 class TinfoilAI:
-    def __init__(self, enclave: str, repo: str):
-        self._enclave = enclave
-        self._repo = repo
-        self._client = self._create_client()
-        self.chat = Chat(self._client)
-        self.embeddings = Embeddings(self._client)
+    chat: OpenAIChat
+    embeddings: OpenAIEmbeddings
+    api_key: str
+    enclave: str
 
-    def _create_client(self) -> OpenAI:
-        tf_client = tinfoil_verifier_client.NewSecureClient(self._enclave, self._repo)
+    def __init__(self, enclave: str, repo: str, api_key: str = "tinfoil"):
+        self.enclave = enclave
+        self.api_key = api_key
+        self.client = self._create_client(enclave, repo)
+        self.chat = self.client.chat
+        self.embeddings = self.client.embeddings
+
+    def _create_client(self, enclave: str, repo: str) -> OpenAI:
+        tf_client = tinfoil_verifier_client.NewSecureClient(enclave, repo)
         expected_fp = tf_client.Verify().CertFingerprint.__bytes__().hex()
 
-        def wrap_socket(*args, **kwargs):
+        def wrap_socket(*args, **kwargs) -> ssl.SSLSocket:
             ssl_socket = ssl.create_default_context().wrap_socket(*args, **kwargs)
             cert_binary = ssl_socket.getpeercert(binary_form=True)
             if not cert_binary:
@@ -51,13 +42,11 @@ class TinfoilAI:
         ctx.wrap_socket = wrap_socket
         http_client = httpx.Client(
             verify=ctx,
-            timeout=openai.DEFAULT_TIMEOUT,
-            limits=openai.DEFAULT_CONNECTION_LIMITS,
             follow_redirects=True,
         )
 
         return OpenAI(
-            base_url=f"https://{self._enclave}/v1/",
-            api_key="tinfoil",
+            base_url=f"https://{self.enclave}/v1/",
+            api_key=self.api_key,
             http_client=http_client,
         )
