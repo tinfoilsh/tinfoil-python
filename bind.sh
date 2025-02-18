@@ -1,10 +1,8 @@
 #!/bin/bash
 
-rm -rf venv verifier tinfoil_verifier
+rm -rf verifier tinfoil_verifier
 
-python3 -m venv venv
-source venv/bin/activate
-pip3 install -e .
+pip3 install .
 
 go install golang.org/x/tools/cmd/goimports@latest
 go install github.com/go-python/gopy@latest
