@@ -1,6 +1,3 @@
-# Tinfoil Python Library
-
-```python
 from tinfoil import TinfoilAI
 
 client = TinfoilAI(
@@ -18,4 +15,3 @@ chat_completion = client.chat.completions.create(
     model="deepseek-r1:70b",
 )
 print(chat_completion.choices[0].message.content)
-```

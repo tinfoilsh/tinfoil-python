@@ -169,3 +169,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+.idea/
+tuf-repo-cdn.sigstore.dev.json
+verifier/
