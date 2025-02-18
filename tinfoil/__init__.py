@@ -6,7 +6,7 @@ from openai import OpenAI
 from openai.resources.chat import Chat as OpenAIChat
 from openai.resources.embeddings import Embeddings as OpenAIEmbeddings
 
-from tinfoil_verifier import client as tinfoil_verifier_client
+from .tinfoil_verifier import client as tinfoil_verifier_client
 
 
 class TinfoilAI:

@@ -1,13 +1,13 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "tinfoil"
-version = "0.0.1"
-description = "Python client for the Tinfoil API"
+version = "0.0.2"
+description = "Python client for Tinfoil"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.13"
 dependencies = [
     "openai>=1.63.0",
     "pybindgen>=0.22.0",

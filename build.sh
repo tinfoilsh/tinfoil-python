@@ -1,6 +1,6 @@
 #!/bin/bash
 
-rm -rf verifier tinfoil_verifier
+rm -rf verifier tinfoil/tinfoil_verifier
 
 pip3 install .
 
@@ -13,5 +13,7 @@ cd verifier || exit
 gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
 cd - || exit
 
-mv verifier/tinfoil_verifier tinfoil_verifier
+mv verifier/tinfoil_verifier tinfoil/tinfoil_verifier
 rm -rf verifier
+
+python3 -m build
