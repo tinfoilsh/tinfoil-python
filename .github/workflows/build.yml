@@ -12,9 +12,15 @@ jobs:
     strategy:
       matrix: # 13 is Intel, 14 is Apple Silicon
         os: [ ubuntu-latest, macos-13, macos-14 ]
+        python: [ 3.10 ]
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
 
       - name: Create venv
         run: |
@@ -58,7 +64,7 @@ jobs:
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: tinfoil-python-${{ matrix.os }}
+          name: tinfoil-python-${{ matrix.os }}-${{ matrix.python }}
           path: ./dist/*.whl
 
   release:
