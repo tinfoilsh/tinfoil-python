@@ -1,11 +1,24 @@
-# Tinfoil Python Library
+# Tinfoil
+
+![PyPI - Version](https://img.shields.io/pypi/v/tinfoil)
+
+A Python client for secure AI model inference through Tinfoil.
+
+## Installation
+
+```bash
+pip install tinfoil
+```
+
+## Usage
 
 ```python
 from tinfoil import TinfoilAI
 
 client = TinfoilAI(
-    "inference.delta.tinfoil.sh",
-    "tinfoilsh/provably-private-deepseek-r1",
+    enclave="inference.delta.tinfoil.sh",
+    repo="tinfoilsh/provably-private-deepseek-r1",
+    api_key="<API_KEY>",
 )
 
 chat_completion = client.chat.completions.create(
@@ -19,3 +32,8 @@ chat_completion = client.chat.completions.create(
 )
 print(chat_completion.choices[0].message.content)
 ```
+
+## Requirements
+
+- Linux (amd64), MacOS 13 (Intel), or MacOS 14 (Apple Silicon)
+- CPython 3.10 through 3.13
