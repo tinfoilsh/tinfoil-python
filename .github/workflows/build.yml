@@ -6,14 +6,12 @@ on:
       - "v*"
 
 jobs:
-  build_wheels:
-    name: Build wheels on ${{ matrix.os }} python ${{ matrix.python }}
-    runs-on: ${{ matrix.os }}
+  build_linux:
+    name: Build Linux wheels
+    runs-on: ubuntu-latest
     strategy:
-      matrix: # 13 is Intel, 14 is Apple Silicon
-        os: [ ubuntu-latest, macos-13, macos-14 ]
-        python: [ "3.10", "3.11", "3.12", "3.13" ]
-
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -22,16 +20,67 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Create venv
-        run: |
-          python3 -m venv venv
+      - name: Install build tools
+        run: pip install build
 
-      - name: Activate virtualenv
+      - name: Install Go
         run: |
-          source venv/bin/activate
-          echo PATH=$PATH >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install -y golang
 
-      - run: pip3 install .
+      - name: Clone verifier repo
+        uses: actions/checkout@v4
+        with:
+          repository: tinfoilsh/verifier
+          ref: v0.0.21
+          path: verifier
+
+      - name: Install Go tools
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          go install github.com/go-python/gopy@latest
+
+      - name: Generate Go bindings
+        run: |
+          cd verifier && gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
+          mv tinfoil_verifier ../tinfoil/
+          cd .. && rm -rf verifier
+
+      - name: Build wheel
+        run: |
+          python3 -m build
+          python3 rename.py
+          # Force manylinux2014 tag
+          for wheel in dist/*linux*.whl; do
+            mv "$wheel" "${wheel//manylinux_2_39/manylinux2014}"
+          done
+
+      - name: Upload Linux wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-wheels-${{ matrix.python }}
+          path: ./dist/*.whl
+
+  build_macos:
+    name: Build macOS wheels
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Set deployment target
+        run: |
+          echo "MACOSX_DEPLOYMENT_TARGET=10.15" >> $GITHUB_ENV
 
       - name: Clone verifier repo
         uses: actions/checkout@v4
@@ -44,16 +93,15 @@ jobs:
         with:
           go-version-file: verifier/go.mod
 
-      - name: Install go bind tools
+      - name: Install Go tools
         run: |
           go install golang.org/x/tools/cmd/goimports@latest
           go install github.com/go-python/gopy@latest
 
-      - name: Bind
+      - name: Generate Go bindings
         run: |
           cd verifier && gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
-          ls -lah
-          mv tinfoil_verifier ../tinfoil
+          mv tinfoil_verifier ../tinfoil/
           cd .. && rm -rf verifier
 
       - name: Build wheel
@@ -61,16 +109,37 @@ jobs:
           python3 -m build
           python3 rename.py
 
-      - name: Upload wheel artifacts
+      - name: Upload macOS wheels
         uses: actions/upload-artifact@v4
         with:
-          name: tinfoil-python-${{ matrix.os }}-${{ matrix.python }}
+          name: macos-wheels-${{ matrix.python }}
           path: ./dist/*.whl
+
+  build_sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build sdist
+        run: python -m build --sdist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: ./dist/*.tar.gz
 
   release:
     name: Release
     runs-on: ubuntu-latest
-    needs: build_wheels
+    needs: [build_linux, build_macos, build_sdist]
     permissions:
       contents: write
       id-token: write
@@ -82,15 +151,17 @@ jobs:
         with:
           path: dist
 
-      - name: Move artifacts
+      - name: Organize artifacts
         run: |
-          mv dist/**/*.whl dist
-          rm -rf dist/tinfoil-python-*
+          mkdir -p dist
+          mv linux-wheels-*/*.whl dist/ || true
+          mv macos-wheels-*/*.whl dist/ || true
+          mv sdist/*.tar.gz dist/
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.whl
+          files: dist/*
 
-      - name: Publish package distributions to PyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
