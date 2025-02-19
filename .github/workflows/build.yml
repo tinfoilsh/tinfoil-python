@@ -7,7 +7,7 @@ on:
 
 jobs:
   build_wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build wheels on ${{ matrix.os }} python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix: # 13 is Intel, 14 is Apple Silicon
