@@ -113,9 +113,13 @@ jobs:
 
       - name: Organize artifacts
         run: |
-          mkdir -p dist
-          mv linux-wheels-*/*.whl dist/ || true
-          mv sdist/*.tar.gz dist/ || true
+          # Move from dist/linux-wheels-3.x into dist/
+          mv dist/linux-wheels-*/*.whl dist/ || true
+          mv dist/sdist/*.tar.gz dist/ || true
+
+          # Optionally remove empty subfolders
+          rm -rf dist/linux-wheels-* dist/sdist || true
+
           ls -l dist
 
       - name: Create release
