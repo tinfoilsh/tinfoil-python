@@ -20,6 +20,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install 'pybindgen' so gopy build doesn't fail
+          # Also install your project's normal deps from pyproject.toml
+          python -m pip install pybindgen
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -44,24 +51,29 @@ jobs:
 
       - name: Generate Go bindings
         run: |
-          cd verifier && gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
+          cd verifier
+          gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
           mv tinfoil_verifier ../tinfoil/
-          cd .. && rm -rf verifier
+          cd ..
+          rm -rf verifier
 
-      - name: Build wheel
+      - name: Build wheels
         run: |
-          python3 -m build
-          python3 rename.py
-          # Force manylinux2014 tag
+          python -m pip install build
+          python -m build
+          python rename.py
+          # Force manylinux2014 tag if desired
           for wheel in dist/*linux*.whl; do
-            mv "$wheel" "${wheel//manylinux_2_39/manylinux2014}"
+            if [ -f "$wheel" ]; then
+              mv "$wheel" "${wheel//manylinux_2_39/manylinux2014}"
+            fi
           done
 
       - name: Upload Linux wheels
         uses: actions/upload-artifact@v4
         with:
           name: linux-wheels-${{ matrix.python }}
-          path: ./dist/*.whl
+          path: dist/*.whl
 
   build_macos:
     name: Build macOS wheels
@@ -80,6 +92,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
+          # Install pybindgen so gopy build doesn't fail
           python -m pip install pybindgen
 
       - name: Configure Go
@@ -101,16 +114,15 @@ jobs:
 
       - name: Generate Go bindings
         run: |
-          cd verifier && gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
+          cd verifier
+          gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
           mv tinfoil_verifier ../tinfoil/
-          cd .. && rm -rf verifier
+          cd ..
+          rm -rf verifier
 
-      - name: Install package dependencies
+      - name: Build wheels
         run: |
-          python -m pip install -e .
-
-      - name: Build wheel
-        run: |
+          python -m pip install build
           python -m build
           python rename.py
 
@@ -118,7 +130,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-wheels-${{ matrix.python }}
-          path: ./dist/*.whl
+          path: dist/*.whl
 
   build_sdist:
     name: Build source distribution
@@ -130,7 +142,7 @@ jobs:
         uses: actions/setup-python@v5
 
       - name: Install build tools
-        run: pip install build
+        run: python -m pip install --upgrade pip build
 
       - name: Build sdist
         run: python -m build --sdist
@@ -139,7 +151,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sdist
-          path: ./dist/*.tar.gz
+          path: dist/*.tar.gz
 
   release:
     name: Release
@@ -161,7 +173,8 @@ jobs:
           mkdir -p dist
           mv linux-wheels-*/*.whl dist/ || true
           mv macos-wheels-*/*.whl dist/ || true
-          mv sdist/*.tar.gz dist/
+          mv sdist/*.tar.gz dist/ || true
+          ls -l dist
 
       - name: Create release
         uses: softprops/action-gh-release@v2
