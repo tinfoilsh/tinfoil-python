@@ -116,10 +116,7 @@ jobs:
       - name: Generate Go bindings
         run: |
           cd verifier
-          PYTHON_PREFIX=$(python3-config --prefix)
-          export CGO_CFLAGS="-I$PYTHON_PREFIX/include/python$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')"
-          export CGO_LDFLAGS="-L$PYTHON_PREFIX/lib -lpython$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')"
-          gopy build -output=tinfoil_verifier -vm=python3 -dynamic-link=true github.com/tinfoilsh/verifier/client
+          gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
           mv tinfoil_verifier ../tinfoil/
           cd ..
           rm -rf verifier
