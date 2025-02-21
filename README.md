@@ -1,4 +1,4 @@
-# Tinfoil
+# Tinfoil Python Library
 
 ![PyPI - Version](https://img.shields.io/pypi/v/tinfoil)
 
