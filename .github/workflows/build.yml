@@ -129,24 +129,22 @@ jobs:
           export GOARCH=$ARCH
           export CGO_ENABLED=1
           export CGO_CFLAGS="-O2 -g -arch $ARCH_FLAG"
-          # Modify LDFLAGS to include more explicit runtime path settings
-          export CGO_LDFLAGS="-Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/lib -arch $ARCH_FLAG"
+          export CGO_LDFLAGS="-Wl,-rpath,@loader_path -arch $ARCH_FLAG"
 
           # Use GOEXPERIMENT instead of GODEBUG for Go 1.23+
           export GOEXPERIMENT=cgocheck2
 
           # Print environment for debugging
           go env
-          echo "CGO_CFLAGS=$CGO_CFLAGS"
-          echo "CGO_LDFLAGS=$CGO_LDFLAGS"
 
-          # Build with verbose output
+          # Attempt simple build first (no tags)
           echo "Attempting build without explicit build tags..."
-          gopy build -output=tinfoil_verifier -vm=python3 -v github.com/tinfoilsh/verifier/client
+          gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
 
-          echo "Detailed library inspection:"
-          find tinfoil_verifier -type f -exec file {} \;
-          find tinfoil_verifier -name "*.dylib" -o -name "*.so" -exec otool -L {} \;
+          # Verify the architecture of the built libraries
+          echo "Checking architecture of built libraries:"
+          find tinfoil_verifier -name "*.dylib" -exec file {} \;
+          find tinfoil_verifier -name "*.so" -exec file {} \;
 
           # Move the built bindings
           mv tinfoil_verifier ../tinfoil/
@@ -172,24 +170,15 @@ jobs:
             mkdir -p wheel_contents
             unzip -q "$whl" -d wheel_contents
             
-            # More detailed inspection of wheel contents
-            echo "Full wheel contents:"
-            find wheel_contents -type f -exec file {} \;
+            # Find and examine all dylib files in the wheel
+            echo "Library files in wheel:"
+            find wheel_contents -name "*.dylib" -o -name "*.so" -exec file {} \; -exec otool -L {} \; || true
             
-            echo "Library dependencies:"
-            find wheel_contents -name "*.dylib" -o -name "*.so" -exec otool -L {} \;
-            
-            # Use delocate with verbose output
+            # Use delocate to fix library paths
             delocate-wheel -w fixed_wheels -v "$whl"
             
-            # Verify fixed wheel
-            echo "Checking fixed wheel:"
-            mkdir -p fixed_wheel_contents
-            unzip -q "fixed_wheels/$(basename $whl)" -d fixed_wheel_contents
-            find fixed_wheel_contents -name "*.dylib" -o -name "*.so" -exec otool -L {} \;
-            
             # Clean up
-            rm -rf wheel_contents fixed_wheel_contents
+            rm -rf wheel_contents
           done
 
           # Move fixed wheels back to dist directory
