@@ -27,6 +27,18 @@ jobs:
           allow-prereleases: false
           check-latest: true # Ensure we get the exact version
 
+      # Add this step to ensure python-config is available
+      - name: Install Python development tools
+        run: |
+          python -m pip install --upgrade pip
+          # Install python-dev package if needed
+          if [ "$(uname)" = "Darwin" ]; then
+            PYTHON_VERSION=${{ matrix.python }}
+            MAJOR_MINOR=$(echo $PYTHON_VERSION | cut -d. -f1,2)
+            # Create symlink to python-config
+            ln -sf /Library/Frameworks/Python.framework/Versions/$MAJOR_MINOR/bin/python$MAJOR_MINOR-config /usr/local/bin/python-config
+          fi
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
