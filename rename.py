@@ -17,8 +17,11 @@ if platform.system() == 'Darwin':
     else:
         arch = 'arm64'
     
-    # Create a consistent macOS platform tag
-    platform_tag = f'macosx_10_9_{arch}'
+    # Create a consistent macOS platform tag for arm64
+    if arch == 'arm64':
+        platform_tag = 'macosx_14_0_arm64'
+    else:
+        platform_tag = f'macosx_10_9_{arch}'
     print(f"Adjusted macOS platform tag: {platform_tag}")
 
 python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
