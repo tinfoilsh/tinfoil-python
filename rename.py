@@ -16,9 +16,9 @@ for wheel_file in wheel_files:
         filename = os.path.basename(wheel_file)
         name_parts = filename.split('-')
         if len(name_parts) >= 2:
-            # Typical wheel format: {distribution}-{version}(-{build tag})?-{python tag}-{abi tag}-{platform tag}.whl
-            name_parts[-3] = python_version
-
+            name_parts[-3] = python_version  # Python tag (cp312)
+            name_parts[-2] = python_version  # ABI tag (cp312) - THIS IS THE KEY FIX
+            
             new_filename = '-'.join(name_parts[:-1]) + f'-{platform_tag}.whl'
             new_path = os.path.join(base_dir, new_filename)
             os.rename(wheel_file, new_path)
