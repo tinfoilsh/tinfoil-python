@@ -26,6 +26,8 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: |
             sudo apt-get update
             sudo apt-get install -y golang
+            echo "GOPATH=$HOME/go" >> $GITHUB_ENV
+            echo "$HOME/go/bin" >> $GITHUB_PATH
             go install golang.org/x/tools/cmd/goimports@latest
             go install github.com/go-python/gopy@latest
             git clone --depth 1 -b v0.0.22 https://github.com/tinfoilsh/verifier
@@ -36,6 +38,8 @@ jobs:
             rm -rf verifier
           CIBW_BEFORE_ALL_MACOS: |
             brew install go
+            echo "GOPATH=$HOME/go" >> $GITHUB_ENV
+            echo "$HOME/go/bin" >> $GITHUB_PATH
             go install golang.org/x/tools/cmd/goimports@latest
             go install github.com/go-python/gopy@latest
             git clone --depth 1 -b v0.0.22 https://github.com/tinfoilsh/verifier
