@@ -2,190 +2,63 @@ name: Build
 
 on:
   push:
+    branches:
+      - main
     tags:
-      - "v*"
+      - 'v*'
+  pull_request:
 
 jobs:
-  build_linux:
-    name: Build Linux wheels
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python: ["3.10", "3.11", "3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pybindgen
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y golang
-
-      - name: Configure Go
-        run: |
-          echo "GOPATH=$HOME/go" >> $GITHUB_ENV
-          echo "$HOME/go/bin" >> $GITHUB_PATH
-
-      - name: Install Go tools
-        run: |
-          go install golang.org/x/tools/cmd/goimports@latest
-          go install github.com/go-python/gopy@latest
-
-      - name: Clone verifier repo
-        uses: actions/checkout@v4
-        with:
-          repository: tinfoilsh/verifier
-          ref: v0.0.22
-          path: verifier
-
-      - name: Generate Go bindings
-        run: |
-          cd verifier
-          gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
-          mv tinfoil_verifier ../tinfoil/
-          cd ..
-          rm -rf verifier
-
-      - name: Build wheels
-        run: |
-          python -m pip install build
-          python -m build
-          python rename.py
-          for wheel in dist/*linux*.whl; do
-            if [ -f "$wheel" ]; then
-              mv "$wheel" "${wheel//manylinux_2_39/manylinux2014}"
-            fi
-          done
-
-      - name: Upload Linux wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-wheels-${{ matrix.python }}
-          path: dist/*.whl
-
-  build_macos:
-    name: Build macOS wheels (${{ matrix.os }})
+  build_wheels:
+    name: Build wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-13-xlarge, macos-14]
-        python: ["3.10", "3.11", "3.12", "3.13"]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pybindgen
-
-      - name: Install system dependencies
-        run: |
-          brew install go
-
-      - name: Configure Go
-        run: |
-          echo "GOPATH=$HOME/go" >> $GITHUB_ENV
-          echo "$HOME/go/bin" >> $GITHUB_PATH
-
-      - name: Install Go tools
-        run: |
-          go install golang.org/x/tools/cmd/goimports@latest
-          go install github.com/go-python/gopy@latest
-
-      - name: Clone verifier repo
-        uses: actions/checkout@v4
-        with:
-          repository: tinfoilsh/verifier
-          ref: v0.0.22
-          path: verifier
-
-      - name: Generate Go bindings
-        run: |
-          cd verifier
-          gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
-          mv tinfoil_verifier ../tinfoil/
-          cd ..
-          rm -rf verifier
-
-      - name: Determine architecture
-        id: detect_arch
-        run: |
-          if [ "${{ matrix.os }}" = "macos-13-xlarge" ]; then
-            echo "arch=x86_64" >> $GITHUB_ENV
-          else
-            echo "arch=arm64" >> $GITHUB_ENV
-          fi
-
-      - name: Get Python library path
-        id: get_python_lib
-        run: |
-          PYTHON_LIB_PATH=$(python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR') + '/' + sysconfig.get_config_var('LDLIBRARY'))")
-          echo "PYTHON_LIB_PATH=$PYTHON_LIB_PATH" >> $GITHUB_ENV
-          echo "Python library path: $PYTHON_LIB_PATH"
-
-      - name: Fix Python library references
-        run: |
-          # Find all .so files and fix their references
-          find tinfoil/tinfoil_verifier -name "*.so" -type f | while read -r lib; do
-            echo "Fixing references in $lib"
-            
-            # Get current Python reference
-            CURRENT_PYTHON_REF=$(otool -L "$lib" | grep -o '/.*Python' | head -1)
-            
-            if [ -n "$CURRENT_PYTHON_REF" ]; then
-              echo "Current Python reference: $CURRENT_PYTHON_REF"
-              
-              # Change to @rpath/libpython
-              PYTHON_BASENAME=$(basename "${{ env.PYTHON_LIB_PATH }}")
-              echo "Will change to @rpath/$PYTHON_BASENAME"
-              
-              install_name_tool -change "$CURRENT_PYTHON_REF" "@rpath/$PYTHON_BASENAME" "$lib"
-              
-              # Add the rpath to the binary
-              install_name_tool -add_rpath "@loader_path/../../.." "$lib"
-            else
-              echo "No Python reference found in $lib"
-            fi
-          done
-
       - name: Build wheels
-        run: |
-          python -m pip install build
-          python -m build
-          python rename.py
+        uses: pypa/cibuildwheel@v2.23.0
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          CIBW_TEST_COMMAND: "python -m pip install {wheel} && python -c 'from tinfoil import TinfoilAI'"
+          CIBW_BEFORE_BUILD: |
+            curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz
+            tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz
+            export PATH=/usr/local/go/bin:$PATH
+            export GOPATH=$HOME/go
+            export PATH=$GOPATH/bin:$PATH
+            go install golang.org/x/tools/cmd/goimports@latest
+            go install github.com/go-python/gopy@latest
+            git clone --depth 1 -b v0.0.22 https://github.com/tinfoilsh/verifier
+            cd verifier
+            gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
+            mv tinfoil_verifier ../tinfoil/
+            cd ..
+            rm -rf verifier
+          CIBW_BEFORE_ALL_MACOS: |
+            brew install go
+            echo "GOPATH=$HOME/go" >> $GITHUB_ENV
+            echo "$HOME/go/bin" >> $GITHUB_PATH
+            go install golang.org/x/tools/cmd/goimports@latest
+            go install github.com/go-python/gopy@latest
+            git clone --depth 1 -b v0.0.22 https://github.com/tinfoilsh/verifier
+            cd verifier
+            gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
+            mv tinfoil_verifier ../tinfoil/
+            cd ..
+            rm -rf verifier
 
-      - name: Delocate wheels
-        run: |
-          python -m pip install delocate
-          for wheel in dist/*.whl; do
-            delocate-wheel -w dist/fixed -v "$wheel"
-          done
-          rm dist/*.whl
-          mv dist/fixed/* dist/
-
-      - name: Upload macOS wheels
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ env.arch }}-wheels-${{ matrix.python }}
-          path: dist/*.whl
+          name: cibw-wheels-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
 
   build_sdist:
     name: Build source distribution
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
 
@@ -201,13 +74,14 @@ jobs:
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
-          name: sdist
+          name: cibw-sdist
           path: dist/*.tar.gz
 
   release:
     name: Release
     runs-on: ubuntu-latest
-    needs: [build_linux, build_macos, build_sdist]
+    needs: [build_wheels, build_sdist]
+    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
       id-token: write
@@ -221,10 +95,9 @@ jobs:
 
       - name: Organize artifacts
         run: |
-          mv dist/linux-wheels-*/*.whl dist/ || true
-          mv dist/macos-*-wheels-*/*.whl dist/ || true
-          mv dist/sdist/*.tar.gz dist/ || true
-          rm -rf dist/linux-wheels-* dist/macos-*-wheels-* dist/sdist || true
+          mv dist/cibw-wheels-*/*.whl dist/ || true
+          mv dist/cibw-sdist/*.tar.gz dist/ || true
+          rm -rf dist/cibw-wheels-* dist/cibw-sdist || true
           ls -l dist
 
       - name: Create release
