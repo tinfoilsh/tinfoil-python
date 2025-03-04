@@ -24,10 +24,11 @@ jobs:
           CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
           CIBW_TEST_COMMAND: "python -m pip install {wheel} && python -c 'from tinfoil import TinfoilAI'"
           CIBW_BEFORE_ALL_LINUX: |
-            sudo apt-get update
-            sudo apt-get install -y golang
-            echo "GOPATH=$HOME/go" >> $GITHUB_ENV
-            echo "$HOME/go/bin" >> $GITHUB_PATH
+            curl -LO https://go.dev/dl/go1.24.0.linux-amd64.tar.gz
+            tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz
+            export PATH=/usr/local/go/bin:$PATH
+            export GOPATH=$HOME/go
+            export PATH=$GOPATH/bin:$PATH
             go install golang.org/x/tools/cmd/goimports@latest
             go install github.com/go-python/gopy@latest
             git clone --depth 1 -b v0.0.22 https://github.com/tinfoilsh/verifier
