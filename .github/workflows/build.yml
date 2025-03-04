@@ -32,11 +32,10 @@ jobs:
             go install golang.org/x/tools/cmd/goimports@latest
             go install github.com/go-python/gopy@latest
             git clone --depth 1 -b v0.0.22 https://github.com/tinfoilsh/verifier
+          CIBW_BEFORE_BUILD: |
             cd verifier
-            gopy build -output=tinfoil_verifier -vm=python3 github.com/tinfoilsh/verifier/client
-            mv tinfoil_verifier ../tinfoil/
+            gopy build -output=../tinfoil/tinfoil_verifier -vm=python github.com/tinfoilsh/verifier/client
             cd ..
-            rm -rf verifier
           CIBW_BEFORE_ALL_MACOS: |
             brew install go
             echo "GOPATH=$HOME/go" >> $GITHUB_ENV
