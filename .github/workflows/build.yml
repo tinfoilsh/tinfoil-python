@@ -130,11 +130,52 @@ jobs:
             echo "arch=arm64" >> $GITHUB_ENV
           fi
 
+      - name: Get Python library path
+        id: get_python_lib
+        run: |
+          PYTHON_LIB_PATH=$(python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR') + '/' + sysconfig.get_config_var('LDLIBRARY'))")
+          echo "PYTHON_LIB_PATH=$PYTHON_LIB_PATH" >> $GITHUB_ENV
+          echo "Python library path: $PYTHON_LIB_PATH"
+
+      - name: Fix Python library references
+        run: |
+          # Find all .so files and fix their references
+          find tinfoil/tinfoil_verifier -name "*.so" -type f | while read -r lib; do
+            echo "Fixing references in $lib"
+            
+            # Get current Python reference
+            CURRENT_PYTHON_REF=$(otool -L "$lib" | grep -o '/.*Python' | head -1)
+            
+            if [ -n "$CURRENT_PYTHON_REF" ]; then
+              echo "Current Python reference: $CURRENT_PYTHON_REF"
+              
+              # Change to @rpath/libpython
+              PYTHON_BASENAME=$(basename "${{ env.PYTHON_LIB_PATH }}")
+              echo "Will change to @rpath/$PYTHON_BASENAME"
+              
+              install_name_tool -change "$CURRENT_PYTHON_REF" "@rpath/$PYTHON_BASENAME" "$lib"
+              
+              # Add the rpath to the binary
+              install_name_tool -add_rpath "@loader_path/../../.." "$lib"
+            else
+              echo "No Python reference found in $lib"
+            fi
+          done
+
       - name: Build wheels
         run: |
           python -m pip install build
           python -m build
           python rename.py
+
+      - name: Delocate wheels
+        run: |
+          python -m pip install delocate
+          for wheel in dist/*.whl; do
+            delocate-wheel -w dist/fixed -v "$wheel"
+          done
+          rm dist/*.whl
+          mv dist/fixed/* dist/
 
       - name: Upload macOS wheels
         uses: actions/upload-artifact@v4
