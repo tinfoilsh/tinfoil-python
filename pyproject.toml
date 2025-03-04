@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tinfoil"
-version = "0.0.20"
+version = "0.0.21"
 description = "Python client for Tinfoil"
 readme = "README.md"
 requires-python = ">=3.10"
