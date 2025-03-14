@@ -35,5 +35,5 @@ print(chat_completion.choices[0].message.content)
 
 ## Requirements
 
-- Linux (amd64), MacOS 13 (Intel), or MacOS 14 (Apple Silicon)
-- CPython 3.10 through 3.13
+- Linux
+- Python 3.10 through 3.13
