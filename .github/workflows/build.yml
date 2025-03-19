@@ -10,7 +10,7 @@ on:
 
 jobs:
   build_linux:
-    name: Build for ubuntu-latest on ${{ matrix.os }}
+    name: Build for ${{ matrix.python }} on ubuntu-latest
     runs-on: ubuntu-latest
     strategy:
       matrix:
