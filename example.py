@@ -1,7 +1,7 @@
 from tinfoil import TinfoilAI
 
 client = TinfoilAI(
-    "llama3-3-70b.delta.tinfoil.sh",
+    "llama3-3-70b.model.tinfoil.sh",
     "tinfoilsh/confidential-llama3-3-70b",
 )
 

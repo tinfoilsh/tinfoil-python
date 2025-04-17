@@ -50,7 +50,7 @@ else:
 
         def _create_client(self, enclave: str, repo: str) -> OpenAI:
             tf_client = tinfoil_verifier_client.NewSecureClient(enclave, repo)
-            expected_fp = tf_client.Verify().CertFingerprint.__bytes__().hex()
+            expected_fp = tf_client.Verify().PublicKey.__str__()
 
             def wrap_socket(*args, **kwargs) -> ssl.SSLSocket:
                 ssl_socket = ssl.create_default_context().wrap_socket(*args, **kwargs)
