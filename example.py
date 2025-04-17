@@ -1,8 +1,8 @@
 from tinfoil import TinfoilAI
 
 client = TinfoilAI(
-    "inference.delta.tinfoil.sh",
-    "tinfoilsh/provably-private-deepseek-r1",
+    "llama3-3-70b.delta.tinfoil.sh",
+    "tinfoilsh/confidential-llama3-3-70b",
 )
 
 chat_completion = client.chat.completions.create(
@@ -12,6 +12,6 @@ chat_completion = client.chat.completions.create(
             "content": "Hi",
         }
     ],
-    model="deepseek-r1:70b",
+    model="llama3-3-70b",
 )
 print(chat_completion.choices[0].message.content)
