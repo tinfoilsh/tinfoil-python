@@ -10,7 +10,7 @@ import binascii
 import requests
 from OpenSSL import crypto
 
-from abi_sevsnp import (Report, ReportSigner, DecomposeTCBVersion)
+from .abi_sevsnp import (Report, ReportSigner, DecomposeTCBVersion)
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes

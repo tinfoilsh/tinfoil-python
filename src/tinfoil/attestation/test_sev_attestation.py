@@ -1,7 +1,5 @@
 import unittest
-import binascii
-import json
-from attestation import verify_sev_attestation
+from .attestation import verify_sev_attestation
 
 class TestSevVerify(unittest.TestCase):
     def test_sev_verify(self):
@@ -16,7 +14,7 @@ class TestSevVerify(unittest.TestCase):
         expected_cert_fp = "65083e5904c0273b644ad90e51e12a8d76fe07f2ab8ab14d76011b3e9c7dcaa7"
 
         # Assertions
-        self.assertEqual(expected_cert_fp, verification.cert_fp)
+        self.assertEqual(expected_cert_fp, verification.public_key_fp)
         self.assertEqual(1, len(verification.measurement.registers))
         self.assertEqual(
             "ff18f0a28cd150bb6123aa266adf07b4edac8ade942085f1b5283d37750ee924ac16199c2bfec7d42a6ab3964354685f",
