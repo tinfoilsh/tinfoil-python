@@ -11,10 +11,10 @@ def main():
     # Set up argument parsing
     parser = argparse.ArgumentParser()
     parser.add_argument('-r', '--repo', 
-                       default='tinfoilsh/provably-private-deepseek-r1',
+                       default='tinfoilsh/confidential-deepseek-r1-70b-prod',
                        help='Repository name')
     parser.add_argument('-e', '--enclave',
-                       default='inference.delta.tinfoil.sh',
+                       default='deepseek-r1-70b-p.model.tinfoil.sh',
                        help='Enclave address')
     args = parser.parse_args()
 
@@ -37,28 +37,61 @@ def main():
 
         # Fetch attestation bundle
         logging.info(f"Fetching attestation bundle for {args.repo}@{digest}")
-        sigstore_bundle = fetch_attestation_bundle(args.repo, digest)
+        try:
+            sigstore_bundle = fetch_attestation_bundle(args.repo, digest)
+        except Exception as e:
+            logging.error(f"Error fetching attestation bundle: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
         # Verify attested measurements
         logging.info(f"Verifying attested measurements for {args.repo}@{digest}")
-        code_measurements = verify_attestation(
-            sigstore_bundle,
-            digest,
-            args.repo
-        )
+        try:
+            code_measurements = verify_attestation(
+                sigstore_bundle,
+                digest,
+                args.repo
+            )
+        except Exception as e:
+            logging.error(f"Error verifying attested measurements: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
         # Fetch runtime attestation
         logging.info(f"Fetching runtime attestation from {args.enclave}")
-        enclave_attestation = fetch_attestation(args.enclave)
+        try:
+            enclave_attestation = fetch_attestation(args.enclave)
+        except Exception as e:
+            logging.error(f"Error fetching runtime attestation: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
         # Verify enclave measurements
         logging.info("Verifying enclave measurements")
-        verification = enclave_attestation.verify()
+        try:
+            verification = enclave_attestation.verify()
+        except Exception as e:
+            logging.error(f"Error verifying enclave measurements: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
+        print(code_measurements)
+        print(verification.measurement)
         # Compare measurements
         logging.info("Comparing measurements")
-        if not code_measurements.equals(verification.measurement):
-            raise ValueError("Code measurements do not match")
+        try:
+            for (i, code_measurement) in enumerate(code_measurements.registers):
+                if code_measurement != verification.measurement.registers[i]:
+                    raise ValueError("Code measurements do not match")
+        except Exception as e:
+            logging.error(f"Error comparing measurements: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
         # Success output
         logging.info("Verification successful!")

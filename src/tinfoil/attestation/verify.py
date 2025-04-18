@@ -11,6 +11,7 @@ import requests
 from OpenSSL import crypto
 
 from .abi_sevsnp import (Report, ReportSigner, DecomposeTCBVersion)
+from .genoa_cert_chain import (ARK_CERT, ASK_CERT)
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -64,29 +65,10 @@ class CertificateChain:
         if productName != "Genoa":
             raise ValueError("This implementation only supports Genoa processors")
         
-        # Load and parse the certificate chain
-        with open('genoa_cert_chain.pem', 'rb') as f:
-            pem_data = f.read()
+        # Use the hardcoded certificate chain
+        ark = x509.load_pem_x509_certificate(ARK_CERT)
+        ask = x509.load_pem_x509_certificate(ASK_CERT)
         
-        # Split the PEM file into individual certificates
-        pem_certs = pem_data.split(b'-----END CERTIFICATE-----\n')
-        if len(pem_certs) < 2:
-            raise ValueError("Invalid certificate chain: expected at least 2 certificates")
-        
-        # Parse ARK (first certificate)
-        ark_pem = pem_certs[0] + b'-----END CERTIFICATE-----\n'
-        try:
-            ark = x509.load_pem_x509_certificate(ark_pem)
-        except Exception as e:
-            raise ValueError(f"Failed to parse ARK certificate: {e}")
-        
-        # Parse ASK (second certificate)
-        ask_pem = pem_certs[1] + b'-----END CERTIFICATE-----\n'
-        try:
-            ask = x509.load_pem_x509_certificate(ask_pem)
-        except Exception as e:
-            raise ValueError(f"Failed to parse ASK certificate: {e}")
-
         signer_info = report.signer_info_parsed
         
         if signer_info.signingKey != ReportSigner.VcekReportSigner:

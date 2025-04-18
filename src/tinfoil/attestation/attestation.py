@@ -123,11 +123,7 @@ def connection_cert_fp(ssl_socket: ssl.SSLSocket) -> str:
 
 def fetch_attestation(host: str) -> Document:
     """Retrieves the attestation document from a given enclave hostname"""
-    url_parts = urlparse(host, scheme="https")
-    url_parts._replace(path=ATTESTATION_ENDPOINT)
-    
-    url = urlunparse(url_parts)
-    
+    url = f"https://{host}{ATTESTATION_ENDPOINT}"
     response = requests.get(url)
     response.raise_for_status()
     

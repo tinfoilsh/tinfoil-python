@@ -54,10 +54,10 @@ def fetch_attestation_bundle(repo: str, digest: str) -> bytes:
     url = f"https://api.github.com/repos/{repo}/attestations/sha256:{digest}"
     bundle_response = requests.get(url)
     
-    response_data = json.loads(bundle_response)
+    response_data = json.loads(bundle_response.content)
     
     try:
         # Extract the first attestation bundle
-        return response_data["attestations"][0]["bundle"]
+        return json.dumps(response_data["attestations"][0]["bundle"])
     except (KeyError, IndexError) as e:
         raise Exception(f"Invalid attestation response format: {e}")
