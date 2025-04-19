@@ -6,6 +6,8 @@ from openai import OpenAI
 from openai.resources.chat import Chat as OpenAIChat
 from openai.resources.embeddings import Embeddings as OpenAIEmbeddings
 
+from .client import SecureClient
+
 class TinfoilAI:
     chat: OpenAIChat
     embeddings: OpenAIEmbeddings
@@ -20,8 +22,8 @@ class TinfoilAI:
         self.embeddings = self.client.embeddings
 
     def _create_client(self, enclave: str, repo: str) -> OpenAI:
-        tf_client = tinfoil_verifier_client.NewSecureClient(enclave, repo)
-        expected_fp = tf_client.Verify().CertFingerprint.__bytes__().hex()
+        tf_client = SecureClient(enclave, repo)
+        expected_fp = tf_client.verify().public_key_fp
 
         def wrap_socket(*args, **kwargs) -> ssl.SSLSocket:
             ssl_socket = ssl.create_default_context().wrap_socket(*args, **kwargs)

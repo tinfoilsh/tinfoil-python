@@ -79,8 +79,6 @@ def main():
             traceback.print_exc()
             sys.exit(1)
 
-        print(code_measurements)
-        print(verification.measurement)
         # Compare measurements
         logging.info("Comparing measurements")
         try:
