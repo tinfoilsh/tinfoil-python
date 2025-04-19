@@ -136,7 +136,6 @@ class CertificateChain:
             # Verify the certificate
             try:
                 store_ctx.verify_certificate()
-                print("Certificate chain verification successful")
                 return True
             except crypto.X509StoreContextError as e:
                 print(f"Certificate chain verification failed: {e}")
@@ -322,7 +321,6 @@ def _verify_report_signature(vcek: x509.Certificate, report: Report) -> bool:
             report.signed_data,
             ec.ECDSA(hashes.SHA384())
         )
-        print("Attestation signature verified")
         return True
     except Exception as e:
         print(f"Attestation signature verification failed: {e}")

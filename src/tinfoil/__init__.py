@@ -25,7 +25,7 @@ class TinfoilAI:
 
     def _create_client(self, enclave: str, repo: str) -> OpenAI:
         tf_client = SecureClient(enclave, repo)
-        expected_fp = tf_client.verify().public_key_fp
+        expected_fp = tf_client.verify().public_key
 
         def wrap_socket(*args, **kwargs) -> ssl.SSLSocket:
             ssl_socket = ssl.create_default_context().wrap_socket(*args, **kwargs)

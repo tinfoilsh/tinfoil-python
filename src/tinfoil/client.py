@@ -95,8 +95,9 @@ class SecureClient:
             verification = enclave_attestation.verify()
             
             # Verify measurements match
-            if not code_measurements.equals(verification.measurement):
-                raise ValueError("Measurements do not match")
+            for (i, code_measurement) in enumerate(code_measurements.registers):
+                if code_measurement != verification.measurement.registers[i]:
+                    raise ValueError("Code measurements do not match")
 
             # Build ground truth from the verified attestation
             self._ground_truth = GroundTruth(

@@ -3,12 +3,13 @@ from tinfoil import TinfoilAI
 client = TinfoilAI(
     "llama3-3-70b.model.tinfoil.sh",
     "tinfoilsh/confidential-llama3-3-70b",
+)
 
 chat_completion = client.chat.completions.create(
     messages=[
         {
             "role": "user",
-            "content": "Hi",
+            "content": "What is Tinfoil?",
         }
     ],
     model="llama3-3-70b",
