@@ -1,5 +1,7 @@
 import hashlib
 import ssl
+import cryptography.x509
+from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
 
 import httpx
 from openai import OpenAI
@@ -31,7 +33,14 @@ class TinfoilAI:
             if not cert_binary:
                 raise Exception("No certificate found")
 
-            cert_fp = hashlib.sha256(cert_binary).hexdigest()
+            # Parse the certificate and extract the public key
+            cert = cryptography.x509.load_der_x509_certificate(cert_binary)
+            public_key = cert.public_key()
+            # Get the public key in PKIX/DER format
+            public_key_der = public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+            # Hash the public key
+            cert_fp = hashlib.sha256(public_key_der).hexdigest()
+            
             if cert_fp != expected_fp:
                 raise Exception(f"Certificate fingerprint mismatch")
 

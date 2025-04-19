@@ -6,6 +6,9 @@ import socket
 from dataclasses import dataclass
 from typing import Dict, Optional, List
 from urllib.parse import urlparse
+import cryptography.x509
+from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
+import hashlib
 
 from .attestation import fetch_attestation
 from .github import fetch_latest_digest, fetch_attestation_bundle
@@ -47,7 +50,12 @@ class TLSBoundHTTPSHandler(urllib.request.HTTPSHandler):
         if not cert:
             raise ValueError("No valid certificate")
         
-        cert_fp = connection_cert_fp(conn.sock)
+        public_key = cert.public_key()
+        # Get the public key in PKIX/DER format
+        public_key_der = public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+        # Hash the public key
+        cert_fp = hashlib.sha256(public_key_der).hexdigest()
+
         if cert_fp != self.expected_pubkey:
             raise ValueError(f"Certificate public key fingerprint mismatch: expected {self.expected_pubkey}, got {cert_fp}")
         
