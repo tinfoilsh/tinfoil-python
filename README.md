@@ -16,8 +16,8 @@ pip install tinfoil
 from tinfoil import TinfoilAI
 
 client = TinfoilAI(
-    enclave="inference.delta.tinfoil.sh",
-    repo="tinfoilsh/provably-private-deepseek-r1",
+    enclave="llama3-3-70b.model.tinfoil.sh",
+    repo="tinfoilsh/confidential-llama3-3-70b",
     api_key="<API_KEY>",
 )
 
@@ -28,10 +28,43 @@ chat_completion = client.chat.completions.create(
             "content": "Hi",
         }
     ],
-    model="deepseek-r1:70b",
+    model="llama3-3-70b",
 )
 print(chat_completion.choices[0].message.content)
 ```
+
+## Low-level HTTP Endpoints
+
+You can also perform arbitrary GET/POST requests that are verified:
+
+```python
+from tinfoil import NewSecureClient
+
+tfclient = NewSecureClient(
+    enclave="df-demo.model.tinfoil.sh",
+    repo="tinfoilsh/confidential-df-demo",
+    api_key="<API_KEY>",
+)
+
+# GET example
+resp = tfclient.get(
+    "https://df-demo.model.tinfoil.sh/health",
+    params={"query": "value"},
+    timeout=30,
+)
+print(resp.status_code, resp.text)
+
+# POST example
+payload = {"key": "value"}
+resp = tfclient.post(
+    "https://df-demo.model.tinfoil.sh/analyze",
+    headers={"Content-Type": "application/json"},
+    json=payload,
+    timeout=30,
+)
+print(resp.status_code, resp.text)
+```
+
 
 ## Requirements
 
