@@ -70,3 +70,20 @@ print(resp.status_code, resp.text)
 
 - Linux
 - Python 3.10 through 3.13
+
+## Testing
+
+Run unit and integration tests:
+
+```bash
+pytest -q
+```
+
+Integration tests require environment variables:
+
+```bash
+export TINFOIL_ENCLAVE="..."
+export TINFOIL_REPO="..."
+export TINFOIL_API_KEY="..."
+pytest -q -m integration
+```
