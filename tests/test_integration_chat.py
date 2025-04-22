@@ -33,4 +33,4 @@ def test_basic_chat_completion(client):
     print(response.choices[0].message.content)
 
 if __name__ == "__main__":
-    pytest.main()
+    pytest.main([__file__])

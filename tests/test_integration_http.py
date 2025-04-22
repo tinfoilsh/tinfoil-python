@@ -29,3 +29,6 @@ def test_http_integration():
     data = resp.json()
     assert "choices" in data
     assert data["choices"][0]["message"]["content"]
+
+if __name__ == "__main__":
+    pytest.main([__file__])

@@ -1,5 +1,5 @@
 import pytest
-from .attestation import verify_sev_attestation
+from tinfoil.attestation.attestation import verify_sev_attestation
 
 def test_sev_verify():
     att = {
