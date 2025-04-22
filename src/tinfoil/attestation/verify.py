@@ -307,7 +307,7 @@ def _VCEKCertURL(productName: str, chip_id: bytes, reported_tcb: int) -> str:
     # TODO add support for other product names
     """Generate the VCEK certificate URL based on the product name, chip ID, and reported TCB"""
     parts = DecomposeTCBVersion(reported_tcb)
-    base_url = "https://kdsintf.amd.com/vcek/v1"
+    base_url = "https://kds-proxy.tinfoil.sh/vcek/v1"
     chip_id_hex = binascii.hexlify(chip_id).decode('ascii')
     return f"{base_url}/{productName}/{chip_id_hex}?blSPL={parts.bl_spl}&teeSPL={parts.tee_spl}&snpSPL={parts.snp_spl}&ucodeSPL={parts.ucode_spl}"
 
