@@ -8,7 +8,7 @@ packages = ["tinfoil"]
 
 [project]
 name = "tinfoil"
-version = "0.0.33"
+version = "0.0.34"
 description = "Python client for Tinfoil"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,5 +26,6 @@ dependencies = [
 
 [tool.pytest.ini_options]
 markers = [
-    "integration: marks tests as integration tests (require TINFOIL_* env vars)"
+    "integration: marks tests as integration tests (require TINFOIL_* env vars)",
+    "asyncio: mark test perfroming async io"
 ]
