@@ -20,7 +20,8 @@ dependencies = [
     "requests>=2.31.0",
     "cryptography>=42.0.0",
     "pyOpenSSL>=25.0.0",
-    "sigstore>=3.6.2"
+    "sigstore>=3.6.2",
+    "platformdirs>=4.2.0"
 ]
 
 [tool.pytest.ini_options]

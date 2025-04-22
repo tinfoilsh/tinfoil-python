@@ -9,6 +9,7 @@ from typing import Dict, TypeAlias
 import binascii
 import requests
 from OpenSSL import crypto
+import platformdirs
 
 from .abi_sevsnp import (Report, ReportSigner, DecomposeTCBVersion)
 from .genoa_cert_chain import (ARK_CERT, ASK_CERT)
@@ -20,6 +21,10 @@ from cryptography.x509.oid import ObjectIdentifier
 
 # Type alias for certificate extensions
 Extensions: TypeAlias = Dict[ObjectIdentifier, bytes]
+
+# VCEK cache directory setup (can stay at module level)
+_VCEK_CACHE_DIR = platformdirs.user_cache_dir("tinfoil", "tinfoil")
+os.makedirs(_VCEK_CACHE_DIR, exist_ok=True)
 
 class SnpOid:
     """OID extensions for the VCEK, used to verify attestation report"""
@@ -50,6 +55,17 @@ class CertificateChain:
         self.ask = ask
         self.vcek = vcek
     
+    @staticmethod
+    def _vcek_cache_path(product_name: str, chip_id: bytes, reported_tcb: int) -> str:
+        """
+        Build a deterministic filename for a given (product, chip_id, tcb).
+        Uses the module-level _VCEK_CACHE_DIR.
+        """
+        chip_hex = chip_id.hex()
+        tcb_hex = f"{reported_tcb:016x}"
+        filename = f"VCEK_{product_name}_{chip_hex}_{tcb_hex}.der"
+        return os.path.join(_VCEK_CACHE_DIR, filename)
+    
     @classmethod
     def from_files(cls, ark_path: str, ask_path: str, vcek_path: str) -> 'CertificateChain':
         """Alternative constructor to load certificates from files"""
@@ -74,17 +90,37 @@ class CertificateChain:
         if signer_info.signingKey != ReportSigner.VcekReportSigner:
             raise ValueError("This implementation only supports VCEK signed reports")
         
-        # Fetch the VCEK certificate from the KDS endpoint
+        # Fetch (or load) the VCEK certificate
         vcek_url = _VCEKCertURL(productName, report.chip_id, report.reported_tcb)
+        cache_path = cls._vcek_cache_path(productName, report.chip_id, report.reported_tcb)
+        
+        # 1. Try the on‑disk cache
+        if os.path.isfile(cache_path):
+            with open(cache_path, "rb") as fh:
+                vcek_cert_data = fh.read()
+        else:
+            # 2. Cache miss → fetch from the KDS endpoint
+            try:
+                response = requests.get(vcek_url, timeout=10)
+                response.raise_for_status()
+                vcek_cert_data = response.content
+                # Persist to cache so the next call is instant
+                with open(cache_path, "wb") as fh:
+                    fh.write(vcek_cert_data)
+            except requests.RequestException as e:
+                raise ValueError(f"Failed to fetch VCEK certificate: {e}") from e
+
+        # Parse the (cached or freshly‑downloaded) certificate
         try:
-            response = requests.get(vcek_url)
-            response.raise_for_status()  # Raise an exception for bad status codes
-            vcek_cert_data = response.content
             vcek = x509.load_der_x509_certificate(vcek_cert_data)
-        except requests.RequestException as e:
-            raise ValueError(f"Failed to fetch VCEK certificate: {e}")
         except Exception as e:
-            raise ValueError(f"Failed to parse VCEK certificate: {e}")
+            # Corrupted cache?  Remove and propagate error so caller can retry.
+            if os.path.exists(cache_path):
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
+            raise ValueError(f"Failed to parse VCEK certificate: {e}") from e
         
         # Return the complete certificate chain
         return cls(ark=ark, ask=ask, vcek=vcek)
