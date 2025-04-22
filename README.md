@@ -33,6 +33,37 @@ chat_completion = client.chat.completions.create(
 print(chat_completion.choices[0].message.content)
 ```
 
+## Async Usage
+
+Simply import `AsyncTinfoilAI` instead of `TinfoilAI` and use `await` with each API call:
+
+```python
+import os
+import asyncio
+from tinfoil import AsyncTinfoilAI
+
+client = AsyncTinfoilAI(
+    enclave="llama3-3-70b.model.tinfoil.sh",
+    repo="tinfoilsh/confidential-llama3-3-70b",
+    api_key=os.environ.get("TINFOIL_API_KEY"),
+)
+
+async def main() -> None:
+    # start a streaming chat completion
+    stream = await client.chat.completions.create(
+        model="llama3-3-70b",
+        messages=[{"role": "user", "content": "Say this is a test"}],
+        stream=True,
+    )
+    async for chunk in stream:
+        print(chunk.choices[0].message.content, end="")
+    print()
+
+asyncio.run(main())
+```
+
+Functionality between the synchronous and asynchronous clients is otherwise identical.
+
 ## Low-level HTTP Endpoints
 
 You can also perform arbitrary GET/POST requests that are verified:
