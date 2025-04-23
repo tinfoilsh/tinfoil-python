@@ -26,8 +26,11 @@ def client() -> TinfoilAI:
 
 def test_basic_chat_completion(client):
     response = client.chat.completions.create(
-        messages=[{"role": "user", "content": "Say hello to integration tests"}],
+        messages=[{"role": "user", "content": "Hi"}],
         model="llama3-3-70b",
     )
     assert response.choices[0].message.content  # non‑empty string
+    print(response.choices[0].message.content)
 
+if __name__ == "__main__":
+    pytest.main([__file__])
