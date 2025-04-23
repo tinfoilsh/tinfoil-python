@@ -29,6 +29,7 @@ async def test_async_chat_integration():
     )
     collected = []
     async for chunk in stream:
-        collected.append(chunk.choices[0].message.content)
+        if chunk.choices[0].delta.content is not None:
+            collected.append(chunk.choices[0].delta.content)
     output = "".join(collected)
     assert output, "Expected non-empty response from async streaming API"
