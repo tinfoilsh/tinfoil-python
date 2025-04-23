@@ -56,7 +56,8 @@ async def main() -> None:
         stream=True,
     )
     async for chunk in stream:
-        print(chunk.choices[0].message.content, end="")
+        if chunk.choices[0].delta.content is not None:
+            print(chunk.choices[0].delta.content, end="", flush=True)
     print()
 
 asyncio.run(main())
