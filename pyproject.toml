@@ -2,6 +2,10 @@
 requires = ["setuptools >= 61.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["tinfoil"]
+
 [project]
 name = "tinfoil"
 version = "0.0.34"
@@ -13,5 +17,18 @@ dependencies = [
     "pybindgen>=0.22.0",
     "httpx>=0.28",
     "build>=1.2.0",
-    "cryptography>=44.0.0"
+    "requests>=2.31.0",
+    "cryptography>=42.0.0",
+    "pyOpenSSL>=25.0.0",
+    "sigstore>=3.6.2",
+    "platformdirs>=4.2.0",
+    "pytest-asyncio>=0.26.0"
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests (require TINFOIL_* env vars)",
+    "asyncio: mark test perfroming async io"
+]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
