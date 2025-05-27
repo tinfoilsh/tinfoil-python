@@ -34,6 +34,7 @@ def fetch_latest_digest(repo: str) -> str:
     """
     url = f"https://api-github-proxy.tinfoil.sh/repos/{repo}/releases/latest"
     release_response = requests.get(url)
+    release_response.raise_for_status()
     
     response_data = json.loads(release_response.content)
     tag_name = response_data["tag_name"]
