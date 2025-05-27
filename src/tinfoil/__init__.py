@@ -7,6 +7,7 @@ import httpx
 from openai import OpenAI, AsyncOpenAI
 from openai.resources.chat import Chat as OpenAIChat
 from openai.resources.embeddings import Embeddings as OpenAIEmbeddings
+from openai.resources.audio import Audio as OpenAIAudio
 
 from .client import SecureClient
 
@@ -62,6 +63,7 @@ def _make_secure_async_http_client(tf_client) -> httpx.AsyncClient:
 class TinfoilAI:
     chat: OpenAIChat
     embeddings: OpenAIEmbeddings
+    audio: OpenAIAudio
     api_key: str
     enclave: str
 
@@ -77,6 +79,7 @@ class TinfoilAI:
         )
         self.chat = self.client.chat
         self.embeddings = self.client.embeddings
+        self.audio = self.client.audio
 
 class AsyncTinfoilAI:
     """
@@ -84,6 +87,7 @@ class AsyncTinfoilAI:
     """
     chat: OpenAIChat
     embeddings: OpenAIEmbeddings
+    audio: OpenAIAudio
     api_key: str
     enclave: str
 
@@ -100,6 +104,7 @@ class AsyncTinfoilAI:
         )
         self.chat = self.client.chat
         self.embeddings = self.client.embeddings
+        self.audio = self.client.audio
 
 class _HTTPSecureClient:
     """Low-level HTTP client with enclave-pinned TLS."""

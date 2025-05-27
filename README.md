@@ -33,6 +33,27 @@ chat_completion = client.chat.completions.create(
 print(chat_completion.choices[0].message.content)
 ```
 
+### Audio Transcription with Whisper
+
+You can transcribe audio files using OpenAI's Whisper model:
+
+```python
+from tinfoil import TinfoilAI
+
+client = TinfoilAI(
+    enclave="audio-processing.model.tinfoil.sh",
+    repo="tinfoilsh/confidential-audio-processing",
+    api_key="<API_KEY>",
+)
+
+with open("audio.mp3", "rb") as audio_file:
+    transcription = client.audio.transcriptions.create(
+        file=audio_file,
+        model="whisper-large-v3-turbo",
+    )
+print(transcription.text)
+```
+
 ## Async Usage
 
 Simply import `AsyncTinfoilAI` instead of `TinfoilAI` and use `await` with each API call:
