@@ -110,7 +110,7 @@ class SecureClient:
         except Exception as e:
             raise e
 
-    def _get_http_client(self) -> urllib.request.OpenerDirector:
+    def get_http_client(self) -> urllib.request.OpenerDirector:
         """Returns an HTTP client that only accepts TLS connections to the verified enclave"""
         if not self._ground_truth:
             ground_truth, err = self.verify()
@@ -122,9 +122,9 @@ class SecureClient:
         handler = TLSBoundHTTPSHandler(self._ground_truth.public_key)
         return urllib.request.build_opener(handler)
 
-    def _make_request(self, req: urllib.request.Request) -> Response:
+    def make_request(self, req: urllib.request.Request) -> Response:
         """Makes an HTTP request using the secure client"""
-        client = self._get_http_client()
+        client = self.get_http_client()
         
         # If URL doesn't have a host, assume it's relative to the enclave
         if not urlparse(req.full_url).netloc:
@@ -145,7 +145,7 @@ class SecureClient:
             headers=headers,
             method="POST"
         )
-        return self._make_request(req)
+        return self.make_request(req)
 
     def get(self, url: str, headers: Dict[str, str]) -> Response:
         """Makes an HTTP GET request"""
@@ -154,4 +154,4 @@ class SecureClient:
             headers=headers,
             method="GET"
         )
-        return self._make_request(req)
+        return self.make_request(req)
