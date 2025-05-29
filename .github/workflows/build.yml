@@ -49,5 +49,11 @@ jobs:
       with:
         name: python-package-distributions
         path: dist/
+
     - name: Publish distribution 📦 to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
+
+    - name: Make GitHub release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: dist/*.whl
