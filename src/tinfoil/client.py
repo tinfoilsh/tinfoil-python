@@ -2,9 +2,9 @@ import http.client
 import json
 import ssl
 import urllib.request
-import socket
+import httpx
 from dataclasses import dataclass
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from urllib.parse import urlparse
 import cryptography.x509
 from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
@@ -75,6 +75,48 @@ class SecureClient:
         """Returns the last verified enclave state"""
         return self._ground_truth
 
+    def make_secure_http_client(self) -> httpx.Client:
+        """
+        Build an httpx.Client that pins the enclave's TLS cert
+        """
+        expected_fp = self.verify().public_key
+        wrap_socket = self._create_socket_wrapper(expected_fp)
+
+        ctx = ssl.create_default_context()
+        ctx.wrap_socket = wrap_socket
+        return httpx.Client(verify=ctx, follow_redirects=True)
+
+    def _create_socket_wrapper(self, expected_fp: str):
+        """
+        Creates a socket wrapper function that verifies the certificate's public key fingerprint
+        matches the expected fingerprint.
+        """
+        def wrap_socket(*args, **kwargs) -> ssl.SSLSocket:
+            sock = ssl.create_default_context().wrap_socket(*args, **kwargs)
+            cert_binary = sock.getpeercert(binary_form=True)
+            if not cert_binary:
+                raise Exception("No certificate found")
+            cert = cryptography.x509.load_der_x509_certificate(cert_binary)
+            pub_der = cert.public_key().public_bytes(
+                Encoding.DER, PublicFormat.SubjectPublicKeyInfo
+            )
+            pk_fp = hashlib.sha256(pub_der).hexdigest()
+            if pk_fp != expected_fp:
+                raise Exception(f"Certificate fingerprint mismatch: expected {expected_fp}, got {pk_fp}")
+            return sock
+        return wrap_socket
+
+    def make_secure_async_http_client(self) -> httpx.AsyncClient:
+        """
+        Build an httpx.AsyncClient that pins the enclave's TLS cert.
+        """
+        expected_fp = self.verify().public_key
+        wrap_socket = self._create_socket_wrapper(expected_fp)
+
+        ctx = ssl.create_default_context()
+        ctx.wrap_socket = wrap_socket
+        return httpx.AsyncClient(verify=ctx, follow_redirects=True)
+
     def verify(self) -> GroundTruth:
         """
         Fetches the latest verification information from GitHub and Sigstore
@@ -113,11 +155,7 @@ class SecureClient:
     def get_http_client(self) -> urllib.request.OpenerDirector:
         """Returns an HTTP client that only accepts TLS connections to the verified enclave"""
         if not self._ground_truth:
-            ground_truth, err = self.verify()
-            if err:
-                raise err
-            if not ground_truth:
-                raise ValueError("Failed to verify enclave")
+            self._ground_truth = self.verify()
         
         handler = TLSBoundHTTPSHandler(self._ground_truth.public_key)
         return urllib.request.build_opener(handler)
