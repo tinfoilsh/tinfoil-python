@@ -120,8 +120,6 @@ print(resp.status_code, resp.text)
 
 
 ## Requirements
-
-- Linux
 - Python 3.10 through 3.13
 
 ## Testing
