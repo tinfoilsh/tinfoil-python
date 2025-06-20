@@ -140,7 +140,7 @@ min_tcb = TCBParts(
     bl_spl=0x7,
     tee_spl=0,
     snp_spl=0xe,
-    ucode_spl=0x47,
+    ucode_spl=0x48,
 )
 
 default_validation_options = ValidationOptions(
@@ -201,12 +201,9 @@ def verify_sev_attestation(attestation_doc: str) -> Verification:
     
     # Validate report
     try:
-        res = validate_report(report, chain, default_validation_options)
+        validate_report(report, chain, default_validation_options)
     except Exception as e:
         raise ValueError(f"Failed to validate report: {e}")
-    
-    if res != True:
-       raise ValueError(f"Report validation failed!") 
 
     # Create measurement object
     measurement = Measurement(

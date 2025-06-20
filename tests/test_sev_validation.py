@@ -14,6 +14,7 @@ from tinfoil.attestation.abi_sevsnp import (
     SignerInfo,
     ReportSigner
 )
+from tinfoil.attestation.verify import CertificateChain
 
 
 class TestValidationOptions:
@@ -122,8 +123,8 @@ class TestValidatePolicy:
             mem_aes256_xts=True, rapl_dis=True, ciphertext_hiding_dram=True
         )
         
-        # Exact match should pass
-        assert _validate_policy(policy, policy) == True
+        # Exact match should pass (no exception raised)
+        _validate_policy(policy, policy)  # Should not raise
     
     def test_abi_version_compatibility(self):
         """Test ABI version compatibility checks"""
@@ -139,7 +140,7 @@ class TestValidatePolicy:
             debug=False, single_socket=False, cxl_allowed=False,
             mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
         )
-        assert _validate_policy(report_policy, required_lower) == True
+        _validate_policy(report_policy, required_lower)  # Should not raise
         
         # Required version higher than report - should fail
         required_higher = SnpPolicy(
@@ -147,7 +148,8 @@ class TestValidatePolicy:
             debug=False, single_socket=False, cxl_allowed=False,
             mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
         )
-        assert _validate_policy(report_policy, required_higher) == False
+        with pytest.raises(ValueError, match="Required ABI version"):
+            _validate_policy(report_policy, required_higher)
 
     def test_unauthorized_capabilities(self):
         """Test rejection of unauthorized capabilities"""
@@ -170,7 +172,8 @@ class TestValidatePolicy:
             debug=False, single_socket=False, cxl_allowed=False,
             mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
         )
-        assert _validate_policy(report_policy, required_policy) == False
+        with pytest.raises(ValueError, match="unauthorized migration agent capability"):
+            _validate_policy(report_policy, required_policy)
         
         # debug
         report_policy = SnpPolicy(
@@ -178,7 +181,8 @@ class TestValidatePolicy:
             debug=True, single_socket=False, cxl_allowed=False,
             mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
         )
-        assert _validate_policy(report_policy, required_policy) == False
+        with pytest.raises(ValueError, match="unauthorized debug capability"):
+            _validate_policy(report_policy, required_policy)
         
         # smt
         report_policy = SnpPolicy(
@@ -186,7 +190,8 @@ class TestValidatePolicy:
             debug=False, single_socket=False, cxl_allowed=False,
             mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
         )
-        assert _validate_policy(report_policy, required_policy) == False
+        with pytest.raises(ValueError, match="unauthorized symmetric multithreading"):
+            _validate_policy(report_policy, required_policy)
         
         # cxl_allowed
         report_policy = SnpPolicy(
@@ -194,7 +199,8 @@ class TestValidatePolicy:
             debug=False, single_socket=False, cxl_allowed=True,
             mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
         )
-        assert _validate_policy(report_policy, required_policy) == False
+        with pytest.raises(ValueError, match="unauthorized CXL capability"):
+            _validate_policy(report_policy, required_policy)
 
     def test_missing_required_restrictions(self):
         """Test rejection when required restrictions are missing"""
@@ -211,7 +217,8 @@ class TestValidatePolicy:
             debug=False, single_socket=True, cxl_allowed=False,
             mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
         )
-        assert _validate_policy(base_report, required_policy) == False
+        with pytest.raises(ValueError, match="single socket restriction not present"):
+            _validate_policy(base_report, required_policy)
         
         # mem_aes256_xts
         required_policy = SnpPolicy(
@@ -219,7 +226,8 @@ class TestValidatePolicy:
             debug=False, single_socket=False, cxl_allowed=False,
             mem_aes256_xts=True, rapl_dis=False, ciphertext_hiding_dram=False
         )
-        assert _validate_policy(base_report, required_policy) == False
+        with pytest.raises(ValueError, match="unauthorized memory encryption mode"):
+            _validate_policy(base_report, required_policy)
         
         # rapl_dis
         required_policy = SnpPolicy(
@@ -227,7 +235,8 @@ class TestValidatePolicy:
             debug=False, single_socket=False, cxl_allowed=False,
             mem_aes256_xts=False, rapl_dis=True, ciphertext_hiding_dram=False
         )
-        assert _validate_policy(base_report, required_policy) == False
+        with pytest.raises(ValueError, match="unauthorized RAPL capability"):
+            _validate_policy(base_report, required_policy)
         
         # ciphertext_hiding_dram
         required_policy = SnpPolicy(
@@ -235,7 +244,8 @@ class TestValidatePolicy:
             debug=False, single_socket=False, cxl_allowed=False,
             mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=True
         )
-        assert _validate_policy(base_report, required_policy) == False
+        with pytest.raises(ValueError, match="Ciphertext hiding in DRAM isn't enforced"):
+            _validate_policy(base_report, required_policy)
 
 
 class TestComparePolicyVersions:
@@ -301,7 +311,7 @@ class TestValidatePlatformInfo:
             alias_check_complete=True
         )
         
-        assert _validate_platform_info(platform_info, platform_info) == True
+        _validate_platform_info(platform_info, platform_info)  # Should not raise
     
     def test_unauthorized_features(self):
         """Test rejection of unauthorized platform features"""
@@ -317,7 +327,8 @@ class TestValidatePlatformInfo:
             rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
             alias_check_complete=False
         )
-        assert _validate_platform_info(report_info, base_required) == False
+        with pytest.raises(ValueError, match="Unauthorized platform feature SMT enabled"):
+            _validate_platform_info(report_info, base_required)
         
         # ECC enabled when not allowed
         report_info = SnpPlatformInfo(
@@ -325,7 +336,8 @@ class TestValidatePlatformInfo:
             rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
             alias_check_complete=False
         )
-        assert _validate_platform_info(report_info, base_required) == False
+        with pytest.raises(ValueError, match="Unauthorized platform feature ECC enabled"):
+            _validate_platform_info(report_info, base_required)
     
     def test_missing_required_features(self):
         """Test rejection when required platform features are missing"""
@@ -341,7 +353,8 @@ class TestValidatePlatformInfo:
             rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
             alias_check_complete=False
         )
-        assert _validate_platform_info(base_report, required_info) == False
+        with pytest.raises(ValueError, match="Required platform feature TSME not enabled"):
+            _validate_platform_info(base_report, required_info)
         
         # RAPL disabled required but not disabled
         required_info = SnpPlatformInfo(
@@ -349,7 +362,8 @@ class TestValidatePlatformInfo:
             rapl_disabled=True, ciphertext_hiding_dram_enabled=False,
             alias_check_complete=False
         )
-        assert _validate_platform_info(base_report, required_info) == False
+        with pytest.raises(ValueError, match="Required platform feature RAPL not disabled"):
+            _validate_platform_info(base_report, required_info)
         
         # Ciphertext hiding required but not enabled
         required_info = SnpPlatformInfo(
@@ -357,7 +371,8 @@ class TestValidatePlatformInfo:
             rapl_disabled=False, ciphertext_hiding_dram_enabled=True,
             alias_check_complete=False
         )
-        assert _validate_platform_info(base_report, required_info) == False
+        with pytest.raises(ValueError, match="Required ciphertext hiding in DRAM not enforced"):
+            _validate_platform_info(base_report, required_info)
         
         # Alias check required but not complete
         required_info = SnpPlatformInfo(
@@ -365,7 +380,8 @@ class TestValidatePlatformInfo:
             rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
             alias_check_complete=True
         )
-        assert _validate_platform_info(base_report, required_info) == False
+        with pytest.raises(ValueError, match="Required memory alias check hasn't been completed"):
+            _validate_platform_info(base_report, required_info)
 
 
 def create_mock_report(**kwargs):
@@ -427,25 +443,36 @@ def create_mock_report(**kwargs):
     return MockReport(**defaults)
 
 
+class MockCertificateChain:
+    """Mock certificate chain for testing"""
+    def validate_vcek_tcb(self, tcb):
+        pass  # Do nothing for tests
+    
+    def validate_vcek_hwid(self, chip_id):
+        pass  # Do nothing for tests
+
+
 class TestValidateReport:
     """Test the main validate_report function"""
     
     def test_validate_empty_options(self):
         """Test validation with empty options (should always pass)"""
         report = create_mock_report()
+        chain = MockCertificateChain()
         options = ValidationOptions()
         
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
     
     def test_guest_policy_validation(self):
         """Test guest policy validation"""
         report = create_mock_report(policy=(1 << 17))  # Only reserved bit set
+        chain = MockCertificateChain()
         
         # Matching policy should pass
         options = ValidationOptions(
             guest_policy=SnpPolicy.from_int((1 << 17))
         )
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         # Non-matching policy should fail
         options = ValidationOptions(
@@ -455,45 +482,52 @@ class TestValidateReport:
                 mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
             )
         )
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError):
+            validate_report(report, chain, options)
     
     def test_minimum_guest_svn(self):
         """Test minimum guest SVN validation"""
+        chain = MockCertificateChain()
         report = create_mock_report(guest_svn=5)
         
         # Lower or equal minimum should pass
         options = ValidationOptions(minimum_guest_svn=5)
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         options = ValidationOptions(minimum_guest_svn=3)
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         # Higher minimum should fail
         options = ValidationOptions(minimum_guest_svn=10)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="Guest SVN .* is less than minimum required"):
+            validate_report(report, chain, options)
     
     def test_minimum_build(self):
         """Test minimum build validation"""
+        chain = MockCertificateChain()
         report = create_mock_report(current_build=21, committed_build=21)
         
         # Lower or equal minimum should pass
         options = ValidationOptions(minimum_build=21)
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         options = ValidationOptions(minimum_build=20)
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         # Higher minimum should fail
         options = ValidationOptions(minimum_build=25)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="SNP firmware build number .* is less than minimum required"):
+            validate_report(report, chain, options)
         
         # Test when current and committed differ (both must meet minimum)
         report = create_mock_report(current_build=25, committed_build=20)
         options = ValidationOptions(minimum_build=22)
-        assert validate_report(report, options) == False  # committed_build < minimum
+        with pytest.raises(ValueError, match="Committed SNP firmware build number .* is less than minimum required"):
+            validate_report(report, chain, options)
     
     def test_minimum_version(self):
         """Test minimum version validation"""
+        chain = MockCertificateChain()
         # Version 1.55 = (1 << 8) | 55 = 311
         report = create_mock_report(
             current_major=1, current_minor=55,
@@ -502,17 +536,19 @@ class TestValidateReport:
         
         # Lower or equal minimum should pass
         options = ValidationOptions(minimum_version=311)  # 1.55
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         options = ValidationOptions(minimum_version=300)  # 1.44
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         # Higher minimum should fail
         options = ValidationOptions(minimum_version=320)  # 1.64
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="version .* is less than minimum required"):
+            validate_report(report, chain, options)
     
     def test_minimum_tcb(self):
         """Test minimum TCB validation"""
+        chain = MockCertificateChain()
         # TCB with all components at level 7
         tcb_value = (7 << 56) | (7 << 48) | (7 << 8) | 7
         report = create_mock_report(
@@ -524,19 +560,21 @@ class TestValidateReport:
         # Lower or equal minimum should pass
         min_tcb = TCBParts(bl_spl=7, tee_spl=7, snp_spl=7, ucode_spl=7)
         options = ValidationOptions(minimum_tcb=min_tcb)
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         min_tcb = TCBParts(bl_spl=5, tee_spl=5, snp_spl=5, ucode_spl=5)
         options = ValidationOptions(minimum_tcb=min_tcb)
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         # Higher minimum should fail
         min_tcb = TCBParts(bl_spl=10, tee_spl=10, snp_spl=10, ucode_spl=10)
         options = ValidationOptions(minimum_tcb=min_tcb)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="TCB .* does not meet minimum requirements"):
+            validate_report(report, chain, options)
     
     def test_field_equality_checks(self):
         """Test field equality validation"""
+        chain = MockCertificateChain()
         report_data = b"A" * 64
         host_data = b"B" * 32
         measurement = b"C" * 48
@@ -553,45 +591,49 @@ class TestValidateReport:
             host_data=host_data,
             measurement=measurement
         )
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         # Non-matching fields should fail
         options = ValidationOptions(report_data=b"X" * 64)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="Report data mismatch"):
+            validate_report(report, chain, options)
         
         options = ValidationOptions(host_data=b"Y" * 32)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="Host data mismatch"):
+            validate_report(report, chain, options)
         
         options = ValidationOptions(measurement=b"Z" * 48)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="Measurement mismatch"):
+            validate_report(report, chain, options)
     
     def test_vmpl_validation(self):
         """Test VMPL validation"""
+        chain = MockCertificateChain()
         report = create_mock_report(vmpl=1)
         
         # Matching VMPL should pass
         options = ValidationOptions(vmpl=1)
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         # Non-matching VMPL should fail
         options = ValidationOptions(vmpl=2)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="VMPL mismatch"):
+            validate_report(report, chain, options)
         
         # Invalid VMPL values should fail
         report = create_mock_report(vmpl=5)  # VMPL > 3
         options = ValidationOptions(vmpl=5)
-        assert validate_report(report, options) == False
-        
-        report = create_mock_report(vmpl=-1)  # VMPL < 0
-        options = ValidationOptions(vmpl=-1)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="VMPL .* is not in valid range"):
+            validate_report(report, chain, options)
     
     def test_provisional_firmware_check(self):
         """Test provisional firmware validation"""
+        chain = MockCertificateChain()
         # When permit_provisional_firmware=True, should always fail (not supported)
         report = create_mock_report()
         options = ValidationOptions(permit_provisional_firmware=True)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="Provisional firmware is not supported"):
+            validate_report(report, chain, options)
         
         # When permit_provisional_firmware=False, committed and current must match
         report = create_mock_report(
@@ -601,33 +643,39 @@ class TestValidateReport:
             current_tcb=0x480e000000000007, committed_tcb=0x480e000000000007
         )
         options = ValidationOptions(permit_provisional_firmware=False)
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         # Mismatched current/committed should fail
         report = create_mock_report(
             current_build=22, committed_build=21  # Different builds
         )
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="Committed build .* does not match current build"):
+            validate_report(report, chain, options)
         
         report = create_mock_report(
             current_minor=56, committed_minor=55  # Different minor versions
         )
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="Committed minor version .* does not match current minor version"):
+            validate_report(report, chain, options)
     
     def test_id_block_author_key_requirements(self):
         """Test ID block and author key requirements"""
+        chain = MockCertificateChain()
         report = create_mock_report()
         
         # When require_author_key=True, should fail (not supported)
         options = ValidationOptions(require_author_key=True)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="ID-block and author key requirements are not supported"):
+            validate_report(report, chain, options)
         
         # When require_id_block=True, should fail (not supported)
         options = ValidationOptions(require_id_block=True)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError, match="ID-block and author key requirements are not supported"):
+            validate_report(report, chain, options)
     
     def test_platform_info_validation(self):
         """Test platform info validation"""
+        chain = MockCertificateChain()
         platform_info_value = (1 << 0) | (1 << 3)  # SMT enabled, RAPL disabled
         report = create_mock_report(platform_info=platform_info_value)
         
@@ -638,7 +686,7 @@ class TestValidateReport:
             alias_check_complete=False
         )
         options = ValidationOptions(platform_info=expected_info)
-        assert validate_report(report, options) == True
+        validate_report(report, chain, options)  # Should not raise
         
         # Non-matching platform info should fail
         different_info = SnpPlatformInfo(
@@ -647,7 +695,8 @@ class TestValidateReport:
             alias_check_complete=False
         )
         options = ValidationOptions(platform_info=different_info)
-        assert validate_report(report, options) == False
+        with pytest.raises(ValueError):
+            validate_report(report, chain, options)
 
 
 if __name__ == '__main__':

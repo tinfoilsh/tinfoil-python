@@ -246,7 +246,7 @@ class CertificateChain:
         if extensions[SnpOid.PRODUCT_NAME_1] != b'\x16\x05Genoa':
             raise ValueError(f"unexpected PRODUCT_NAME_1 in VCEK certificate: {extensions[SnpOid.PRODUCT_NAME_1]}")
         
-    def validate_vcek_tcb(self, tcb: TCBParts) -> bool:
+    def validate_vcek_tcb(self, tcb: TCBParts):
         """Validate the TCB extension in the VCEK certificate matches a given TCB"""
         extensions = _get_certificate_extensions(self.vcek)
         
@@ -274,9 +274,7 @@ class CertificateChain:
         if ucode_spl != tcb.ucode_spl:
             raise ValueError(f"UCODE extension in VCEK certificate does not match tcb.ucode_spl: {ucode_spl} != {tcb.ucode_spl}")
         
-        return True
-    
-    def validate_vcek_hwid(self, chip_id: bytes) -> bool:
+    def validate_vcek_hwid(self, chip_id: bytes):
         """Validate the HWID extension in the VCEK certificate matches a given chip id"""
         extensions = _get_certificate_extensions(self.vcek)
         if SnpOid.HWID not in extensions:
