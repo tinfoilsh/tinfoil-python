@@ -245,6 +245,44 @@ class CertificateChain:
 
         if extensions[SnpOid.PRODUCT_NAME_1] != b'\x16\x05Genoa':
             raise ValueError(f"unexpected PRODUCT_NAME_1 in VCEK certificate: {extensions[SnpOid.PRODUCT_NAME_1]}")
+        
+    def validate_vcek_tcb(self, tcb: TCBParts) -> bool:
+        """Validate the TCB extension in the VCEK certificate matches a given TCB"""
+        extensions = _get_certificate_extensions(self.vcek)
+        
+        if SnpOid.BL_SPL not in extensions:
+            raise ValueError(f"missing BL_SPL extension for VCEK certificate")
+        bl_spl = _decode_der_integer(extensions[SnpOid.BL_SPL])
+        if bl_spl != tcb.bl_spl:
+            raise ValueError(f"BL_SPL extension in VCEK certificate does not match tcb.bl_spl: {bl_spl} != {tcb.bl_spl}")
+            
+        if SnpOid.TEE_SPL not in extensions:
+            raise ValueError(f"missing TEE_SPL extension for VCEK certificate")
+        tee_spl = _decode_der_integer(extensions[SnpOid.TEE_SPL])
+        if tee_spl != tcb.tee_spl:
+            raise ValueError(f"TEE_SPL extension in VCEK certificate does not match tcb.tee_spl: {tee_spl} != {tcb.tee_spl}")
+            
+        if SnpOid.SNP_SPL not in extensions:
+            raise ValueError(f"missing SNP_SPL extension for VCEK certificate")
+        snp_spl = _decode_der_integer(extensions[SnpOid.SNP_SPL])
+        if snp_spl != tcb.snp_spl:
+            raise ValueError(f"SNP_SPL extension in VCEK certificate does not match tcb.snp_spl: {snp_spl} != {tcb.snp_spl}")
+            
+        if SnpOid.UCODE not in extensions:
+            raise ValueError(f"missing UCODE extension for VCEK certificate")
+        ucode_spl = _decode_der_integer(extensions[SnpOid.UCODE])
+        if ucode_spl != tcb.ucode_spl:
+            raise ValueError(f"UCODE extension in VCEK certificate does not match tcb.ucode_spl: {ucode_spl} != {tcb.ucode_spl}")
+        
+        return True
+    
+    def validate_vcek_hwid(self, chip_id: bytes) -> bool:
+        """Validate the HWID extension in the VCEK certificate matches a given chip id"""
+        extensions = _get_certificate_extensions(self.vcek)
+        if SnpOid.HWID not in extensions:
+            raise ValueError(f"missing HWID extension for VCEK certificate")
+        if extensions[SnpOid.HWID] != chip_id:
+            raise ValueError(f"HWID extension in VCEK certificate does not match chip_id: {extensions[SnpOid.HWID]} != {chip_id}")
     
 
 ## HELPER FUNCTIONS
@@ -256,6 +294,17 @@ def _get_certificate_extensions(cert: x509.Certificate) -> Extensions:
         extensions[ext.oid] = ext.value.value
     return extensions
 
+def _decode_der_integer(der_bytes: bytes) -> int:
+    """Decode a DER-encoded INTEGER"""
+    if len(der_bytes) < 2 or der_bytes[0] != 0x02:
+        raise ValueError(f"Invalid DER INTEGER: {der_bytes.hex()}")
+    
+    length = der_bytes[1]
+    if len(der_bytes) != 2 + length:
+        raise ValueError(f"Invalid DER INTEGER length: {der_bytes.hex()}")
+    
+    # Convert the integer bytes to int (big-endian)
+    return int.from_bytes(der_bytes[2:2+length], byteorder='big')
 
 def _validateAmdLocation(name: x509.Name) -> bool:
     """Validate that the certificate subject name matches AMD's expected values.

@@ -201,7 +201,7 @@ def verify_sev_attestation(attestation_doc: str) -> Verification:
     
     # Validate report
     try:
-        res = validate_report(report, default_validation_options)
+        res = validate_report(report, chain, default_validation_options)
     except Exception as e:
         raise ValueError(f"Failed to validate report: {e}")
     

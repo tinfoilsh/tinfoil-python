@@ -6,7 +6,9 @@ from .abi_sevsnp import (
     TCBParts,
     SnpPolicy,
     SnpPlatformInfo,
+    ReportSigner,
 )
+from .verify import CertificateChain
 
 @dataclass
 class ValidationOptions:
@@ -52,7 +54,7 @@ class ValidationOptions:
     # cert_table_options: Dict[str, CertEntryOption] = field(default_factory=dict)
 
 
-def validate_report(report: Report, options: ValidationOptions) -> bool:
+def validate_report(report: Report, chain: CertificateChain, options: ValidationOptions) -> bool:
     """
     Validate the supplied SEV-SNP attestation report according to *options*.
     """
@@ -84,6 +86,10 @@ def validate_report(report: Report, options: ValidationOptions) -> bool:
         reported_tcb_parts = TCBParts.from_int(report.reported_tcb)
         if not current_tcb_parts.meets_minimum(options.minimum_tcb) or not committed_tcb_parts.meets_minimum(options.minimum_tcb) or not reported_tcb_parts.meets_minimum(options.minimum_tcb):
             return False
+        
+    # VCEK-specific TCB check
+    if not chain.validate_vcek_tcb(TCBParts.from_int(report.reported_tcb)):
+        return False
     
     if options.minimum_launch_tcb is not None:
         launch_tcb_parts = TCBParts.from_int(report.launch_tcb)
@@ -123,6 +129,12 @@ def validate_report(report: Report, options: ValidationOptions) -> bool:
         if len(report.chip_id) != 64 or report.chip_id != options.chip_id:
             return False
     
+    # VCEK-specific CHIP_ID ↔ HWID equality check
+    if report.signer_info_parsed.signingKey == ReportSigner.VcekReportSigner:
+        if any(report.chip_id): # at least one byte is non-zero
+            if not chain.validate_vcek_hwid(report.chip_id):
+                return False
+    
     # Platform info check
     if options.platform_info is not None:
         if not _validate_platform_info(report.platform_info_parsed, options.platform_info):
@@ -130,7 +142,7 @@ def validate_report(report: Report, options: ValidationOptions) -> bool:
     
     # VMPL check
     if options.vmpl is not None: # Must be between 0 and 3 and equal to the expected value
-        if report.vmpl > 3 or report.vmpl < 0:
+        if not (0 <= report.vmpl <= 3):
             return False
         if report.vmpl != options.vmpl:
             return False
@@ -180,6 +192,9 @@ def _validate_policy(report_policy: SnpPolicy, required: SnpPolicy) -> bool:
     
     if not required.cxl_allowed and report_policy.cxl_allowed:
         return False  # "found unauthorized CXL capability"
+    
+    if not required.mem_aes256_xts and report_policy.mem_aes256_xts:
+        return False  # "found unauthorized memory encryption mode"
     
     # Required restrictions/features (report lacks what required mandates)
     if required.single_socket and not report_policy.single_socket:
