@@ -154,7 +154,9 @@ def validate_report(report: Report, chain: CertificateChain, options: Validation
     
     # VCEK-specific CHIP_ID ↔ HWID equality check
     if report.signer_info_parsed.signingKey == ReportSigner.VcekReportSigner:
-        if any(report.chip_id): # at least one byte is non-zero
+        if report.signer_info_parsed.maskChipKey and any(report.chip_id):
+            raise ValueError("maskChipKey is set but CHIP_ID is not zeroed")
+        if not report.signer_info_parsed.maskChipKey:
             chain.validate_vcek_hwid(report.chip_id)
     
     # Platform info check
