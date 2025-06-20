@@ -11,7 +11,7 @@ import requests
 from OpenSSL import crypto
 import platformdirs
 
-from .abi_sevsnp import (Report, ReportSigner, DecomposeTCBVersion)
+from .abi_sevsnp import (Report, ReportSigner, TCBParts)
 from .genoa_cert_chain import (ARK_CERT, ASK_CERT)
 
 from cryptography import x509
@@ -306,7 +306,7 @@ def _validateAmdLocation(name: x509.Name) -> bool:
 def _VCEKCertURL(productName: str, chip_id: bytes, reported_tcb: int) -> str:
     # TODO add support for other product names
     """Generate the VCEK certificate URL based on the product name, chip ID, and reported TCB"""
-    parts = DecomposeTCBVersion(reported_tcb)
+    parts = TCBParts.from_int(reported_tcb)
     base_url = "https://kds-proxy.tinfoil.sh/vcek/v1"
     chip_id_hex = binascii.hexlify(chip_id).decode('ascii')
     return f"{base_url}/{productName}/{chip_id_hex}?blSPL={parts.bl_spl}&teeSPL={parts.tee_spl}&snpSPL={parts.snp_spl}&ucodeSPL={parts.ucode_spl}"
