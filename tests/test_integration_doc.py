@@ -13,7 +13,7 @@ def test_doc_upload(client):
     """Test synchronous doc upload."""
     httpx_client = client.make_secure_http_client()
 
-    with open("dummy.pdf", "rb") as file:
+    with open("tests/dummy.pdf", "rb") as file:
         response = httpx_client.post(
             "https://doc-upload.model.tinfoil.sh/v1alpha/convert/file", 
             files={'files': file},
@@ -27,7 +27,7 @@ async def test_doc_upload_async(client):
     """Test asynchronous doc upload."""
     httpx_client = client.make_secure_async_http_client()
 
-    with open("dummy.pdf", "rb") as file:
+    with open("tests/dummy.pdf", "rb") as file:
         response = await httpx_client.post(
             "https://doc-upload.model.tinfoil.sh/v1alpha/convert/file", 
             files={'files': file},

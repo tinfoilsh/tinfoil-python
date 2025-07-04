@@ -40,38 +40,133 @@ class TCBParts:
     """Represents the decomposed parts of a TCB version"""
     ucode_spl: int
     snp_spl: int
-    spl7: int
-    spl6: int
-    spl5: int
-    spl4: int
     tee_spl: int
     bl_spl: int
 
-def DecomposeTCBVersion(tcb: int) -> TCBParts:
-    """Decompose a TCB version into its constituent parts"""
-    return TCBParts(
-        ucode_spl=((tcb >> 56) & 0xff),
-        snp_spl=((tcb >> 48) & 0xff),
-        spl7=((tcb >> 40) & 0xff),
-        spl6=((tcb >> 32) & 0xff),
-        spl5=((tcb >> 24) & 0xff),
-        spl4=((tcb >> 16) & 0xff),
-        tee_spl=((tcb >> 8) & 0xff),
-        bl_spl=((tcb >> 0) & 0xff)
-    )
+    def __str__(self) -> str:
+        """Return a human-friendly string with all component SPL values."""
+        # Print fields in order starting with the least-significant component (bl_spl)
+        return (
+            "TCBParts("  # Opening
+            f"bl_spl=0x{self.bl_spl:02x}, "
+            f"tee_spl=0x{self.tee_spl:02x}, "
+            f"snp_spl=0x{self.snp_spl:02x}, "
+            f"ucode_spl=0x{self.ucode_spl:02x})"
+        )
+
+    @classmethod
+    def from_int(cls, tcb: int) -> "TCBParts":
+        """Build a TCBParts instance from a 64-bit packed TCB value."""
+        return cls(
+            ucode_spl=((tcb >> 56) & 0xff),
+            snp_spl=((tcb >> 48) & 0xff),
+            tee_spl=((tcb >> 8) & 0xff),
+            bl_spl=((tcb >> 0) & 0xff),
+        )
+
+    def meets_minimum(self, minimum: "TCBParts") -> bool:
+        """Check if this TCB meets minimum requirements (component-wise)."""
+        return (
+            self.bl_spl >= minimum.bl_spl and
+            self.tee_spl >= minimum.tee_spl and
+            self.snp_spl >= minimum.snp_spl and
+            self.ucode_spl >= minimum.ucode_spl
+        )
+
+@dataclass
+class SnpPlatformInfo:
+    """Decoded view of the 64-bit PLATFORM_INFO field."""
+
+    smt_enabled: bool
+    tsme_enabled: bool
+    ecc_enabled: bool
+    rapl_disabled: bool
+    ciphertext_hiding_dram_enabled: bool
+    alias_check_complete: bool
+    tio_enabled: bool
+
+    @classmethod
+    def from_int(cls, value: int) -> "SnpPlatformInfo":
+        return cls(
+            smt_enabled=bool(value & (1 << 0)),
+            tsme_enabled=bool(value & (1 << 1)),
+            ecc_enabled=bool(value & (1 << 2)),
+            rapl_disabled=bool(value & (1 << 3)),
+            ciphertext_hiding_dram_enabled=bool(value & (1 << 4)),
+            alias_check_complete=bool(value & (1 << 5)),
+            tio_enabled=bool(value & (1 << 7))
+        )
+
+    def __str__(self) -> str:  # pragma: no cover – formatting helper
+        return (
+            "SnpPlatformInfo("  # opening
+            f"SMTEnabled={self.smt_enabled}, "
+            f"TSMEEnabled={self.tsme_enabled}, "
+            f"ECCEnabled={self.ecc_enabled}, "
+            f"RAPLDisabled={self.rapl_disabled}, "
+            f"CiphertextHidingDRAMEnabled={self.ciphertext_hiding_dram_enabled}, "
+            f"AliasCheckComplete={self.alias_check_complete}, "
+            f"TIOEnabled={self.tio_enabled})"
+        )
+
+
+@dataclass
+class SnpPolicy:
+    """Decoded view of the 64-bit POLICY field (bits 0-20)."""
+
+    abi_minor: int
+    abi_major: int
+    smt: bool
+    migrate_ma: bool
+    debug: bool
+    single_socket: bool
+    cxl_allowed: bool
+    mem_aes256_xts: bool
+    rapl_dis: bool
+    ciphertext_hiding_dram: bool
+    page_swap_disabled: bool
+
+    def __str__(self) -> str:  # pragma: no cover – formatting helper
+        return (
+            "SnpPolicy("  # opening
+            f"ABIMajor={self.abi_major}, ABIMinor={self.abi_minor}, "
+            f"SMT={self.smt}, MigrateMA={self.migrate_ma}, Debug={self.debug}, "
+            f"SingleSocket={self.single_socket}, CXLAllowed={self.cxl_allowed}, "
+            f"MemAES256XTS={self.mem_aes256_xts}, RAPLDis={self.rapl_dis}, "
+            f"CipherTextHidingDRAM={self.ciphertext_hiding_dram}, PageSwapDisabled={self.page_swap_disabled})"
+        )
+
+    @classmethod
+    def from_int(cls, value: int) -> "SnpPolicy":
+        """Parse the guest policy bit-field following AMD SEV-SNP spec."""
+        return cls(
+            abi_minor=value & 0xFF,
+            abi_major=(value >> 8) & 0xFF,
+            smt=bool(value & (1 << 16)),
+            migrate_ma=bool(value & (1 << 18)),
+            debug=bool(value & (1 << 19)),
+            single_socket=bool(value & (1 << 20)),
+            cxl_allowed=bool(value & (1 << 21)),
+            mem_aes256_xts=bool(value & (1 << 22)),
+            rapl_dis=bool(value & (1 << 23)),
+            ciphertext_hiding_dram=bool(value & (1 << 24)),
+            page_swap_disabled=bool(value & (1 << 25)),
+        )
 
 @dataclass 
 class Report:
     """SEV-SNP attestation report"""
-    version: int  # Should be 2 for revision 1.55, and 3 for revision 1.56
+    version: int  # Should be 2 for revision 1.55, 3 for revision 1.56, 5 for revision 1.58
     guest_svn: int
     policy: int
+    policy_parsed: SnpPolicy
     family_id: bytes  # Should be 16 bytes long
     image_id: bytes   # Should be 16 bytes long
     vmpl: int
     signature_algo: int
     current_tcb: int
     platform_info: int
+    platform_info_parsed: SnpPlatformInfo
     signer_info: int  # AuthorKeyEn, MaskChipKey, SigningKey
     signer_info_parsed: SignerInfo
     report_data: bytes  # Should be 64 bytes long
@@ -93,7 +188,6 @@ class Report:
     launch_tcb: int
     signed_data: bytes
     signature: bytes  # Should be 512 bytes long
-    cpuid1eax_fms: int  # The cpuid(1).eax & 0x0fff0fff representation of family/model/stepping
     family: bytes
     model: bytes
     stepping: bytes
@@ -121,16 +215,25 @@ class Report:
         if not (self.policy & (1 << POLICY_RESERVED_1_BIT)):
             raise ValueError(f"policy[{POLICY_RESERVED_1_BIT}] is reserved, must be 1, got 0")
         
-        # Check bits 63-21 must be zero
-        if self.policy >> 21:
-            raise ValueError("policy bits 63-21 must be zero")
+        # Check bits 63-26 must be zero
+        if self.policy >> 26:
+            raise ValueError("policy bits 63-26 must be zero")
     
         self.family_id = data[0x10:0x20]  # 16 bytes
         self.image_id = data[0x20:0x30]   # 16 bytes
         self.vmpl = int.from_bytes(data[0x30:0x34], byteorder='little')
         self.signature_algo = int.from_bytes(data[0x34:0x38], byteorder='little')
         self.current_tcb = int.from_bytes(data[0x38:0x40], byteorder='little')
+
+        try:
+            mbz64(int(self.current_tcb), "current_tcb", 47, 16)
+        except ValueError as e:
+            raise ValueError(f"current_tcb not correctly formed: {e}")
+        
         self.platform_info = int.from_bytes(data[0x40:0x48], byteorder='little')
+        # Decode additional helper structures for easier consumption later.
+        self.policy_parsed = SnpPolicy.from_int(self.policy)
+        self.platform_info_parsed = SnpPlatformInfo.from_int(self.platform_info)
         self.signer_info = int.from_bytes(data[0x48:0x4C], byteorder='little')
 
         self.signer_info_parsed = SignerInfo()
@@ -159,18 +262,25 @@ class Report:
         self.report_id = data[0x140:0x160]       # 32 bytes
         self.report_id_ma = data[0x160:0x180]    # 32 bytes
         self.reported_tcb = int.from_bytes(data[0x180:0x188], byteorder='little')
-        
+
+        try:
+            mbz64(int(self.reported_tcb), "reported_tcb", 47, 16)
+        except ValueError as e:
+            raise ValueError(f"reported_tcb not correctly formed: {e}")
+
         mbzLo = 0x188
         # Version specific parsing
-        if self.version == 3:  # Report Version 3
+        if self.version >= 3:  # Report Version 3
             self.family = data[0x188]
             self.model = data[0x189]
             self.stepping = data[0x18A]
             self._init_product_name()
             mbzLo = 0x18B
         elif self.version == 2:  # Report Version 2
+            self.family = ZEN3ZEN4_FAMILY
+            self.model = GENOA_MODEL
+            self.stepping = 0x01
             self.productName = "Genoa"
-            # TODO impose default for now with genoa
         else:
             raise ValueError("Unknown report version")
         
@@ -181,6 +291,11 @@ class Report:
         
         self.chip_id = data[0x1A0:0x1E0]        # 64 bytes
         self.committed_tcb = int.from_bytes(data[0x1E0:0x1E8], byteorder='little')
+
+        try:
+            mbz64(int(self.committed_tcb), "committed_tcb", 47, 16)
+        except ValueError as e:
+            raise ValueError(f"committed_tcb not correctly formed: {e}")
         
         # Version fields
         self.current_build = data[0x1E8]
@@ -202,6 +317,11 @@ class Report:
             raise ValueError(f"report_data not correctly formed: {e}")
         
         self.launch_tcb = int.from_bytes(data[0x1F0:0x1F8], byteorder='little')
+
+        try:
+            mbz64(int(self.launch_tcb), "launch_tcb", 47, 16)
+        except ValueError as e:
+            raise ValueError(f"launch_tcb not correctly formed: {e}")
 
         try:
             mbz(data, 0x1F8, SIGNATURE_OFFSET)
@@ -231,6 +351,47 @@ class Report:
         elif self.family == ZEN5_FAMILY:
             if self.model == TURIN_MODEL:
                 self.productName = "Turin"
+
+    def print_report(self):
+        """Print all relevant fields of the SEV-SNP attestation report in a human-readable format."""
+        print("=== SEV-SNP Attestation Report ===")
+        print(f"Version: {self.version}")
+        print(f"Guest SVN: {self.guest_svn}")
+        print(f"Policy: 0x{self.policy:x}")
+        print(f"  -> {self.policy_parsed}")
+        print(f"Family ID: {self.family_id.hex()}")
+        print(f"Image ID: {self.image_id.hex()}")
+        print(f"VMPL: {self.vmpl}")
+        print(f"Signature Algorithm: {self.signature_algo}")
+        print(f"Current TCB: 0x{self.current_tcb:x}")
+        print(f"  -> {TCBParts.from_int(self.current_tcb)}")
+        print(f"Platform Info: 0x{self.platform_info:x}")
+        print(f"  -> {self.platform_info_parsed}")
+        print(f"Signer Info: 0x{self.signer_info:x}")
+        print(f"  - Signing Key: {self.signer_info_parsed.signingKey}")
+        print(f"  - Mask Chip Key: {self.signer_info_parsed.maskChipKey}")
+        print(f"  - Author Key Enabled: {self.signer_info_parsed.authorKeyEn}")
+        print(f"Report Data: {self.report_data.hex()}")
+        print(f"Measurement: {self.measurement.hex()}")
+        print(f"Host Data: {self.host_data.hex()}")
+        print(f"ID Key Digest: {self.id_key_digest.hex()}")
+        print(f"Author Key Digest: {self.author_key_digest.hex()}")
+        print(f"Report ID: {self.report_id.hex()}")
+        print(f"Report ID MA: {self.report_id_ma.hex()}")
+        print(f"Reported TCB: 0x{self.reported_tcb:x}")
+        print(f"  -> {TCBParts.from_int(self.reported_tcb)}")
+        print(f"Chip ID: {self.chip_id.hex()}")
+        print(f"Committed TCB: 0x{self.committed_tcb:x}")
+        print(f"  -> {TCBParts.from_int(self.committed_tcb)}")
+        print(f"Current Version: {self.current_major}.{self.current_minor}.{self.current_build}")
+        print(f"Committed Version: {self.committed_major}.{self.committed_minor}.{self.committed_build}")
+        print(f"Launch TCB: 0x{self.launch_tcb:x}")
+        print(f"  -> {TCBParts.from_int(self.launch_tcb)}")
+        print(f"Product Name: {self.productName}")
+        if hasattr(self, 'family') and hasattr(self, 'model') and hasattr(self, 'stepping'):
+            print(f"CPU: Family=0x{self.family:02x}, Model=0x{self.model:02x}, Stepping=0x{self.stepping:02x}")
+        print(f"Signature Length: {len(self.signature)} bytes")
+        print("=" * 40)
 
 ## HELPER FUNCTIONS
     
