@@ -364,8 +364,8 @@ def _verify_report_signature(vcek: x509.Certificate, report: Report) -> bool:
     # Validate Report Format
     POLICY_RESERVED_1_BIT = 17
 
-    if report.version != 2 and report.version != 3:
-        raise ValueError(f"Report version is not 2 or 3 but {report.version}")
+    if report.version < 2:
+        raise ValueError(f"Report version is lower than 2: is {report.version}")
 
     # Check reserved bit must be 1
     if not (report.policy & (1 << POLICY_RESERVED_1_BIT)):

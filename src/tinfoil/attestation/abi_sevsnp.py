@@ -83,6 +83,7 @@ class SnpPlatformInfo:
     rapl_disabled: bool
     ciphertext_hiding_dram_enabled: bool
     alias_check_complete: bool
+    tio_enabled: bool
 
     @classmethod
     def from_int(cls, value: int) -> "SnpPlatformInfo":
@@ -93,6 +94,7 @@ class SnpPlatformInfo:
             rapl_disabled=bool(value & (1 << 3)),
             ciphertext_hiding_dram_enabled=bool(value & (1 << 4)),
             alias_check_complete=bool(value & (1 << 5)),
+            tio_enabled=bool(value & (1 << 7))
         )
 
     def __str__(self) -> str:  # pragma: no cover – formatting helper
@@ -103,7 +105,8 @@ class SnpPlatformInfo:
             f"ECCEnabled={self.ecc_enabled}, "
             f"RAPLDisabled={self.rapl_disabled}, "
             f"CiphertextHidingDRAMEnabled={self.ciphertext_hiding_dram_enabled}, "
-            f"AliasCheckComplete={self.alias_check_complete})"
+            f"AliasCheckComplete={self.alias_check_complete}, "
+            f"TIOEnabled={self.tio_enabled})"
         )
 
 
@@ -121,6 +124,7 @@ class SnpPolicy:
     mem_aes256_xts: bool
     rapl_dis: bool
     ciphertext_hiding_dram: bool
+    page_swap_disabled: bool
 
     def __str__(self) -> str:  # pragma: no cover – formatting helper
         return (
@@ -129,7 +133,7 @@ class SnpPolicy:
             f"SMT={self.smt}, MigrateMA={self.migrate_ma}, Debug={self.debug}, "
             f"SingleSocket={self.single_socket}, CXLAllowed={self.cxl_allowed}, "
             f"MemAES256XTS={self.mem_aes256_xts}, RAPLDis={self.rapl_dis}, "
-            f"CipherTextHidingDRAM={self.ciphertext_hiding_dram})"
+            f"CipherTextHidingDRAM={self.ciphertext_hiding_dram}, PageSwapDisabled={self.page_swap_disabled})"
         )
 
     @classmethod
@@ -146,12 +150,13 @@ class SnpPolicy:
             mem_aes256_xts=bool(value & (1 << 22)),
             rapl_dis=bool(value & (1 << 23)),
             ciphertext_hiding_dram=bool(value & (1 << 24)),
+            page_swap_disabled=bool(value & (1 << 25)),
         )
 
 @dataclass 
 class Report:
     """SEV-SNP attestation report"""
-    version: int  # Should be 2 for revision 1.55, and 3 for revision 1.56
+    version: int  # Should be 2 for revision 1.55, 3 for revision 1.56, 5 for revision 1.58
     guest_svn: int
     policy: int
     policy_parsed: SnpPolicy
@@ -210,9 +215,9 @@ class Report:
         if not (self.policy & (1 << POLICY_RESERVED_1_BIT)):
             raise ValueError(f"policy[{POLICY_RESERVED_1_BIT}] is reserved, must be 1, got 0")
         
-        # Check bits 63-21 must be zero
-        if self.policy >> 21:
-            raise ValueError("policy bits 63-21 must be zero")
+        # Check bits 63-26 must be zero
+        if self.policy >> 26:
+            raise ValueError("policy bits 63-26 must be zero")
     
         self.family_id = data[0x10:0x20]  # 16 bytes
         self.image_id = data[0x20:0x30]   # 16 bytes
@@ -265,7 +270,7 @@ class Report:
 
         mbzLo = 0x188
         # Version specific parsing
-        if self.version == 3:  # Report Version 3
+        if self.version >= 3:  # Report Version 3
             self.family = data[0x188]
             self.model = data[0x189]
             self.stepping = data[0x18A]

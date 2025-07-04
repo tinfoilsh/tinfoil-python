@@ -235,6 +235,8 @@ def _validate_policy(report_policy: SnpPolicy, required: SnpPolicy):
     if required.ciphertext_hiding_dram and not report_policy.ciphertext_hiding_dram:
         raise ValueError(f"Ciphertext hiding in DRAM isn't enforced. Report policy: {report_policy}, Required policy: {required}")
 
+    if required.page_swap_disabled and not report_policy.page_swap_disabled:
+        raise ValueError(f"Page swap isn't disabled. Report policy: {report_policy}, Required policy: {required}")
 
 def _compare_policy_versions(required: SnpPolicy, report: SnpPolicy) -> int:
     """
@@ -266,12 +268,12 @@ def _validate_platform_info(report_info: SnpPlatformInfo, required: SnpPlatformI
     if report_info.smt_enabled and not required.smt_enabled:
         raise ValueError(f"Unauthorized platform feature SMT enabled. Report platform info: {report_info}, Required platform info: {required}")
     
-    if report_info.ecc_enabled and not required.ecc_enabled:
-        raise ValueError(f"Unauthorized platform feature ECC enabled. Report platform info: {report_info}, Required platform info: {required}")
-    
     # Required features (report lacks something that required mandates)
+    if not report_info.ecc_enabled and required.ecc_enabled:
+        raise ValueError(f"Required platform feature ECC not enabled. Report platform info: {report_info}, Required platform info: {required}")
+    
     if not report_info.tsme_enabled and required.tsme_enabled:
-        raise ValueError(f"Required platform feature TSME not enabled. Report platform info: {report_info}, Required platform info: {required}")
+        raise ValueError(f"Required platform feature TSME not enabled. Report platform info: {report_info}, Required platform info: {required}") 
     
     if not report_info.rapl_disabled and required.rapl_disabled:
         raise ValueError(f"Required platform feature RAPL not disabled. Report platform info: {report_info}, Required platform info: {required}")
@@ -280,4 +282,7 @@ def _validate_platform_info(report_info: SnpPlatformInfo, required: SnpPlatformI
         raise ValueError(f"Required ciphertext hiding in DRAM not enforced. Report platform info: {report_info}, Required platform info: {required}")
     
     if not report_info.alias_check_complete and required.alias_check_complete:
-        raise ValueError(f"Required memory alias check hasn't been completed. Report platform info: {report_info}, Required platform info: {required}") 
+        raise ValueError(f"Required memory alias check hasn't been completed. Report platform info: {report_info}, Required platform info: {required}")
+
+    if not report_info.tio_enabled and required.tio_enabled:
+        raise ValueError(f"Required TIO not enabled. Report platform info: {report_info}, Required platform info: {required}")
