@@ -58,7 +58,8 @@ class TestValidationOptions:
         policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=True, migrate_ma=False,
             debug=False, single_socket=True, cxl_allowed=False,
-            mem_aes256_xts=True, rapl_dis=True, ciphertext_hiding_dram=True
+            mem_aes256_xts=True, rapl_dis=True, ciphertext_hiding_dram=True,
+            page_swap_disabled=False
         )
         
         tcb = TCBParts(bl_spl=7, tee_spl=0, snp_spl=14, ucode_spl=71)
@@ -66,7 +67,7 @@ class TestValidationOptions:
         platform_info = SnpPlatformInfo(
             smt_enabled=True, tsme_enabled=False, ecc_enabled=False,
             rapl_disabled=True, ciphertext_hiding_dram_enabled=True,
-            alias_check_complete=True
+            alias_check_complete=True, tio_enabled=False
         )
         
         options = ValidationOptions(
@@ -120,7 +121,8 @@ class TestValidatePolicy:
         policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=True, migrate_ma=False,
             debug=False, single_socket=True, cxl_allowed=False,
-            mem_aes256_xts=True, rapl_dis=True, ciphertext_hiding_dram=True
+            mem_aes256_xts=True, rapl_dis=True, ciphertext_hiding_dram=True,
+            page_swap_disabled=False
         )
         
         # Exact match should pass (no exception raised)
@@ -131,14 +133,16 @@ class TestValidatePolicy:
         report_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         
         # Required version lower than report - should pass
         required_lower = SnpPolicy(
             abi_minor=0, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         _validate_policy(report_policy, required_lower)  # Should not raise
         
@@ -146,7 +150,8 @@ class TestValidatePolicy:
         required_higher = SnpPolicy(
             abi_minor=2, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         with pytest.raises(ValueError, match="Required ABI version"):
             _validate_policy(report_policy, required_higher)
@@ -156,13 +161,15 @@ class TestValidatePolicy:
         base_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         
         required_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         
         # Test each unauthorized capability
@@ -170,7 +177,8 @@ class TestValidatePolicy:
         report_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=True,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         with pytest.raises(ValueError, match="unauthorized migration agent capability"):
             _validate_policy(report_policy, required_policy)
@@ -179,7 +187,8 @@ class TestValidatePolicy:
         report_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=True, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         with pytest.raises(ValueError, match="unauthorized debug capability"):
             _validate_policy(report_policy, required_policy)
@@ -188,7 +197,8 @@ class TestValidatePolicy:
         report_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=True, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         with pytest.raises(ValueError, match="unauthorized symmetric multithreading"):
             _validate_policy(report_policy, required_policy)
@@ -197,7 +207,8 @@ class TestValidatePolicy:
         report_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=True,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         with pytest.raises(ValueError, match="unauthorized CXL capability"):
             _validate_policy(report_policy, required_policy)
@@ -207,7 +218,8 @@ class TestValidatePolicy:
         base_report = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         
         # Test each required restriction
@@ -215,7 +227,8 @@ class TestValidatePolicy:
         required_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=True, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         with pytest.raises(ValueError, match="single socket restriction not present"):
             _validate_policy(base_report, required_policy)
@@ -224,7 +237,8 @@ class TestValidatePolicy:
         required_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=True, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=True, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         with pytest.raises(ValueError, match="unauthorized memory encryption mode"):
             _validate_policy(base_report, required_policy)
@@ -233,7 +247,8 @@ class TestValidatePolicy:
         required_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=True, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=True, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         with pytest.raises(ValueError, match="unauthorized RAPL capability"):
             _validate_policy(base_report, required_policy)
@@ -242,7 +257,8 @@ class TestValidatePolicy:
         required_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=True
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=True,
+            page_swap_disabled=False
         )
         with pytest.raises(ValueError, match="Ciphertext hiding in DRAM isn't enforced"):
             _validate_policy(base_report, required_policy)
@@ -256,12 +272,14 @@ class TestComparePolicyVersions:
         policy1 = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         policy2 = SnpPolicy(
             abi_minor=1, abi_major=2, smt=True, migrate_ma=True,  # Other fields don't matter
             debug=True, single_socket=True, cxl_allowed=True,
-            mem_aes256_xts=True, rapl_dis=True, ciphertext_hiding_dram=True
+            mem_aes256_xts=True, rapl_dis=True, ciphertext_hiding_dram=True,
+            page_swap_disabled=True
         )
         
         assert _compare_policy_versions(policy1, policy2) == 0
@@ -272,12 +290,14 @@ class TestComparePolicyVersions:
         policy_v1 = SnpPolicy(
             abi_minor=1, abi_major=1, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         policy_v2 = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         
         assert _compare_policy_versions(policy_v1, policy_v2) < 0  # v1 < v2
@@ -288,12 +308,14 @@ class TestComparePolicyVersions:
         policy_v10 = SnpPolicy(
             abi_minor=0, abi_major=1, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         policy_v11 = SnpPolicy(
             abi_minor=1, abi_major=1, smt=False, migrate_ma=False,
             debug=False, single_socket=False, cxl_allowed=False,
-            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+            mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+            page_swap_disabled=False
         )
         
         assert _compare_policy_versions(policy_v10, policy_v11) < 0  # 1.0 < 1.1
@@ -308,7 +330,7 @@ class TestValidatePlatformInfo:
         platform_info = SnpPlatformInfo(
             smt_enabled=True, tsme_enabled=False, ecc_enabled=False,
             rapl_disabled=True, ciphertext_hiding_dram_enabled=False,
-            alias_check_complete=True
+            alias_check_complete=True, tio_enabled=False
         )
         
         _validate_platform_info(platform_info, platform_info)  # Should not raise
@@ -318,25 +340,16 @@ class TestValidatePlatformInfo:
         base_required = SnpPlatformInfo(
             smt_enabled=False, tsme_enabled=False, ecc_enabled=False,
             rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
-            alias_check_complete=False
+            alias_check_complete=False, tio_enabled=False
         )
         
         # SMT enabled when not allowed
         report_info = SnpPlatformInfo(
             smt_enabled=True, tsme_enabled=False, ecc_enabled=False,
             rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
-            alias_check_complete=False
+            alias_check_complete=False, tio_enabled=False
         )
         with pytest.raises(ValueError, match="Unauthorized platform feature SMT enabled"):
-            _validate_platform_info(report_info, base_required)
-        
-        # ECC enabled when not allowed
-        report_info = SnpPlatformInfo(
-            smt_enabled=False, tsme_enabled=False, ecc_enabled=True,
-            rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
-            alias_check_complete=False
-        )
-        with pytest.raises(ValueError, match="Unauthorized platform feature ECC enabled"):
             _validate_platform_info(report_info, base_required)
     
     def test_missing_required_features(self):
@@ -344,14 +357,14 @@ class TestValidatePlatformInfo:
         base_report = SnpPlatformInfo(
             smt_enabled=False, tsme_enabled=False, ecc_enabled=False,
             rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
-            alias_check_complete=False
+            alias_check_complete=False, tio_enabled=False
         )
         
         # TSME required but not enabled
         required_info = SnpPlatformInfo(
             smt_enabled=False, tsme_enabled=True, ecc_enabled=False,
             rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
-            alias_check_complete=False
+            alias_check_complete=False, tio_enabled=False
         )
         with pytest.raises(ValueError, match="Required platform feature TSME not enabled"):
             _validate_platform_info(base_report, required_info)
@@ -360,7 +373,7 @@ class TestValidatePlatformInfo:
         required_info = SnpPlatformInfo(
             smt_enabled=False, tsme_enabled=False, ecc_enabled=False,
             rapl_disabled=True, ciphertext_hiding_dram_enabled=False,
-            alias_check_complete=False
+            alias_check_complete=False, tio_enabled=False
         )
         with pytest.raises(ValueError, match="Required platform feature RAPL not disabled"):
             _validate_platform_info(base_report, required_info)
@@ -369,7 +382,7 @@ class TestValidatePlatformInfo:
         required_info = SnpPlatformInfo(
             smt_enabled=False, tsme_enabled=False, ecc_enabled=False,
             rapl_disabled=False, ciphertext_hiding_dram_enabled=True,
-            alias_check_complete=False
+            alias_check_complete=False, tio_enabled=False
         )
         with pytest.raises(ValueError, match="Required ciphertext hiding in DRAM not enforced"):
             _validate_platform_info(base_report, required_info)
@@ -378,9 +391,18 @@ class TestValidatePlatformInfo:
         required_info = SnpPlatformInfo(
             smt_enabled=False, tsme_enabled=False, ecc_enabled=False,
             rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
-            alias_check_complete=True
+            alias_check_complete=True, tio_enabled=False
         )
         with pytest.raises(ValueError, match="Required memory alias check hasn't been completed"):
+            _validate_platform_info(base_report, required_info)
+
+        # ECC  required but not complete
+        required_info = SnpPlatformInfo(
+            smt_enabled=False, tsme_enabled=False, ecc_enabled=True,
+            rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
+            alias_check_complete=False, tio_enabled=False
+        )
+        with pytest.raises(ValueError, match="Required platform feature ECC not enabled"):
             _validate_platform_info(base_report, required_info)
 
 
@@ -479,7 +501,8 @@ class TestValidateReport:
             guest_policy=SnpPolicy(
                 abi_minor=1, abi_major=2, smt=True, migrate_ma=False,
                 debug=False, single_socket=False, cxl_allowed=False,
-                mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False
+                mem_aes256_xts=False, rapl_dis=False, ciphertext_hiding_dram=False,
+                page_swap_disabled=False
             )
         )
         with pytest.raises(ValueError):
@@ -683,7 +706,7 @@ class TestValidateReport:
         expected_info = SnpPlatformInfo(
             smt_enabled=True, tsme_enabled=False, ecc_enabled=False,
             rapl_disabled=True, ciphertext_hiding_dram_enabled=False,
-            alias_check_complete=False
+            alias_check_complete=False, tio_enabled=False
         )
         options = ValidationOptions(platform_info=expected_info)
         validate_report(report, chain, options)  # Should not raise
@@ -692,7 +715,7 @@ class TestValidateReport:
         different_info = SnpPlatformInfo(
             smt_enabled=False, tsme_enabled=True, ecc_enabled=False,
             rapl_disabled=False, ciphertext_hiding_dram_enabled=False,
-            alias_check_complete=False
+            alias_check_complete=False, tio_enabled=False
         )
         options = ValidationOptions(platform_info=different_info)
         with pytest.raises(ValueError):
