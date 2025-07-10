@@ -65,7 +65,7 @@ class TLSBoundHTTPSHandler(urllib.request.HTTPSHandler):
 class SecureClient:
     """A client that verifies and communicates with secure enclaves"""
     
-    def __init__(self, enclave: str, repo: str):
+    def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy"):
         self.enclave = enclave
         self.repo = repo
         self._ground_truth: Optional[GroundTruth] = None
