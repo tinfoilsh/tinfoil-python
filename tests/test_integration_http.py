@@ -2,16 +2,11 @@ import os
 import pytest
 from tinfoil import NewSecureClient
 
-ENCLAVE = os.getenv("TINFOIL_ENCLAVE")
-REPO    = os.getenv("TINFOIL_REPO")
+ENCLAVE = "inference.tinfoil.sh"
+REPO    = "tinfoilsh/confidential-inference-proxy"
 API_KEY = os.getenv("TINFOIL_API_KEY", "tinfoil")
 
 pytestmark = pytest.mark.integration
-
-@pytest.fixture(autouse=True)
-def skip_if_no_env():
-    if not ENCLAVE or not REPO:
-        pytest.skip("Missing TINFOIL_* env vars", allow_module_level=True)
 
 def test_http_integration():
     client = NewSecureClient(ENCLAVE, REPO, api_key=API_KEY)

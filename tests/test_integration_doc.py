@@ -15,7 +15,7 @@ def test_doc_upload(client):
 
     with open("tests/dummy.pdf", "rb") as file:
         response = httpx_client.post(
-            "https://doc-upload.model.tinfoil.sh/v1alpha/convert/file", 
+            "https://doc-upload.model.tinfoil.sh/v1/convert/file", 
             files={'files': file},
             timeout=30,
         )
@@ -29,7 +29,7 @@ async def test_doc_upload_async(client):
 
     with open("tests/dummy.pdf", "rb") as file:
         response = await httpx_client.post(
-            "https://doc-upload.model.tinfoil.sh/v1alpha/convert/file", 
+            "https://doc-upload.model.tinfoil.sh/v1/convert/file", 
             files={'files': file},
             timeout=30,
         )

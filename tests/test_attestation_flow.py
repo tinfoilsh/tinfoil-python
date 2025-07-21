@@ -11,12 +11,8 @@ pytestmark = pytest.mark.integration  # allows pytest -m integration filtering
 
 # Fetch config from environment variables, falling back to defaults
 # Use the same env vars as the other integration test for consistency
-ENCLAVE = os.getenv("TINFOIL_ENCLAVE")
-REPO    = os.getenv("TINFOIL_REPO")
-
-# Skip if essential config is missing (optional, adjust if defaults are always acceptable)
-if not os.getenv("TINFOIL_ENCLAVE") or not os.getenv("TINFOIL_REPO"):
-     pytest.skip("Missing Tinfoil integration settings", allow_module_level=True)
+ENCLAVE = "inference.tinfoil.sh"
+REPO    = "tinfoilsh/confidential-inference-proxy"
 
 def test_full_verification_flow():
     """
