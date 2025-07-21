@@ -12,7 +12,10 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from .validate import validate_report, ValidationOptions
 from .verify import Report, verify_attestation, CertificateChain
+from .abi_sevsnp import TCBParts, SnpPolicy, SnpPlatformInfo
+
 
 class PredicateType(str, Enum):
     """Predicate types for attestation"""
@@ -133,6 +136,46 @@ def fetch_attestation(host: str) -> Document:
         body=doc_dict["body"]
     )
 
+min_tcb = TCBParts(
+    bl_spl=0x7,
+    tee_spl=0,
+    snp_spl=0xe,
+    ucode_spl=0x48,
+)
+
+default_validation_options = ValidationOptions(
+    guest_policy=SnpPolicy(
+        abi_minor=0,
+        abi_major=0,
+        smt=True,
+        migrate_ma=False,
+        debug=False,
+        single_socket=False,
+        cxl_allowed=False,
+        mem_aes256_xts=False,
+        rapl_dis=False,
+        ciphertext_hiding_dram=False,
+        page_swap_disabled=False,
+    ),
+    minimum_guest_svn=0,
+    minimum_build=21,
+    minimum_version=(1 << 8) | 55,  # 1.55
+    minimum_tcb=min_tcb,
+    minimum_launch_tcb=min_tcb,
+    permit_provisional_firmware=False,  # We only support False per your requirement
+    platform_info=SnpPlatformInfo(
+        smt_enabled=True,
+        tsme_enabled=False,
+        ecc_enabled=False,
+        rapl_disabled=False,
+        ciphertext_hiding_dram_enabled=False,
+        alias_check_complete=False,
+        tio_enabled=False,
+    ),
+    require_author_key=False,
+    require_id_block=False,
+)
+
 def verify_sev_attestation(attestation_doc: str) -> Verification:
     """Verify SEV attestation document and return verification result."""
     try:
@@ -157,6 +200,12 @@ def verify_sev_attestation(attestation_doc: str) -> Verification:
     
     if res!= True:
         raise ValueError("Attestation verification failed!")
+    
+    # Validate report
+    try:
+        validate_report(report, chain, default_validation_options)
+    except Exception as e:
+        raise ValueError(f"Failed to validate report: {e}")
 
     # Create measurement object
     measurement = Measurement(

@@ -5,14 +5,9 @@ from tinfoil import AsyncTinfoilAI
 
 pytestmark = pytest.mark.integration
 
-ENCLAVE = os.getenv("TINFOIL_ENCLAVE")
-REPO    = os.getenv("TINFOIL_REPO")
+ENCLAVE = "inference.tinfoil.sh"
+REPO    = "tinfoilsh/confidential-inference-proxy"
 API_KEY = os.getenv("TINFOIL_API_KEY", "tinfoil")
-
-@pytest.fixture(autouse=True)
-def skip_if_no_env():
-    if not ENCLAVE or not REPO:
-        pytest.skip("Missing TINFOIL_* env vars", allow_module_level=True)
 
 @pytest.mark.asyncio
 async def test_async_chat_integration():
