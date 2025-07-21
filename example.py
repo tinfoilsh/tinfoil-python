@@ -1,9 +1,6 @@
 from tinfoil import TinfoilAI
 
-client = TinfoilAI(
-    "llama3-3-70b.model.tinfoil.sh",
-    "tinfoilsh/confidential-llama3-3-70b",
-)
+client = TinfoilAI()
 
 chat_completion = client.chat.completions.create(
     messages=[
