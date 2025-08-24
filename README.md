@@ -13,22 +13,21 @@ pip install tinfoil
 ## Usage
 
 ```python
+import os
 from tinfoil import TinfoilAI
 
 client = TinfoilAI(
-    enclave="llama3-3-70b.model.tinfoil.sh",
-    repo="tinfoilsh/confidential-llama3-3-70b",
-    api_key="<API_KEY>",
+    api_key=os.getenv("TINFOIL_API_KEY")
 )
 
 chat_completion = client.chat.completions.create(
+    model="llama3-3-70b",
     messages=[
         {
             "role": "user",
             "content": "Hi",
         }
     ],
-    model="llama3-3-70b",
 )
 print(chat_completion.choices[0].message.content)
 ```
@@ -38,12 +37,11 @@ print(chat_completion.choices[0].message.content)
 You can transcribe audio files using OpenAI's Whisper model:
 
 ```python
+import os
 from tinfoil import TinfoilAI
 
 client = TinfoilAI(
-    enclave="audio-processing.model.tinfoil.sh",
-    repo="tinfoilsh/confidential-audio-processing",
-    api_key="<API_KEY>",
+    api_key=os.getenv("TINFOIL_API_KEY")
 )
 
 with open("audio.mp3", "rb") as audio_file:
@@ -64,9 +62,7 @@ import asyncio
 from tinfoil import AsyncTinfoilAI
 
 client = AsyncTinfoilAI(
-    enclave="llama3-3-70b.model.tinfoil.sh",
-    repo="tinfoilsh/confidential-llama3-3-70b",
-    api_key=os.environ.get("TINFOIL_API_KEY"),
+    api_key=os.getenv("TINFOIL_API_KEY")
 )
 
 async def main() -> None:
@@ -77,7 +73,7 @@ async def main() -> None:
         stream=True,
     )
     async for chunk in stream:
-        if chunk.choices[0].delta.content is not None:
+        if chunk.choices and chunk.choices[0].delta.content is not None:
             print(chunk.choices[0].delta.content, end="", flush=True)
     print()
 
@@ -91,12 +87,13 @@ Functionality between the synchronous and asynchronous clients is otherwise iden
 You can also perform arbitrary GET/POST requests that are verified:
 
 ```python
+import os
 from tinfoil import NewSecureClient
 
 tfclient = NewSecureClient(
     enclave="df-demo.model.tinfoil.sh",
     repo="tinfoilsh/confidential-df-demo",
-    api_key="<API_KEY>",
+    api_key=os.getenv("TINFOIL_API_KEY"),
 )
 
 # GET example
@@ -118,8 +115,8 @@ resp = tfclient.post(
 print(resp.status_code, resp.text)
 ```
 
-
 ## Requirements
+
 - Python 3.10 through 3.13
 
 ## Testing
