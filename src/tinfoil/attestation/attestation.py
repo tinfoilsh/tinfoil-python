@@ -16,7 +16,6 @@ from .verify import Report, verify_attestation, CertificateChain
 
 class PredicateType(str, Enum):
     """Predicate types for attestation"""
-    AWS_NITRO_ENCLAVE_V1 = "https://tinfoil.sh/predicate/aws-nitro-enclave/v1"
     SEV_GUEST_V1 = "https://tinfoil.sh/predicate/sev-snp-guest/v1"
 
 ATTESTATION_ENDPOINT = "/.well-known/tinfoil-attestation"
