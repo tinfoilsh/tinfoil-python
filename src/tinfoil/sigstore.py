@@ -88,16 +88,7 @@ def verify_attestation(bundle_json: bytes, digest: str, repo: str) -> Measuremen
             )
         
         # Convert predicate type to measurement type
-        if predicate_type == PredicateType.AWS_NITRO_ENCLAVE_V1:
-            try:
-                registers = [
-                    predicate_fields["PCR0"],
-                    predicate_fields["PCR1"],
-                    predicate_fields["PCR2"],
-                ]
-            except KeyError:
-                raise ValueError("AWS Nitro Enclave V1 predicate does not contain PCR0, PCR1, or PCR2")
-        elif predicate_type == PredicateType.SEV_GUEST_V1:
+        if predicate_type == PredicateType.SEV_GUEST_V1:
             try:
                 registers = [predicate_fields["measurement"]]
             except KeyError:
