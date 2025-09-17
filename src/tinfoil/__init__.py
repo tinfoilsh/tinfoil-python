@@ -18,9 +18,8 @@ class TinfoilAI:
     enclave: str
 
     def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil", measurement: dict = None):
-        # Validate that both measurement and repo are not provided at the same time
-        if measurement is not None and repo != "":
-            raise ValueError("Cannot provide both 'measurement' and 'repo' parameters. Use either one or the other.")
+        if measurement is not None:
+            repo = ""
         
         # Ensure at least one verification method is provided
         if measurement is None and (repo == "" or repo is None):
@@ -50,9 +49,8 @@ class AsyncTinfoilAI:
     enclave: str
 
     def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil", measurement: dict = None):
-        # Validate that both measurement and repo are not provided at the same time
-        if measurement is not None and repo != "":
-            raise ValueError("Cannot provide both 'measurement' and 'repo' parameters. Use either one or the other.")
+        if measurement is not None:
+            repo = ""
         
         # Ensure at least one verification method is provided
         if measurement is None and (repo == "" or repo is None):
@@ -98,9 +96,8 @@ def NewSecureClient(enclave: str = "inference.tinfoil.sh", repo: str = "tinfoils
     """
     Create a secure HTTP client for direct GET/POST through the Tinfoil enclave.
     """
-    # Validate that both measurement and repo are not provided at the same time
-    if measurement is not None and repo != "":
-        raise ValueError("Cannot provide both 'measurement' and 'repo' parameters. Use either one or the other.")
+    if measurement is not None:
+        repo = ""
     
     # Ensure at least one verification method is provided
     if measurement is None and (repo == "" or repo is None):
