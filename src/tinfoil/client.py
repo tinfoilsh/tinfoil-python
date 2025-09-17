@@ -39,17 +39,22 @@ class TLSBoundHTTPSHandler(urllib.request.HTTPSHandler):
         self.expected_pubkey = expected_pubkey
 
     def https_open(self, req):
-        return self.do_open(self._create_connection, req)
+        return self.do_open(self._get_connection, req)
 
-    def _create_connection(self, host, **kwargs):
-        conn = super().do_open(http.client.HTTPSConnection, host, **kwargs)
+    def _get_connection(self, host, timeout=None):
+        """Create an HTTPS connection with certificate verification"""
+        conn = http.client.HTTPSConnection(host, timeout=timeout)
+        conn.connect()
+        
         if not conn.sock:
             raise ValueError("No TLS connection")
         
-        cert = conn.sock.getpeercert(binary_form=True)
-        if not cert:
+        cert_binary = conn.sock.getpeercert(binary_form=True)
+        if not cert_binary:
             raise ValueError("No valid certificate")
         
+        # Parse the certificate using cryptography
+        cert = cryptography.x509.load_der_x509_certificate(cert_binary)
         public_key = cert.public_key()
         # Get the public key in PKIX/DER format
         public_key_der = public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
