@@ -39,17 +39,22 @@ class TLSBoundHTTPSHandler(urllib.request.HTTPSHandler):
         self.expected_pubkey = expected_pubkey
 
     def https_open(self, req):
-        return self.do_open(self._create_connection, req)
+        return self.do_open(self._get_connection, req)
 
-    def _create_connection(self, host, **kwargs):
-        conn = super().do_open(http.client.HTTPSConnection, host, **kwargs)
+    def _get_connection(self, host, timeout=None):
+        """Create an HTTPS connection with certificate verification"""
+        conn = http.client.HTTPSConnection(host, timeout=timeout)
+        conn.connect()
+        
         if not conn.sock:
             raise ValueError("No TLS connection")
         
-        cert = conn.sock.getpeercert(binary_form=True)
-        if not cert:
+        cert_binary = conn.sock.getpeercert(binary_form=True)
+        if not cert_binary:
             raise ValueError("No valid certificate")
         
+        # Parse the certificate using cryptography
+        cert = cryptography.x509.load_der_x509_certificate(cert_binary)
         public_key = cert.public_key()
         # Get the public key in PKIX/DER format
         public_key_der = public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
@@ -65,9 +70,18 @@ class TLSBoundHTTPSHandler(urllib.request.HTTPSHandler):
 class SecureClient:
     """A client that verifies and communicates with secure enclaves"""
     
-    def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy"):
+    def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", measurement: Optional[dict] = None):
+        # Hardcoded measurement takes precedence over repo
+        if measurement is not None:
+            repo = ""
+
+        # Ensure at least one verification method is provided
+        if measurement is None and (repo == "" or repo is None):
+            raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
+
         self.enclave = enclave
         self.repo = repo
+        self.measurement = measurement
         self._ground_truth: Optional[GroundTruth] = None
 
     @property
@@ -122,8 +136,32 @@ class SecureClient:
         Fetches the latest verification information from GitHub and Sigstore
         and stores the ground truth results in the client
         """
-        try:
-            # Fetch and verify all required information
+
+        enclave_attestation = fetch_attestation(self.enclave)
+        verification = enclave_attestation.verify()
+
+        if self.measurement is not None:
+            # Use provided measurement directly
+            # Verify the SNP measurement matches the provided one
+            expected_snp_measurement = self.measurement.get("snp_measurement")
+            if expected_snp_measurement is None:
+                raise ValueError("snp_measurement not found in provided measurement")
+            
+            # Get the actual measurement from the attestation
+            actual_measurement = verification.measurement.registers[0]  # SNP measurement is the first register
+            
+            if actual_measurement != expected_snp_measurement:
+                raise ValueError(f"SNP measurement mismatch: expected {expected_snp_measurement}, got {actual_measurement}")
+            
+            # Build ground truth from the verified attestation
+            self._ground_truth = GroundTruth(
+                public_key=verification.public_key_fp,
+                digest="pinned_no_digest",  # No digest when using direct measurement
+                measurement=verification.measurement
+            )
+            return self._ground_truth
+        else:
+            # GitHub-based verification
             digest = fetch_latest_digest(self.repo)
             sigstore_bundle = fetch_attestation_bundle(self.repo, digest)
             
@@ -132,9 +170,6 @@ class SecureClient:
                 digest, 
                 self.repo
             )
-            
-            enclave_attestation = fetch_attestation(self.enclave)
-            verification = enclave_attestation.verify()
             
             # Verify measurements match
             for (i, code_measurement) in enumerate(code_measurements.registers):
@@ -148,9 +183,6 @@ class SecureClient:
                 measurement=verification.measurement
             )
             return self._ground_truth
-        
-        except Exception as e:
-            raise e
 
     def get_http_client(self) -> urllib.request.OpenerDirector:
         """Returns an HTTP client that only accepts TLS connections to the verified enclave"""
@@ -185,7 +217,7 @@ class SecureClient:
         )
         return self.make_request(req)
 
-    def get(self, url: str, headers: Dict[str, str]) -> Response:
+    def get(self, url: str, headers: Dict[str, str] = {}) -> Response:
         """Makes an HTTP GET request"""
         req = urllib.request.Request(
             url,

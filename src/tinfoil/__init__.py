@@ -17,10 +17,17 @@ class TinfoilAI:
     api_key: str
     enclave: str
 
-    def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil"):
+    def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil", measurement: dict = None):
+        if measurement is not None:
+            repo = ""
+        
+        # Ensure at least one verification method is provided
+        if measurement is None and (repo == "" or repo is None):
+            raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
+        
         self.enclave = enclave
         self.api_key = api_key
-        tf_client = SecureClient(enclave, repo)
+        tf_client = SecureClient(enclave, repo, measurement)
         secure_http = tf_client.make_secure_http_client()
         self.client = OpenAI(
             base_url=f"https://{enclave}/v1/",
@@ -41,11 +48,18 @@ class AsyncTinfoilAI:
     api_key: str
     enclave: str
 
-    def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil"):
+    def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil", measurement: dict = None):
+        if measurement is not None:
+            repo = ""
+        
+        # Ensure at least one verification method is provided
+        if measurement is None and (repo == "" or repo is None):
+            raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
+        
         self.enclave = enclave
         self.api_key = api_key
         # verifier client remains sync; only used to fetch the expected public key
-        tf_client = SecureClient(enclave, repo)
+        tf_client = SecureClient(enclave, repo, measurement)
         async_http = tf_client.make_secure_async_http_client()
         self.client = AsyncOpenAI(
             base_url=f"https://{enclave}/v1/",
@@ -78,11 +92,18 @@ class _HTTPSecureClient:
         return self._http_client.post(url, headers=headers, data=data, json=json, timeout=timeout)
 
 
-def NewSecureClient(enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil"):
+def NewSecureClient(enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil", measurement: dict = None):
     """
     Create a secure HTTP client for direct GET/POST through the Tinfoil enclave.
     """
-    tf_client = SecureClient(enclave, repo)
+    if measurement is not None:
+        repo = ""
+    
+    # Ensure at least one verification method is provided
+    if measurement is None and (repo == "" or repo is None):
+        raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
+    
+    tf_client = SecureClient(enclave, repo, measurement)
     return _HTTPSecureClient(enclave, tf_client, api_key)
 
 __all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient"]
