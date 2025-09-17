@@ -221,3 +221,22 @@ def verify_sev_attestation(attestation_doc: str) -> Verification:
         measurement=measurement,
         public_key_fp=kfp
     )
+
+def from_snp_digest(snp_digest: str) -> dict:
+    """
+    Convert an SNP launch digest string to measurement format.
+    
+    Args:
+        snp_digest: The SNP launch digest as a hex string
+        
+    Returns:
+        Dictionary in the format expected by SecureClient measurement parameter
+        
+    Example:
+        from tinfoil.attestation import from_snp_digest
+        measurement = from_snp_digest("abcdef")
+        client = TinfoilAI(measurement=measurement)
+    """
+    return {
+        "snp_measurement": snp_digest
+    }
