@@ -3,10 +3,10 @@ from enum import Enum
 import json
 
 import base64
+import gzip
 import hashlib
 import ssl
 from typing import List, Optional
-from urllib.parse import urlparse, urlunparse
 import requests
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -20,6 +20,8 @@ from .abi_sevsnp import TCBParts, SnpPolicy, SnpPlatformInfo
 class PredicateType(str, Enum):
     """Predicate types for attestation"""
     SEV_GUEST_V1 = "https://tinfoil.sh/predicate/sev-snp-guest/v1"
+    SEV_GUEST_V2 = "https://tinfoil.sh/predicate/sev-snp-guest/v2"
+    TDX_GUEST_V1 = "https://tinfoil.sh/predicate/tdx-guest/v1"
 
 ATTESTATION_ENDPOINT = "/.well-known/tinfoil-attestation"
 
@@ -67,6 +69,7 @@ class Verification:
     """Represents verification results"""
     measurement: Measurement
     public_key_fp: str
+    hpke_public_key: Optional[str] = None
 
 @dataclass
 class Document:
@@ -85,7 +88,9 @@ class Document:
         and returns the inner measurements
         """
         if self.format == PredicateType.SEV_GUEST_V1:
-            return verify_sev_attestation(self.body)
+            return verify_sev_attestation_v1(self.body)
+        elif self.format == PredicateType.SEV_GUEST_V2:
+            return verify_sev_attestation_v2(self.body)
         else:
             raise ValueError(f"Unsupported attestation format: {self.format}")
 
@@ -175,36 +180,9 @@ default_validation_options = ValidationOptions(
     require_id_block=False,
 )
 
-def verify_sev_attestation(attestation_doc: str) -> Verification:
+def verify_sev_attestation_v1(attestation_doc: str) -> Verification:
     """Verify SEV attestation document and return verification result."""
-    try:
-        att_doc_bytes = base64.b64decode(attestation_doc)
-    except Exception as e:
-        raise ValueError(f"Failed to decode base64: {e}")
-    
-    # Parse the report
-    try:
-        report = Report(att_doc_bytes)
-    except Exception as e:
-        raise ValueError(f"Failed to parse report: {e}")
-    
-    # Get attestation chain
-    chain: CertificateChain = CertificateChain.from_report(report)
-
-    # Verify attestation
-    try:
-        res = verify_attestation(chain, report)
-    except Exception as e:
-        raise ValueError(f"Failed to verify attestation: {e}")
-    
-    if res!= True:
-        raise ValueError("Attestation verification failed!")
-    
-    # Validate report
-    try:
-        validate_report(report, chain, default_validation_options)
-    except Exception as e:
-        raise ValueError(f"Failed to validate report: {e}")
+    report = verify_sev_report(attestation_doc, False)
 
     # Create measurement object
     measurement = Measurement(
@@ -221,6 +199,65 @@ def verify_sev_attestation(attestation_doc: str) -> Verification:
         measurement=measurement,
         public_key_fp=kfp
     )
+
+def verify_sev_attestation_v2(attestation_doc: str) -> Verification:
+    """Verify SEV attestation document and return verification result."""
+    report = verify_sev_report(attestation_doc, True)
+
+    # Create measurement object
+    measurement = Measurement(
+        type=PredicateType.SEV_GUEST_V2,
+        registers=[
+            report.measurement.hex()
+        ]
+    )
+
+    keys = report.report_data
+    tls_key_fp = keys[0:32]
+    hpke_public_key = keys[32:64]
+
+    return Verification(
+        measurement=measurement,
+        public_key_fp=tls_key_fp.hex(),
+        hpke_public_key=hpke_public_key.hex()
+    )
+
+
+def verify_sev_report(attestation_doc: str, is_compressed: bool) -> Report:
+    """Verify SEV attestation document and return verification result."""
+    try:
+        att_doc_bytes = base64.b64decode(attestation_doc)
+    except Exception as e:
+        raise ValueError(f"Failed to decode base64: {e}")
+    
+    if is_compressed:
+        att_doc_bytes = gzip.decompress(att_doc_bytes)
+
+    # Parse the report
+    try:
+        report = Report(att_doc_bytes)
+    except Exception as e:
+        raise ValueError(f"Failed to parse report: {e}")
+    
+    # Get attestation chain
+    chain: CertificateChain = CertificateChain.from_report(report)
+
+    # Verify attestation
+    try:
+        res = verify_attestation(chain, report)
+    except Exception as e:
+        raise ValueError(f"Failed to verify attestation: {e}")
+
+    if not res:
+        raise ValueError("Attestation verification failed!")
+    
+    # Validate report
+    try:
+        validate_report(report, chain, default_validation_options)
+    except Exception as e:
+        raise ValueError(f"Failed to validate report: {e}")
+
+    return report
 
 def from_snp_digest(snp_digest: str) -> dict:
     """
