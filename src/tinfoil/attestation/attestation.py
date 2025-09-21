@@ -22,6 +22,7 @@ class PredicateType(str, Enum):
     SEV_GUEST_V1 = "https://tinfoil.sh/predicate/sev-snp-guest/v1"
     SEV_GUEST_V2 = "https://tinfoil.sh/predicate/sev-snp-guest/v2"
     TDX_GUEST_V1 = "https://tinfoil.sh/predicate/tdx-guest/v1"
+    SNP_TDX_MULTIPLATFORM_v1 = "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1"
 
 ATTESTATION_ENDPOINT = "/.well-known/tinfoil-attestation"
 
