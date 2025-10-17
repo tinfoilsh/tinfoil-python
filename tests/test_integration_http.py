@@ -2,8 +2,8 @@ import os
 import pytest
 from tinfoil import NewSecureClient
 
-ENCLAVE = "inference.tinfoil.sh"
-REPO    = "tinfoilsh/confidential-inference-proxy"
+ENCLAVE = "router.inf6.tinfoil.sh"
+REPO    = "tinfoilsh/confidential-model-router"
 API_KEY = os.getenv("TINFOIL_API_KEY", "tinfoil")
 
 pytestmark = pytest.mark.integration

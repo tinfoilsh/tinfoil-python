@@ -8,7 +8,7 @@ packages = ["tinfoil", "tinfoil.attestation"]
 
 [project]
 name = "tinfoil"
-version = "0.4.1"
+version = "0.10.0"
 description = "Python client for Tinfoil"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,7 +20,7 @@ dependencies = [
     "requests>=2.31.0",
     "cryptography>=42.0.0",
     "pyOpenSSL>=25.0.0",
-    "sigstore>=3.6.2",
+    "sigstore>=4.1.0",
     "platformdirs>=4.2.0",
     "pytest-asyncio>=0.26.0"
 ]

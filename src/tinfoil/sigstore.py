@@ -1,12 +1,9 @@
-import sigstore
 from sigstore.verify import Verifier 
-from sigstore.verify.policy import AllOf, OIDCIssuer, GitHubWorkflowRepository, GitHubWorkflowRef, GitHubWorkflowSHA, Certificate, _OIDC_GITHUB_WORKFLOW_REF_OID, ExtensionNotFound, OIDCSourceRepositoryDigest, OIDCBuildSignerDigest, OIDCBuildConfigDigest
+from sigstore.verify.policy import AllOf, OIDCIssuer, GitHubWorkflowRepository, Certificate, _OIDC_GITHUB_WORKFLOW_REF_OID, ExtensionNotFound
 from sigstore.models import Bundle
 from sigstore.errors import VerificationError
-from sigstore._utils import sha256_digest
 import json
 import re
-import binascii
 
 from .attestation import Measurement, PredicateType
 
@@ -97,7 +94,7 @@ def verify_attestation(bundle_json: bytes, digest: str, repo: str) -> Measuremen
             registers = [predicate_fields["snp_measurement"]]
         else:
             raise ValueError(f"Unsupported predicate type: {predicate_type}")
-            
+
         return Measurement(
             type=predicate_type,
             registers=registers
@@ -105,4 +102,3 @@ def verify_attestation(bundle_json: bytes, digest: str, repo: str) -> Measuremen
         
     except Exception as e:
         raise ValueError(f"Attestation processing failed: {e}") from e
-    

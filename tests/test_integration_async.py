@@ -5,8 +5,8 @@ from tinfoil import AsyncTinfoilAI
 
 pytestmark = pytest.mark.integration
 
-ENCLAVE = "inference.tinfoil.sh"
-REPO    = "tinfoilsh/confidential-inference-proxy"
+ENCLAVE = "router.inf6.tinfoil.sh"
+REPO    = "tinfoilsh/confidential-model-router"
 API_KEY = os.getenv("TINFOIL_API_KEY", "tinfoil")
 
 @pytest.mark.asyncio

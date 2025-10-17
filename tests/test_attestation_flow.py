@@ -6,13 +6,14 @@ import sys
 from tinfoil.github import fetch_latest_digest, fetch_attestation_bundle
 from tinfoil.sigstore import verify_attestation
 from tinfoil.attestation import fetch_attestation
+from tinfoil.client import get_router_address
 
 pytestmark = pytest.mark.integration  # allows pytest -m integration filtering
 
 # Fetch config from environment variables, falling back to defaults
 # Use the same env vars as the other integration test for consistency
-ENCLAVE = "inference.tinfoil.sh"
-REPO    = "tinfoilsh/confidential-inference-proxy"
+ENCLAVE = get_router_address()
+REPO    = "tinfoilsh/confidential-model-router"
 
 def test_full_verification_flow():
     """
