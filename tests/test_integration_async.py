@@ -1,18 +1,20 @@
 # tests/test_integration_async.py
 import os
 import pytest
-from tinfoil import AsyncTinfoilAI
+from tinfoil import AsyncTinfoilAI, get_router_address
 
 pytestmark = pytest.mark.integration
 
-ENCLAVE = "inference.tinfoil.sh"
-REPO    = "tinfoilsh/confidential-inference-proxy"
+REPO    = "tinfoilsh/confidential-model-router"
 API_KEY = os.getenv("TINFOIL_API_KEY", "tinfoil")
 
 @pytest.mark.asyncio
 async def test_async_chat_integration():
+    enclave = get_router_address()
+    assert enclave is not None
+
     client = AsyncTinfoilAI(
-        enclave=ENCLAVE,
+        enclave=enclave,
         repo=REPO,
         api_key=API_KEY,
     )

@@ -1,14 +1,9 @@
-import hashlib
-import ssl
-import cryptography.x509
-from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
-
 from openai import OpenAI, AsyncOpenAI
 from openai.resources.chat import Chat as OpenAIChat
 from openai.resources.embeddings import Embeddings as OpenAIEmbeddings
 from openai.resources.audio import Audio as OpenAIAudio
 
-from .client import SecureClient
+from .client import SecureClient, get_router_address
 
 class TinfoilAI:
     chat: OpenAIChat
@@ -17,13 +12,17 @@ class TinfoilAI:
     api_key: str
     enclave: str
 
-    def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil", measurement: dict = None):
+    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: dict = None):
         if measurement is not None:
             repo = ""
         
         # Ensure at least one verification method is provided
         if measurement is None and (repo == "" or repo is None):
             raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
+        
+        # If enclave is empty, fetch a random one from the routers API
+        if enclave == "" or enclave is None:
+            enclave = get_router_address()
         
         self.enclave = enclave
         self.api_key = api_key
@@ -48,13 +47,17 @@ class AsyncTinfoilAI:
     api_key: str
     enclave: str
 
-    def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil", measurement: dict = None):
+    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: dict = None):
         if measurement is not None:
             repo = ""
         
         # Ensure at least one verification method is provided
         if measurement is None and (repo == "" or repo is None):
             raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
+        
+        # If enclave is empty, fetch a random one from the routers API
+        if enclave == "" or enclave is None:
+            enclave = get_router_address()
         
         self.enclave = enclave
         self.api_key = api_key
@@ -92,7 +95,7 @@ class _HTTPSecureClient:
         return self._http_client.post(url, headers=headers, data=data, json=json, timeout=timeout)
 
 
-def NewSecureClient(enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", api_key: str = "tinfoil", measurement: dict = None):
+def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: dict = None):
     """
     Create a secure HTTP client for direct GET/POST through the Tinfoil enclave.
     """
@@ -102,6 +105,10 @@ def NewSecureClient(enclave: str = "inference.tinfoil.sh", repo: str = "tinfoils
     # Ensure at least one verification method is provided
     if measurement is None and (repo == "" or repo is None):
         raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
+    
+    # If enclave is empty, fetch a random one from the routers API
+    if enclave == "" or enclave is None:
+        enclave = get_router_address()
     
     tf_client = SecureClient(enclave, repo, measurement)
     return _HTTPSecureClient(enclave, tf_client, api_key)

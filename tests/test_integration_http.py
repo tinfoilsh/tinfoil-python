@@ -1,17 +1,17 @@
 import os
 import pytest
-from tinfoil import NewSecureClient
+from tinfoil import NewSecureClient, get_router_address
 
-ENCLAVE = "inference.tinfoil.sh"
-REPO    = "tinfoilsh/confidential-inference-proxy"
+REPO    = "tinfoilsh/confidential-model-router"
 API_KEY = os.getenv("TINFOIL_API_KEY", "tinfoil")
 
 pytestmark = pytest.mark.integration
 
 def test_http_integration():
-    client = NewSecureClient(ENCLAVE, REPO, api_key=API_KEY)
+    enclave = get_router_address()
+    client = NewSecureClient(enclave, REPO, api_key=API_KEY)
 
-    url = f"https://{ENCLAVE}/v1/chat/completions"
+    url = f"https://{enclave}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {API_KEY}"}
     payload = {
         "model": "llama3-3-70b",

@@ -1,18 +1,16 @@
-import os
 import pytest
-import sys
 
 # Adjust these imports based on your project structure
 from tinfoil.github import fetch_latest_digest, fetch_attestation_bundle
 from tinfoil.sigstore import verify_attestation
 from tinfoil.attestation import fetch_attestation
+from tinfoil.client import get_router_address
 
 pytestmark = pytest.mark.integration  # allows pytest -m integration filtering
 
 # Fetch config from environment variables, falling back to defaults
 # Use the same env vars as the other integration test for consistency
-ENCLAVE = "inference.tinfoil.sh"
-REPO    = "tinfoilsh/confidential-inference-proxy"
+REPO = "tinfoilsh/confidential-model-router"
 
 def test_full_verification_flow():
     """
@@ -25,6 +23,13 @@ def test_full_verification_flow():
     6. Compare code measurements with runtime measurements.
     """
     try:
+        # Fetch enclave address lazily inside the test to avoid import-time network calls
+        try:
+            enclave = get_router_address()
+        except Exception as e:
+            pytest.skip(f"Could not fetch router address from ATC service: {e}")
+            return
+
         # Fetch latest release digest
         print(f"Fetching latest release for {REPO}")
         digest = fetch_latest_digest(REPO)
@@ -47,8 +52,8 @@ def test_full_verification_flow():
 
 
         # Fetch runtime attestation from the enclave
-        print(f"Fetching runtime attestation from {ENCLAVE}")
-        enclave_attestation = fetch_attestation(ENCLAVE)
+        print(f"Fetching runtime attestation from {enclave}")
+        enclave_attestation = fetch_attestation(enclave)
         assert enclave_attestation is not None # Basic check
 
         # Verify enclave measurements from runtime attestation

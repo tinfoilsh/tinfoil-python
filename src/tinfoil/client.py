@@ -3,6 +3,7 @@ import json
 import ssl
 import urllib.request
 import httpx
+import random
 from dataclasses import dataclass
 from typing import Dict, Optional
 from urllib.parse import urlparse
@@ -70,7 +71,7 @@ class TLSBoundHTTPSHandler(urllib.request.HTTPSHandler):
 class SecureClient:
     """A client that verifies and communicates with secure enclaves"""
     
-    def __init__(self, enclave: str = "inference.tinfoil.sh", repo: str = "tinfoilsh/confidential-inference-proxy", measurement: Optional[dict] = None):
+    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None):
         # Hardcoded measurement takes precedence over repo
         if measurement is not None:
             repo = ""
@@ -78,6 +79,10 @@ class SecureClient:
         # Ensure at least one verification method is provided
         if measurement is None and (repo == "" or repo is None):
             raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
+
+        # If enclave is empty, fetch a random one from the routers API
+        if enclave == "" or enclave is None:
+            enclave = get_router_address()
 
         self.enclave = enclave
         self.repo = repo
@@ -225,3 +230,18 @@ class SecureClient:
             method="GET"
         )
         return self.make_request(req)
+
+def get_router_address() -> str:
+    """
+    Fetches the list of available routers from the ATC API
+    and returns a randomly selected address.
+    """
+
+    routers_url = "https://atc.tinfoil.sh/routers?platform=snp"
+
+    with urllib.request.urlopen(routers_url) as response:
+        routers = json.loads(response.read().decode('utf-8'))
+        if len(routers) == 0:
+            raise ValueError("No routers found in the response")
+        
+        return random.choice(routers)
