@@ -2,6 +2,7 @@
 
 ![PyPI - Version](https://img.shields.io/pypi/v/tinfoil)
 [![Integration](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/integration.yml/badge.svg)](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/integration.yml)
+[![Documentation](https://img.shields.io/badge/docs-tinfoil.sh-blue)](https://docs.tinfoil.sh/sdk/python-sdk)
 
 A Python client for secure AI model inference through Tinfoil.
 
@@ -12,6 +13,8 @@ pip install tinfoil
 ```
 
 ## Usage
+
+The Tinfoil SDK automatically selects a router enclave and verifies it against the official GitHub repository. You just need to provide your API key:
 
 ```python
 import os
@@ -67,7 +70,6 @@ client = AsyncTinfoilAI(
 )
 
 async def main() -> None:
-    # start a streaming chat completion
     stream = await client.chat.completions.create(
         model="llama3-3-70b",
         messages=[{"role": "user", "content": "Say this is a test"}],
@@ -128,11 +130,9 @@ Run unit and integration tests:
 pytest -q
 ```
 
-Integration tests require environment variables:
+Integration tests require the `TINFOIL_API_KEY` environment variable:
 
 ```bash
-export TINFOIL_ENCLAVE="..."
-export TINFOIL_REPO="..."
 export TINFOIL_API_KEY="..."
 pytest -q -m integration
 ```
