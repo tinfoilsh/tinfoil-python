@@ -9,6 +9,6 @@ chat_completion = client.chat.completions.create(
             "content": "What is Tinfoil?",
         }
     ],
-    model="llama3-3-70b",
+    model="llama-free",
 )
 print(chat_completion.choices[0].message.content)

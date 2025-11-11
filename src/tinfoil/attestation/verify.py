@@ -18,6 +18,8 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.x509.oid import ObjectIdentifier
+import warnings
+from cryptography.utils import CryptographyDeprecationWarning
 
 # Type alias for certificate extensions
 Extensions: TypeAlias = Dict[ObjectIdentifier, bytes]
@@ -112,7 +114,15 @@ class CertificateChain:
 
         # Parse the (cached or freshly‑downloaded) certificate
         try:
-            vcek = x509.load_der_x509_certificate(vcek_cert_data)
+            # cryptography 46+ emits a deprecation warning for non‑positive serial numbers.
+            # Suppress this specific deprecation warning locally when parsing VCEK DER.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"Parsed a serial number which wasn't positive",
+                    category=CryptographyDeprecationWarning,
+                )
+                vcek = x509.load_der_x509_certificate(vcek_cert_data)
         except Exception as e:
             # Corrupted cache?  Remove and propagate error so caller can retry.
             if os.path.exists(cache_path):
@@ -135,7 +145,14 @@ class CertificateChain:
         if ext.lower() == '.pem':
             return x509.load_pem_x509_certificate(data)
         else:
-            return x509.load_der_x509_certificate(data)
+            # Suppress cryptography deprecation warnings for DER parsing as above.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"Parsed a serial number which wasn't positive",
+                    category=CryptographyDeprecationWarning,
+                )
+                return x509.load_der_x509_certificate(data)
         
     def verify_chain(self) -> bool:
         # Validate VCEK format
