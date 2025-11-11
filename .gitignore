@@ -174,3 +174,4 @@ cython_debug/
 tuf-repo-cdn.sigstore.dev.json
 verifier/
 tinfoil/tinfoil_verifier/
+.DS_Store
