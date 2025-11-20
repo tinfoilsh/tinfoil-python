@@ -1,7 +1,9 @@
+from typing import Optional
 from openai import OpenAI, AsyncOpenAI
 from openai.resources.chat import Chat as OpenAIChat
 from openai.resources.embeddings import Embeddings as OpenAIEmbeddings
 from openai.resources.audio import Audio as OpenAIAudio
+import httpx
 
 from .client import SecureClient, get_router_address
 
@@ -12,7 +14,7 @@ class TinfoilAI:
     api_key: str
     enclave: str
 
-    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: dict = None):
+    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: Optional[dict] = None):
         if measurement is not None:
             repo = ""
         
@@ -47,7 +49,7 @@ class AsyncTinfoilAI:
     api_key: str
     enclave: str
 
-    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: dict = None):
+    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: Optional[dict] = None):
         if measurement is not None:
             repo = ""
         
@@ -75,27 +77,27 @@ class AsyncTinfoilAI:
 
 class _HTTPSecureClient:
     """Low-level HTTP client with enclave-pinned TLS."""
-    def __init__(self, enclave: str, tf_client, api_key: str):
+    def __init__(self, enclave: str, tf_client: SecureClient, api_key: str):
         self.enclave = enclave
         self._tf_client = tf_client
         self._http_client = tf_client.make_secure_http_client()
         self._api_key = api_key
 
-    def get(self, url: str, headers: dict = None, params: dict = None, timeout: int = None):
+    def get(self, url: str, headers: Optional[dict] = None, params: Optional[dict] = None, timeout: Optional[int] = None) -> httpx.Response:
         return self._http_client.get(url, headers=headers, params=params, timeout=timeout)
 
     def post(
         self,
         url: str,
-        headers: dict = None,
-        data: dict = None,
-        json: dict = None,
-        timeout: int = None,
-    ):
+        headers: Optional[dict] = None,
+        data: Optional[dict] = None,
+        json: Optional[dict] = None,
+        timeout: Optional[int] = None,
+    ) -> httpx.Response:
         return self._http_client.post(url, headers=headers, data=data, json=json, timeout=timeout)
 
 
-def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: dict = None):
+def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: Optional[dict] = None):
     """
     Create a secure HTTP client for direct GET/POST through the Tinfoil enclave.
     """
