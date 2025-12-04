@@ -207,8 +207,8 @@ class CertificateChain:
             raise ValueError("ARK certificate subject is not a valid AMD location")
         
         cn = self.ark.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-        if cn != "SEV-Genoa":
-            raise ValueError(f"ARK certificate subject common name is not SEV-Genoa but {cn}")
+        if cn != "ARK-Genoa":
+            raise ValueError(f"ARK certificate subject common name is not ARK-Genoa but {cn}")
         
         # TODO add support for Certificate Revocation Lists        
         # NOTE Here the go implementation cross check Sev format with the X509 certificate but we only trust the certificate we ship with the code
@@ -223,8 +223,8 @@ class CertificateChain:
             raise ValueError("ASK certificate subject is not a valid AMD location")
         
         cn = self.ask.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-        if cn != "ARK-Genoa":
-            raise ValueError(f"ASK certificate subject common name is not ARK-Genoa but {cn}")
+        if cn != "SEV-Genoa":
+            raise ValueError(f"ASK certificate subject common name is not SEV-Genoa but {cn}")
         
         # TODO add support for Certificate Revocation Lists
         # NOTE Here the go implementation cross check Sev format with the X509 certificate but we only trust the certificate we ship with the code
