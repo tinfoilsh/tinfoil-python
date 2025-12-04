@@ -371,9 +371,9 @@ def _verify_report_signature(vcek: x509.Certificate, report: Report) -> bool:
     if not (report.policy & (1 << POLICY_RESERVED_1_BIT)):
         raise ValueError(f"policy[{POLICY_RESERVED_1_BIT}] is reserved, must be 1, got 0")
     
-    # Check bits 63-21 must be zero
-    if report.policy >> 21:
-        raise ValueError("policy bits 63-21 must be zero")
+    # Check bits 63-26 must be zero
+    if report.policy >> 26:
+        raise ValueError("policy bits 63-26 must be zero")
 
     try:
         # Check signature algorithm
