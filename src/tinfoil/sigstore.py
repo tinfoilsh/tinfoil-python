@@ -85,12 +85,7 @@ def verify_attestation(bundle_json: bytes, digest: str, repo: str) -> Measuremen
             )
         
         # Convert predicate type to measurement type
-        if predicate_type == PredicateType.SEV_GUEST_V1:
-            try:
-                registers = [predicate_fields["measurement"]]
-            except KeyError:
-                raise ValueError("SEV Guest V1 predicate does not contain measurement")
-        elif predicate_type == PredicateType.SNP_TDX_MULTIPLATFORM_v1:
+        if predicate_type == PredicateType.SNP_TDX_MULTIPLATFORM_v1:
             registers = [predicate_fields["snp_measurement"]]
         else:
             raise ValueError(f"Unsupported predicate type: {predicate_type}")

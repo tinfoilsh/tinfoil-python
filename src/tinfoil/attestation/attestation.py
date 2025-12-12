@@ -19,9 +19,9 @@ from .abi_sevsnp import TCBParts, SnpPolicy, SnpPlatformInfo
 
 class PredicateType(str, Enum):
     """Predicate types for attestation"""
-    SEV_GUEST_V1 = "https://tinfoil.sh/predicate/sev-snp-guest/v1"
+    SEV_GUEST_V1 = "https://tinfoil.sh/predicate/sev-snp-guest/v1"  # Deprecated
     SEV_GUEST_V2 = "https://tinfoil.sh/predicate/sev-snp-guest/v2"
-    TDX_GUEST_V1 = "https://tinfoil.sh/predicate/tdx-guest/v1"
+    TDX_GUEST_V1 = "https://tinfoil.sh/predicate/tdx-guest/v1"  # Deprecated
     SNP_TDX_MULTIPLATFORM_v1 = "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1"
 
 ATTESTATION_ENDPOINT = "/.well-known/tinfoil-attestation"
@@ -85,12 +85,10 @@ class Document:
 
     def verify(self) -> Verification:
         """
-        Checks the attestation document against its trust root 
+        Checks the attestation document against its trust root
         and returns the inner measurements
         """
-        if self.format == PredicateType.SEV_GUEST_V1:
-            return verify_sev_attestation_v1(self.body)
-        elif self.format == PredicateType.SEV_GUEST_V2:
+        if self.format == PredicateType.SEV_GUEST_V2:
             return verify_sev_attestation_v2(self.body)
         else:
             raise ValueError(f"Unsupported attestation format: {self.format}")
@@ -180,26 +178,6 @@ default_validation_options = ValidationOptions(
     require_author_key=False,
     require_id_block=False,
 )
-
-def verify_sev_attestation_v1(attestation_doc: str) -> Verification:
-    """Verify SEV attestation document and return verification result."""
-    report = verify_sev_report(attestation_doc, False)
-
-    # Create measurement object
-    measurement = Measurement(
-        type=PredicateType.SEV_GUEST_V1,
-        registers=[
-            report.measurement.hex()
-        ]
-    )
-
-    # The public key fingerprint is at the start of the report (32 bytes)
-    kfp = report.report_data.decode()
-
-    return Verification(
-        measurement=measurement,
-        public_key_fp=kfp
-    )
 
 def verify_sev_attestation_v2(attestation_doc: str) -> Verification:
     """Verify SEV attestation document and return verification result."""
