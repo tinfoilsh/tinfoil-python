@@ -94,14 +94,12 @@ import os
 from tinfoil import NewSecureClient
 
 tfclient = NewSecureClient(
-    enclave="df-demo.model.tinfoil.sh",
-    repo="tinfoilsh/confidential-df-demo",
     api_key=os.getenv("TINFOIL_API_KEY"),
 )
 
 # GET example
 resp = tfclient.get(
-    "https://df-demo.model.tinfoil.sh/health",
+    "https://example.com/health",
     params={"query": "value"},
     timeout=30,
 )
@@ -110,7 +108,7 @@ print(resp.status_code, resp.text)
 # POST example
 payload = {"key": "value"}
 resp = tfclient.post(
-    "https://df-demo.model.tinfoil.sh/analyze",
+    "https://example.com/analyze",
     headers={"Content-Type": "application/json"},
     json=payload,
     timeout=30,
