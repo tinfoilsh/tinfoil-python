@@ -11,14 +11,10 @@ from tinfoil import TinfoilAI, AsyncTinfoilAI
 
 TEST_AUDIO_PATH = Path(__file__).parent / "jackhammer.wav"
 TEST_AUDIO_TEXT = "The stale smell of old beer lingers."
-ENCLAVE = "audio-processing.model.tinfoil.sh"
-REPO = "tinfoilsh/confidential-audio-processing"
 
 @pytest.fixture(scope="session")
 def client() -> TinfoilAI:
     return TinfoilAI(
-        enclave=ENCLAVE,
-        repo=REPO,
         api_key=os.getenv("TINFOIL_API_KEY", "tinfoil"),
     )
 
@@ -26,8 +22,6 @@ def client() -> TinfoilAI:
 @pytest.fixture(scope="session")
 def async_client() -> AsyncTinfoilAI:
     return AsyncTinfoilAI(
-        enclave=ENCLAVE,
-        repo=REPO,
         api_key=os.getenv("TINFOIL_API_KEY", "tinfoil"),
     )
 
