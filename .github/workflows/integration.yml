@@ -13,18 +13,15 @@ jobs:
       matrix:
         python-version: ["3.11"]   # pick one stable Python
 
-    # Expose secrets as plain ENV vars so we can gate on them
     env:
-      TINFOIL_ENCLAVE: ${{ secrets.TINFOIL_ENCLAVE }}
-      TINFOIL_REPO:    ${{ secrets.TINFOIL_REPO }}
       TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
 
     steps:
-      # ─── Gate: skip entire job if secrets aren’t set (e.g. forks) ────────
+      # ─── Gate: skip entire job if secrets aren't set (e.g. forks) ────────
       - name: Check integration secrets
         id: gate
         run: |
-          if [ -z "$TINFOIL_ENCLAVE" ] || [ -z "$TINFOIL_REPO" ]; then
+          if [ -z "$TINFOIL_API_KEY" ]; then
             echo "run=false" >> $GITHUB_OUTPUT
           else
             echo "run=true"  >> $GITHUB_OUTPUT
