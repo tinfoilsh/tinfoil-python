@@ -171,15 +171,13 @@ class SecureClient:
             sigstore_bundle = fetch_attestation_bundle(self.repo, digest)
             
             code_measurements = verify_attestation(
-                sigstore_bundle, 
-                digest, 
+                sigstore_bundle,
+                digest,
                 self.repo
             )
-            
-            # Verify measurements match
-            for (i, code_measurement) in enumerate(code_measurements.registers):
-                if code_measurement != verification.measurement.registers[i]:
-                    raise ValueError("Code measurements do not match")
+
+            # Verify measurements match (handles cross-platform comparison)
+            code_measurements.equals(verification.measurement)
 
             # Build ground truth from the verified attestation
             self._ground_truth = GroundTruth(

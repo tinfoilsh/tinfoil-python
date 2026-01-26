@@ -23,7 +23,7 @@ import os
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 import platformdirs
@@ -493,8 +493,8 @@ def _verify_issuer_chain(certs: List[x509.Certificate], chain_name: str) -> None
 
     # Verify root certificate matches Intel SGX Root CA
     chain_root = certs[-1]
-    intel_root_pubkey = intel_root.public_bytes(encoding=x509.encoding.Encoding.DER)
-    chain_root_pubkey = chain_root.public_bytes(encoding=x509.encoding.Encoding.DER)
+    intel_root_pubkey = intel_root.public_bytes(serialization.Encoding.DER)
+    chain_root_pubkey = chain_root.public_bytes(serialization.Encoding.DER)
 
     if chain_root_pubkey != intel_root_pubkey:
         raise CollateralError(
@@ -1086,7 +1086,8 @@ def get_tdx_module_identity(
         return None
 
     # Extract major version and form module ID
-    major_version = tee_tcb_svn[0]
+    # TEE_TCB_SVN[0] = minor SVN, TEE_TCB_SVN[1] = major SVN
+    major_version = tee_tcb_svn[1]
     module_id = f"TDX_{major_version:02d}"
 
     # Find matching module identity
@@ -1109,7 +1110,7 @@ def validate_tdx_module_identity(
     This validates:
     - MR_SIGNER_SEAM matches the expected module signer
     - SEAM_ATTRIBUTES match under the attribute mask
-    - Module-specific TCB level matches the minor version (TEE_TCB_SVN[1])
+    - Module-specific TCB level matches the minor version (TEE_TCB_SVN[0])
 
     Args:
         tcb_info: Parsed TCB Info from Intel PCS
@@ -1160,8 +1161,9 @@ def validate_tdx_module_identity(
         )
 
     # Find matching module-specific TCB level
-    # The minor version (TEE_TCB_SVN[1]) is used for module TCB matching
-    minor_version = tee_tcb_svn[1] if len(tee_tcb_svn) > 1 else 0
+    # TEE_TCB_SVN[0] = minor SVN, TEE_TCB_SVN[1] = major SVN
+    # The minor version is used for module TCB matching
+    minor_version = tee_tcb_svn[0]
 
     for level in module_identity.tcb_levels:
         # Module TCB levels should have isv_svn (minor version) set
@@ -1170,7 +1172,7 @@ def validate_tdx_module_identity(
             if level.tcb_status == TcbStatus.REVOKED:
                 raise CollateralError(
                     f"TDX module TCB status is REVOKED for version "
-                    f"{tee_tcb_svn[0]}.{minor_version}"
+                    f"{tee_tcb_svn[1]}.{minor_version}"
                 )
             return level
 

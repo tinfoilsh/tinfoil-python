@@ -64,19 +64,15 @@ def test_full_verification_flow():
         print(f"Public key fingerprint: {runtime_verification.public_key_fp}")
 
 
-        # Compare measurements
+        # Compare measurements (handles cross-platform comparison)
         print("Comparing measurements")
-        assert len(code_measurements.registers) == len(runtime_verification.measurement.registers), \
-            "Number of measurement registers differ"
-
-        for i, code_reg in enumerate(code_measurements.registers):
-            runtime_reg = runtime_verification.measurement.registers[i]
-            assert code_reg == runtime_reg, \
-                f"Measurement register {i} mismatch: Code='{code_reg}' vs Runtime='{runtime_reg}'"
+        print(f"Code type: {code_measurements.type}, Runtime type: {runtime_verification.measurement.type}")
+        code_measurements.equals(runtime_verification.measurement)
 
         print("Verification successful!")
         print(f"Public key fingerprint: {runtime_verification.public_key_fp}")
-        print(f"Measurement: {code_measurements.fingerprint()}")
+        print(f"Code measurement: {code_measurements}")
+        print(f"Runtime measurement: {runtime_verification.measurement}")
 
     except Exception as e:
         import traceback

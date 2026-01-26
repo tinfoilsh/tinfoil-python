@@ -736,8 +736,9 @@ class TestTdxModuleIdentity:
         """Test finding module identity by TEE_TCB_SVN."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        # Version 3.x should match TDX_03
-        tee_tcb_svn = bytes([3, 3] + [0] * 14)
+        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
+        # Major version 3 should match TDX_03
+        tee_tcb_svn = bytes([5, 3] + [0] * 14)  # minor=5, major=3
         result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
         assert result is not None
         assert result.id == "TDX_03"
@@ -746,8 +747,9 @@ class TestTdxModuleIdentity:
         """Test no matching module identity for unknown version."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        # Version 5.x should not match any
-        tee_tcb_svn = bytes([5, 0] + [0] * 14)
+        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
+        # Major version 5 should not match any (only TDX_03 exists)
+        tee_tcb_svn = bytes([0, 5] + [0] * 14)  # minor=0, major=5
         result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
         assert result is None
 
@@ -755,7 +757,9 @@ class TestTdxModuleIdentity:
         """Test successful module identity validation."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        tee_tcb_svn = bytes([3, 3] + [0] * 14)
+        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
+        # minor=5 (used for TCB level matching), major=3 (used to find TDX_03)
+        tee_tcb_svn = bytes([5, 3] + [0] * 14)
         mr_signer_seam = b"\xaa" * 48
         seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
 
@@ -769,7 +773,8 @@ class TestTdxModuleIdentity:
         """Test module identity validation fails with MR_SIGNER_SEAM mismatch."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        tee_tcb_svn = bytes([3, 3] + [0] * 14)
+        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
+        tee_tcb_svn = bytes([5, 3] + [0] * 14)  # minor=5, major=3
         mr_signer_seam = b"\xbb" * 48  # Wrong MR_SIGNER_SEAM
         seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
 
@@ -782,8 +787,9 @@ class TestTdxModuleIdentity:
         """Test validation returns None when no matching module identity."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        # Version 5.x doesn't exist in module identities
-        tee_tcb_svn = bytes([5, 0] + [0] * 14)
+        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
+        # Major version 5 doesn't exist in module identities (only TDX_03)
+        tee_tcb_svn = bytes([0, 5] + [0] * 14)  # minor=0, major=5
         mr_signer_seam = b"\xaa" * 48
         seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
 

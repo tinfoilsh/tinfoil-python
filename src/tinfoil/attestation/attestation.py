@@ -23,9 +23,13 @@ class PredicateType(str, Enum):
     SEV_GUEST_V1 = "https://tinfoil.sh/predicate/sev-snp-guest/v1"  # Deprecated
     SEV_GUEST_V2 = "https://tinfoil.sh/predicate/sev-snp-guest/v2"
     TDX_GUEST_V1 = "https://tinfoil.sh/predicate/tdx-guest/v1"  # Deprecated
+    TDX_GUEST_V2 = "https://tinfoil.sh/predicate/tdx-guest/v2"
     SNP_TDX_MULTIPLATFORM_v1 = "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1"
 
 ATTESTATION_ENDPOINT = "/.well-known/tinfoil-attestation"
+
+# RTMR3 should always be zeros (48 bytes = 96 hex chars)
+RTMR3_ZERO = "0" * 96
 
 class AttestationError(Exception):
     """Base class for attestation errors"""
@@ -37,6 +41,10 @@ class FormatMismatchError(AttestationError):
 
 class MeasurementMismatchError(AttestationError):
     """Raised when measurements don't match"""
+    pass
+
+class Rtmr3NotZeroError(AttestationError):
+    """Raised when RTMR3 is not zeros"""
     pass
 
 @dataclass
@@ -67,15 +75,25 @@ class Measurement:
                 raise MeasurementMismatchError()
             return
 
+        # TDX v1 and v2 are equivalent for measurement comparison
+        tdx_types = (PredicateType.TDX_GUEST_V1, PredicateType.TDX_GUEST_V2)
+        if self.type in tdx_types and other.type in tdx_types:
+            if len(self.registers) != len(other.registers) or self.registers != other.registers:
+                raise MeasurementMismatchError()
+            return
+
         # Multi-platform comparison support
         if self.type == PredicateType.SNP_TDX_MULTIPLATFORM_v1:
             # Multi-platform format: [SNP_measurement, RTMR1, RTMR2]
-            if other.type == PredicateType.TDX_GUEST_V1 and len(other.registers) == 5:
+            if other.type in tdx_types and len(other.registers) == 5:
                 # Compare with TDX: check RTMR1 and RTMR2 (indices 2 and 3 in TDX)
-                if (len(self.registers) != 3 or 
-                    self.registers[1] != other.registers[2] or 
+                if (len(self.registers) != 3 or
+                    self.registers[1] != other.registers[2] or
                     self.registers[2] != other.registers[3]):
                     raise MeasurementMismatchError()
+                # Check RTMR3 is zeros
+                if other.registers[4] != RTMR3_ZERO:
+                    raise Rtmr3NotZeroError(f"RTMR3 must be zeros, got {other.registers[4]}")
                 return
             elif other.type == PredicateType.SEV_GUEST_V2 and len(other.registers) == 1:
                 # Compare with AMD: check SNP measurement
@@ -99,17 +117,17 @@ class Measurement:
         """Returns a human-readable string representation of the measurement"""
         if self.type == PredicateType.SEV_GUEST_V2 and len(self.registers) == 1:
             return f"Measurement(type={self.type.value}, snp_measurement={self.registers[0][:16]}...)"
-        
-        elif self.type == PredicateType.TDX_GUEST_V1 and len(self.registers) == 5:
+
+        elif self.type in (PredicateType.TDX_GUEST_V1, PredicateType.TDX_GUEST_V2) and len(self.registers) == 5:
             labels = ["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"]
             parts = [f"{label}={reg[:16]}..." for label, reg in zip(labels, self.registers)]
             return f"Measurement(type={self.type.value}, {', '.join(parts)})"
-        
+
         elif self.type == PredicateType.SNP_TDX_MULTIPLATFORM_v1 and len(self.registers) == 3:
-            labels = ["snp_measurement", "rtmr1", "rtmr2"] 
+            labels = ["snp_measurement", "rtmr1", "rtmr2"]
             parts = [f"{label}={reg[:16]}..." for label, reg in zip(labels, self.registers)]
             return f"Measurement(type={self.type.value}, {', '.join(parts)})"
-        
+
         # Default representation for unknown formats
         return f"Measurement(type={self.type.value}, registers={len(self.registers)} items)"
 
@@ -140,6 +158,8 @@ class Document:
             return verify_sev_attestation_v2(self.body)
         elif self.format == PredicateType.TDX_GUEST_V1:
             return verify_tdx_attestation_v1(self.body)
+        elif self.format == PredicateType.TDX_GUEST_V2:
+            return verify_tdx_attestation_v2(self.body)
         else:
             raise ValueError(f"Unsupported attestation format: {self.format}")
 
@@ -254,7 +274,7 @@ def verify_sev_attestation_v2(attestation_doc: str) -> Verification:
 
 def verify_tdx_attestation_v1(attestation_doc: str) -> Verification:
     """
-    Verify TDX attestation document and return verification result.
+    Verify TDX attestation document (v1 format) and return verification result.
 
     Args:
         attestation_doc: Base64-encoded, gzip-compressed TDX quote
@@ -274,6 +294,40 @@ def verify_tdx_attestation_v1(attestation_doc: str) -> Verification:
     # [MRTD, RTMR0, RTMR1, RTMR2, RTMR3]
     measurement = Measurement(
         type=PredicateType.TDX_GUEST_V1,
+        registers=result.measurements,
+    )
+
+    return Verification(
+        measurement=measurement,
+        public_key_fp=result.tls_key_fp,
+        hpke_public_key=result.hpke_public_key,
+    )
+
+
+def verify_tdx_attestation_v2(attestation_doc: str) -> Verification:
+    """
+    Verify TDX attestation document (v2 format) and return verification result.
+
+    v2 format: report_data contains TLS key fingerprint (32 bytes) + HPKE public key (32 bytes).
+
+    Args:
+        attestation_doc: Base64-encoded, gzip-compressed TDX quote
+
+    Returns:
+        Verification containing measurements, public key fingerprint, and HPKE public key
+
+    Raises:
+        ValueError: If verification fails
+    """
+    try:
+        result = verify_tdx_attestation(attestation_doc, is_compressed=True)
+    except TdxValidationError as e:
+        raise ValueError(f"TDX attestation verification failed: {e}")
+
+    # Create measurement object with 5 TDX registers:
+    # [MRTD, RTMR0, RTMR1, RTMR2, RTMR3]
+    measurement = Measurement(
+        type=PredicateType.TDX_GUEST_V2,
         registers=result.measurements,
     )
 

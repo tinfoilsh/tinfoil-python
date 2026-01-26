@@ -86,7 +86,22 @@ def verify_attestation(bundle_json: bytes, digest: str, repo: str) -> Measuremen
         
         # Convert predicate type to measurement type
         if predicate_type == PredicateType.SNP_TDX_MULTIPLATFORM_v1:
-            registers = [predicate_fields["snp_measurement"]]
+            # Extract snp_measurement from root
+            snp_measurement = predicate_fields.get("snp_measurement")
+            if not snp_measurement:
+                raise ValueError("Invalid multiplatform measurement: no snp_measurement")
+
+            # Extract rtmr1 and rtmr2 from nested tdx_measurement struct
+            tdx_measurement = predicate_fields.get("tdx_measurement")
+            if not tdx_measurement:
+                raise ValueError("Invalid multiplatform measurement: no tdx_measurement")
+
+            rtmr1 = tdx_measurement.get("rtmr1")
+            rtmr2 = tdx_measurement.get("rtmr2")
+            if not rtmr1 or not rtmr2:
+                raise ValueError("Invalid multiplatform measurement: missing rtmr1 or rtmr2")
+
+            registers = [snp_measurement, rtmr1, rtmr2]
         else:
             raise ValueError(f"Unsupported predicate type: {predicate_type}")
 
