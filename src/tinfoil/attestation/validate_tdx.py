@@ -27,6 +27,7 @@ from .pck_extensions import extract_pck_extensions, PckExtensions, PckExtensionE
 from .collateral_tdx import (
     fetch_collateral,
     validate_tcb_status,
+    validate_tdx_module_identity,
     validate_qe_identity,
     check_collateral_freshness,
     CollateralError,
@@ -132,13 +133,27 @@ def verify_tdx_attestation(
                 pck_extensions,
             )
 
+            # Validate TDX module identity (if module identities present in TCB Info)
+            validate_tdx_module_identity(
+                collateral.tcb_info.tcb_info,
+                quote.td_quote_body.tee_tcb_svn,
+                quote.td_quote_body.mr_signer_seam,
+                quote.td_quote_body.seam_attributes,
+            )
+
             # Validate QE identity
             qe_report = quote.signed_data.certification_data.qe_report_data
             if qe_report is not None:
+                qe_parsed = qe_report.qe_report_parsed
+                # Convert misc_select int to 4 bytes (little-endian)
+                miscselect_bytes = qe_parsed.misc_select.to_bytes(4, byteorder='little')
                 validate_qe_identity(
                     collateral.qe_identity.enclave_identity,
-                    qe_report.qe_report_parsed.isv_svn,
-                    qe_report.qe_report_parsed.mr_signer,
+                    qe_parsed.isv_svn,
+                    qe_parsed.mr_signer,
+                    miscselect_bytes,
+                    qe_parsed.attributes,
+                    qe_parsed.isv_prod_id,
                 )
         except CollateralError as e:
             raise TdxValidationError(f"Collateral validation failed: {e}")
