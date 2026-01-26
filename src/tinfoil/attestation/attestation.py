@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from .validate import validate_report, ValidationOptions
 from .verify import Report, verify_attestation, CertificateChain
 from .abi_sevsnp import TCBParts, SnpPolicy, SnpPlatformInfo
+from .validate_tdx import verify_tdx_attestation, TdxValidationError
 
 
 class PredicateType(str, Enum):
@@ -57,13 +58,60 @@ class Measurement:
 
     def equals(self, other: 'Measurement') -> None:
         """
-        Checks if this measurement equals another measurement
+        Checks if this measurement equals another measurement with multi-platform support
         Raises appropriate error if they don't match
         """
-        if self.type != other.type:
-            raise FormatMismatchError()
-        if len(self.registers) != len(other.registers) or self.registers != other.registers:
-            raise MeasurementMismatchError()
+        # Direct comparison for same types
+        if self.type == other.type:
+            if len(self.registers) != len(other.registers) or self.registers != other.registers:
+                raise MeasurementMismatchError()
+            return
+
+        # Multi-platform comparison support
+        if self.type == PredicateType.SNP_TDX_MULTIPLATFORM_v1:
+            # Multi-platform format: [SNP_measurement, RTMR1, RTMR2]
+            if other.type == PredicateType.TDX_GUEST_V1 and len(other.registers) == 5:
+                # Compare with TDX: check RTMR1 and RTMR2 (indices 2 and 3 in TDX)
+                if (len(self.registers) != 3 or 
+                    self.registers[1] != other.registers[2] or 
+                    self.registers[2] != other.registers[3]):
+                    raise MeasurementMismatchError()
+                return
+            elif other.type == PredicateType.SEV_GUEST_V2 and len(other.registers) == 1:
+                # Compare with AMD: check SNP measurement
+                if len(self.registers) != 3 or self.registers[0] != other.registers[0]:
+                    raise MeasurementMismatchError()
+                return
+
+        # Reverse comparisons
+        if other.type == PredicateType.SNP_TDX_MULTIPLATFORM_v1:
+            # Delegate to the other measurement's equals method
+            try:
+                other.equals(self)
+                return
+            except (FormatMismatchError, MeasurementMismatchError):
+                raise
+
+        # If we get here, the formats are incompatible
+        raise FormatMismatchError()
+    
+    def __str__(self) -> str:
+        """Returns a human-readable string representation of the measurement"""
+        if self.type == PredicateType.SEV_GUEST_V2 and len(self.registers) == 1:
+            return f"Measurement(type={self.type.value}, snp_measurement={self.registers[0][:16]}...)"
+        
+        elif self.type == PredicateType.TDX_GUEST_V1 and len(self.registers) == 5:
+            labels = ["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"]
+            parts = [f"{label}={reg[:16]}..." for label, reg in zip(labels, self.registers)]
+            return f"Measurement(type={self.type.value}, {', '.join(parts)})"
+        
+        elif self.type == PredicateType.SNP_TDX_MULTIPLATFORM_v1 and len(self.registers) == 3:
+            labels = ["snp_measurement", "rtmr1", "rtmr2"] 
+            parts = [f"{label}={reg[:16]}..." for label, reg in zip(labels, self.registers)]
+            return f"Measurement(type={self.type.value}, {', '.join(parts)})"
+        
+        # Default representation for unknown formats
+        return f"Measurement(type={self.type.value}, registers={len(self.registers)} items)"
 
 @dataclass
 class Verification:
@@ -90,6 +138,8 @@ class Document:
         """
         if self.format == PredicateType.SEV_GUEST_V2:
             return verify_sev_attestation_v2(self.body)
+        elif self.format == PredicateType.TDX_GUEST_V1:
+            return verify_tdx_attestation_v1(self.body)
         else:
             raise ValueError(f"Unsupported attestation format: {self.format}")
 
@@ -199,6 +249,38 @@ def verify_sev_attestation_v2(attestation_doc: str) -> Verification:
         measurement=measurement,
         public_key_fp=tls_key_fp.hex(),
         hpke_public_key=hpke_public_key.hex()
+    )
+
+
+def verify_tdx_attestation_v1(attestation_doc: str) -> Verification:
+    """
+    Verify TDX attestation document and return verification result.
+
+    Args:
+        attestation_doc: Base64-encoded, gzip-compressed TDX quote
+
+    Returns:
+        Verification containing measurements and public key fingerprint
+
+    Raises:
+        ValueError: If verification fails
+    """
+    try:
+        result = verify_tdx_attestation(attestation_doc, is_compressed=True)
+    except TdxValidationError as e:
+        raise ValueError(f"TDX attestation verification failed: {e}")
+
+    # Create measurement object with 5 TDX registers:
+    # [MRTD, RTMR0, RTMR1, RTMR2, RTMR3]
+    measurement = Measurement(
+        type=PredicateType.TDX_GUEST_V1,
+        registers=result.measurements,
+    )
+
+    return Verification(
+        measurement=measurement,
+        public_key_fp=result.tls_key_fp,
+        hpke_public_key=result.hpke_public_key,
     )
 
 
