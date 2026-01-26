@@ -65,10 +65,13 @@ HEADER_AK_TYPE_START = 0x02
 HEADER_AK_TYPE_END = 0x04
 HEADER_TEE_TYPE_START = 0x04
 HEADER_TEE_TYPE_END = 0x08
-HEADER_PCE_SVN_START = 0x08
-HEADER_PCE_SVN_END = 0x0A
-HEADER_QE_SVN_START = 0x0A
-HEADER_QE_SVN_END = 0x0C
+# Bytes 0x08-0x0C are reserved in QuoteV4.
+# Note: Some older specs labeled these as QE_SVN/PCE_SVN, but they are
+# always zero in practice. The actual SVN values come from:
+#   - PCE SVN: PCK certificate extensions (OID 1.2.840.113741.1.13.1.2.17)
+#   - QE ISV SVN: QE Report at offset 0x102 within certification data
+HEADER_RESERVED1_START = 0x08
+HEADER_RESERVED1_END = 0x0C
 HEADER_QE_VENDOR_ID_START = 0x0C
 HEADER_QE_VENDOR_ID_END = 0x1C
 HEADER_USER_DATA_START = 0x1C
@@ -167,13 +170,16 @@ class TdxHeader:
     TDX Quote header (48 bytes).
 
     Contains quote metadata including version, attestation key type,
-    TEE type, and QE/PCE SVN values.
+    TEE type, and vendor information.
+
+    Note: Bytes 8-11 are reserved. Some older specs labeled these as
+    QE_SVN/PCE_SVN, but they are always zero in practice. The actual
+    SVN values come from PCK certificate extensions and QE Report.
     """
     version: int  # 2 bytes - must be 4 for QuoteV4
     attestation_key_type: int  # 2 bytes - must be 2 (ECDSA-P256)
     tee_type: int  # 4 bytes - must be 0x81 (TDX)
-    pce_svn: int  # 2 bytes - PCE Security Version Number
-    qe_svn: int  # 2 bytes - QE Security Version Number
+    reserved: bytes  # 4 bytes - reserved (was QE_SVN/PCE_SVN in older specs)
     qe_vendor_id: bytes  # 16 bytes - Intel: 939a7233-f79c-4ca9-940a-0db3957f0607
     user_data: bytes  # 20 bytes - Custom data from QE
 
@@ -182,8 +188,6 @@ class TdxHeader:
             f"TdxHeader(version={self.version}, "
             f"ak_type={self.attestation_key_type}, "
             f"tee_type=0x{self.tee_type:x}, "
-            f"pce_svn={self.pce_svn}, "
-            f"qe_svn={self.qe_svn}, "
             f"qe_vendor_id={self.qe_vendor_id.hex()})"
         )
 
@@ -382,8 +386,7 @@ def _parse_header(data: bytes) -> TdxHeader:
     version = struct.unpack_from("<H", data, HEADER_VERSION_START)[0]
     attestation_key_type = struct.unpack_from("<H", data, HEADER_AK_TYPE_START)[0]
     tee_type = struct.unpack_from("<I", data, HEADER_TEE_TYPE_START)[0]
-    pce_svn = struct.unpack_from("<H", data, HEADER_PCE_SVN_START)[0]
-    qe_svn = struct.unpack_from("<H", data, HEADER_QE_SVN_START)[0]
+    reserved = data[HEADER_RESERVED1_START:HEADER_RESERVED1_END]
     qe_vendor_id = data[HEADER_QE_VENDOR_ID_START:HEADER_QE_VENDOR_ID_END]
     user_data = data[HEADER_USER_DATA_START:HEADER_USER_DATA_END]
 
@@ -391,8 +394,7 @@ def _parse_header(data: bytes) -> TdxHeader:
         version=version,
         attestation_key_type=attestation_key_type,
         tee_type=tee_type,
-        pce_svn=pce_svn,
-        qe_svn=qe_svn,
+        reserved=reserved,
         qe_vendor_id=qe_vendor_id,
         user_data=user_data,
     )

@@ -90,13 +90,17 @@ def sign_prehashed(private_key: ec.EllipticCurvePrivateKey, digest: bytes) -> by
 # =============================================================================
 
 def build_header_bytes() -> bytes:
-    """Build a valid TDX header."""
+    """Build a valid TDX header.
+
+    Note: Bytes 8-11 are reserved. Some older specs labeled these as
+    QE_SVN/PCE_SVN, but they are always zero in actual quotes. The real
+    SVN values come from PCK certificate extensions and QE Report.
+    """
     header = b''
     header += struct.pack('<H', 4)  # version
     header += struct.pack('<H', 2)  # attestation_key_type
     header += struct.pack('<I', 0x81)  # tee_type
-    header += struct.pack('<H', 13)  # pce_svn
-    header += struct.pack('<H', 8)   # qe_svn
+    header += b'\x00\x00\x00\x00'  # reserved (4 bytes)
     header += bytes.fromhex('939a7233f79c4ca9940a0db3957f0607')  # qe_vendor_id
     header += b'\x00' * 20  # user_data
     assert len(header) == HEADER_SIZE

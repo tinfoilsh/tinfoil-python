@@ -44,18 +44,21 @@ def build_header(
     version: int = QUOTE_VERSION_V4,
     attestation_key_type: int = ATTESTATION_KEY_TYPE_ECDSA_P256,
     tee_type: int = TEE_TDX,
-    pce_svn: int = 13,
-    qe_svn: int = 8,
+    reserved: bytes = b'\x00\x00\x00\x00',
     qe_vendor_id: bytes = INTEL_QE_VENDOR_ID,
     user_data: bytes = b'\x00' * 20,
 ) -> bytes:
-    """Build a synthetic TDX quote header (48 bytes)."""
+    """Build a synthetic TDX quote header (48 bytes).
+
+    Note: Bytes 8-11 are reserved. Some older specs labeled these as
+    QE_SVN/PCE_SVN, but they are always zero in actual quotes. The real
+    SVN values come from PCK certificate extensions and QE Report.
+    """
     header = b''
     header += struct.pack('<H', version)
     header += struct.pack('<H', attestation_key_type)
     header += struct.pack('<I', tee_type)
-    header += struct.pack('<H', pce_svn)
-    header += struct.pack('<H', qe_svn)
+    header += reserved[:4].ljust(4, b'\x00')
     header += qe_vendor_id[:16].ljust(16, b'\x00')
     header += user_data[:20].ljust(20, b'\x00')
     assert len(header) == HEADER_SIZE
@@ -185,25 +188,23 @@ class TestParseHeader:
         assert header.version == QUOTE_VERSION_V4
         assert header.attestation_key_type == ATTESTATION_KEY_TYPE_ECDSA_P256
         assert header.tee_type == TEE_TDX
-        assert header.pce_svn == 13
-        assert header.qe_svn == 8
+        assert header.reserved == b'\x00\x00\x00\x00'
         assert header.qe_vendor_id == INTEL_QE_VENDOR_ID
 
     def test_parse_header_custom_values(self):
         """Test parsing header with custom values."""
         custom_vendor = b'\x01\x02\x03\x04' + b'\x00' * 12
         custom_user_data = b'custom_data_here' + b'\x00' * 4
+        custom_reserved = b'\xab\xcd\xef\x12'
 
         header_bytes = build_header(
-            pce_svn=99,
-            qe_svn=42,
+            reserved=custom_reserved,
             qe_vendor_id=custom_vendor,
             user_data=custom_user_data,
         )
         header = _parse_header(header_bytes)
 
-        assert header.pce_svn == 99
-        assert header.qe_svn == 42
+        assert header.reserved == custom_reserved
         assert header.qe_vendor_id == custom_vendor
         assert header.user_data == custom_user_data
 
