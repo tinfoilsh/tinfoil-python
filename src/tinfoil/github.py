@@ -33,7 +33,7 @@ def fetch_latest_digest(repo: str) -> str:
         Exception: If there's any error fetching or parsing the data
     """
     url = f"https://api-github-proxy.tinfoil.sh/repos/{repo}/releases/latest"
-    release_response = requests.get(url)
+    release_response = requests.get(url, timeout=15)
     release_response.raise_for_status()
     
     response_data = json.loads(release_response.content)
@@ -54,7 +54,7 @@ def fetch_latest_digest(repo: str) -> str:
     
     # Fallback option: fetch digest from github special endpoint
     digest_url = f"https://github-proxy.tinfoil.sh/{repo}/releases/download/{tag_name}/tinfoil.hash"
-    response = requests.get(digest_url)
+    response = requests.get(digest_url, timeout=15)
     if response.status_code != 200:
         raise Exception(f"Failed to fetch attestation digest: {response.status_code} {response.reason}")
     return response.text.strip()
@@ -123,7 +123,7 @@ def fetch_attestation_bundle(repo: str, digest: str) -> bytes:
             # Don't fail the whole operation if cache write fails, just warn
             print(f"Warning: Failed to write cache file {cache_path}: {e}", file=sys.stderr)
 
-        return bundle_json_string
+        return bundle_bytes_to_write
 
     except (KeyError, IndexError, TypeError) as e:
         raise Exception(f"Invalid attestation response format from {url}: {e}. Response: {response_data}") from e

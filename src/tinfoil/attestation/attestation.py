@@ -252,7 +252,7 @@ def connection_cert_fp(ssl_socket: ssl.SSLSocket) -> str:
 def fetch_attestation(host: str) -> Document:
     """Retrieves the attestation document from a given enclave hostname"""
     url = f"https://{host}{ATTESTATION_ENDPOINT}"
-    response = requests.get(url)
+    response = requests.get(url, timeout=15)
     response.raise_for_status()
     
     doc_dict = response.json()

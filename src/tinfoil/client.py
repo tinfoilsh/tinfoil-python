@@ -241,9 +241,9 @@ def get_router_address() -> str:
     and returns a randomly selected address.
     """
 
-    routers_url = "https://atc.tinfoil.sh/routers?platform=snp"
+    routers_url = "https://atc.tinfoil.sh/routers"
 
-    with urllib.request.urlopen(routers_url) as response:
+    with urllib.request.urlopen(routers_url, timeout=15) as response:
         routers = json.loads(response.read().decode('utf-8'))
         if len(routers) == 0:
             raise ValueError("No routers found in the response")
