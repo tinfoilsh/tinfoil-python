@@ -29,6 +29,7 @@ from .collateral_tdx import (
     validate_tcb_status,
     validate_tdx_module_identity,
     validate_qe_identity,
+    validate_certificate_revocation,
     check_collateral_freshness,
     CollateralError,
     TdxCollateral,
@@ -123,8 +124,11 @@ def verify_tdx_attestation(
 
     if not skip_collateral:
         try:
-            collateral = fetch_collateral(pck_extensions)
+            collateral = fetch_collateral(pck_extensions, pck_chain.pck_cert)
             check_collateral_freshness(collateral)
+
+            # Validate certificate revocation
+            validate_certificate_revocation(collateral, pck_chain.pck_cert)
 
             # Validate TCB status
             tcb_level = validate_tcb_status(

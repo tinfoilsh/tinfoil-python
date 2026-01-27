@@ -58,6 +58,22 @@ class TcbStatus(str, Enum):
 
 
 # =============================================================================
+# CRL Data Structures
+# =============================================================================
+
+@dataclass
+class PckCrl:
+    """
+    PCK Certificate Revocation List from Intel PCS.
+
+    Contains the parsed CRL and metadata for caching.
+    """
+    crl: x509.CertificateRevocationList
+    ca_type: str  # "platform" or "processor"
+    next_update: datetime
+
+
+# =============================================================================
 # TCB Info Data Structures
 # =============================================================================
 
@@ -167,6 +183,7 @@ class TdxCollateral:
     qe_identity: QeIdentity
     tcb_info_raw: bytes  # Raw JSON for signature verification
     qe_identity_raw: bytes  # Raw JSON for signature verification
+    pck_crl: Optional[PckCrl] = None  # PCK CRL for revocation checking
 
 
 # =============================================================================
@@ -214,6 +231,20 @@ def _is_qe_identity_fresh(qe_identity: QeIdentity) -> bool:
     """Check if QE Identity is still fresh (not expired)."""
     now = datetime.now(timezone.utc)
     return now < qe_identity.enclave_identity.next_update
+
+
+def _get_crl_cache_path(ca_type: str) -> str:
+    """Get cache file path for PCK CRL (keyed by CA type)."""
+    return os.path.join(_TDX_CACHE_DIR, f"tdx_pck_crl_{ca_type.lower()}.der")
+
+
+def _is_crl_fresh(crl: x509.CertificateRevocationList) -> bool:
+    """Check if CRL is still fresh (not expired)."""
+    now = datetime.now(timezone.utc)
+    next_update = crl.next_update_utc
+    if next_update is None:
+        return False
+    return now < next_update
 
 
 # =============================================================================
@@ -832,12 +863,157 @@ def fetch_qe_identity(timeout: float = 30.0) -> Tuple[QeIdentity, bytes]:
     return qe_identity, raw_bytes
 
 
-def fetch_collateral(pck_extensions: PckExtensions, timeout: float = 30.0) -> TdxCollateral:
+def _verify_crl_signature(
+    crl: x509.CertificateRevocationList,
+    issuer_chain: List[x509.Certificate],
+    ca_type: str,
+) -> None:
+    """
+    Verify the CRL signature against the issuer certificate chain.
+
+    Args:
+        crl: Parsed CRL
+        issuer_chain: Issuer certificate chain from response header
+        ca_type: CA type for error messages
+
+    Raises:
+        CollateralError: If verification fails
+    """
+    # Verify the issuer chain first
+    _verify_issuer_chain(issuer_chain, f"PCK CRL ({ca_type}) issuer chain")
+
+    # Verify CRL signature using the signing cert (first in chain)
+    signing_cert = issuer_chain[0]
+    try:
+        signing_cert.public_key().verify(
+            crl.signature,
+            crl.tbs_certlist_bytes,
+            ec.ECDSA(crl.signature_hash_algorithm),
+        )
+    except InvalidSignature:
+        raise CollateralError(
+            f"PCK CRL ({ca_type}) signature verification failed"
+        )
+
+
+def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
+    """
+    Fetch PCK CRL from Intel PCS, with caching.
+
+    The CRL is fetched from the SGX certification API (shared with TDX).
+    Cached CRL is stored on disk and reused until next_update expires.
+
+    Args:
+        ca_type: CA type - "platform" or "processor"
+        timeout: Request timeout in seconds
+
+    Returns:
+        Parsed PckCrl
+
+    Raises:
+        CollateralError: If fetching, parsing, or signature verification fails
+    """
+    if ca_type not in ("platform", "processor"):
+        raise CollateralError(f"Invalid CA type: {ca_type}. Must be 'platform' or 'processor'")
+
+    cache_path = _get_crl_cache_path(ca_type)
+
+    # Try cache first (signature was verified on original fetch)
+    cached_bytes = _read_cache(cache_path)
+    if cached_bytes is not None:
+        try:
+            cached_crl = x509.load_der_x509_crl(cached_bytes)
+            if _is_crl_fresh(cached_crl):
+                next_update = cached_crl.next_update_utc
+                if next_update is None:
+                    next_update = datetime.now(timezone.utc)
+                return PckCrl(crl=cached_crl, ca_type=ca_type, next_update=next_update)
+        except Exception:
+            # Cache corrupted or parse failed, fetch fresh
+            pass
+
+    # Cache miss or stale - fetch from Intel PCS
+    # CRL endpoint is under the SGX API (not TDX-specific)
+    url = f"{INTEL_PCS_SGX_BASE_URL}/pckcrl?ca={ca_type}"
+
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise CollateralError(f"Failed to fetch PCK CRL ({ca_type}) from Intel PCS: {e}")
+
+    raw_bytes = response.content
+
+    # Parse the DER-encoded CRL
+    try:
+        crl = x509.load_der_x509_crl(raw_bytes)
+    except Exception as e:
+        raise CollateralError(f"Failed to parse PCK CRL ({ca_type}): {e}")
+
+    # Extract and verify issuer certificate chain from response header
+    issuer_chain_header = response.headers.get("SGX-PCK-CRL-Issuer-Chain")
+    if not issuer_chain_header:
+        raise CollateralError(
+            f"PCK CRL ({ca_type}) response missing SGX-PCK-CRL-Issuer-Chain header"
+        )
+
+    issuer_chain = _parse_issuer_chain_header(issuer_chain_header)
+    _verify_crl_signature(crl, issuer_chain, ca_type)
+
+    # Write to cache (signature verified, safe to cache)
+    _write_cache(cache_path, raw_bytes)
+
+    next_update = crl.next_update_utc
+    if next_update is None:
+        next_update = datetime.now(timezone.utc)
+
+    return PckCrl(crl=crl, ca_type=ca_type, next_update=next_update)
+
+
+def _determine_pck_ca_type(pck_cert: x509.Certificate) -> str:
+    """
+    Determine which CA issued the PCK certificate.
+
+    The PCK certificate issuer CN indicates the CA type:
+    - "Intel SGX PCK Platform CA" -> "platform"
+    - "Intel SGX PCK Processor CA" -> "processor"
+
+    Args:
+        pck_cert: PCK certificate from the quote
+
+    Returns:
+        CA type string ("platform" or "processor")
+
+    Raises:
+        CollateralError: If CA type cannot be determined
+    """
+    try:
+        issuer = pck_cert.issuer
+        for attr in issuer:
+            if attr.oid == x509.oid.NameOID.COMMON_NAME:
+                cn = attr.value
+                if "Platform" in cn:
+                    return "platform"
+                elif "Processor" in cn:
+                    return "processor"
+        raise CollateralError(
+            f"Could not determine PCK CA type from issuer: {issuer}"
+        )
+    except Exception as e:
+        raise CollateralError(f"Failed to determine PCK CA type: {e}")
+
+
+def fetch_collateral(
+    pck_extensions: PckExtensions,
+    pck_cert: Optional[x509.Certificate] = None,
+    timeout: float = 30.0,
+) -> TdxCollateral:
     """
     Fetch all required collateral from Intel PCS.
 
     Args:
         pck_extensions: PCK certificate extensions containing FMSPC
+        pck_cert: PCK certificate (optional, needed for CRL fetching)
         timeout: Request timeout in seconds
 
     Returns:
@@ -849,11 +1025,18 @@ def fetch_collateral(pck_extensions: PckExtensions, timeout: float = 30.0) -> Td
     tcb_info, tcb_info_raw = fetch_tcb_info(pck_extensions.fmspc, timeout)
     qe_identity, qe_identity_raw = fetch_qe_identity(timeout)
 
+    # Fetch CRL if PCK certificate is provided
+    pck_crl = None
+    if pck_cert is not None:
+        ca_type = _determine_pck_ca_type(pck_cert)
+        pck_crl = fetch_pck_crl(ca_type, timeout)
+
     return TdxCollateral(
         tcb_info=tcb_info,
         qe_identity=qe_identity,
         tcb_info_raw=tcb_info_raw,
         qe_identity_raw=qe_identity_raw,
+        pck_crl=pck_crl,
     )
 
 
@@ -1335,3 +1518,48 @@ def check_collateral_freshness(
                 f"minimum required ({min_tcb_evaluation_data_number}). "
                 f"Collateral may be outdated."
             )
+
+
+def validate_certificate_revocation(
+    collateral: TdxCollateral,
+    pck_cert: x509.Certificate,
+) -> None:
+    """
+    Validate that the PCK certificate has not been revoked.
+
+    Checks the certificate serial number against the CRL fetched from Intel PCS.
+    If the certificate is found in the CRL, it has been revoked and should not
+    be trusted.
+
+    Args:
+        collateral: TDX collateral containing the PCK CRL
+        pck_cert: PCK certificate to check
+
+    Raises:
+        CollateralError: If certificate is revoked or CRL check fails
+    """
+    if collateral.pck_crl is None:
+        raise CollateralError(
+            "Cannot check certificate revocation: CRL not available in collateral"
+        )
+
+    crl = collateral.pck_crl.crl
+
+    # Check CRL freshness
+    now = datetime.now(timezone.utc)
+    crl_next_update = crl.next_update_utc
+    if crl_next_update is not None and now > crl_next_update:
+        raise CollateralError(
+            f"PCK CRL has expired (next update was {crl_next_update})"
+        )
+
+    # Check if certificate is revoked
+    cert_serial = pck_cert.serial_number
+    revoked_cert = crl.get_revoked_certificate_by_serial_number(cert_serial)
+
+    if revoked_cert is not None:
+        revocation_date = revoked_cert.revocation_date_utc
+        raise CollateralError(
+            f"PCK certificate has been revoked. "
+            f"Serial: {cert_serial:x}, Revocation date: {revocation_date}"
+        )

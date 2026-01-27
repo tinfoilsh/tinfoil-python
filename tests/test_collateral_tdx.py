@@ -1198,5 +1198,304 @@ class TestFetchQeIdentityWithCache:
                 assert qe_identity.enclave_identity.id == "TD_QE"
 
 
+# =============================================================================
+# CRL Tests
+# =============================================================================
+
+from tinfoil.attestation.collateral_tdx import (
+    PckCrl,
+    _get_crl_cache_path,
+    _is_crl_fresh,
+    _determine_pck_ca_type,
+    fetch_pck_crl,
+    validate_certificate_revocation,
+)
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+
+class TestCrlCacheHelpers:
+    """Test CRL cache helper functions."""
+
+    def test_crl_cache_path_platform(self):
+        """Test CRL cache path generation for platform CA."""
+        path = _get_crl_cache_path("platform")
+        assert "tdx_pck_crl_platform.der" in path
+
+    def test_crl_cache_path_processor(self):
+        """Test CRL cache path generation for processor CA."""
+        path = _get_crl_cache_path("processor")
+        assert "tdx_pck_crl_processor.der" in path
+
+    def test_crl_cache_path_lowercase(self):
+        """Test CRL cache path is lowercase."""
+        path1 = _get_crl_cache_path("Platform")
+        path2 = _get_crl_cache_path("platform")
+        assert path1 == path2
+
+    def test_is_crl_fresh_valid(self):
+        """Test CRL freshness check with valid (not expired) CRL."""
+        # Create a mock CRL with next_update in the future
+        mock_crl = MagicMock()
+        mock_crl.next_update_utc = datetime.now(timezone.utc) + timedelta(days=30)
+
+        assert _is_crl_fresh(mock_crl) is True
+
+    def test_is_crl_fresh_expired(self):
+        """Test CRL freshness check with expired CRL."""
+        mock_crl = MagicMock()
+        mock_crl.next_update_utc = datetime.now(timezone.utc) - timedelta(days=1)
+
+        assert _is_crl_fresh(mock_crl) is False
+
+    def test_is_crl_fresh_no_next_update(self):
+        """Test CRL freshness check with no next_update."""
+        mock_crl = MagicMock()
+        mock_crl.next_update_utc = None
+
+        assert _is_crl_fresh(mock_crl) is False
+
+
+class TestDeterminePckCaType:
+    """Test PCK CA type determination from certificate issuer."""
+
+    def _create_mock_cert_with_issuer(self, cn: str) -> MagicMock:
+        """Create a mock certificate with given issuer CN."""
+        mock_attr = MagicMock()
+        mock_attr.oid = NameOID.COMMON_NAME
+        mock_attr.value = cn
+
+        mock_issuer = MagicMock()
+        mock_issuer.__iter__ = MagicMock(return_value=iter([mock_attr]))
+
+        mock_cert = MagicMock()
+        mock_cert.issuer = mock_issuer
+
+        return mock_cert
+
+    def test_platform_ca(self):
+        """Test detecting Platform CA from issuer CN."""
+        mock_cert = self._create_mock_cert_with_issuer("Intel SGX PCK Platform CA")
+        result = _determine_pck_ca_type(mock_cert)
+        assert result == "platform"
+
+    def test_processor_ca(self):
+        """Test detecting Processor CA from issuer CN."""
+        mock_cert = self._create_mock_cert_with_issuer("Intel SGX PCK Processor CA")
+        result = _determine_pck_ca_type(mock_cert)
+        assert result == "processor"
+
+    def test_unknown_ca_raises_error(self):
+        """Test that unknown CA type raises error."""
+        mock_cert = self._create_mock_cert_with_issuer("Unknown CA")
+        with pytest.raises(CollateralError, match="Could not determine PCK CA type"):
+            _determine_pck_ca_type(mock_cert)
+
+
+class TestFetchPckCrl:
+    """Test fetch_pck_crl function."""
+
+    def test_invalid_ca_type_raises_error(self):
+        """Test that invalid CA type raises error."""
+        with pytest.raises(CollateralError, match="Invalid CA type"):
+            fetch_pck_crl("invalid")
+
+    def test_cache_hit_skips_network(self, tmp_path):
+        """Test that fresh cache hit skips network fetch."""
+        # Create a mock CRL
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives import hashes
+        from cryptography import x509
+        from cryptography.x509 import CertificateRevocationListBuilder
+        import datetime
+
+        # Generate a key for signing
+        private_key = ec.generate_private_key(ec.SECP256R1())
+
+        # Build a minimal CRL
+        builder = CertificateRevocationListBuilder()
+        builder = builder.issuer_name(x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, "Test CA"),
+        ]))
+        builder = builder.last_update(datetime.datetime.now(datetime.timezone.utc))
+        builder = builder.next_update(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30))
+
+        crl = builder.sign(private_key, hashes.SHA256())
+        crl_der = crl.public_bytes(serialization.Encoding.DER)
+
+        with patch('tinfoil.attestation.collateral_tdx._TDX_CACHE_DIR', str(tmp_path)):
+            # Write fresh CRL cache
+            cache_path = tmp_path / "tdx_pck_crl_platform.der"
+            cache_path.write_bytes(crl_der)
+
+            with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
+                result = fetch_pck_crl("platform")
+
+                # Should not call network
+                mock_get.assert_not_called()
+                assert result.ca_type == "platform"
+
+    def test_cache_miss_fetches_from_network(self, tmp_path):
+        """Test that cache miss triggers network fetch."""
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography import x509
+        from cryptography.x509 import CertificateRevocationListBuilder
+        import datetime
+
+        # Generate keys
+        private_key = ec.generate_private_key(ec.SECP256R1())
+
+        # Build a minimal CRL
+        builder = CertificateRevocationListBuilder()
+        builder = builder.issuer_name(x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, "Test CA"),
+        ]))
+        builder = builder.last_update(datetime.datetime.now(datetime.timezone.utc))
+        builder = builder.next_update(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30))
+
+        crl = builder.sign(private_key, hashes.SHA256())
+        crl_der = crl.public_bytes(serialization.Encoding.DER)
+
+        with patch('tinfoil.attestation.collateral_tdx._TDX_CACHE_DIR', str(tmp_path)):
+            with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
+                with patch('tinfoil.attestation.collateral_tdx._verify_crl_signature'):
+                    with patch('tinfoil.attestation.collateral_tdx._parse_issuer_chain_header') as mock_parse:
+                        mock_parse.return_value = []
+
+                        mock_response = MagicMock()
+                        mock_response.content = crl_der
+                        mock_response.raise_for_status = MagicMock()
+                        mock_response.headers = {"SGX-PCK-CRL-Issuer-Chain": "dummy"}
+                        mock_get.return_value = mock_response
+
+                        result = fetch_pck_crl("platform")
+
+                        mock_get.assert_called_once()
+                        assert result.ca_type == "platform"
+
+
+class TestValidateCertificateRevocation:
+    """Test certificate revocation validation."""
+
+    def _create_mock_crl(self, revoked_serials: list[int] = None) -> MagicMock:
+        """Create a mock CRL with optional revoked serials."""
+        mock_crl = MagicMock()
+        mock_crl.next_update_utc = datetime.now(timezone.utc) + timedelta(days=30)
+
+        def get_revoked(serial):
+            if revoked_serials and serial in revoked_serials:
+                revoked = MagicMock()
+                revoked.revocation_date_utc = datetime.now(timezone.utc) - timedelta(days=1)
+                return revoked
+            return None
+
+        mock_crl.get_revoked_certificate_by_serial_number = get_revoked
+        return mock_crl
+
+    def _create_mock_cert(self, serial: int) -> MagicMock:
+        """Create a mock certificate with given serial number."""
+        mock_cert = MagicMock()
+        mock_cert.serial_number = serial
+        return mock_cert
+
+    def test_certificate_not_revoked(self):
+        """Test that non-revoked certificate passes validation."""
+        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
+        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
+
+        mock_crl = self._create_mock_crl(revoked_serials=[])
+        pck_crl = PckCrl(
+            crl=mock_crl,
+            ca_type="platform",
+            next_update=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+
+        collateral = TdxCollateral(
+            tcb_info=tcb_info,
+            qe_identity=qe_identity,
+            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
+            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
+            pck_crl=pck_crl,
+        )
+
+        mock_cert = self._create_mock_cert(serial=12345)
+
+        # Should not raise
+        validate_certificate_revocation(collateral, mock_cert)
+
+    def test_certificate_revoked(self):
+        """Test that revoked certificate fails validation."""
+        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
+        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
+
+        mock_crl = self._create_mock_crl(revoked_serials=[12345])
+        pck_crl = PckCrl(
+            crl=mock_crl,
+            ca_type="platform",
+            next_update=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+
+        collateral = TdxCollateral(
+            tcb_info=tcb_info,
+            qe_identity=qe_identity,
+            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
+            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
+            pck_crl=pck_crl,
+        )
+
+        mock_cert = self._create_mock_cert(serial=12345)
+
+        with pytest.raises(CollateralError, match="has been revoked"):
+            validate_certificate_revocation(collateral, mock_cert)
+
+    def test_no_crl_raises_error(self):
+        """Test that missing CRL raises error."""
+        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
+        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
+
+        collateral = TdxCollateral(
+            tcb_info=tcb_info,
+            qe_identity=qe_identity,
+            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
+            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
+            pck_crl=None,  # No CRL
+        )
+
+        mock_cert = self._create_mock_cert(serial=12345)
+
+        with pytest.raises(CollateralError, match="CRL not available"):
+            validate_certificate_revocation(collateral, mock_cert)
+
+    def test_expired_crl_raises_error(self):
+        """Test that expired CRL raises error."""
+        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
+        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
+
+        mock_crl = MagicMock()
+        mock_crl.next_update_utc = datetime.now(timezone.utc) - timedelta(days=1)  # Expired
+
+        pck_crl = PckCrl(
+            crl=mock_crl,
+            ca_type="platform",
+            next_update=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+
+        collateral = TdxCollateral(
+            tcb_info=tcb_info,
+            qe_identity=qe_identity,
+            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
+            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
+            pck_crl=pck_crl,
+        )
+
+        mock_cert = self._create_mock_cert(serial=12345)
+
+        with pytest.raises(CollateralError, match="CRL has expired"):
+            validate_certificate_revocation(collateral, mock_cert)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
