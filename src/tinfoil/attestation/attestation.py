@@ -25,6 +25,7 @@ class PredicateType(str, Enum):
     TDX_GUEST_V1 = "https://tinfoil.sh/predicate/tdx-guest/v1"  # Deprecated
     TDX_GUEST_V2 = "https://tinfoil.sh/predicate/tdx-guest/v2"
     SNP_TDX_MULTIPLATFORM_v1 = "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1"
+    HARDWARE_MEASUREMENTS_V1 = "https://tinfoil.sh/predicate/hardware-measurements/v1"
 
 ATTESTATION_ENDPOINT = "/.well-known/tinfoil-attestation"
 
@@ -46,6 +47,17 @@ class MeasurementMismatchError(AttestationError):
 class Rtmr3NotZeroError(AttestationError):
     """Raised when RTMR3 is not zeros"""
     pass
+
+class HardwareMeasurementError(AttestationError):
+    """Raised when hardware measurement verification fails"""
+    pass
+
+@dataclass
+class HardwareMeasurement:
+    """Represents hardware platform measurements (MRTD and RTMR0 for TDX)"""
+    id: str  # platform@digest
+    mrtd: str
+    rtmr0: str
 
 @dataclass
 class Measurement:
@@ -137,6 +149,46 @@ class Verification:
     measurement: Measurement
     public_key_fp: str
     hpke_public_key: Optional[str] = None
+
+
+def verify_hardware(
+    hardware_measurements: List[HardwareMeasurement],
+    enclave_measurement: Measurement
+) -> HardwareMeasurement:
+    """
+    Verify that the enclave's MRTD and RTMR0 match a known hardware platform.
+
+    Args:
+        hardware_measurements: List of known-good hardware measurements from Sigstore
+        enclave_measurement: The measurement from the TDX enclave attestation
+
+    Returns:
+        The matching HardwareMeasurement
+
+    Raises:
+        HardwareMeasurementError: If no matching hardware platform is found
+        ValueError: If enclave measurement is invalid
+    """
+    if enclave_measurement is None:
+        raise ValueError("enclave measurement is None")
+
+    # Only TDX measurements have hardware-specific MRTD/RTMR0
+    tdx_types = (PredicateType.TDX_GUEST_V1, PredicateType.TDX_GUEST_V2)
+    if enclave_measurement.type not in tdx_types:
+        raise ValueError(f"unsupported enclave platform: {enclave_measurement.type}")
+
+    if len(enclave_measurement.registers) < 2:
+        raise ValueError(f"enclave provided fewer registers than expected: {len(enclave_measurement.registers)}")
+
+    enclave_mrtd = enclave_measurement.registers[0]
+    enclave_rtmr0 = enclave_measurement.registers[1]
+
+    for hw in hardware_measurements:
+        if hw.mrtd == enclave_mrtd and hw.rtmr0 == enclave_rtmr0:
+            return hw
+
+    raise HardwareMeasurementError("no matching hardware platform found")
+
 
 @dataclass
 class Document:

@@ -3,6 +3,7 @@ from .attestation import (
     verify_attestation_json,
     verify_sev_attestation_v2,
     verify_tdx_attestation_v2,
+    verify_hardware,
     Measurement,
     PredicateType,
     from_snp_digest,
@@ -11,12 +12,15 @@ from .attestation import (
     FormatMismatchError,
     MeasurementMismatchError,
     Rtmr3NotZeroError,
+    HardwareMeasurementError,
+    HardwareMeasurement,
 )
 
 __all__ = [
     'fetch_attestation',
     'verify_sev_attestation_v2',
     'verify_tdx_attestation_v2',
+    'verify_hardware',
     'verify_attestation_json',
     'Measurement',
     'PredicateType',
@@ -26,4 +30,6 @@ __all__ = [
     'FormatMismatchError',
     'MeasurementMismatchError',
     'Rtmr3NotZeroError',
+    'HardwareMeasurementError',
+    'HardwareMeasurement',
 ]

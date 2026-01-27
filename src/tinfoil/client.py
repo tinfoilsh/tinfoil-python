@@ -11,9 +11,9 @@ import cryptography.x509
 from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
 import hashlib
 
-from .attestation import fetch_attestation
+from .attestation import fetch_attestation, PredicateType, verify_hardware
 from .github import fetch_latest_digest, fetch_attestation_bundle
-from .sigstore import verify_attestation
+from .sigstore import verify_attestation, fetch_latest_hardware_measurements
 
 
 @dataclass
@@ -169,12 +169,18 @@ class SecureClient:
             # GitHub-based verification
             digest = fetch_latest_digest(self.repo)
             sigstore_bundle = fetch_attestation_bundle(self.repo, digest)
-            
+
             code_measurements = verify_attestation(
                 sigstore_bundle,
                 digest,
                 self.repo
             )
+
+            # For TDX, verify hardware measurements (MRTD and RTMR0)
+            tdx_types = (PredicateType.TDX_GUEST_V1, PredicateType.TDX_GUEST_V2)
+            if verification.measurement.type in tdx_types:
+                hardware_measurements = fetch_latest_hardware_measurements()
+                verify_hardware(hardware_measurements, verification.measurement)
 
             # Verify measurements match (handles cross-platform comparison)
             code_measurements.equals(verification.measurement)

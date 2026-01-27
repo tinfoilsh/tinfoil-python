@@ -5,7 +5,9 @@ from sigstore.errors import VerificationError
 import json
 import re
 
-from .attestation import Measurement, PredicateType
+from typing import List
+from .attestation import Measurement, PredicateType, HardwareMeasurement
+from .github import fetch_latest_digest, fetch_attestation_bundle
 
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 
@@ -109,6 +111,91 @@ def verify_attestation(bundle_json: bytes, digest: str, repo: str) -> Measuremen
             type=predicate_type,
             registers=registers
         )
-        
+
     except Exception as e:
         raise ValueError(f"Attestation processing failed: {e}") from e
+
+
+HARDWARE_MEASUREMENTS_REPO = "tinfoilsh/hardware-measurements"
+
+
+def fetch_hardware_measurements(bundle_json: bytes, digest: str, repo: str) -> List[HardwareMeasurement]:
+    """
+    Fetches and verifies hardware measurements from a Sigstore bundle.
+
+    Args:
+        bundle_json: The bundle JSON data (bytes)
+        digest: The expected hex-encoded SHA256 digest
+        repo: The repository name
+
+    Returns:
+        List of HardwareMeasurement objects
+
+    Raises:
+        ValueError: If verification fails or predicate type is unexpected
+    """
+    try:
+        verifier = Verifier.production()
+        bundle = Bundle.from_json(bundle_json)
+
+        policy = AllOf([
+            OIDCIssuer(OIDC_ISSUER),
+            GitHubWorkflowRepository(repo),
+            GitHubWorkflowRefPattern("refs/tags/.*")
+        ])
+
+        payload_type, payload_bytes = verifier.verify_dsse(bundle, policy)
+
+        if payload_type != 'application/vnd.in-toto+json':
+            raise ValueError(f"Unsupported payload type: {payload_type}")
+
+        result_json = json.loads(payload_bytes)
+        predicate_type = result_json["predicateType"]
+
+        if predicate_type != PredicateType.HARDWARE_MEASUREMENTS_V1.value:
+            raise ValueError(f"Unexpected predicate type: {predicate_type}")
+
+        # Verify digest
+        if digest != result_json["subject"][0]["digest"]["sha256"]:
+            raise ValueError(
+                f"Digest mismatch: expected {digest}, got {result_json['subject'][0]['digest']['sha256']}"
+            )
+
+        predicate_fields = result_json["predicate"]
+        measurements = []
+
+        for platform_id, platform_data in predicate_fields.items():
+            if not isinstance(platform_data, dict):
+                raise ValueError(f"Invalid hardware measurement for {platform_id}")
+
+            mrtd = platform_data.get("mrtd")
+            rtmr0 = platform_data.get("rtmr0")
+
+            if not mrtd or not rtmr0:
+                raise ValueError(f"Invalid hardware measurement for {platform_id}: missing mrtd or rtmr0")
+
+            measurements.append(HardwareMeasurement(
+                id=f"{platform_id}@{digest}",
+                mrtd=mrtd,
+                rtmr0=rtmr0,
+            ))
+
+        return measurements
+
+    except Exception as e:
+        raise ValueError(f"Hardware measurements processing failed: {e}") from e
+
+
+def fetch_latest_hardware_measurements() -> List[HardwareMeasurement]:
+    """
+    Fetches the latest hardware measurements from GitHub + Sigstore.
+
+    Returns:
+        List of HardwareMeasurement objects
+
+    Raises:
+        ValueError: If fetching or verification fails
+    """
+    digest = fetch_latest_digest(HARDWARE_MEASUREMENTS_REPO)
+    bundle_json = fetch_attestation_bundle(HARDWARE_MEASUREMENTS_REPO, digest)
+    return fetch_hardware_measurements(bundle_json, digest, HARDWARE_MEASUREMENTS_REPO)
