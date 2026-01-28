@@ -288,16 +288,19 @@ class PckCertChainData:
 @dataclass
 class CertificationData:
     """
-    Certification Data from the quote.
+    Certification Data from the quote (type 6 only).
 
-    Can be either a direct PCK cert chain (type 5) or QE report
-    certification data (type 6) which contains nested cert chain.
+    Contains QE report certification data with nested PCK cert chain.
+    Type 5 (direct PCK cert chain) is not supported as it lacks the
+    QE report needed for attestation key binding verification.
     """
-    cert_type: int  # 2 bytes - Type of certification data
+    cert_type: int  # 2 bytes - Must be 6 (QE report certification data)
     cert_data_size: int  # 4 bytes - Size of certification data
-    # One of these will be populated based on cert_type:
-    pck_cert_chain: PckCertChainData | None = None
-    qe_report_data: QeReportCertificationData | None = None
+    qe_report_data: QeReportCertificationData
+
+    def get_pck_chain(self) -> PckCertChainData:
+        """Get the PCK certificate chain from the QE report certification data."""
+        return self.qe_report_data.pck_cert_chain_data
 
 
 @dataclass
@@ -575,9 +578,9 @@ def _parse_certification_data(data: bytes) -> tuple[CertificationData, int]:
     """
     Parse certification data from signed data section.
 
-    Can be either:
-        - Type 5: Direct PCK cert chain
-        - Type 6: QE report certification data (contains nested type 5)
+    Only type 6 (QE report certification data) is supported. Type 5 (direct
+    PCK cert chain) is rejected as it lacks the QE report needed for
+    attestation key binding verification.
 
     Args:
         data: Raw bytes starting at certification data
@@ -604,26 +607,17 @@ def _parse_certification_data(data: bytes) -> tuple[CertificationData, int]:
     cert_data_raw = data[header_size:header_size + cert_data_size]
 
     if cert_type == CERT_DATA_TYPE_PCK_CERT_CHAIN:
-        # Type 5: Direct PCK cert chain
-        pck_data = PckCertChainData(
-            cert_type=cert_type,
-            cert_data_size=cert_data_size,
-            cert_data=cert_data_raw,
+        raise TdxQuoteParseError(
+            "Certification data type 5 (direct PCK cert chain) is not supported. "
+            "Type 6 (QE report certification data) is required for attestation "
+            "key binding verification."
         )
-        return CertificationData(
-            cert_type=cert_type,
-            cert_data_size=cert_data_size,
-            pck_cert_chain=pck_data,
-            qe_report_data=None,
-        ), header_size + cert_data_size
 
     elif cert_type == CERT_DATA_TYPE_QE_REPORT:
-        # Type 6: QE report certification data
         qe_report_data, _ = _parse_qe_report_certification_data(cert_data_raw)
         return CertificationData(
             cert_type=cert_type,
             cert_data_size=cert_data_size,
-            pck_cert_chain=None,
             qe_report_data=qe_report_data,
         ), header_size + cert_data_size
 

@@ -14,10 +14,10 @@ Verification flow:
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import List
 
 from cryptography import x509
+from cryptography.x509 import verification
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -69,17 +69,7 @@ def extract_pck_cert_chain(quote: QuoteV4) -> PCKCertificateChain:
     Raises:
         TdxVerificationError: If certificate chain is missing or malformed
     """
-    # Get cert chain from type 6 certification data
-    cert_data = quote.signed_data.certification_data
-    if cert_data.qe_report_data is None:
-        raise TdxVerificationError(
-            "Quote does not contain QE report certification data (type 6)"
-        )
-
-    pck_chain_data = cert_data.qe_report_data.pck_cert_chain_data
-    if pck_chain_data is None:
-        raise TdxVerificationError("PCK certificate chain data is missing")
-
+    pck_chain_data = quote.signed_data.certification_data.get_pck_chain()
     cert_pem = pck_chain_data.cert_data
     if not cert_pem:
         raise TdxVerificationError("PCK certificate chain is empty")
@@ -154,9 +144,7 @@ def verify_pck_chain(chain: PCKCertificateChain) -> None:
 
     Verification steps:
     1. Verify root cert matches embedded Intel SGX Root CA
-    2. Verify all certificates are within their validity period
-    3. Verify intermediate cert is signed by root
-    4. Verify PCK leaf cert is signed by intermediate
+    2. Verify certificate chain (validity + signatures) using cryptography library
 
     Args:
         chain: PCK certificate chain from quote
@@ -181,72 +169,15 @@ def verify_pck_chain(chain: PCKCertificateChain) -> None:
             "Root certificate public key does not match Intel SGX Root CA"
         )
 
-    # Step 2: Verify certificate validity periods
-    now = datetime.now(timezone.utc)
-    _verify_cert_validity(chain.root_cert, "Root CA", now)
-    _verify_cert_validity(chain.intermediate_cert, "Intermediate CA", now)
-    _verify_cert_validity(chain.pck_cert, "PCK leaf", now)
+    # Step 2: Verify certificate chain (validity periods + signatures)
+    store = verification.Store([intel_root])
+    builder = verification.PolicyBuilder().store(store)
+    verifier = builder.build_client_verifier()
 
-    # Step 3: Verify intermediate is signed by root
     try:
-        _verify_cert_signature(chain.intermediate_cert, chain.root_cert)
-    except InvalidSignature:
-        raise TdxVerificationError(
-            "Intermediate certificate signature verification failed"
-        )
-
-    # Step 4: Verify PCK leaf is signed by intermediate
-    try:
-        _verify_cert_signature(chain.pck_cert, chain.intermediate_cert)
-    except InvalidSignature:
-        raise TdxVerificationError(
-            "PCK leaf certificate signature verification failed"
-        )
-
-
-def _verify_cert_validity(cert: x509.Certificate, name: str, now: datetime) -> None:
-    """
-    Verify that a certificate is within its validity period.
-
-    Args:
-        cert: Certificate to check
-        name: Human-readable name for error messages
-        now: Current time (UTC)
-
-    Raises:
-        TdxVerificationError: If certificate is expired or not yet valid
-    """
-    # Handle both timezone-aware and naive datetime from certificates
-    not_before = cert.not_valid_before_utc
-    not_after = cert.not_valid_after_utc
-
-    if now < not_before:
-        raise TdxVerificationError(
-            f"{name} certificate is not yet valid (valid from {not_before})"
-        )
-    if now > not_after:
-        raise TdxVerificationError(
-            f"{name} certificate has expired (expired {not_after})"
-        )
-
-
-def _verify_cert_signature(cert: x509.Certificate, issuer: x509.Certificate) -> None:
-    """
-    Verify that a certificate was signed by the issuer.
-
-    Args:
-        cert: Certificate to verify
-        issuer: Issuer certificate
-
-    Raises:
-        InvalidSignature: If signature verification fails
-    """
-    issuer_public_key = issuer.public_key()
-    issuer_public_key.verify(
-        cert.signature,
-        cert.tbs_certificate_bytes,
-        ec.ECDSA(cert.signature_hash_algorithm),
-    )
+        verifier.verify(chain.pck_cert, [chain.intermediate_cert])
+    except verification.VerificationError as e:
+        raise TdxVerificationError(f"PCK certificate chain verification failed: {e}")
 
 
 def verify_quote_signature(quote: QuoteV4, raw_quote: bytes) -> None:
