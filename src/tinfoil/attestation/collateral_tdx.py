@@ -13,13 +13,15 @@ Intel PCS API:
     QE Identity: /qe/identity
 """
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional, Tuple
-from urllib.parse import unquote
 import json
 import os
+import stat
+from typing import List, Optional, Tuple
+from urllib.parse import unquote
 
 from cryptography import x509
 from cryptography.x509 import verification
@@ -203,35 +205,102 @@ class TdxCollateral:
 # Collateral Cache Helpers
 # =============================================================================
 
+# Cache directory permissions (owner-only)
+_CACHE_DIR_MODE = stat.S_IRWXU  # 0700
+_CACHE_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR  # 0600
+
+
+@dataclass
+class CacheEntry:
+    """
+    Cache entry containing body and issuer chain for signature verification.
+
+    This allows re-verification of signatures on cache hits, not just on fetch.
+    """
+    body: bytes  # Raw response body (JSON for TCB/QE, DER for CRLs)
+    issuer_chain_pem: Optional[str] = None  # PEM-encoded issuer cert chain
+
+
+def _ensure_cache_dir() -> bool:
+    """
+    Ensure cache directory exists with secure permissions (0700).
+
+    Returns:
+        True if directory exists/was created, False on failure
+    """
+    try:
+        if not os.path.exists(_TDX_CACHE_DIR):
+            os.makedirs(_TDX_CACHE_DIR, mode=_CACHE_DIR_MODE)
+        else:
+            # Tighten permissions if directory already exists
+            os.chmod(_TDX_CACHE_DIR, _CACHE_DIR_MODE)
+        return True
+    except OSError:
+        return False
+
+
 def _get_tcb_info_cache_path(fmspc: str) -> str:
     """Get cache file path for TCB Info (keyed by FMSPC)."""
-    return os.path.join(_TDX_CACHE_DIR, f"tdx_tcb_info_{fmspc.lower()}.bin")
+    return os.path.join(_TDX_CACHE_DIR, f"tdx_tcb_info_{fmspc.lower()}.json")
 
 
 def _get_qe_identity_cache_path() -> str:
     """Get cache file path for QE Identity (global, not FMSPC-specific)."""
-    return os.path.join(_TDX_CACHE_DIR, "tdx_qe_identity.bin")
+    return os.path.join(_TDX_CACHE_DIR, "tdx_qe_identity.json")
 
 
-def _read_cache(cache_path: str) -> Optional[bytes]:
-    """Read cached collateral from disk."""
-    if os.path.isfile(cache_path):
-        try:
-            with open(cache_path, "rb") as f:
-                return f.read()
-        except OSError:
-            return None
-    return None
+def _read_cache(cache_path: str) -> Optional[CacheEntry]:
+    """
+    Read cached collateral from disk.
 
-
-def _write_cache(cache_path: str, data: bytes) -> None:
-    """Write collateral to disk cache."""
+    Returns:
+        CacheEntry with body and optional issuer chain, or None on failure
+    """
+    if not os.path.isfile(cache_path):
+        return None
     try:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, "wb") as f:
-            f.write(data)
+        with open(cache_path, "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
+        return CacheEntry(
+            body=base64.b64decode(data["body"]),
+            issuer_chain_pem=data.get("issuer_chain_pem"),
+        )
+    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+        return None
+
+
+def _write_cache(cache_path: str, entry: CacheEntry) -> None:
+    """
+    Write collateral to disk cache atomically with secure permissions.
+
+    Uses write-to-temp + rename pattern to prevent partial writes.
+    Sets file permissions to 0600 (owner read/write only).
+    """
+    if not _ensure_cache_dir():
+        return
+
+    data = {
+        "body": base64.b64encode(entry.body).decode("ascii"),
+    }
+    if entry.issuer_chain_pem is not None:
+        data["issuer_chain_pem"] = entry.issuer_chain_pem
+
+    tmp_path = cache_path + ".tmp"
+    try:
+        # Write to temp file
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _CACHE_FILE_MODE)
+        try:
+            os.write(fd, json.dumps(data).encode("utf-8"))
+        finally:
+            os.close(fd)
+        # Atomic rename
+        os.replace(tmp_path, cache_path)
     except OSError:
-        pass  # Cache write failure is non-fatal
+        # Clean up temp file on failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _is_tcb_info_fresh(tcb_info: TdxTcbInfo) -> bool:
@@ -248,12 +317,12 @@ def _is_qe_identity_fresh(qe_identity: QeIdentity) -> bool:
 
 def _get_crl_cache_path(ca_type: str) -> str:
     """Get cache file path for PCK CRL (keyed by CA type)."""
-    return os.path.join(_TDX_CACHE_DIR, f"tdx_pck_crl_{ca_type.lower()}.der")
+    return os.path.join(_TDX_CACHE_DIR, f"tdx_pck_crl_{ca_type.lower()}.json")
 
 
 def _get_root_crl_cache_path() -> str:
     """Get cache file path for Intel SGX Root CA CRL."""
-    return os.path.join(_TDX_CACHE_DIR, "intel_sgx_root_ca.crl")
+    return os.path.join(_TDX_CACHE_DIR, "intel_sgx_root_ca_crl.json")
 
 
 def _is_crl_fresh(crl: x509.CertificateRevocationList) -> bool:
@@ -741,15 +810,47 @@ def verify_qe_identity_signature(
 # Collateral Fetching
 # =============================================================================
 
+def _certs_to_pem(certs: List[x509.Certificate]) -> str:
+    """Convert list of certificates to concatenated PEM string."""
+    pem_parts = []
+    for cert in certs:
+        pem_parts.append(cert.public_bytes(serialization.Encoding.PEM).decode("ascii"))
+    return "".join(pem_parts)
+
+
+def _pem_to_certs(pem_data: str) -> List[x509.Certificate]:
+    """Parse concatenated PEM string to list of certificates."""
+    certs = []
+    remaining = pem_data.encode("utf-8")
+
+    while remaining:
+        remaining = remaining.lstrip()
+        if not remaining:
+            break
+
+        try:
+            cert = x509.load_pem_x509_certificate(remaining)
+            certs.append(cert)
+
+            end_marker = b'-----END CERTIFICATE-----'
+            end_pos = remaining.find(end_marker)
+            if end_pos == -1:
+                break
+            remaining = remaining[end_pos + len(end_marker):]
+        except Exception:
+            if not remaining.strip():
+                break
+            raise
+
+    return certs
+
+
 def fetch_tcb_info(fmspc: str, timeout: float = 30.0) -> Tuple[TdxTcbInfo, bytes]:
     """
     Fetch TCB Info from Intel PCS, with caching.
 
     Cached TCB Info is stored on disk and reused until the next_update
-    timestamp expires. This avoids hitting Intel PCS on every attestation.
-
-    Signature verification is performed when fetching fresh data from Intel PCS.
-    Cached data is trusted since the signature was verified on original fetch.
+    timestamp expires. Signature is re-verified on every cache hit.
 
     Args:
         fmspc: FMSPC value from PCK certificate (6 bytes hex)
@@ -763,15 +864,20 @@ def fetch_tcb_info(fmspc: str, timeout: float = 30.0) -> Tuple[TdxTcbInfo, bytes
     """
     cache_path = _get_tcb_info_cache_path(fmspc)
 
-    # Try cache first (signature was verified on original fetch)
-    cached_bytes = _read_cache(cache_path)
-    if cached_bytes is not None:
+    # Try cache first
+    cached_entry = _read_cache(cache_path)
+    if cached_entry is not None and cached_entry.issuer_chain_pem is not None:
         try:
-            cached_tcb_info = parse_tcb_info_response(cached_bytes)
+            cached_tcb_info = parse_tcb_info_response(cached_entry.body)
             if _is_tcb_info_fresh(cached_tcb_info):
-                return cached_tcb_info, cached_bytes
+                # Re-verify signature on cache hit
+                issuer_chain = _pem_to_certs(cached_entry.issuer_chain_pem)
+                verify_tcb_info_signature(
+                    cached_entry.body, cached_tcb_info, issuer_chain
+                )
+                return cached_tcb_info, cached_entry.body
         except (CollateralError, Exception):
-            # Cache corrupted or parse failed, fetch fresh
+            # Cache corrupted, parse failed, or signature invalid - fetch fresh
             pass
 
     # Cache miss or stale - fetch from Intel PCS
@@ -796,8 +902,12 @@ def fetch_tcb_info(fmspc: str, timeout: float = 30.0) -> Tuple[TdxTcbInfo, bytes
     issuer_chain = _parse_issuer_chain_header(issuer_chain_header)
     verify_tcb_info_signature(raw_bytes, tcb_info, issuer_chain)
 
-    # Write to cache (signature verified, safe to cache)
-    _write_cache(cache_path, raw_bytes)
+    # Write to cache with issuer chain for re-verification
+    cache_entry = CacheEntry(
+        body=raw_bytes,
+        issuer_chain_pem=_certs_to_pem(issuer_chain),
+    )
+    _write_cache(cache_path, cache_entry)
 
     return tcb_info, raw_bytes
 
@@ -807,10 +917,7 @@ def fetch_qe_identity(timeout: float = 30.0) -> Tuple[QeIdentity, bytes]:
     Fetch QE Identity from Intel PCS, with caching.
 
     Cached QE Identity is stored on disk and reused until the next_update
-    timestamp expires. This avoids hitting Intel PCS on every attestation.
-
-    Signature verification is performed when fetching fresh data from Intel PCS.
-    Cached data is trusted since the signature was verified on original fetch.
+    timestamp expires. Signature is re-verified on every cache hit.
 
     Note: QE Identity is global (not FMSPC-specific) so there's only one
     cache file shared across all platforms.
@@ -826,15 +933,20 @@ def fetch_qe_identity(timeout: float = 30.0) -> Tuple[QeIdentity, bytes]:
     """
     cache_path = _get_qe_identity_cache_path()
 
-    # Try cache first (signature was verified on original fetch)
-    cached_bytes = _read_cache(cache_path)
-    if cached_bytes is not None:
+    # Try cache first
+    cached_entry = _read_cache(cache_path)
+    if cached_entry is not None and cached_entry.issuer_chain_pem is not None:
         try:
-            cached_qe_identity = parse_qe_identity_response(cached_bytes)
+            cached_qe_identity = parse_qe_identity_response(cached_entry.body)
             if _is_qe_identity_fresh(cached_qe_identity):
-                return cached_qe_identity, cached_bytes
+                # Re-verify signature on cache hit
+                issuer_chain = _pem_to_certs(cached_entry.issuer_chain_pem)
+                verify_qe_identity_signature(
+                    cached_entry.body, cached_qe_identity, issuer_chain
+                )
+                return cached_qe_identity, cached_entry.body
         except (CollateralError, Exception):
-            # Cache corrupted or parse failed, fetch fresh
+            # Cache corrupted, parse failed, or signature invalid - fetch fresh
             pass
 
     # Cache miss or stale - fetch from Intel PCS
@@ -859,8 +971,12 @@ def fetch_qe_identity(timeout: float = 30.0) -> Tuple[QeIdentity, bytes]:
     issuer_chain = _parse_issuer_chain_header(issuer_chain_header)
     verify_qe_identity_signature(raw_bytes, qe_identity, issuer_chain)
 
-    # Write to cache (signature verified, safe to cache)
-    _write_cache(cache_path, raw_bytes)
+    # Write to cache with issuer chain for re-verification
+    cache_entry = CacheEntry(
+        body=raw_bytes,
+        issuer_chain_pem=_certs_to_pem(issuer_chain),
+    )
+    _write_cache(cache_path, cache_entry)
 
     return qe_identity, raw_bytes
 
@@ -904,6 +1020,7 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
 
     The CRL is fetched from the SGX certification API (shared with TDX).
     Cached CRL is stored on disk and reused until next_update expires.
+    Signature is re-verified on every cache hit.
 
     Args:
         ca_type: CA type - "platform" or "processor"
@@ -920,18 +1037,21 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
 
     cache_path = _get_crl_cache_path(ca_type)
 
-    # Try cache first (signature was verified on original fetch)
-    cached_bytes = _read_cache(cache_path)
-    if cached_bytes is not None:
+    # Try cache first
+    cached_entry = _read_cache(cache_path)
+    if cached_entry is not None and cached_entry.issuer_chain_pem is not None:
         try:
-            cached_crl = x509.load_der_x509_crl(cached_bytes)
+            cached_crl = x509.load_der_x509_crl(cached_entry.body)
             if _is_crl_fresh(cached_crl):
+                # Re-verify signature on cache hit
+                issuer_chain = _pem_to_certs(cached_entry.issuer_chain_pem)
+                _verify_crl_signature(cached_crl, issuer_chain, ca_type)
                 next_update = cached_crl.next_update_utc
                 if next_update is None:
                     next_update = datetime.now(timezone.utc)
                 return PckCrl(crl=cached_crl, ca_type=ca_type, next_update=next_update)
         except Exception:
-            # Cache corrupted or parse failed, fetch fresh
+            # Cache corrupted, parse failed, or signature invalid - fetch fresh
             pass
 
     # Cache miss or stale - fetch from Intel PCS
@@ -962,8 +1082,12 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
     issuer_chain = _parse_issuer_chain_header(issuer_chain_header)
     _verify_crl_signature(crl, issuer_chain, ca_type)
 
-    # Write to cache (signature verified, safe to cache)
-    _write_cache(cache_path, raw_bytes)
+    # Write to cache with issuer chain for re-verification
+    cache_entry = CacheEntry(
+        body=raw_bytes,
+        issuer_chain_pem=_certs_to_pem(issuer_chain),
+    )
+    _write_cache(cache_path, cache_entry)
 
     next_update = crl.next_update_utc
     if next_update is None:
@@ -976,12 +1100,37 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
 INTEL_SGX_ROOT_CA_CRL_URL = "https://certificates.trustedservices.intel.com/IntelSGXRootCA.der"
 
 
+def _verify_root_crl_signature(crl: x509.CertificateRevocationList) -> None:
+    """
+    Verify the Root CA CRL signature against Intel SGX Root CA.
+
+    Args:
+        crl: Parsed CRL
+
+    Raises:
+        CollateralError: If signature verification fails
+    """
+    intel_root = get_intel_root_ca()
+    hash_algo = crl.signature_hash_algorithm
+    if hash_algo is None:
+        raise CollateralError("Intel SGX Root CA CRL has no signature hash algorithm")
+    try:
+        intel_root.public_key().verify(
+            crl.signature,
+            crl.tbs_certlist_bytes,
+            ec.ECDSA(hash_algo),
+        )
+    except InvalidSignature:
+        raise CollateralError("Intel SGX Root CA CRL signature verification failed")
+
+
 def fetch_root_ca_crl(timeout: float = 30.0) -> RootCrl:
     """
     Fetch Intel SGX Root CA CRL, with caching.
 
     This CRL lists revoked intermediate CA certificates (Platform CA, Processor CA).
     Used to verify that the PCK certificate chain's intermediate CA is not revoked.
+    Signature is re-verified on every cache hit.
 
     Args:
         timeout: Request timeout in seconds
@@ -995,17 +1144,19 @@ def fetch_root_ca_crl(timeout: float = 30.0) -> RootCrl:
     cache_path = _get_root_crl_cache_path()
 
     # Try cache first
-    cached_bytes = _read_cache(cache_path)
-    if cached_bytes is not None:
+    cached_entry = _read_cache(cache_path)
+    if cached_entry is not None:
         try:
-            cached_crl = x509.load_der_x509_crl(cached_bytes)
+            cached_crl = x509.load_der_x509_crl(cached_entry.body)
             if _is_crl_fresh(cached_crl):
+                # Re-verify signature on cache hit
+                _verify_root_crl_signature(cached_crl)
                 next_update = cached_crl.next_update_utc
                 if next_update is None:
                     next_update = datetime.now(timezone.utc)
                 return RootCrl(crl=cached_crl, next_update=next_update)
-        except Exception:
-            # Cache corrupted or parse failed, fetch fresh
+        except (CollateralError, Exception):
+            # Cache corrupted, parse failed, or signature invalid - fetch fresh
             pass
 
     # Cache miss or stale - fetch from Intel
@@ -1024,18 +1175,11 @@ def fetch_root_ca_crl(timeout: float = 30.0) -> RootCrl:
         raise CollateralError(f"Failed to parse Intel SGX Root CA CRL: {e}")
 
     # Verify CRL is signed by the Intel SGX Root CA
-    intel_root = get_intel_root_ca()
-    try:
-        intel_root.public_key().verify(
-            crl.signature,
-            crl.tbs_certlist_bytes,
-            ec.ECDSA(crl.signature_hash_algorithm),
-        )
-    except InvalidSignature:
-        raise CollateralError("Intel SGX Root CA CRL signature verification failed")
+    _verify_root_crl_signature(crl)
 
-    # Write to cache (signature verified, safe to cache)
-    _write_cache(cache_path, raw_bytes)
+    # Write to cache (no issuer chain needed - verified against embedded root)
+    cache_entry = CacheEntry(body=raw_bytes)
+    _write_cache(cache_path, cache_entry)
 
     next_update = crl.next_update_utc
     if next_update is None:
@@ -1616,6 +1760,10 @@ def validate_certificate_revocation(
 
     Raises:
         CollateralError: If any certificate is revoked or CRL check fails
+
+    TODO: Use cryptography.x509.verification integrated CRL checking when available.
+          As of cryptography 46.0.3, PolicyBuilder doesn't support CRL stores.
+          Track: https://github.com/pyca/cryptography/issues
     """
     if collateral.pck_crl is None:
         raise CollateralError(

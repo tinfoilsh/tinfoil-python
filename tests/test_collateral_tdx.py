@@ -936,7 +936,7 @@ class TestCacheHelpers:
     def test_tcb_info_cache_path(self):
         """Test TCB Info cache path generation."""
         path = _get_tcb_info_cache_path("00A06D080000")
-        assert "tdx_tcb_info_00a06d080000.bin" in path
+        assert "tdx_tcb_info_00a06d080000.json" in path
         # Should be lowercase
         path2 = _get_tcb_info_cache_path("00a06d080000")
         assert path == path2
@@ -944,7 +944,7 @@ class TestCacheHelpers:
     def test_qe_identity_cache_path(self):
         """Test QE Identity cache path generation."""
         path = _get_qe_identity_cache_path()
-        assert "tdx_qe_identity.bin" in path
+        assert "tdx_qe_identity.json" in path
 
     def test_is_tcb_info_fresh(self):
         """Test TCB Info freshness check."""
@@ -1125,24 +1125,40 @@ class TestFetchTcbInfoWithCache:
 
     def test_cache_hit_skips_network(self, tmp_path):
         """Test that fresh cache hit skips network fetch."""
+        import base64
+        import json as json_mod
         with patch('tinfoil.attestation.collateral_tdx._TDX_CACHE_DIR', str(tmp_path)):
-            # Write fresh cache (signature was verified on original fetch)
-            cache_path = tmp_path / "tdx_tcb_info_00a06d080000.bin"
-            cache_path.write_bytes(SAMPLE_TCB_INFO_RESPONSE)
+            # Write fresh cache in the new JSON format with issuer chain
+            cache_path = tmp_path / "tdx_tcb_info_00a06d080000.json"
+            cache_data = {
+                "body": base64.b64encode(SAMPLE_TCB_INFO_RESPONSE).decode("ascii"),
+                "issuer_chain_pem": "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+            }
+            cache_path.write_text(json_mod.dumps(cache_data))
 
             with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
-                tcb_info, raw = fetch_tcb_info("00A06D080000")
+                # Mock signature verification on cache hit
+                with patch('tinfoil.attestation.collateral_tdx.verify_tcb_info_signature'):
+                    with patch('tinfoil.attestation.collateral_tdx._pem_to_certs') as mock_pem:
+                        mock_pem.return_value = []
+                        tcb_info, raw = fetch_tcb_info("00A06D080000")
 
-                # Should not call network
-                mock_get.assert_not_called()
-                assert tcb_info.tcb_info.id == "TDX"
+                        # Should not call network
+                        mock_get.assert_not_called()
+                        assert tcb_info.tcb_info.id == "TDX"
 
     def test_stale_cache_fetches_fresh(self, tmp_path):
         """Test that stale cache triggers fresh fetch."""
+        import base64
+        import json as json_mod
         with patch('tinfoil.attestation.collateral_tdx._TDX_CACHE_DIR', str(tmp_path)):
-            # Write stale cache (expired next_update)
-            cache_path = tmp_path / "tdx_tcb_info_00a06d080000.bin"
-            cache_path.write_bytes(SAMPLE_STALE_TCB_INFO_RESPONSE)
+            # Write stale cache (expired next_update) in new JSON format
+            cache_path = tmp_path / "tdx_tcb_info_00a06d080000.json"
+            cache_data = {
+                "body": base64.b64encode(SAMPLE_STALE_TCB_INFO_RESPONSE).decode("ascii"),
+                "issuer_chain_pem": "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+            }
+            cache_path.write_text(json_mod.dumps(cache_data))
 
             with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
                 with patch('tinfoil.attestation.collateral_tdx.verify_tcb_info_signature'):
@@ -1185,17 +1201,27 @@ class TestFetchQeIdentityWithCache:
 
     def test_cache_hit_skips_network(self, tmp_path):
         """Test that fresh cache hit skips network fetch."""
+        import base64
+        import json as json_mod
         with patch('tinfoil.attestation.collateral_tdx._TDX_CACHE_DIR', str(tmp_path)):
-            # Write fresh cache (signature was verified on original fetch)
-            cache_path = tmp_path / "tdx_qe_identity.bin"
-            cache_path.write_bytes(SAMPLE_QE_IDENTITY_RESPONSE)
+            # Write fresh cache in the new JSON format with issuer chain
+            cache_path = tmp_path / "tdx_qe_identity.json"
+            cache_data = {
+                "body": base64.b64encode(SAMPLE_QE_IDENTITY_RESPONSE).decode("ascii"),
+                "issuer_chain_pem": "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+            }
+            cache_path.write_text(json_mod.dumps(cache_data))
 
             with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
-                qe_identity, raw = fetch_qe_identity()
+                # Mock signature verification on cache hit
+                with patch('tinfoil.attestation.collateral_tdx.verify_qe_identity_signature'):
+                    with patch('tinfoil.attestation.collateral_tdx._pem_to_certs') as mock_pem:
+                        mock_pem.return_value = []
+                        qe_identity, raw = fetch_qe_identity()
 
-                # Should not call network
-                mock_get.assert_not_called()
-                assert qe_identity.enclave_identity.id == "TD_QE"
+                        # Should not call network
+                        mock_get.assert_not_called()
+                        assert qe_identity.enclave_identity.id == "TD_QE"
 
 
 # =============================================================================
@@ -1222,12 +1248,12 @@ class TestCrlCacheHelpers:
     def test_crl_cache_path_platform(self):
         """Test CRL cache path generation for platform CA."""
         path = _get_crl_cache_path("platform")
-        assert "tdx_pck_crl_platform.der" in path
+        assert "tdx_pck_crl_platform.json" in path
 
     def test_crl_cache_path_processor(self):
         """Test CRL cache path generation for processor CA."""
         path = _get_crl_cache_path("processor")
-        assert "tdx_pck_crl_processor.der" in path
+        assert "tdx_pck_crl_processor.json" in path
 
     def test_crl_cache_path_lowercase(self):
         """Test CRL cache path is lowercase."""
@@ -1304,6 +1330,8 @@ class TestFetchPckCrl:
 
     def test_cache_hit_skips_network(self, tmp_path):
         """Test that fresh cache hit skips network fetch."""
+        import base64
+        import json as json_mod
         # Create a mock CRL
         from cryptography.hazmat.primitives.asymmetric import ec
         from cryptography.hazmat.primitives import hashes
@@ -1326,16 +1354,24 @@ class TestFetchPckCrl:
         crl_der = crl.public_bytes(serialization.Encoding.DER)
 
         with patch('tinfoil.attestation.collateral_tdx._TDX_CACHE_DIR', str(tmp_path)):
-            # Write fresh CRL cache
-            cache_path = tmp_path / "tdx_pck_crl_platform.der"
-            cache_path.write_bytes(crl_der)
+            # Write fresh CRL cache in new JSON format
+            cache_path = tmp_path / "tdx_pck_crl_platform.json"
+            cache_data = {
+                "body": base64.b64encode(crl_der).decode("ascii"),
+                "issuer_chain_pem": "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+            }
+            cache_path.write_text(json_mod.dumps(cache_data))
 
             with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
-                result = fetch_pck_crl("platform")
+                # Mock signature verification on cache hit
+                with patch('tinfoil.attestation.collateral_tdx._verify_crl_signature'):
+                    with patch('tinfoil.attestation.collateral_tdx._pem_to_certs') as mock_pem:
+                        mock_pem.return_value = []
+                        result = fetch_pck_crl("platform")
 
-                # Should not call network
-                mock_get.assert_not_called()
-                assert result.ca_type == "platform"
+                        # Should not call network
+                        mock_get.assert_not_called()
+                        assert result.ca_type == "platform"
 
     def test_cache_miss_fetches_from_network(self, tmp_path):
         """Test that cache miss triggers network fetch."""
