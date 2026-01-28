@@ -1223,7 +1223,7 @@ def _determine_pck_ca_type(pck_cert: x509.Certificate) -> str:
 
 def fetch_collateral(
     pck_extensions: PckExtensions,
-    pck_cert: Optional[x509.Certificate] = None,
+    pck_cert: x509.Certificate,
     timeout: float = 30.0,
 ) -> TdxCollateral:
     """
@@ -1231,7 +1231,7 @@ def fetch_collateral(
 
     Args:
         pck_extensions: PCK certificate extensions containing FMSPC
-        pck_cert: PCK certificate (optional, needed for CRL fetching)
+        pck_cert: PCK certificate (needed for CRL fetching)
         timeout: Request timeout in seconds
 
     Returns:
@@ -1243,13 +1243,10 @@ def fetch_collateral(
     tcb_info, tcb_info_raw = fetch_tcb_info(pck_extensions.fmspc, timeout)
     qe_identity, qe_identity_raw = fetch_qe_identity(timeout)
 
-    # Fetch CRLs if PCK certificate is provided
-    pck_crl = None
-    root_crl = None
-    if pck_cert is not None:
-        ca_type = _determine_pck_ca_type(pck_cert)
-        pck_crl = fetch_pck_crl(ca_type, timeout)
-        root_crl = fetch_root_ca_crl(timeout)
+    # Fetch CRLs for revocation checking
+    ca_type = _determine_pck_ca_type(pck_cert)
+    pck_crl = fetch_pck_crl(ca_type, timeout)
+    root_crl = fetch_root_ca_crl(timeout)
 
     return TdxCollateral(
         tcb_info=tcb_info,
