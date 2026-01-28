@@ -1496,6 +1496,137 @@ class TestValidateCertificateRevocation:
         with pytest.raises(CollateralError, match="CRL has expired"):
             validate_certificate_revocation(collateral, mock_cert)
 
+    def test_intermediate_cert_not_revoked(self):
+        """Test that non-revoked intermediate CA certificate passes validation."""
+        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
+        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
+
+        mock_pck_crl = self._create_mock_crl(revoked_serials=[])
+        pck_crl = PckCrl(
+            crl=mock_pck_crl,
+            ca_type="platform",
+            next_update=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+
+        mock_root_crl = self._create_mock_crl(revoked_serials=[])
+        from tinfoil.attestation.collateral_tdx import RootCrl
+        root_crl = RootCrl(
+            crl=mock_root_crl,
+            next_update=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+
+        collateral = TdxCollateral(
+            tcb_info=tcb_info,
+            qe_identity=qe_identity,
+            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
+            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
+            pck_crl=pck_crl,
+            root_crl=root_crl,
+        )
+
+        mock_pck_cert = self._create_mock_cert(serial=12345)
+        mock_intermediate_cert = self._create_mock_cert(serial=67890)
+
+        # Should not raise
+        validate_certificate_revocation(collateral, mock_pck_cert, mock_intermediate_cert)
+
+    def test_intermediate_cert_revoked(self):
+        """Test that revoked intermediate CA certificate fails validation."""
+        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
+        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
+
+        mock_pck_crl = self._create_mock_crl(revoked_serials=[])
+        pck_crl = PckCrl(
+            crl=mock_pck_crl,
+            ca_type="platform",
+            next_update=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+
+        # Root CRL has the intermediate CA's serial as revoked
+        mock_root_crl = self._create_mock_crl(revoked_serials=[67890])
+        from tinfoil.attestation.collateral_tdx import RootCrl
+        root_crl = RootCrl(
+            crl=mock_root_crl,
+            next_update=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+
+        collateral = TdxCollateral(
+            tcb_info=tcb_info,
+            qe_identity=qe_identity,
+            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
+            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
+            pck_crl=pck_crl,
+            root_crl=root_crl,
+        )
+
+        mock_pck_cert = self._create_mock_cert(serial=12345)
+        mock_intermediate_cert = self._create_mock_cert(serial=67890)
+
+        with pytest.raises(CollateralError, match="Intermediate CA certificate has been revoked"):
+            validate_certificate_revocation(collateral, mock_pck_cert, mock_intermediate_cert)
+
+    def test_no_root_crl_with_intermediate_raises_error(self):
+        """Test that missing root CRL raises error when checking intermediate."""
+        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
+        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
+
+        mock_pck_crl = self._create_mock_crl(revoked_serials=[])
+        pck_crl = PckCrl(
+            crl=mock_pck_crl,
+            ca_type="platform",
+            next_update=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+
+        collateral = TdxCollateral(
+            tcb_info=tcb_info,
+            qe_identity=qe_identity,
+            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
+            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
+            pck_crl=pck_crl,
+            root_crl=None,  # No root CRL
+        )
+
+        mock_pck_cert = self._create_mock_cert(serial=12345)
+        mock_intermediate_cert = self._create_mock_cert(serial=67890)
+
+        with pytest.raises(CollateralError, match="Root CRL not available"):
+            validate_certificate_revocation(collateral, mock_pck_cert, mock_intermediate_cert)
+
+    def test_expired_root_crl_raises_error(self):
+        """Test that expired root CRL raises error when checking intermediate."""
+        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
+        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
+
+        mock_pck_crl = self._create_mock_crl(revoked_serials=[])
+        pck_crl = PckCrl(
+            crl=mock_pck_crl,
+            ca_type="platform",
+            next_update=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+
+        mock_root_crl = MagicMock()
+        mock_root_crl.next_update_utc = datetime.now(timezone.utc) - timedelta(days=1)  # Expired
+        from tinfoil.attestation.collateral_tdx import RootCrl
+        root_crl = RootCrl(
+            crl=mock_root_crl,
+            next_update=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+
+        collateral = TdxCollateral(
+            tcb_info=tcb_info,
+            qe_identity=qe_identity,
+            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
+            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
+            pck_crl=pck_crl,
+            root_crl=root_crl,
+        )
+
+        mock_pck_cert = self._create_mock_cert(serial=12345)
+        mock_intermediate_cert = self._create_mock_cert(serial=67890)
+
+        with pytest.raises(CollateralError, match="Root CA CRL has expired"):
+            validate_certificate_revocation(collateral, mock_pck_cert, mock_intermediate_cert)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

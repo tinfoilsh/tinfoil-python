@@ -63,6 +63,7 @@ def verify_tdx_attestation(
     attestation_doc: str,
     is_compressed: bool = True,
     skip_collateral: bool = False,
+    min_tcb_evaluation_data_number: Optional[int] = None,
 ) -> TdxValidationResult:
     """
     Verify a TDX attestation document.
@@ -81,6 +82,8 @@ def verify_tdx_attestation(
         attestation_doc: Base64-encoded attestation document
         is_compressed: Whether the document is gzip compressed
         skip_collateral: Skip collateral fetching (for testing/offline use)
+        min_tcb_evaluation_data_number: Optional minimum tcbEvaluationDataNumber
+            threshold for collateral freshness checks
 
     Returns:
         TdxValidationResult containing validated data
@@ -125,10 +128,15 @@ def verify_tdx_attestation(
     if not skip_collateral:
         try:
             collateral = fetch_collateral(pck_extensions, pck_chain.pck_cert)
-            check_collateral_freshness(collateral)
+            check_collateral_freshness(
+                collateral,
+                min_tcb_evaluation_data_number=min_tcb_evaluation_data_number,
+            )
 
-            # Validate certificate revocation
-            validate_certificate_revocation(collateral, pck_chain.pck_cert)
+            # Validate certificate revocation (both PCK leaf and intermediate CA)
+            validate_certificate_revocation(
+                collateral, pck_chain.pck_cert, pck_chain.intermediate_cert
+            )
 
             # Validate TCB status
             tcb_level = validate_tcb_status(

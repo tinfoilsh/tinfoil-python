@@ -73,6 +73,17 @@ class PckCrl:
     next_update: datetime
 
 
+@dataclass
+class RootCrl:
+    """
+    Intel SGX Root CA Certificate Revocation List.
+
+    Used to check if intermediate CA certificates have been revoked.
+    """
+    crl: x509.CertificateRevocationList
+    next_update: datetime
+
+
 # =============================================================================
 # TCB Info Data Structures
 # =============================================================================
@@ -184,6 +195,7 @@ class TdxCollateral:
     tcb_info_raw: bytes  # Raw JSON for signature verification
     qe_identity_raw: bytes  # Raw JSON for signature verification
     pck_crl: Optional[PckCrl] = None  # PCK CRL for revocation checking
+    root_crl: Optional[RootCrl] = None  # Root CA CRL for intermediate revocation checking
 
 
 # =============================================================================
@@ -236,6 +248,11 @@ def _is_qe_identity_fresh(qe_identity: QeIdentity) -> bool:
 def _get_crl_cache_path(ca_type: str) -> str:
     """Get cache file path for PCK CRL (keyed by CA type)."""
     return os.path.join(_TDX_CACHE_DIR, f"tdx_pck_crl_{ca_type.lower()}.der")
+
+
+def _get_root_crl_cache_path() -> str:
+    """Get cache file path for Intel SGX Root CA CRL."""
+    return os.path.join(_TDX_CACHE_DIR, "intel_sgx_root_ca.crl")
 
 
 def _is_crl_fresh(crl: x509.CertificateRevocationList) -> bool:
@@ -970,6 +987,78 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
     return PckCrl(crl=crl, ca_type=ca_type, next_update=next_update)
 
 
+# Intel SGX Root CA CRL URL (from the certificate's CRL Distribution Point)
+INTEL_SGX_ROOT_CA_CRL_URL = "https://certificates.trustedservices.intel.com/IntelSGXRootCA.der"
+
+
+def fetch_root_ca_crl(timeout: float = 30.0) -> RootCrl:
+    """
+    Fetch Intel SGX Root CA CRL, with caching.
+
+    This CRL lists revoked intermediate CA certificates (Platform CA, Processor CA).
+    Used to verify that the PCK certificate chain's intermediate CA is not revoked.
+
+    Args:
+        timeout: Request timeout in seconds
+
+    Returns:
+        Parsed RootCrl
+
+    Raises:
+        CollateralError: If fetching, parsing, or signature verification fails
+    """
+    cache_path = _get_root_crl_cache_path()
+
+    # Try cache first
+    cached_bytes = _read_cache(cache_path)
+    if cached_bytes is not None:
+        try:
+            cached_crl = x509.load_der_x509_crl(cached_bytes)
+            if _is_crl_fresh(cached_crl):
+                next_update = cached_crl.next_update_utc
+                if next_update is None:
+                    next_update = datetime.now(timezone.utc)
+                return RootCrl(crl=cached_crl, next_update=next_update)
+        except Exception:
+            # Cache corrupted or parse failed, fetch fresh
+            pass
+
+    # Cache miss or stale - fetch from Intel
+    try:
+        response = requests.get(INTEL_SGX_ROOT_CA_CRL_URL, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise CollateralError(f"Failed to fetch Intel SGX Root CA CRL: {e}")
+
+    raw_bytes = response.content
+
+    # Parse the DER-encoded CRL
+    try:
+        crl = x509.load_der_x509_crl(raw_bytes)
+    except Exception as e:
+        raise CollateralError(f"Failed to parse Intel SGX Root CA CRL: {e}")
+
+    # Verify CRL is signed by the Intel SGX Root CA
+    intel_root = get_intel_root_ca()
+    try:
+        intel_root.public_key().verify(
+            crl.signature,
+            crl.tbs_certlist_bytes,
+            ec.ECDSA(crl.signature_hash_algorithm),
+        )
+    except InvalidSignature:
+        raise CollateralError("Intel SGX Root CA CRL signature verification failed")
+
+    # Write to cache (signature verified, safe to cache)
+    _write_cache(cache_path, raw_bytes)
+
+    next_update = crl.next_update_utc
+    if next_update is None:
+        next_update = datetime.now(timezone.utc)
+
+    return RootCrl(crl=crl, next_update=next_update)
+
+
 def _determine_pck_ca_type(pck_cert: x509.Certificate) -> str:
     """
     Determine which CA issued the PCK certificate.
@@ -1025,11 +1114,13 @@ def fetch_collateral(
     tcb_info, tcb_info_raw = fetch_tcb_info(pck_extensions.fmspc, timeout)
     qe_identity, qe_identity_raw = fetch_qe_identity(timeout)
 
-    # Fetch CRL if PCK certificate is provided
+    # Fetch CRLs if PCK certificate is provided
     pck_crl = None
+    root_crl = None
     if pck_cert is not None:
         ca_type = _determine_pck_ca_type(pck_cert)
         pck_crl = fetch_pck_crl(ca_type, timeout)
+        root_crl = fetch_root_ca_crl(timeout)
 
     return TdxCollateral(
         tcb_info=tcb_info,
@@ -1037,6 +1128,7 @@ def fetch_collateral(
         tcb_info_raw=tcb_info_raw,
         qe_identity_raw=qe_identity_raw,
         pck_crl=pck_crl,
+        root_crl=root_crl,
     )
 
 
@@ -1255,8 +1347,8 @@ def get_tdx_module_identity(
     Find the matching TDX module identity based on TEE_TCB_SVN.
 
     The module ID is derived from TEE_TCB_SVN[0] (major version):
-    - TEE_TCB_SVN[0] = 0x03 -> Module ID = "TDX_03"
-    - TEE_TCB_SVN[0] = 0x01 -> Module ID = "TDX_01"
+    - TEE_TCB_SVN[1] = 0x03 -> Module ID = "TDX_03"
+    - TEE_TCB_SVN[1] = 0x01 -> Module ID = "TDX_01"
 
     Args:
         tcb_info: Parsed TCB Info from Intel PCS
@@ -1523,43 +1615,73 @@ def check_collateral_freshness(
 def validate_certificate_revocation(
     collateral: TdxCollateral,
     pck_cert: x509.Certificate,
+    intermediate_cert: Optional[x509.Certificate] = None,
 ) -> None:
     """
-    Validate that the PCK certificate has not been revoked.
+    Validate that the PCK certificate and intermediate CA have not been revoked.
 
-    Checks the certificate serial number against the CRL fetched from Intel PCS.
-    If the certificate is found in the CRL, it has been revoked and should not
-    be trusted.
+    Checks:
+    1. PCK (leaf) certificate against the PCK CRL from Intel PCS
+    2. Intermediate CA certificate against the Intel SGX Root CA CRL
 
     Args:
-        collateral: TDX collateral containing the PCK CRL
+        collateral: TDX collateral containing the PCK CRL and Root CRL
         pck_cert: PCK certificate to check
+        intermediate_cert: Intermediate CA certificate to check (optional)
 
     Raises:
-        CollateralError: If certificate is revoked or CRL check fails
+        CollateralError: If any certificate is revoked or CRL check fails
     """
     if collateral.pck_crl is None:
         raise CollateralError(
-            "Cannot check certificate revocation: CRL not available in collateral"
+            "Cannot check certificate revocation: PCK CRL not available in collateral"
         )
 
-    crl = collateral.pck_crl.crl
+    # --- Check PCK (leaf) certificate against PCK CRL ---
+    pck_crl = collateral.pck_crl.crl
 
-    # Check CRL freshness
+    # Check PCK CRL freshness
     now = datetime.now(timezone.utc)
-    crl_next_update = crl.next_update_utc
-    if crl_next_update is not None and now > crl_next_update:
+    pck_crl_next_update = pck_crl.next_update_utc
+    if pck_crl_next_update is not None and now > pck_crl_next_update:
         raise CollateralError(
-            f"PCK CRL has expired (next update was {crl_next_update})"
+            f"PCK CRL has expired (next update was {pck_crl_next_update})"
         )
 
-    # Check if certificate is revoked
-    cert_serial = pck_cert.serial_number
-    revoked_cert = crl.get_revoked_certificate_by_serial_number(cert_serial)
+    # Check if PCK certificate is revoked
+    pck_serial = pck_cert.serial_number
+    revoked_pck = pck_crl.get_revoked_certificate_by_serial_number(pck_serial)
 
-    if revoked_cert is not None:
-        revocation_date = revoked_cert.revocation_date_utc
+    if revoked_pck is not None:
+        revocation_date = revoked_pck.revocation_date_utc
         raise CollateralError(
             f"PCK certificate has been revoked. "
-            f"Serial: {cert_serial:x}, Revocation date: {revocation_date}"
+            f"Serial: {pck_serial:x}, Revocation date: {revocation_date}"
         )
+
+    # --- Check intermediate CA certificate against Root CA CRL ---
+    if intermediate_cert is not None:
+        if collateral.root_crl is None:
+            raise CollateralError(
+                "Cannot check intermediate CA revocation: Root CRL not available in collateral"
+            )
+
+        root_crl = collateral.root_crl.crl
+
+        # Check Root CRL freshness
+        root_crl_next_update = root_crl.next_update_utc
+        if root_crl_next_update is not None and now > root_crl_next_update:
+            raise CollateralError(
+                f"Intel SGX Root CA CRL has expired (next update was {root_crl_next_update})"
+            )
+
+        # Check if intermediate CA certificate is revoked
+        intermediate_serial = intermediate_cert.serial_number
+        revoked_intermediate = root_crl.get_revoked_certificate_by_serial_number(intermediate_serial)
+
+        if revoked_intermediate is not None:
+            revocation_date = revoked_intermediate.revocation_date_utc
+            raise CollateralError(
+                f"Intermediate CA certificate has been revoked. "
+                f"Serial: {intermediate_serial:x}, Revocation date: {revocation_date}"
+            )
