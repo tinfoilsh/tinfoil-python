@@ -22,6 +22,7 @@ import json
 import os
 
 from cryptography import x509
+from cryptography.x509 import verification
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -549,35 +550,19 @@ def _verify_issuer_chain(certs: List[x509.Certificate], chain_name: str) -> None
             f"{chain_name} root certificate does not match Intel SGX Root CA"
         )
 
-    # Verify certificate validity periods
-    now = datetime.now(timezone.utc)
-    for i, cert in enumerate(certs):
-        not_before = cert.not_valid_before_utc
-        not_after = cert.not_valid_after_utc
-        if now < not_before:
-            raise CollateralError(
-                f"{chain_name} certificate {i} is not yet valid (valid from {not_before})"
-            )
-        if now > not_after:
-            raise CollateralError(
-                f"{chain_name} certificate {i} has expired (expired {not_after})"
-            )
+    # Verify certificate chain (validity + signatures) using cryptography library
+    store = verification.Store([intel_root])
+    builder = verification.PolicyBuilder().store(store)
+    verifier = builder.build_client_verifier()
 
-    # Verify chain signatures (each cert signed by the next)
-    for i in range(len(certs) - 1):
-        cert = certs[i]
-        issuer = certs[i + 1]
-        try:
-            issuer_public_key = issuer.public_key()
-            issuer_public_key.verify(
-                cert.signature,
-                cert.tbs_certificate_bytes,
-                ec.ECDSA(cert.signature_hash_algorithm),
-            )
-        except InvalidSignature:
-            raise CollateralError(
-                f"{chain_name} certificate {i} signature verification failed"
-            )
+    # Chain is [leaf, intermediate(s)..., root] - verify leaf against intermediates
+    leaf = certs[0]
+    intermediates = certs[1:-1]  # Everything between leaf and root
+
+    try:
+        verifier.verify(leaf, intermediates)
+    except verification.VerificationError as e:
+        raise CollateralError(f"{chain_name} certificate chain verification failed: {e}")
 
 
 def _verify_collateral_signature(
