@@ -1048,7 +1048,7 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
                 _verify_crl_signature(cached_crl, issuer_chain, ca_type)
                 next_update = cached_crl.next_update_utc
                 if next_update is None:
-                    next_update = datetime.now(timezone.utc)
+                    raise CollateralError(f"PCK CRL ({ca_type}) is missing next_update field")
                 return PckCrl(crl=cached_crl, ca_type=ca_type, next_update=next_update)
         except Exception:
             # Cache corrupted, parse failed, or signature invalid - fetch fresh
@@ -1091,7 +1091,7 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
 
     next_update = crl.next_update_utc
     if next_update is None:
-        next_update = datetime.now(timezone.utc)
+        raise CollateralError(f"PCK CRL ({ca_type}) is missing next_update field")
 
     return PckCrl(crl=crl, ca_type=ca_type, next_update=next_update)
 
@@ -1153,7 +1153,7 @@ def fetch_root_ca_crl(timeout: float = 30.0) -> RootCrl:
                 _verify_root_crl_signature(cached_crl)
                 next_update = cached_crl.next_update_utc
                 if next_update is None:
-                    next_update = datetime.now(timezone.utc)
+                    raise CollateralError("Intel SGX Root CA CRL is missing next_update field")
                 return RootCrl(crl=cached_crl, next_update=next_update)
         except (CollateralError, Exception):
             # Cache corrupted, parse failed, or signature invalid - fetch fresh
@@ -1183,7 +1183,7 @@ def fetch_root_ca_crl(timeout: float = 30.0) -> RootCrl:
 
     next_update = crl.next_update_utc
     if next_update is None:
-        next_update = datetime.now(timezone.utc)
+        raise CollateralError("Intel SGX Root CA CRL is missing next_update field")
 
     return RootCrl(crl=crl, next_update=next_update)
 
