@@ -1259,6 +1259,147 @@ def fetch_collateral(
 
 
 # =============================================================================
+# TCB Evaluation Data Number Calculation
+# =============================================================================
+
+@dataclass
+class TcbEvalNumber:
+    """A single TCB evaluation data number with its dates."""
+    tcb_evaluation_data_number: int
+    tcb_recovery_event_date: datetime
+    tcb_date: datetime
+
+
+@dataclass
+class TcbEvaluationDataNumbers:
+    """Response from the tcbevaluationdatanumbers endpoint."""
+    id: str  # "TDX"
+    version: int
+    issue_date: datetime
+    next_update: datetime
+    tcb_eval_numbers: List[TcbEvalNumber]
+    signature: str
+
+
+def _parse_tcb_eval_numbers_response(response_bytes: bytes) -> TcbEvaluationDataNumbers:
+    """
+    Parse the tcbevaluationdatanumbers response from Intel PCS.
+
+    Args:
+        response_bytes: Raw JSON response bytes
+
+    Returns:
+        Parsed TcbEvaluationDataNumbers
+
+    Raises:
+        CollateralError: If parsing fails
+    """
+    try:
+        data = json.loads(response_bytes)
+    except json.JSONDecodeError as e:
+        raise CollateralError(f"Failed to parse TCB evaluation data numbers JSON: {e}")
+
+    inner = data.get("tcbEvaluationDataNumbers", {})
+
+    tcb_eval_numbers = []
+    for item in inner.get("tcbEvalNumbers", []):
+        tcb_eval_numbers.append(TcbEvalNumber(
+            tcb_evaluation_data_number=item.get("tcbEvaluationDataNumber", 0),
+            tcb_recovery_event_date=_parse_datetime(item.get("tcbRecoveryEventDate", "1970-01-01T00:00:00Z")),
+            tcb_date=_parse_datetime(item.get("tcbDate", "1970-01-01T00:00:00Z")),
+        ))
+
+    return TcbEvaluationDataNumbers(
+        id=inner.get("id", ""),
+        version=inner.get("version", 0),
+        issue_date=_parse_datetime(inner.get("issueDate", "1970-01-01T00:00:00Z")),
+        next_update=_parse_datetime(inner.get("nextUpdate", "1970-01-01T00:00:00Z")),
+        tcb_eval_numbers=tcb_eval_numbers,
+        signature=data.get("signature", ""),
+    )
+
+
+def fetch_tcb_evaluation_data_numbers(timeout: float = 30.0) -> TcbEvaluationDataNumbers:
+    """
+    Fetch TCB evaluation data numbers from Intel PCS.
+
+    This endpoint returns all TCB evaluation data numbers with their
+    TCB recovery event dates, which can be used to determine the minimum
+    acceptable tcbEvaluationDataNumber based on age.
+
+    Args:
+        timeout: Request timeout in seconds
+
+    Returns:
+        Parsed TcbEvaluationDataNumbers
+
+    Raises:
+        CollateralError: If fetching or parsing fails
+    """
+    url = f"{INTEL_PCS_TDX_BASE_URL}/tcbevaluationdatanumbers"
+
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise CollateralError(f"Failed to fetch TCB evaluation data numbers from Intel PCS: {e}")
+
+    return _parse_tcb_eval_numbers_response(response.content)
+
+
+def calculate_min_tcb_evaluation_data_number(
+    max_age_days: int = 365,
+    timeout: float = 30.0,
+) -> int:
+    """
+    Calculate the minimum acceptable tcbEvaluationDataNumber based on age.
+
+    This function queries Intel PCS to find the lowest tcbEvaluationDataNumber
+    whose TCB recovery event date is within the specified maximum age. This
+    ensures that collateral from older TCB recovery events is rejected.
+
+    Args:
+        max_age_days: Maximum age in days (default: 365 = 1 year)
+        timeout: Request timeout in seconds
+
+    Returns:
+        Minimum acceptable tcbEvaluationDataNumber
+
+    Raises:
+        CollateralError: If calculation fails or no valid number found
+
+    Example:
+        >>> min_num = calculate_min_tcb_evaluation_data_number()
+        >>> print(f"Minimum acceptable tcbEvaluationDataNumber: {min_num}")
+    """
+    from datetime import timedelta
+
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+
+    data = fetch_tcb_evaluation_data_numbers(timeout)
+
+    if not data.tcb_eval_numbers:
+        raise CollateralError("No TCB evaluation data numbers found in Intel PCS response")
+
+    # Sort by number ascending to find the lowest acceptable
+    sorted_numbers = sorted(data.tcb_eval_numbers, key=lambda x: x.tcb_evaluation_data_number)
+
+    # Find the lowest number whose tcbRecoveryEventDate is >= cutoff_date
+    for item in sorted_numbers:
+        if item.tcb_recovery_event_date >= cutoff_date:
+            return item.tcb_evaluation_data_number
+
+    # If all numbers are too old, return the highest (most recent) one
+    # This is a fallback - in practice, at least the most recent should be recent
+    highest = sorted_numbers[-1]
+    raise CollateralError(
+        f"All TCB evaluation data numbers are older than {max_age_days} days. "
+        f"Most recent is {highest.tcb_evaluation_data_number} from "
+        f"{highest.tcb_recovery_event_date}."
+    )
+
+
+# =============================================================================
 # TCB Level Matching and Validation
 # =============================================================================
 
@@ -1693,9 +1834,9 @@ def check_collateral_freshness(
        must have tcbEvaluationDataNumber >= the threshold
 
     The tcbEvaluationDataNumber is a monotonically increasing number that
-    Intel updates when new TCB recovery events occur. Relying parties can
+    Intel updates when new TCB recovery (TCB-R) events occur. Relying parties can
     specify a minimum threshold to ensure they don't accept collateral that
-    was issued before critical security updates.
+    was issued before critical security updates. Check: https://www.intel.com/content/www/us/en/developer/topic-technology/software-security-guidance/trusted-computing-base-recovery-attestation.html
 
     Args:
         collateral: TDX collateral to check

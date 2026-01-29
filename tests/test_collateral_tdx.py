@@ -1664,5 +1664,166 @@ class TestValidateCertificateRevocation:
             validate_certificate_revocation(collateral, mock_pck_cert, mock_intermediate_cert)
 
 
+# =============================================================================
+# TCB Evaluation Data Numbers Tests
+# =============================================================================
+
+from tinfoil.attestation.collateral_tdx import (
+    TcbEvalNumber,
+    TcbEvaluationDataNumbers,
+    _parse_tcb_eval_numbers_response,
+    fetch_tcb_evaluation_data_numbers,
+    calculate_min_tcb_evaluation_data_number,
+)
+
+
+SAMPLE_TCB_EVAL_NUMBERS_RESPONSE = b'''{
+  "tcbEvaluationDataNumbers": {
+    "id": "TDX",
+    "version": 1,
+    "issueDate": "2026-01-15T19:17:02Z",
+    "nextUpdate": "2026-02-14T19:17:02Z",
+    "tcbEvalNumbers": [
+      {"tcbEvaluationDataNumber": 20, "tcbRecoveryEventDate": "2025-08-12T00:00:00Z", "tcbDate": "2025-08-13T00:00:00Z"},
+      {"tcbEvaluationDataNumber": 19, "tcbRecoveryEventDate": "2025-05-13T00:00:00Z", "tcbDate": "2025-05-14T00:00:00Z"},
+      {"tcbEvaluationDataNumber": 18, "tcbRecoveryEventDate": "2024-11-12T00:00:00Z", "tcbDate": "2024-11-13T00:00:00Z"},
+      {"tcbEvaluationDataNumber": 17, "tcbRecoveryEventDate": "2024-03-12T00:00:00Z", "tcbDate": "2024-03-13T00:00:00Z"},
+      {"tcbEvaluationDataNumber": 16, "tcbRecoveryEventDate": "2023-08-08T00:00:00Z", "tcbDate": "2023-08-09T00:00:00Z"}
+    ]
+  },
+  "signature": "dummy"
+}'''
+
+
+class TestParseTcbEvalNumbersResponse:
+    """Test parsing of tcbevaluationdatanumbers response."""
+
+    def test_parse_valid_response(self):
+        """Test parsing a valid response."""
+        result = _parse_tcb_eval_numbers_response(SAMPLE_TCB_EVAL_NUMBERS_RESPONSE)
+
+        assert result.id == "TDX"
+        assert result.version == 1
+        assert len(result.tcb_eval_numbers) == 5
+        assert result.tcb_eval_numbers[0].tcb_evaluation_data_number == 20
+        assert result.tcb_eval_numbers[4].tcb_evaluation_data_number == 16
+
+    def test_parse_dates(self):
+        """Test that dates are parsed correctly."""
+        result = _parse_tcb_eval_numbers_response(SAMPLE_TCB_EVAL_NUMBERS_RESPONSE)
+
+        # Check first entry
+        assert result.tcb_eval_numbers[0].tcb_recovery_event_date.year == 2025
+        assert result.tcb_eval_numbers[0].tcb_recovery_event_date.month == 8
+        assert result.tcb_eval_numbers[0].tcb_recovery_event_date.day == 12
+
+    def test_parse_invalid_json(self):
+        """Test that invalid JSON raises error."""
+        with pytest.raises(CollateralError, match="Failed to parse"):
+            _parse_tcb_eval_numbers_response(b"not json")
+
+
+class TestFetchTcbEvaluationDataNumbers:
+    """Test fetching TCB evaluation data numbers."""
+
+    def test_fetch_success(self):
+        """Test successful fetch."""
+        with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
+            mock_response = MagicMock()
+            mock_response.content = SAMPLE_TCB_EVAL_NUMBERS_RESPONSE
+            mock_response.raise_for_status = MagicMock()
+            mock_get.return_value = mock_response
+
+            result = fetch_tcb_evaluation_data_numbers()
+
+            mock_get.assert_called_once()
+            assert result.id == "TDX"
+
+    def test_fetch_failure(self):
+        """Test fetch failure raises error."""
+        import requests as req
+        with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
+            mock_get.side_effect = req.RequestException("Network error")
+
+            with pytest.raises(CollateralError, match="Failed to fetch"):
+                fetch_tcb_evaluation_data_numbers()
+
+
+class TestCalculateMinTcbEvaluationDataNumber:
+    """Test calculate_min_tcb_evaluation_data_number function."""
+
+    def test_calculate_with_recent_cutoff(self):
+        """Test calculation finds correct minimum with recent cutoff."""
+        with patch('tinfoil.attestation.collateral_tdx.fetch_tcb_evaluation_data_numbers') as mock_fetch:
+            mock_fetch.return_value = _parse_tcb_eval_numbers_response(SAMPLE_TCB_EVAL_NUMBERS_RESPONSE)
+
+            # With 365-day cutoff from 2026-01-15, numbers from 2025-01-15 or later are acceptable
+            # Number 19 (2025-05-13) should be the minimum acceptable
+            # Number 18 (2024-11-12) is older than 1 year
+            with patch('tinfoil.attestation.collateral_tdx.datetime') as mock_dt:
+                mock_now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+                mock_dt.now.return_value = mock_now
+                mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+
+                result = calculate_min_tcb_evaluation_data_number(max_age_days=365)
+
+                # Should return 19 since 18 is older than 1 year
+                assert result == 19
+
+    def test_calculate_with_shorter_cutoff(self):
+        """Test calculation with shorter max age."""
+        with patch('tinfoil.attestation.collateral_tdx.fetch_tcb_evaluation_data_numbers') as mock_fetch:
+            mock_fetch.return_value = _parse_tcb_eval_numbers_response(SAMPLE_TCB_EVAL_NUMBERS_RESPONSE)
+
+            # With 180-day cutoff from 2026-01-15, cutoff is ~2025-07-19
+            # Number 20 (2025-08-12) should be acceptable
+            # Number 19 (2025-05-13) is older than 180 days
+            with patch('tinfoil.attestation.collateral_tdx.datetime') as mock_dt:
+                mock_now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+                mock_dt.now.return_value = mock_now
+                mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+
+                result = calculate_min_tcb_evaluation_data_number(max_age_days=180)
+
+                assert result == 20
+
+    def test_calculate_empty_numbers_raises(self):
+        """Test that empty numbers list raises error."""
+        with patch('tinfoil.attestation.collateral_tdx.fetch_tcb_evaluation_data_numbers') as mock_fetch:
+            mock_fetch.return_value = TcbEvaluationDataNumbers(
+                id="TDX",
+                version=1,
+                issue_date=datetime.now(timezone.utc),
+                next_update=datetime.now(timezone.utc) + timedelta(days=30),
+                tcb_eval_numbers=[],
+                signature="dummy",
+            )
+
+            with pytest.raises(CollateralError, match="No TCB evaluation data numbers found"):
+                calculate_min_tcb_evaluation_data_number()
+
+    def test_calculate_all_too_old_raises(self):
+        """Test that all numbers too old raises error."""
+        # Create response with only old numbers
+        old_numbers_response = b'''{
+          "tcbEvaluationDataNumbers": {
+            "id": "TDX",
+            "version": 1,
+            "issueDate": "2026-01-15T19:17:02Z",
+            "nextUpdate": "2026-02-14T19:17:02Z",
+            "tcbEvalNumbers": [
+              {"tcbEvaluationDataNumber": 10, "tcbRecoveryEventDate": "2020-01-01T00:00:00Z", "tcbDate": "2020-01-02T00:00:00Z"}
+            ]
+          },
+          "signature": "dummy"
+        }'''
+
+        with patch('tinfoil.attestation.collateral_tdx.fetch_tcb_evaluation_data_numbers') as mock_fetch:
+            mock_fetch.return_value = _parse_tcb_eval_numbers_response(old_numbers_response)
+
+            with pytest.raises(CollateralError, match="older than 365 days"):
+                calculate_min_tcb_evaluation_data_number()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

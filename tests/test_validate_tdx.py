@@ -9,7 +9,6 @@ from unittest.mock import patch, MagicMock
 
 from tinfoil.attestation.validate_tdx import (
     verify_tdx_attestation,
-    verify_tdx_quote_only,
     TdxValidationError,
     TdxValidationResult,
 )
@@ -44,53 +43,6 @@ def create_test_attestation_doc(raw_quote: bytes, compress: bool = True) -> str:
 
 
 # =============================================================================
-# Unit Tests for verify_tdx_quote_only
-# =============================================================================
-
-class TestVerifyTdxQuoteOnly:
-    """Test verify_tdx_quote_only function."""
-
-    def test_valid_quote(self):
-        """Test verification of a valid synthetic quote."""
-        raw_quote, _, _ = build_signed_quote_with_keys()
-
-        # Mock both verify_tdx_quote and extract_pck_extensions
-        # since our test certs aren't signed by Intel Root CA
-        with patch('tinfoil.attestation.validate_tdx.verify_tdx_quote') as mock_verify:
-            with patch('tinfoil.attestation.validate_tdx.extract_pck_extensions') as mock_extract:
-                from tinfoil.attestation.pck_extensions import PckExtensions, PckCertTCB
-
-                # Setup mock PCK chain
-                mock_verify.return_value = MagicMock()
-
-                mock_extract.return_value = PckExtensions(
-                    ppid="00" * 16,
-                    tcb=PckCertTCB(
-                        pce_svn=13,
-                        cpu_svn=bytes(16),
-                        tcb_components=[0] * 16,
-                    ),
-                    pceid="0000",
-                    fmspc="90c06f000000",
-                )
-
-                result = verify_tdx_quote_only(raw_quote)
-
-                assert isinstance(result, TdxValidationResult)
-                assert result.quote is not None
-                assert result.pck_chain is not None
-                assert len(result.measurements) == 5
-                assert result.tls_key_fp is not None
-                assert result.collateral is None  # Not fetched
-                assert result.tcb_level is None  # Not validated
-
-    def test_invalid_quote_too_short(self):
-        """Test that too-short quote raises error."""
-        with pytest.raises(TdxValidationError, match="Failed to parse"):
-            verify_tdx_quote_only(b"too short")
-
-
-# =============================================================================
 # Unit Tests for verify_tdx_attestation
 # =============================================================================
 
@@ -108,38 +60,6 @@ class TestVerifyTdxAttestation:
         doc = base64.b64encode(b"not gzipped").decode()
         with pytest.raises(TdxValidationError, match="Failed to decompress"):
             verify_tdx_attestation(doc, is_compressed=True)
-
-    def test_skip_collateral(self):
-        """Test verification with skip_collateral=True."""
-        raw_quote, _, _ = build_signed_quote_with_keys()
-        doc = create_test_attestation_doc(raw_quote)
-
-        # Mock both verify_tdx_quote and extract_pck_extensions
-        # since our test certs aren't signed by Intel Root CA
-        with patch('tinfoil.attestation.validate_tdx.verify_tdx_quote') as mock_verify:
-            with patch('tinfoil.attestation.validate_tdx.extract_pck_extensions') as mock_extract:
-                from tinfoil.attestation.pck_extensions import PckExtensions, PckCertTCB
-
-                # Setup mock PCK chain
-                mock_verify.return_value = MagicMock()
-
-                mock_extract.return_value = PckExtensions(
-                    ppid="00" * 16,
-                    tcb=PckCertTCB(
-                        pce_svn=13,
-                        cpu_svn=bytes(16),
-                        tcb_components=[0] * 16,
-                    ),
-                    pceid="0000",
-                    fmspc="90c06f000000",
-                )
-
-                result = verify_tdx_attestation(doc, skip_collateral=True)
-
-                assert isinstance(result, TdxValidationResult)
-                assert result.collateral is None
-                assert result.tcb_level is None
-
 
 # =============================================================================
 # Integration Tests with attestation.py
