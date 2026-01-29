@@ -814,8 +814,8 @@ class TestCheckCollateralFreshness:
             qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
         )
 
-        # Should not raise
-        check_collateral_freshness(collateral)
+        # Should not raise (sample has tcbEvaluationDataNumber=18)
+        check_collateral_freshness(collateral, min_tcb_evaluation_data_number=18)
 
     def test_expired_tcb_info_fails(self):
         """Test expired TCB Info fails."""
@@ -835,7 +835,7 @@ class TestCheckCollateralFreshness:
         )
 
         with pytest.raises(CollateralError, match="TCB Info has expired"):
-            check_collateral_freshness(collateral)
+            check_collateral_freshness(collateral, min_tcb_evaluation_data_number=18)
 
     def test_tcb_evaluation_data_number_threshold_passes(self):
         """Test collateral passes when tcbEvaluationDataNumber meets threshold."""

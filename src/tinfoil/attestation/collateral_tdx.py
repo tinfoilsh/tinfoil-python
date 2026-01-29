@@ -1822,7 +1822,7 @@ def validate_qe_identity(
 
 def check_collateral_freshness(
     collateral: TdxCollateral,
-    min_tcb_evaluation_data_number: Optional[int] = None,
+    min_tcb_evaluation_data_number: int,
 ) -> None:
     """
     Check that collateral is not expired and meets freshness requirements.
@@ -1830,18 +1830,19 @@ def check_collateral_freshness(
     This performs the following checks:
     1. TCB Info has not expired (now < next_update)
     2. QE Identity has not expired (now < next_update)
-    3. If min_tcb_evaluation_data_number is set, both TCB Info and QE Identity
-       must have tcbEvaluationDataNumber >= the threshold
+    3. Both TCB Info and QE Identity must have tcbEvaluationDataNumber >= threshold
 
     The tcbEvaluationDataNumber is a monotonically increasing number that
-    Intel updates when new TCB recovery (TCB-R) events occur. Relying parties can
-    specify a minimum threshold to ensure they don't accept collateral that
-    was issued before critical security updates. Check: https://www.intel.com/content/www/us/en/developer/topic-technology/software-security-guidance/trusted-computing-base-recovery-attestation.html
+    Intel updates when new TCB recovery (TCB-R) events occur. The minimum
+    threshold ensures we don't accept collateral issued before critical
+    security updates.
+
+    See: https://www.intel.com/content/www/us/en/developer/topic-technology/software-security-guidance/trusted-computing-base-recovery-attestation.html
 
     Args:
         collateral: TDX collateral to check
-        min_tcb_evaluation_data_number: Optional minimum tcbEvaluationDataNumber
-            threshold. If set, collateral with a lower number is rejected.
+        min_tcb_evaluation_data_number: Minimum tcbEvaluationDataNumber threshold.
+            Collateral with a lower number is rejected.
 
     Raises:
         CollateralError: If collateral is expired or too old
@@ -1860,23 +1861,22 @@ def check_collateral_freshness(
             f"QE Identity has expired (next update was {qe_next_update})"
         )
 
-    # Check tcbEvaluationDataNumber threshold if specified
-    if min_tcb_evaluation_data_number is not None:
-        tcb_eval_num = collateral.tcb_info.tcb_info.tcb_evaluation_data_number
-        if tcb_eval_num < min_tcb_evaluation_data_number:
-            raise CollateralError(
-                f"TCB Info tcbEvaluationDataNumber ({tcb_eval_num}) is below "
-                f"minimum required ({min_tcb_evaluation_data_number}). "
-                f"Collateral may be outdated."
-            )
+    # Check tcbEvaluationDataNumber threshold
+    tcb_eval_num = collateral.tcb_info.tcb_info.tcb_evaluation_data_number
+    if tcb_eval_num < min_tcb_evaluation_data_number:
+        raise CollateralError(
+            f"TCB Info tcbEvaluationDataNumber ({tcb_eval_num}) is below "
+            f"minimum required ({min_tcb_evaluation_data_number}). "
+            f"Collateral may be outdated."
+        )
 
-        qe_eval_num = collateral.qe_identity.enclave_identity.tcb_evaluation_data_number
-        if qe_eval_num < min_tcb_evaluation_data_number:
-            raise CollateralError(
-                f"QE Identity tcbEvaluationDataNumber ({qe_eval_num}) is below "
-                f"minimum required ({min_tcb_evaluation_data_number}). "
-                f"Collateral may be outdated."
-            )
+    qe_eval_num = collateral.qe_identity.enclave_identity.tcb_evaluation_data_number
+    if qe_eval_num < min_tcb_evaluation_data_number:
+        raise CollateralError(
+            f"QE Identity tcbEvaluationDataNumber ({qe_eval_num}) is below "
+            f"minimum required ({min_tcb_evaluation_data_number}). "
+            f"Collateral may be outdated."
+        )
 
 
 def validate_certificate_revocation(
