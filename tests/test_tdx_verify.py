@@ -32,8 +32,8 @@ from tinfoil.attestation.verify_tdx import (
     verify_tdx_quote,
     _bytes_to_p256_pubkey,
     _signature_to_der,
-    _parse_pem_chain,
 )
+from tinfoil.attestation.cert_utils import parse_pem_chain
 from tinfoil.attestation.intel_root_ca import get_intel_root_ca, INTEL_SGX_ROOT_CA_PEM
 
 
@@ -303,12 +303,12 @@ class TestSignatureToDer:
 
 
 class TestParsePemChain:
-    """Test _parse_pem_chain helper."""
+    """Test parse_pem_chain helper."""
 
     def test_parse_single_cert(self):
         """Test parsing single certificate."""
         cert_pem = _generate_self_signed_cert_pem("Test")
-        certs = _parse_pem_chain(cert_pem)
+        certs = parse_pem_chain(cert_pem)
         assert len(certs) == 1
 
     def test_parse_multiple_certs(self):
@@ -318,13 +318,13 @@ class TestParsePemChain:
         cert3 = _generate_self_signed_cert_pem("Cert3")
 
         chain = cert1 + cert2 + cert3
-        certs = _parse_pem_chain(chain)
+        certs = parse_pem_chain(chain)
         assert len(certs) == 3
 
     def test_parse_with_whitespace(self):
         """Test parsing with leading/trailing whitespace."""
         cert_pem = b'\n\n' + _generate_self_signed_cert_pem("Test") + b'\n\n'
-        certs = _parse_pem_chain(cert_pem)
+        certs = parse_pem_chain(cert_pem)
         assert len(certs) == 1
 
 

@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from typing import List
 
 from cryptography import x509
-from cryptography.x509 import verification
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -30,7 +29,7 @@ from .abi_tdx import (
     QUOTE_BODY_END,
     SIGNATURE_SIZE,
 )
-from .intel_root_ca import get_intel_root_ca
+from .cert_utils import parse_pem_chain, verify_intel_chain, CertificateChainError
 
 
 class TdxVerificationError(Exception):
@@ -75,7 +74,11 @@ def extract_pck_cert_chain(quote: QuoteV4) -> PCKCertificateChain:
         raise TdxVerificationError("PCK certificate chain is empty")
 
     # Parse concatenated PEM certificates
-    certs = _parse_pem_chain(cert_pem)
+    try:
+        certs = parse_pem_chain(cert_pem)
+    except CertificateChainError as e:
+        raise TdxVerificationError(f"Failed to parse PCK certificate chain: {e}")
+
     if len(certs) != 3:
         raise TdxVerificationError(
             f"PCK certificate chain should contain 3 certificates, got {len(certs)}"
@@ -86,56 +89,6 @@ def extract_pck_cert_chain(quote: QuoteV4) -> PCKCertificateChain:
         intermediate_cert=certs[1],
         root_cert=certs[2],
     )
-
-
-def _parse_pem_chain(pem_data: bytes) -> List[x509.Certificate]:
-    """
-    Parse concatenated PEM certificates.
-
-    Handles:
-    - Concatenated PEM certificates
-    - Leading/trailing whitespace and null bytes
-    - Trailing null bytes between certificates (common in TDX quotes)
-
-    Args:
-        pem_data: PEM-encoded certificate chain
-
-    Returns:
-        List of parsed certificates in order
-    """
-    certs = []
-    remaining = pem_data
-
-    while remaining:
-        # Strip leading whitespace and null bytes
-        remaining = remaining.lstrip(b'\x00\n\r\t ')
-        if not remaining:
-            break
-
-        # Check if remaining data is just null bytes or whitespace
-        stripped = remaining.rstrip(b'\x00\n\r\t ')
-        if not stripped:
-            break
-
-        try:
-            cert = x509.load_pem_x509_certificate(remaining)
-            certs.append(cert)
-
-            # Find end of this certificate and move to next
-            end_marker = b'-----END CERTIFICATE-----'
-            end_pos = remaining.find(end_marker)
-            if end_pos == -1:
-                break
-            remaining = remaining[end_pos + len(end_marker):]
-        except Exception as e:
-            # If we already got certs and remaining is just nulls/whitespace, that's OK
-            if certs:
-                remaining_stripped = remaining.rstrip(b'\x00\n\r\t ')
-                if not remaining_stripped:
-                    break
-            raise TdxVerificationError(f"Failed to parse PEM certificate: {e}")
-
-    return certs
 
 
 def verify_pck_chain(chain: PCKCertificateChain) -> None:
@@ -152,32 +105,11 @@ def verify_pck_chain(chain: PCKCertificateChain) -> None:
     Raises:
         TdxVerificationError: If chain verification fails
     """
-    intel_root = get_intel_root_ca()
-
-    # Step 1: Verify root certificate matches Intel SGX Root CA
-    chain_root_pubkey = chain.root_cert.public_key().public_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    intel_root_pubkey = intel_root.public_key().public_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-
-    if chain_root_pubkey != intel_root_pubkey:
-        raise TdxVerificationError(
-            "Root certificate public key does not match Intel SGX Root CA"
-        )
-
-    # Step 2: Verify certificate chain (validity periods + signatures)
-    store = verification.Store([intel_root])
-    builder = verification.PolicyBuilder().store(store)
-    verifier = builder.build_client_verifier()
-
+    certs = [chain.pck_cert, chain.intermediate_cert, chain.root_cert]
     try:
-        verifier.verify(chain.pck_cert, [chain.intermediate_cert])
-    except verification.VerificationError as e:
-        raise TdxVerificationError(f"PCK certificate chain verification failed: {e}")
+        verify_intel_chain(certs, "PCK certificate chain")
+    except CertificateChainError as e:
+        raise TdxVerificationError(str(e))
 
 
 def verify_quote_signature(quote: QuoteV4, raw_quote: bytes) -> None:

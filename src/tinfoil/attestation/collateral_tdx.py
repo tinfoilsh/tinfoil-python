@@ -24,7 +24,6 @@ from typing import List, Optional, Tuple
 from urllib.parse import unquote
 
 from cryptography import x509
-from cryptography.x509 import verification
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -34,6 +33,12 @@ import requests
 
 from .intel_root_ca import get_intel_root_ca
 from .pck_extensions import PckExtensions
+from .cert_utils import (
+    parse_pem_chain,
+    certs_to_pem,
+    verify_intel_chain,
+    CertificateChainError,
+)
 
 
 # Intel PCS API base URLs
@@ -562,31 +567,10 @@ def _parse_issuer_chain_header(header_value: str) -> List[x509.Certificate]:
     # URL-decode the header value
     pem_data = unquote(header_value).encode('utf-8')
 
-    certs = []
-    remaining = pem_data
-
-    while remaining:
-        # Strip leading whitespace
-        remaining = remaining.lstrip()
-        if not remaining:
-            break
-
-        try:
-            cert = x509.load_pem_x509_certificate(remaining)
-            certs.append(cert)
-
-            # Find end of this certificate and move to next
-            end_marker = b'-----END CERTIFICATE-----'
-            end_pos = remaining.find(end_marker)
-            if end_pos == -1:
-                break
-            remaining = remaining[end_pos + len(end_marker):]
-        except Exception as e:
-            if certs:
-                # If we got some certs, remaining might just be whitespace
-                if not remaining.strip():
-                    break
-            raise CollateralError(f"Failed to parse issuer chain certificate: {e}")
+    try:
+        certs = parse_pem_chain(pem_data)
+    except CertificateChainError as e:
+        raise CollateralError(f"Failed to parse issuer chain certificate: {e}")
 
     if len(certs) < 2:
         raise CollateralError(
@@ -594,44 +578,6 @@ def _parse_issuer_chain_header(header_value: str) -> List[x509.Certificate]:
         )
 
     return certs
-
-
-def _verify_issuer_chain(certs: List[x509.Certificate], chain_name: str) -> None:
-    """
-    Verify the issuer certificate chain against Intel SGX Root CA.
-
-    Args:
-        certs: Certificate chain (signing cert first, root last)
-        chain_name: Human-readable name for error messages
-
-    Raises:
-        CollateralError: If chain verification fails
-    """
-    intel_root = get_intel_root_ca()
-
-    # Verify root certificate matches Intel SGX Root CA
-    chain_root = certs[-1]
-    intel_root_pubkey = intel_root.public_bytes(serialization.Encoding.DER)
-    chain_root_pubkey = chain_root.public_bytes(serialization.Encoding.DER)
-
-    if chain_root_pubkey != intel_root_pubkey:
-        raise CollateralError(
-            f"{chain_name} root certificate does not match Intel SGX Root CA"
-        )
-
-    # Verify certificate chain (validity + signatures) using cryptography library
-    store = verification.Store([intel_root])
-    builder = verification.PolicyBuilder().store(store)
-    verifier = builder.build_client_verifier()
-
-    # Chain is [leaf, intermediate(s)..., root] - verify leaf against intermediates
-    leaf = certs[0]
-    intermediates = certs[1:-1]  # Everything between leaf and root
-
-    try:
-        verifier.verify(leaf, intermediates)
-    except verification.VerificationError as e:
-        raise CollateralError(f"{chain_name} certificate chain verification failed: {e}")
 
 
 def _verify_collateral_signature(
@@ -765,7 +711,10 @@ def verify_tcb_info_signature(
         CollateralError: If verification fails
     """
     # Verify the issuer chain
-    _verify_issuer_chain(issuer_chain, "TCB Info issuer chain")
+    try:
+        verify_intel_chain(issuer_chain, "TCB Info issuer chain")
+    except CertificateChainError as e:
+        raise CollateralError(str(e))
 
     # Verify signature over tcbInfo JSON
     _verify_collateral_signature(
@@ -794,7 +743,10 @@ def verify_qe_identity_signature(
         CollateralError: If verification fails
     """
     # Verify the issuer chain
-    _verify_issuer_chain(issuer_chain, "QE Identity issuer chain")
+    try:
+        verify_intel_chain(issuer_chain, "QE Identity issuer chain")
+    except CertificateChainError as e:
+        raise CollateralError(str(e))
 
     # Verify signature over enclaveIdentity JSON
     _verify_collateral_signature(
@@ -809,41 +761,6 @@ def verify_qe_identity_signature(
 # =============================================================================
 # Collateral Fetching
 # =============================================================================
-
-def _certs_to_pem(certs: List[x509.Certificate]) -> str:
-    """Convert list of certificates to concatenated PEM string."""
-    pem_parts = []
-    for cert in certs:
-        pem_parts.append(cert.public_bytes(serialization.Encoding.PEM).decode("ascii"))
-    return "".join(pem_parts)
-
-
-def _pem_to_certs(pem_data: str) -> List[x509.Certificate]:
-    """Parse concatenated PEM string to list of certificates."""
-    certs = []
-    remaining = pem_data.encode("utf-8")
-
-    while remaining:
-        remaining = remaining.lstrip()
-        if not remaining:
-            break
-
-        try:
-            cert = x509.load_pem_x509_certificate(remaining)
-            certs.append(cert)
-
-            end_marker = b'-----END CERTIFICATE-----'
-            end_pos = remaining.find(end_marker)
-            if end_pos == -1:
-                break
-            remaining = remaining[end_pos + len(end_marker):]
-        except Exception:
-            if not remaining.strip():
-                break
-            raise
-
-    return certs
-
 
 def fetch_tcb_info(fmspc: str, timeout: float = 30.0) -> Tuple[TdxTcbInfo, bytes]:
     """
@@ -871,7 +788,7 @@ def fetch_tcb_info(fmspc: str, timeout: float = 30.0) -> Tuple[TdxTcbInfo, bytes
             cached_tcb_info = parse_tcb_info_response(cached_entry.body)
             if _is_tcb_info_fresh(cached_tcb_info):
                 # Re-verify signature on cache hit
-                issuer_chain = _pem_to_certs(cached_entry.issuer_chain_pem)
+                issuer_chain = parse_pem_chain(cached_entry.issuer_chain_pem.encode("utf-8"))
                 verify_tcb_info_signature(
                     cached_entry.body, cached_tcb_info, issuer_chain
                 )
@@ -905,7 +822,7 @@ def fetch_tcb_info(fmspc: str, timeout: float = 30.0) -> Tuple[TdxTcbInfo, bytes
     # Write to cache with issuer chain for re-verification
     cache_entry = CacheEntry(
         body=raw_bytes,
-        issuer_chain_pem=_certs_to_pem(issuer_chain),
+        issuer_chain_pem=certs_to_pem(issuer_chain),
     )
     _write_cache(cache_path, cache_entry)
 
@@ -940,7 +857,7 @@ def fetch_qe_identity(timeout: float = 30.0) -> Tuple[QeIdentity, bytes]:
             cached_qe_identity = parse_qe_identity_response(cached_entry.body)
             if _is_qe_identity_fresh(cached_qe_identity):
                 # Re-verify signature on cache hit
-                issuer_chain = _pem_to_certs(cached_entry.issuer_chain_pem)
+                issuer_chain = parse_pem_chain(cached_entry.issuer_chain_pem.encode("utf-8"))
                 verify_qe_identity_signature(
                     cached_entry.body, cached_qe_identity, issuer_chain
                 )
@@ -974,7 +891,7 @@ def fetch_qe_identity(timeout: float = 30.0) -> Tuple[QeIdentity, bytes]:
     # Write to cache with issuer chain for re-verification
     cache_entry = CacheEntry(
         body=raw_bytes,
-        issuer_chain_pem=_certs_to_pem(issuer_chain),
+        issuer_chain_pem=certs_to_pem(issuer_chain),
     )
     _write_cache(cache_path, cache_entry)
 
@@ -998,7 +915,10 @@ def _verify_crl_signature(
         CollateralError: If verification fails
     """
     # Verify the issuer chain first
-    _verify_issuer_chain(issuer_chain, f"PCK CRL ({ca_type}) issuer chain")
+    try:
+        verify_intel_chain(issuer_chain, f"PCK CRL ({ca_type}) issuer chain")
+    except CertificateChainError as e:
+        raise CollateralError(str(e))
 
     # Verify CRL signature using the signing cert (first in chain)
     signing_cert = issuer_chain[0]
@@ -1044,7 +964,7 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
             cached_crl = x509.load_der_x509_crl(cached_entry.body)
             if _is_crl_fresh(cached_crl):
                 # Re-verify signature on cache hit
-                issuer_chain = _pem_to_certs(cached_entry.issuer_chain_pem)
+                issuer_chain = parse_pem_chain(cached_entry.issuer_chain_pem.encode("utf-8"))
                 _verify_crl_signature(cached_crl, issuer_chain, ca_type)
                 next_update = cached_crl.next_update_utc
                 if next_update is None:
@@ -1085,7 +1005,7 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
     # Write to cache with issuer chain for re-verification
     cache_entry = CacheEntry(
         body=raw_bytes,
-        issuer_chain_pem=_certs_to_pem(issuer_chain),
+        issuer_chain_pem=certs_to_pem(issuer_chain),
     )
     _write_cache(cache_path, cache_entry)
 

@@ -1139,7 +1139,7 @@ class TestFetchTcbInfoWithCache:
             with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
                 # Mock signature verification on cache hit
                 with patch('tinfoil.attestation.collateral_tdx.verify_tcb_info_signature'):
-                    with patch('tinfoil.attestation.collateral_tdx._pem_to_certs') as mock_pem:
+                    with patch('tinfoil.attestation.collateral_tdx.parse_pem_chain') as mock_pem:
                         mock_pem.return_value = []
                         tcb_info, raw = fetch_tcb_info("00A06D080000")
 
@@ -1215,7 +1215,7 @@ class TestFetchQeIdentityWithCache:
             with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
                 # Mock signature verification on cache hit
                 with patch('tinfoil.attestation.collateral_tdx.verify_qe_identity_signature'):
-                    with patch('tinfoil.attestation.collateral_tdx._pem_to_certs') as mock_pem:
+                    with patch('tinfoil.attestation.collateral_tdx.parse_pem_chain') as mock_pem:
                         mock_pem.return_value = []
                         qe_identity, raw = fetch_qe_identity()
 
@@ -1365,7 +1365,7 @@ class TestFetchPckCrl:
             with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
                 # Mock signature verification on cache hit
                 with patch('tinfoil.attestation.collateral_tdx._verify_crl_signature'):
-                    with patch('tinfoil.attestation.collateral_tdx._pem_to_certs') as mock_pem:
+                    with patch('tinfoil.attestation.collateral_tdx.parse_pem_chain') as mock_pem:
                         mock_pem.return_value = []
                         result = fetch_pck_crl("platform")
 
