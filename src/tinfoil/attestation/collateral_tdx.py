@@ -1291,6 +1291,7 @@ def calculate_min_tcb_evaluation_data_number(
     Example:
         >>> min_num = calculate_min_tcb_evaluation_data_number()
         >>> print(f"Minimum acceptable tcbEvaluationDataNumber: {min_num}")
+    TODO: Verify response using Intel root cert
     """
     from datetime import timedelta
 
@@ -1642,8 +1643,11 @@ def validate_tdx_module_identity(
                 )
             return
 
-    # If no matching level, that's not necessarily an error - the platform
-    # TCB level matching is the primary check
+    # No matching TCB level found - this is an error (matches Go behavior)
+    raise CollateralError(
+        f"Could not find a TDX Module Identity TCB Level matching "
+        f"the TDX Module's ISVSVN ({minor_version})"
+    )
 
 
 def validate_qe_identity(

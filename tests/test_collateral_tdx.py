@@ -797,6 +797,22 @@ class TestTdxModuleIdentity:
                 tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes
             )
 
+    def test_validate_module_identity_no_matching_tcb_level(self):
+        """Test validation raises when minor version is too low for any TCB level."""
+        tcb_info = self._create_tcb_info_with_module_identities()
+
+        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
+        # Module identity TDX_03 has TCB level with isv_svn=3
+        # minor=2 < 3, so no TCB level should match
+        tee_tcb_svn = bytes([2, 3] + [0] * 14)  # minor=2, major=3
+        mr_signer_seam = b"\xaa" * 48
+        seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
+
+        with pytest.raises(CollateralError, match="Could not find a TDX Module Identity TCB Level"):
+            validate_tdx_module_identity(
+                tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes
+            )
+
 
 class TestCheckCollateralFreshness:
     """Test collateral freshness checking."""
