@@ -34,7 +34,7 @@ def test_tdx_full_verification_flow():
         # Fetch enclave address
         try:
             # enclave = get_router_address()
-            enclave = "router.inf9.tinfoil.sh"
+            enclave = "deepseek-r1-0528.inf9.tinfoil.sh"
         except Exception as e:
             pytest.skip(f"Could not fetch router address from ATC service: {e}")
             return

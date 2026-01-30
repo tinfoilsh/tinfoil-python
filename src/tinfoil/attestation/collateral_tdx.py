@@ -961,7 +961,7 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
     cached_entry = _read_cache(cache_path)
     if cached_entry is not None and cached_entry.issuer_chain_pem is not None:
         try:
-            cached_crl = x509.load_der_x509_crl(cached_entry.body)
+            cached_crl = x509.load_pem_x509_crl(cached_entry.body)
             if _is_crl_fresh(cached_crl):
                 # Re-verify signature on cache hit
                 issuer_chain = parse_pem_chain(cached_entry.issuer_chain_pem.encode("utf-8"))
@@ -986,9 +986,9 @@ def fetch_pck_crl(ca_type: str, timeout: float = 30.0) -> PckCrl:
 
     raw_bytes = response.content
 
-    # Parse the DER-encoded CRL
+    # Parse the PEM-encoded CRL
     try:
-        crl = x509.load_der_x509_crl(raw_bytes)
+        crl = x509.load_pem_x509_crl(raw_bytes)
     except Exception as e:
         raise CollateralError(f"Failed to parse PCK CRL ({ca_type}): {e}")
 
