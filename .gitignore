@@ -178,3 +178,8 @@ tinfoil/tinfoil_verifier/
 
 # Logs
 *.log
+
+# .md files except README
+docs/
+*.md
+!README.md
