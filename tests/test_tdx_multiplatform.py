@@ -521,15 +521,15 @@ class TestModuleIdentityMatchingWithRealTeeTcbSvn:
         assert result is not None
         assert result.id == "TDX_05"
 
-    def test_tee_tcb_svn_unknown_major_version_returns_none(self):
-        """Test TEE_TCB_SVN with unknown major version returns None."""
+    def test_tee_tcb_svn_unknown_major_version_raises(self):
+        """Test TEE_TCB_SVN with unknown major version raises error."""
         tcb_info = self._create_tcb_info_with_modules(["TDX_01", "TDX_03"])
 
         # TEE_TCB_SVN: minor=0, major=99 (no TDX_99 module exists)
         tee_tcb_svn = bytes([0, 99] + [0] * 14)
 
-        result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-        assert result is None
+        with pytest.raises(CollateralError, match="Unknown TDX module version TDX_99"):
+            get_tdx_module_identity(tcb_info, tee_tcb_svn)
 
     def test_tee_tcb_svn_major_version_0_matches_tdx_00(self):
         """Test TEE_TCB_SVN with major=0 matches TDX_00 if present."""
@@ -542,15 +542,15 @@ class TestModuleIdentityMatchingWithRealTeeTcbSvn:
         assert result is not None
         assert result.id == "TDX_00"
 
-    def test_tee_tcb_svn_too_short_returns_none(self):
-        """Test TEE_TCB_SVN with < 2 bytes returns None."""
+    def test_tee_tcb_svn_too_short_raises(self):
+        """Test TEE_TCB_SVN with < 2 bytes raises error."""
         tcb_info = self._create_tcb_info_with_modules(["TDX_03"])
 
         # Only 1 byte - not enough to extract major version
         tee_tcb_svn = bytes([5])
 
-        result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-        assert result is None
+        with pytest.raises(CollateralError, match="TEE_TCB_SVN is too short"):
+            get_tdx_module_identity(tcb_info, tee_tcb_svn)
 
     def test_validate_module_identity_with_real_svn_values(self):
         """Test full module identity validation with realistic SVN values."""
@@ -566,11 +566,10 @@ class TestModuleIdentityMatchingWithRealTeeTcbSvn:
         mr_signer_seam = module_mrsigner
         seam_attributes = b"\x00" * 8
 
-        result = validate_tdx_module_identity(
+        # Should not raise - validation succeeds
+        validate_tdx_module_identity(
             tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes
         )
-        assert result is not None
-        assert result.tcb_status == TcbStatus.UP_TO_DATE
 
     def test_validate_module_identity_minor_svn_too_low_returns_none(self):
         """Test that minor SVN below threshold returns None (no matching level)."""

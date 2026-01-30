@@ -1529,11 +1529,11 @@ def validate_tcb_status(
 def get_tdx_module_identity(
     tcb_info: TcbInfo,
     tee_tcb_svn: bytes,
-) -> Optional[TdxModuleIdentity]:
+) -> TdxModuleIdentity:
     """
     Find the matching TDX module identity based on TEE_TCB_SVN.
 
-    The module ID is derived from TEE_TCB_SVN[0] (major version):
+    The module ID is derived from TEE_TCB_SVN[1] (major version):
     - TEE_TCB_SVN[1] = 0x03 -> Module ID = "TDX_03"
     - TEE_TCB_SVN[1] = 0x01 -> Module ID = "TDX_01"
 
@@ -1542,10 +1542,19 @@ def get_tdx_module_identity(
         tee_tcb_svn: TEE TCB SVN from quote body (16 bytes)
 
     Returns:
-        Matching TdxModuleIdentity or None if no match found
+        Matching TdxModuleIdentity
+
+    Raises:
+        CollateralError: If no module identities in TCB Info, tee_tcb_svn is
+            malformed, or module version is unknown
     """
+    if not tcb_info.tdx_module_identities:
+        raise CollateralError("TCB Info has no TDX module identities")
+
     if len(tee_tcb_svn) < 2:
-        return None
+        raise CollateralError(
+            f"TEE_TCB_SVN is too short ({len(tee_tcb_svn)} bytes, expected >= 2)"
+        )
 
     # Extract major version and form module ID
     # TEE_TCB_SVN[0] = minor SVN, TEE_TCB_SVN[1] = major SVN
@@ -1557,7 +1566,10 @@ def get_tdx_module_identity(
         if module_identity.id == module_id:
             return module_identity
 
-    return None
+    known_ids = [m.id for m in tcb_info.tdx_module_identities]
+    raise CollateralError(
+        f"Unknown TDX module version {module_id}. Known module identities: {known_ids}"
+    )
 
 
 def validate_tdx_module_identity(
@@ -1565,7 +1577,7 @@ def validate_tdx_module_identity(
     tee_tcb_svn: bytes,
     mr_signer_seam: bytes,
     seam_attributes: bytes,
-) -> Optional[TcbLevel]:
+) -> None:
     """
     Validate TDX module identity against Intel's published identities.
 
@@ -1580,18 +1592,10 @@ def validate_tdx_module_identity(
         mr_signer_seam: MR_SIGNER_SEAM from quote body (48 bytes)
         seam_attributes: SEAM_ATTRIBUTES from quote body (8 bytes)
 
-    Returns:
-        Matching module-specific TcbLevel if found
-
     Raises:
         CollateralError: If module identity validation fails
     """
     module_identity = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-
-    # If no matching module identity found, this could be an older TDX version
-    # without module identities in TCB Info - skip module validation
-    if module_identity is None:
-        return None
 
     # Verify MR_SIGNER_SEAM matches
     if mr_signer_seam != module_identity.mrsigner:
@@ -1636,11 +1640,10 @@ def validate_tdx_module_identity(
                     f"TDX module TCB status is REVOKED for version "
                     f"{tee_tcb_svn[1]}.{minor_version}"
                 )
-            return level
+            return
 
     # If no matching level, that's not necessarily an error - the platform
     # TCB level matching is the primary check
-    return None
 
 
 def validate_qe_identity(

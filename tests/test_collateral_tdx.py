@@ -744,14 +744,14 @@ class TestTdxModuleIdentity:
         assert result.id == "TDX_03"
 
     def test_get_module_identity_not_found(self):
-        """Test no matching module identity for unknown version."""
+        """Test unknown module version raises error."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
         # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
         # Major version 5 should not match any (only TDX_03 exists)
         tee_tcb_svn = bytes([0, 5] + [0] * 14)  # minor=0, major=5
-        result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-        assert result is None
+        with pytest.raises(CollateralError, match="Unknown TDX module version TDX_05"):
+            get_tdx_module_identity(tcb_info, tee_tcb_svn)
 
     def test_validate_module_identity_success(self):
         """Test successful module identity validation."""
@@ -763,11 +763,10 @@ class TestTdxModuleIdentity:
         mr_signer_seam = b"\xaa" * 48
         seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
 
-        result = validate_tdx_module_identity(
+        # Should not raise - validation succeeds
+        validate_tdx_module_identity(
             tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes
         )
-        assert result is not None
-        assert result.tcb_status == TcbStatus.UP_TO_DATE
 
     def test_validate_module_identity_mrsigner_mismatch(self):
         """Test module identity validation fails with MR_SIGNER_SEAM mismatch."""
@@ -783,8 +782,8 @@ class TestTdxModuleIdentity:
                 tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes
             )
 
-    def test_validate_module_identity_no_match_returns_none(self):
-        """Test validation returns None when no matching module identity."""
+    def test_validate_module_identity_unknown_version_raises(self):
+        """Test validation raises when module version is unknown."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
         # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
@@ -793,10 +792,10 @@ class TestTdxModuleIdentity:
         mr_signer_seam = b"\xaa" * 48
         seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
 
-        result = validate_tdx_module_identity(
-            tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes
-        )
-        assert result is None
+        with pytest.raises(CollateralError, match="Unknown TDX module version TDX_05"):
+            validate_tdx_module_identity(
+                tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes
+            )
 
 
 class TestCheckCollateralFreshness:
