@@ -9,7 +9,8 @@ import base64
 from typing import Optional
 
 from .abi_sev import TCBParts, SnpPolicy, SnpPlatformInfo, Report
-from .types import Measurement, Verification, PredicateType, TLS_KEY_FP_SIZE, HPKE_KEY_SIZE, safe_gzip_decompress
+from .types import Measurement, Verification, PredicateType, TLS_KEY_FP_SIZE, HPKE_KEY_SIZE
+from .utils import safe_gzip_decompress
 from .verify_sev import verify_attestation, CertificateChain
 from .validate_sev import validate_report, ValidationOptions
 
