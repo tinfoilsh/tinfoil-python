@@ -1,19 +1,21 @@
 import http.client
 import json
 import ssl
+import urllib.error
 import urllib.request
 import httpx
 import random
 from dataclasses import dataclass
 from typing import Dict, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
 import cryptography.x509
 from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
 import hashlib
 
-from .attestation import fetch_attestation
+from .attestation import fetch_attestation, TDX_TYPES
+from .attestation.attestation_tdx import verify_tdx_hardware
 from .github import fetch_latest_digest, fetch_attestation_bundle
-from .sigstore import verify_attestation
+from .sigstore import verify_attestation, fetch_latest_hardware_measurements
 
 
 @dataclass
@@ -114,14 +116,14 @@ class SecureClient:
             sock = ssl.create_default_context().wrap_socket(*args, **kwargs)
             cert_binary = sock.getpeercert(binary_form=True)
             if not cert_binary:
-                raise Exception("No certificate found")
+                raise ValueError("No certificate found")
             cert = cryptography.x509.load_der_x509_certificate(cert_binary)
             pub_der = cert.public_key().public_bytes(
                 Encoding.DER, PublicFormat.SubjectPublicKeyInfo
             )
             pk_fp = hashlib.sha256(pub_der).hexdigest()
             if pk_fp != expected_fp:
-                raise Exception(f"Certificate fingerprint mismatch: expected {expected_fp}, got {pk_fp}")
+                raise ValueError(f"Certificate fingerprint mismatch: expected {expected_fp}, got {pk_fp}")
             return sock
         return wrap_socket
 
@@ -152,8 +154,9 @@ class SecureClient:
             if expected_snp_measurement is None:
                 raise ValueError("snp_measurement not found in provided measurement")
             
-            # Get the actual measurement from the attestation
-            actual_measurement = verification.measurement.registers[0]  # SNP measurement is the first register
+            if not verification.measurement.registers:
+                raise ValueError("No measurement registers found in attestation")
+            actual_measurement = verification.measurement.registers[0]
             
             if actual_measurement != expected_snp_measurement:
                 raise ValueError(f"SNP measurement mismatch: expected {expected_snp_measurement}, got {actual_measurement}")
@@ -169,17 +172,20 @@ class SecureClient:
             # GitHub-based verification
             digest = fetch_latest_digest(self.repo)
             sigstore_bundle = fetch_attestation_bundle(self.repo, digest)
-            
+
             code_measurements = verify_attestation(
-                sigstore_bundle, 
-                digest, 
+                sigstore_bundle,
+                digest,
                 self.repo
             )
-            
-            # Verify measurements match
-            for (i, code_measurement) in enumerate(code_measurements.registers):
-                if code_measurement != verification.measurement.registers[i]:
-                    raise ValueError("Code measurements do not match")
+
+            # For TDX, verify hardware measurements (MRTD and RTMR0)
+            if verification.measurement.type in TDX_TYPES:
+                hardware_measurements = fetch_latest_hardware_measurements()
+                verify_tdx_hardware(hardware_measurements, verification.measurement)
+
+            # Verify measurements match (handles cross-platform comparison)
+            code_measurements.assert_equal(verification.measurement)
 
             # Build ground truth from the verified attestation
             self._ground_truth = GroundTruth(
@@ -231,17 +237,26 @@ class SecureClient:
         )
         return self.make_request(req)
 
-def get_router_address() -> str:
+def get_router_address(platform: Optional[str] = None) -> str:
     """
     Fetches the list of available routers from the ATC API
     and returns a randomly selected address.
+
+    Args:
+        platform: Optional platform filter (e.g. "snp", "tdx").
+                  If None, returns routers for any platform.
     """
+    routers_url = "https://atc.tinfoil.sh/routers"
+    if platform:
+        routers_url += "?" + urlencode({"platform": platform})
 
-    routers_url = "https://atc.tinfoil.sh/routers?platform=snp"
+    try:
+        with urllib.request.urlopen(routers_url, timeout=15) as response:
+            routers = json.loads(response.read().decode('utf-8'))
+    except (urllib.error.URLError, json.JSONDecodeError) as e:
+        raise ValueError(f"Failed to fetch router addresses: {e}") from e
 
-    with urllib.request.urlopen(routers_url) as response:
-        routers = json.loads(response.read().decode('utf-8'))
-        if len(routers) == 0:
-            raise ValueError("No routers found in the response")
-        
-        return random.choice(routers)
+    if not isinstance(routers, list) or len(routers) == 0:
+        raise ValueError("No routers found in the response")
+
+    return random.choice(routers)
