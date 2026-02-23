@@ -96,6 +96,32 @@ class SecureClient:
         """Returns the last verified enclave state"""
         return self._ground_truth
 
+    @staticmethod
+    def _verify_peer_fingerprint(cert_binary: Optional[bytes], expected_fp: str) -> None:
+        """Verify that a certificate's public key fingerprint matches the expected value."""
+        if not cert_binary:
+            raise ValueError("No certificate found")
+        cert = cryptography.x509.load_der_x509_certificate(cert_binary)
+        pub_der = cert.public_key().public_bytes(
+            Encoding.DER, PublicFormat.SubjectPublicKeyInfo
+        )
+        pk_fp = hashlib.sha256(pub_der).hexdigest()
+        if pk_fp != expected_fp:
+            raise ValueError(f"Certificate fingerprint mismatch: expected {expected_fp}, got {pk_fp}")
+
+    def _create_socket_wrapper(self, expected_fp: str):
+        """
+        Creates a socket wrapper function that verifies the certificate's public key fingerprint
+        matches the expected fingerprint.
+        """
+        def wrap_socket(*args, **kwargs) -> ssl.SSLSocket:
+            sock = ssl.create_default_context().wrap_socket(*args, **kwargs)
+            SecureClient._verify_peer_fingerprint(
+                sock.getpeercert(binary_form=True), expected_fp
+            )
+            return sock
+        return wrap_socket
+
     def make_secure_http_client(self) -> httpx.Client:
         """
         Build an httpx.Client that pins the enclave's TLS cert
@@ -107,35 +133,29 @@ class SecureClient:
         ctx.wrap_socket = wrap_socket
         return httpx.Client(verify=ctx, follow_redirects=True)
 
-    def _create_socket_wrapper(self, expected_fp: str):
-        """
-        Creates a socket wrapper function that verifies the certificate's public key fingerprint
-        matches the expected fingerprint.
-        """
-        def wrap_socket(*args, **kwargs) -> ssl.SSLSocket:
-            sock = ssl.create_default_context().wrap_socket(*args, **kwargs)
-            cert_binary = sock.getpeercert(binary_form=True)
-            if not cert_binary:
-                raise ValueError("No certificate found")
-            cert = cryptography.x509.load_der_x509_certificate(cert_binary)
-            pub_der = cert.public_key().public_bytes(
-                Encoding.DER, PublicFormat.SubjectPublicKeyInfo
-            )
-            pk_fp = hashlib.sha256(pub_der).hexdigest()
-            if pk_fp != expected_fp:
-                raise ValueError(f"Certificate fingerprint mismatch: expected {expected_fp}, got {pk_fp}")
-            return sock
-        return wrap_socket
-
     def make_secure_async_http_client(self) -> httpx.AsyncClient:
         """
-        Build an httpx.AsyncClient that pins the enclave's TLS cert.
+        Build an httpx.AsyncClient that pins the enclave's TLS cert
         """
         expected_fp = self.verify().public_key
-        wrap_socket = self._create_socket_wrapper(expected_fp)
 
         ctx = ssl.create_default_context()
-        ctx.wrap_socket = wrap_socket
+        original_wrap_bio = ctx.wrap_bio
+
+        def pinned_wrap_bio(*args, **kwargs):
+            ssl_object = original_wrap_bio(*args, **kwargs)
+            original_do_handshake = ssl_object.do_handshake
+
+            def checked_do_handshake():
+                result = original_do_handshake()
+                cert_binary = ssl_object.getpeercert(binary_form=True)
+                SecureClient._verify_peer_fingerprint(cert_binary, expected_fp)
+                return result
+
+            ssl_object.do_handshake = checked_do_handshake
+            return ssl_object
+
+        ctx.wrap_bio = pinned_wrap_bio
         return httpx.AsyncClient(verify=ctx, follow_redirects=True)
 
     def verify(self) -> GroundTruth:
