@@ -239,6 +239,9 @@ def _parse_tcb(value_component) -> PckCertTCB:
     tcb_components = [0] * TCB_COMPONENTS_COUNT
     pce_svn = 0
     cpu_svn = bytes(CPU_SVN_SIZE)
+    found_pce_svn = False
+    found_cpu_svn = False
+    found_components: set[int] = set()
 
     with _asn1_errors("TCB extension"):
         for item in tcb_seq:
@@ -255,6 +258,7 @@ def _parse_tcb(value_component) -> PckCertTCB:
                         f"PCE SVN value {val} out of uint16 range"
                     )
                 pce_svn = val
+                found_pce_svn = True
             elif oid_str == OID_CPU_SVN.dotted_string:
                 raw = bytes(item[1])
                 if len(raw) != CPU_SVN_SIZE:
@@ -262,6 +266,7 @@ def _parse_tcb(value_component) -> PckCertTCB:
                         f"CPU SVN has wrong size: expected {CPU_SVN_SIZE}, got {len(raw)}"
                     )
                 cpu_svn = raw
+                found_cpu_svn = True
             elif (idx := _TCB_COMPONENT_OID_INDEX.get(oid_str)) is not None:
                 val = int(item[1])
                 if val < 0 or val > 0xFF:
@@ -269,5 +274,20 @@ def _parse_tcb(value_component) -> PckCertTCB:
                         f"TCB component {idx + 1} value {val} out of byte range"
                     )
                 tcb_components[idx] = val
+                found_components.add(idx)
+            else:
+                raise PckExtensionError(
+                    f"Unrecognized OID in TCB extension: {oid_str}"
+                )
+
+    if not found_pce_svn:
+        raise PckExtensionError("PCE SVN not found in TCB extension")
+    if not found_cpu_svn:
+        raise PckExtensionError("CPU SVN not found in TCB extension")
+    if len(found_components) != TCB_COMPONENTS_COUNT:
+        missing = set(range(TCB_COMPONENTS_COUNT)) - found_components
+        raise PckExtensionError(
+            f"Missing TCB components: {sorted(i + 1 for i in missing)}"
+        )
 
     return PckCertTCB(pce_svn=pce_svn, cpu_svn=cpu_svn, tcb_components=tcb_components)
