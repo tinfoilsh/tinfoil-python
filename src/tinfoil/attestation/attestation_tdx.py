@@ -29,7 +29,8 @@ from .abi_tdx import (
     MR_OWNER_SIZE,
     MR_OWNER_CONFIG_SIZE,
 )
-from .types import TLS_KEY_FP_SIZE, HPKE_KEY_SIZE, Measurement, Verification, PredicateType, HardwareMeasurement, HardwareMeasurementError, TDX_MRTD_IDX, TDX_RTMR0_IDX, TDX_REGISTER_COUNT, safe_gzip_decompress
+from .types import TLS_KEY_FP_SIZE, HPKE_KEY_SIZE, Measurement, Verification, PredicateType, HardwareMeasurement, HardwareMeasurementError, TDX_MRTD_IDX, TDX_RTMR0_IDX, TDX_REGISTER_COUNT
+from .utils import safe_gzip_decompress
 from .verify_tdx import (
     verify_tdx_quote,
     TdxVerificationError,
