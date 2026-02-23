@@ -1,89 +1,97 @@
+"""
+Integration test for attestation verification flow.
+
+Tests the complete verification using the SecureClient API with a live router.
+Works with any architecture (SNP or TDX) returned by the router service.
+"""
+
 import pytest
 
-# Adjust these imports based on your project structure
-from tinfoil.github import fetch_latest_digest, fetch_attestation_bundle
-from tinfoil.sigstore import verify_attestation
-from tinfoil.attestation import fetch_attestation
-from tinfoil.client import get_router_address
+from tinfoil.client import SecureClient, get_router_address
+from tinfoil.attestation import PredicateType
 
 pytestmark = pytest.mark.integration  # allows pytest -m integration filtering
 
-# Fetch config from environment variables, falling back to defaults
-# Use the same env vars as the other integration test for consistency
+# Router always runs confidential-model-router
 REPO = "tinfoilsh/confidential-model-router"
+
 
 def test_full_verification_flow():
     """
-    Tests the complete attestation verification flow:
-    1. Fetch latest digest for the repository.
-    2. Fetch the sigstore attestation bundle for that digest.
-    3. Verify the sigstore bundle to get code measurements.
-    4. Fetch the runtime attestation from the enclave.
-    5. Verify the runtime attestation.
-    6. Compare code measurements with runtime measurements.
+    Tests the complete attestation verification flow using SecureClient.
+    
+    Gets a router from the ATC service and verifies it against the
+    confidential-model-router repo. Works with any TEE type (SNP or TDX).
+    
+    SecureClient.verify() performs:
+    1. Fetch runtime attestation from enclave
+    2. Verify attestation (cryptographic + policy validation)
+    3. Fetch latest digest from GitHub
+    4. Fetch and verify sigstore attestation bundle
+    5. For TDX: verify hardware measurements (MRTD, RTMR0)
+    6. Compare code measurements with runtime measurements
     """
     try:
-        # Fetch enclave address lazily inside the test to avoid import-time network calls
-        try:
-            enclave = get_router_address()
-        except Exception as e:
-            pytest.skip(f"Could not fetch router address from ATC service: {e}")
-            return
-
-        # Fetch latest release digest
-        print(f"Fetching latest release for {REPO}")
-        digest = fetch_latest_digest(REPO)
-        print(f"Found digest: {digest}")
-
-        # Fetch attestation bundle
-        print(f"Fetching attestation bundle for {REPO}@{digest}")
-        sigstore_bundle = fetch_attestation_bundle(REPO, digest)
-        assert sigstore_bundle is not None # Basic check
-
-        # Verify attested measurements from sigstore bundle
-        print(f"Verifying attested measurements for {REPO}@{digest}")
-        code_measurements = verify_attestation(
-            sigstore_bundle,
-            digest,
-            REPO
-        )
-        assert code_measurements is not None # Basic check
-        print(f"Code measurements fingerprint: {code_measurements.fingerprint()}")
-
-
-        # Fetch runtime attestation from the enclave
-        print(f"Fetching runtime attestation from {enclave}")
-        enclave_attestation = fetch_attestation(enclave)
-        assert enclave_attestation is not None # Basic check
-
-        # Verify enclave measurements from runtime attestation
-        print("Verifying enclave measurements")
-        runtime_verification = enclave_attestation.verify()
-        assert runtime_verification is not None # Basic check
-        print(f"Runtime measurement fingerprint: {runtime_verification.measurement.fingerprint()}")
-        print(f"Public key fingerprint: {runtime_verification.public_key_fp}")
-
-
-        # Compare measurements
-        print("Comparing measurements")
-        assert len(code_measurements.registers) == len(runtime_verification.measurement.registers), \
-            "Number of measurement registers differ"
-
-        for i, code_reg in enumerate(code_measurements.registers):
-            runtime_reg = runtime_verification.measurement.registers[i]
-            assert code_reg == runtime_reg, \
-                f"Measurement register {i} mismatch: Code='{code_reg}' vs Runtime='{runtime_reg}'"
-
-        print("Verification successful!")
-        print(f"Public key fingerprint: {runtime_verification.public_key_fp}")
-        print(f"Measurement: {code_measurements.fingerprint()}")
-
+        enclave = get_router_address()
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        pytest.fail(f"Verification flow failed with exception: {e}")
+        pytest.skip(f"Could not fetch router address from ATC service: {e}")
+    
+    print(f"\nVerifying enclave: {enclave}")
+    print(f"Against repo: {REPO}")
+    
+    client = SecureClient(enclave=enclave, repo=REPO)
+    ground_truth = client.verify()
+    
+    # Print architecture-specific info
+    measurement_type = ground_truth.measurement.type
+    print(f"\n✓ Verification successful!")
+    print(f"  Architecture: {measurement_type.value}")
+    print(f"  Measurement fingerprint: {ground_truth.measurement.fingerprint()}")
+    print(f"  Public key fingerprint: {ground_truth.public_key}")
+    print(f"  Digest: {ground_truth.digest}")
+    
+    # Print registers based on type
+    regs = ground_truth.measurement.registers
+    if measurement_type == PredicateType.SEV_GUEST_V2:
+        print(f"\n  SNP Measurement: {regs[0][:32]}...")
+    elif measurement_type == PredicateType.TDX_GUEST_V2:
+        print(f"\n  TDX Measurements:")
+        print(f"    MRTD:  {regs[0][:32]}...")
+        print(f"    RTMR0: {regs[1][:32]}...")
+        print(f"    RTMR1: {regs[2][:32]}...")
+        print(f"    RTMR2: {regs[3][:32]}...")
+        print(f"    RTMR3: {regs[4][:32]}...")
+
+
+def test_secure_http_client():
+    """
+    Tests that SecureClient creates a working pinned HTTP client
+    and that TLS pinning is exercised by issuing an actual request.
+    Works with any TEE type (SNP or TDX).
+    """
+    try:
+        enclave = get_router_address()
+    except Exception as e:
+        pytest.skip(f"Could not fetch router address from ATC service: {e}")
+    
+    print(f"\nCreating secure HTTP client for: {enclave}")
+    
+    client = SecureClient(enclave=enclave, repo=REPO)
+    http_client = client.make_secure_http_client()
+    
+    ground_truth = client.ground_truth
+    assert ground_truth is not None
+    
+    try:
+        response = http_client.get(f"https://{enclave}/.well-known/tinfoil-attestation")
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}"
+        print(f"\n✓ TLS-pinned request succeeded (status {response.status_code})")
+    finally:
+        http_client.close()
+    
+    print(f"  Architecture: {ground_truth.measurement.type.value}")
+    print(f"  TLS pinned to: {ground_truth.public_key}")
 
 
 if __name__ == "__main__":
-    # Allow running the test directly using `python tests/test_verification_flow.py`
-    pytest.main([__file__])
+    pytest.main([__file__, "-v", "-s"])
