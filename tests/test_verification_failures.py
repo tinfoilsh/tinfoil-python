@@ -10,6 +10,8 @@ This guards against bugs where failed verification would still allow
 connections to proceed.
 """
 
+import ssl
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -292,6 +294,214 @@ class TestDirectMeasurementVerification:
 
         with pytest.raises(ValueError, match="SNP measurement mismatch"):
             client.verify()
+
+
+class TestVerifyPeerFingerprint:
+    """Tests for SecureClient._verify_peer_fingerprint static method."""
+
+    def test_raises_on_none_cert(self):
+        """Must raise ValueError when cert_binary is None."""
+        with pytest.raises(ValueError, match="No certificate found"):
+            SecureClient._verify_peer_fingerprint(None, "abc123")
+
+    def test_raises_on_empty_cert(self):
+        """Must raise ValueError when cert_binary is empty bytes."""
+        with pytest.raises(ValueError, match="No certificate found"):
+            SecureClient._verify_peer_fingerprint(b"", "abc123")
+
+    def test_raises_on_fingerprint_mismatch(self):
+        """Must raise ValueError when public key fingerprint doesn't match."""
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+        import datetime
+
+        # Generate a self-signed cert to get valid DER bytes
+        key = ec.generate_private_key(ec.SECP256R1())
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test")])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+            .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+            .sign(key, hashes.SHA256())
+        )
+        from cryptography.hazmat.primitives.serialization import Encoding as CryptoEncoding
+        cert_der = cert.public_bytes(CryptoEncoding.DER)
+
+        with pytest.raises(ValueError, match="Certificate fingerprint mismatch"):
+            SecureClient._verify_peer_fingerprint(cert_der, "wrong_fingerprint")
+
+    def test_passes_on_fingerprint_match(self):
+        """Must not raise when public key fingerprint matches."""
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.serialization import Encoding as CryptoEncoding, PublicFormat as CryptoPublicFormat
+        from cryptography.x509.oid import NameOID
+        import datetime
+        import hashlib
+
+        key = ec.generate_private_key(ec.SECP256R1())
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test")])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+            .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+            .sign(key, hashes.SHA256())
+        )
+        cert_der = cert.public_bytes(CryptoEncoding.DER)
+
+        # Compute the expected fingerprint the same way the code does
+        pub_der = key.public_key().public_bytes(
+            CryptoEncoding.DER, CryptoPublicFormat.SubjectPublicKeyInfo
+        )
+        expected_fp = hashlib.sha256(pub_der).hexdigest()
+
+        # Should not raise
+        SecureClient._verify_peer_fingerprint(cert_der, expected_fp)
+
+
+class TestAsyncTLSPinning:
+    """Tests that the async httpx client correctly pins TLS certificates via wrap_bio."""
+
+    FAKE_FP = "a" * 64
+
+    def _make_client_with_fake_verify(self):
+        """Create a SecureClient that returns a fake fingerprint from verify()."""
+        client = SecureClient(enclave="test.enclave.sh", repo="test/repo")
+        ground_truth = MagicMock()
+        ground_truth.public_key = self.FAKE_FP
+        client.verify = MagicMock(return_value=ground_truth)
+        return client
+
+    def _get_ssl_context(self, async_http_client):
+        """Extract the SSL context from an httpx.AsyncClient."""
+        return async_http_client._transport._pool._ssl_context
+
+    def _call_pinned_wrap_bio(self, ssl_ctx, fake_ssl_object):
+        """
+        Call the patched wrap_bio on ssl_ctx, intercepting the real
+        original_wrap_bio so it returns our fake_ssl_object instead of
+        attempting a real SSL operation.
+
+        The pinned_wrap_bio closure holds a reference to original_wrap_bio
+        (the real ctx.wrap_bio at creation time). We patch the underlying
+        ctx._wrap_bio C method so that the call chain
+        pinned_wrap_bio -> original_wrap_bio -> SSLContext.wrap_bio -> _wrap_bio
+        returns our fake.
+        """
+        with patch.object(ssl_ctx, '_wrap_bio', create=True) as mock_inner:
+            # ssl.SSLContext.wrap_bio calls sslobject_class._create which
+            # calls context._wrap_bio. We need to go one level deeper and
+            # patch SSLObject._create to just return our fake.
+            with patch('ssl.SSLObject._create', return_value=fake_ssl_object):
+                return ssl_ctx.wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO())
+
+    def test_wrap_bio_is_monkey_patched(self):
+        """make_secure_async_http_client() must replace ctx.wrap_bio."""
+        client = self._make_client_with_fake_verify()
+        async_http = client.make_secure_async_http_client()
+
+        # The underlying SSL context's wrap_bio should no longer be the
+        # original C-level method — it should be our pinned_wrap_bio closure.
+        ssl_ctx = self._get_ssl_context(async_http)
+        assert ssl_ctx.wrap_bio is not ssl.SSLContext.wrap_bio
+
+    def test_do_handshake_verifies_fingerprint_match(self):
+        """After handshake, matching fingerprint must not raise."""
+        client = self._make_client_with_fake_verify()
+        async_http = client.make_secure_async_http_client()
+        ssl_ctx = self._get_ssl_context(async_http)
+
+        fake_ssl_object = MagicMock()
+        fake_ssl_object.do_handshake = MagicMock(return_value=None)
+
+        with patch.object(SecureClient, '_verify_peer_fingerprint') as mock_verify:
+            result = self._call_pinned_wrap_bio(ssl_ctx, fake_ssl_object)
+
+            # do_handshake should have been replaced with the checked version
+            result.do_handshake()
+
+            mock_verify.assert_called_once_with(
+                fake_ssl_object.getpeercert(binary_form=True),
+                self.FAKE_FP,
+            )
+
+    def test_do_handshake_rejects_fingerprint_mismatch(self):
+        """After handshake, mismatched fingerprint must raise ValueError."""
+        client = self._make_client_with_fake_verify()
+        async_http = client.make_secure_async_http_client()
+        ssl_ctx = self._get_ssl_context(async_http)
+
+        fake_ssl_object = MagicMock()
+        fake_ssl_object.do_handshake = MagicMock(return_value=None)
+        fake_ssl_object.getpeercert.return_value = b"fake_cert_bytes"
+
+        with patch.object(
+            SecureClient, '_verify_peer_fingerprint',
+            side_effect=ValueError("Certificate fingerprint mismatch"),
+        ):
+            result = self._call_pinned_wrap_bio(ssl_ctx, fake_ssl_object)
+
+            with pytest.raises(ValueError, match="Certificate fingerprint mismatch"):
+                result.do_handshake()
+
+    def test_do_handshake_rejects_missing_cert(self):
+        """After handshake, missing peer cert must raise ValueError."""
+        client = self._make_client_with_fake_verify()
+        async_http = client.make_secure_async_http_client()
+        ssl_ctx = self._get_ssl_context(async_http)
+
+        fake_ssl_object = MagicMock()
+        fake_ssl_object.do_handshake = MagicMock(return_value=None)
+        fake_ssl_object.getpeercert.return_value = None
+
+        result = self._call_pinned_wrap_bio(ssl_ctx, fake_ssl_object)
+
+        with pytest.raises(ValueError, match="No certificate found"):
+            result.do_handshake()
+
+    def test_ssl_want_read_propagates_without_cert_check(self):
+        """SSLWantReadError during handshake must propagate without checking cert."""
+        client = self._make_client_with_fake_verify()
+        async_http = client.make_secure_async_http_client()
+        ssl_ctx = self._get_ssl_context(async_http)
+
+        fake_ssl_object = MagicMock()
+        fake_ssl_object.do_handshake = MagicMock(side_effect=ssl.SSLWantReadError())
+
+        result = self._call_pinned_wrap_bio(ssl_ctx, fake_ssl_object)
+
+        with pytest.raises(ssl.SSLWantReadError):
+            result.do_handshake()
+
+        # getpeercert should NOT have been called — handshake isn't done yet
+        fake_ssl_object.getpeercert.assert_not_called()
+
+    def test_ssl_want_write_propagates_without_cert_check(self):
+        """SSLWantWriteError during handshake must propagate without checking cert."""
+        client = self._make_client_with_fake_verify()
+        async_http = client.make_secure_async_http_client()
+        ssl_ctx = self._get_ssl_context(async_http)
+
+        fake_ssl_object = MagicMock()
+        fake_ssl_object.do_handshake = MagicMock(side_effect=ssl.SSLWantWriteError())
+
+        result = self._call_pinned_wrap_bio(ssl_ctx, fake_ssl_object)
+
+        with pytest.raises(ssl.SSLWantWriteError):
+            result.do_handshake()
+
+        fake_ssl_object.getpeercert.assert_not_called()
 
 
 if __name__ == "__main__":

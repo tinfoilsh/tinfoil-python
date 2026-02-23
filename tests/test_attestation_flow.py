@@ -93,5 +93,70 @@ def test_secure_http_client():
     print(f"  TLS pinned to: {ground_truth.public_key}")
 
 
+@pytest.mark.asyncio
+async def test_secure_async_http_client():
+    """
+    Tests that the async pinned client can connect to the enclave.
+    Mirrors test_secure_http_client for the async path.
+    """
+    try:
+        enclave = get_router_address()
+    except Exception as e:
+        pytest.skip(f"Could not fetch router address from ATC service: {e}")
+
+    client = SecureClient(enclave=enclave, repo=REPO)
+    http_client = client.make_secure_async_http_client()
+
+    ground_truth = client.ground_truth
+    assert ground_truth is not None
+
+    try:
+        response = await http_client.get(f"https://{enclave}/.well-known/tinfoil-attestation")
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}"
+    finally:
+        await http_client.aclose()
+
+
+def test_sync_pinned_client_rejects_wrong_host():
+    """
+    A client pinned to the enclave's cert must reject connections
+    to a different host (whose cert won't match the pinned fingerprint).
+    """
+    try:
+        enclave = get_router_address()
+    except Exception as e:
+        pytest.skip(f"Could not fetch router address from ATC service: {e}")
+
+    client = SecureClient(enclave=enclave, repo=REPO)
+    http_client = client.make_secure_http_client()
+
+    try:
+        with pytest.raises(Exception):
+            http_client.get("https://google.com")
+    finally:
+        http_client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_pinned_client_rejects_wrong_host():
+    """
+    The async pinned client must reject connections to a host
+    whose cert doesn't match the pinned fingerprint.
+    """
+    try:
+        enclave = get_router_address()
+    except Exception as e:
+        pytest.skip(f"Could not fetch router address from ATC service: {e}")
+
+    client = SecureClient(enclave=enclave, repo=REPO)
+    http_client = client.make_secure_async_http_client()
+
+    try:
+        with pytest.raises(Exception):
+            await http_client.get("https://google.com")
+    finally:
+        await http_client.aclose()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
