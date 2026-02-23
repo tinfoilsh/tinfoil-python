@@ -49,26 +49,13 @@ from .collateral_tdx import (
     CollateralError,
     TdxCollateral,
     TcbLevel,
+    DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER,
 )
 
 
 # =============================================================================
 # Orchestration Constants
 # =============================================================================
-
-# Minimum required tcbEvaluationDataNumber.
-# This prevents accepting collateral issued before critical security updates.
-# See: https://www.intel.com/content/www/us/en/developer/topic-technology/software-security-guidance/trusted-computing-base-recovery-attestation.html
-#
-# This value should be set using:
-#   from tinfoil.attestation.collateral_tdx import calculate_min_tcb_evaluation_data_number
-#   min_num = calculate_min_tcb_evaluation_data_number()
-#
-# The function queries Intel PCS and returns the lowest tcbEvaluationDataNumber
-# whose TCB recovery event date is within the last year.
-#
-# Current value 18 corresponds to TCB recovery event date 2024-11-12.
-DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER = 18
 
 # Expected values for policy validation
 # TdAttributes: All zeros except SEPT_VE_DISABLE=1
