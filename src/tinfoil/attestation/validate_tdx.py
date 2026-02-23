@@ -355,6 +355,11 @@ def _validate_exact_byte_matches(quote: QuoteV4, options: PolicyOptions) -> None
 
     # RTMR checks
     if t.rtmrs is not None:
+        if len(body.rtmrs) != len(t.rtmrs):
+            raise TdxValidationError(
+                f"RTMR count mismatch: quote has {len(body.rtmrs)}, "
+                f"policy expects {len(t.rtmrs)}"
+            )
         for i, (given, expected) in enumerate(zip(body.rtmrs, t.rtmrs)):
             if expected is not None:
                 _byte_check(f"RTMR[{i}]", given, expected)
