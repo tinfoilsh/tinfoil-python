@@ -15,7 +15,7 @@ import ssl
 import pytest
 from unittest.mock import patch, MagicMock
 
-from tinfoil.client import SecureClient
+from tinfoil.client import SecureClient, _verify_peer_fingerprint
 from tinfoil.attestation import (
     Measurement,
     PredicateType,
@@ -297,17 +297,17 @@ class TestDirectMeasurementVerification:
 
 
 class TestVerifyPeerFingerprint:
-    """Tests for SecureClient._verify_peer_fingerprint static method."""
+    """Tests for _verify_peer_fingerprint."""
 
     def test_raises_on_none_cert(self):
         """Must raise ValueError when cert_binary is None."""
         with pytest.raises(ValueError, match="No certificate found"):
-            SecureClient._verify_peer_fingerprint(None, "abc123")
+            _verify_peer_fingerprint(None, "abc123")
 
     def test_raises_on_empty_cert(self):
         """Must raise ValueError when cert_binary is empty bytes."""
         with pytest.raises(ValueError, match="No certificate found"):
-            SecureClient._verify_peer_fingerprint(b"", "abc123")
+            _verify_peer_fingerprint(b"", "abc123")
 
     def test_raises_on_fingerprint_mismatch(self):
         """Must raise ValueError when public key fingerprint doesn't match."""
@@ -334,7 +334,7 @@ class TestVerifyPeerFingerprint:
         cert_der = cert.public_bytes(CryptoEncoding.DER)
 
         with pytest.raises(ValueError, match="Certificate fingerprint mismatch"):
-            SecureClient._verify_peer_fingerprint(cert_der, "wrong_fingerprint")
+            _verify_peer_fingerprint(cert_der, "wrong_fingerprint")
 
     def test_passes_on_fingerprint_match(self):
         """Must not raise when public key fingerprint matches."""
@@ -367,7 +367,7 @@ class TestVerifyPeerFingerprint:
         expected_fp = hashlib.sha256(pub_der).hexdigest()
 
         # Should not raise
-        SecureClient._verify_peer_fingerprint(cert_der, expected_fp)
+        _verify_peer_fingerprint(cert_der, expected_fp)
 
 
 class TestAsyncTLSPinning:
@@ -425,7 +425,7 @@ class TestAsyncTLSPinning:
         fake_ssl_object = MagicMock()
         fake_ssl_object.do_handshake = MagicMock(return_value=None)
 
-        with patch.object(SecureClient, '_verify_peer_fingerprint') as mock_verify:
+        with patch('tinfoil.client._verify_peer_fingerprint') as mock_verify:
             result = self._call_pinned_wrap_bio(ssl_ctx, fake_ssl_object)
 
             # do_handshake should have been replaced with the checked version
@@ -446,8 +446,8 @@ class TestAsyncTLSPinning:
         fake_ssl_object.do_handshake = MagicMock(return_value=None)
         fake_ssl_object.getpeercert.return_value = b"fake_cert_bytes"
 
-        with patch.object(
-            SecureClient, '_verify_peer_fingerprint',
+        with patch(
+            'tinfoil.client._verify_peer_fingerprint',
             side_effect=ValueError("Certificate fingerprint mismatch"),
         ):
             result = self._call_pinned_wrap_bio(ssl_ctx, fake_ssl_object)
