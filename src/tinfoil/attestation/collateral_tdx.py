@@ -1362,8 +1362,7 @@ def calculate_min_tcb_evaluation_data_number(
         if item.tcb_recovery_event_date >= cutoff_date:
             return item.tcb_evaluation_data_number
 
-    # If all numbers are too old, return the highest (most recent) one
-    # This is a fallback - in practice, at least the most recent should be recent
+    # Fail closed if all numbers are too old
     highest = sorted_numbers[-1]
     raise CollateralError(
         f"All TCB evaluation data numbers are older than {max_age_days} days. "
