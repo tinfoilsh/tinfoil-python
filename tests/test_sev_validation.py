@@ -1,12 +1,12 @@
 import pytest
-from tinfoil.attestation.validate import (
+from tinfoil.attestation.validate_sev import (
     ValidationOptions, 
     validate_report, 
     _validate_policy, 
     _compare_policy_versions, 
     _validate_platform_info
 )
-from tinfoil.attestation.abi_sevsnp import (
+from tinfoil.attestation.abi_sev import (
     Report, 
     SnpPolicy, 
     SnpPlatformInfo, 
@@ -14,7 +14,7 @@ from tinfoil.attestation.abi_sevsnp import (
     SignerInfo,
     ReportSigner
 )
-from tinfoil.attestation.verify import CertificateChain
+from tinfoil.attestation.verify_sev import CertificateChain
 
 
 class TestValidationOptions:
