@@ -175,3 +175,9 @@ tuf-repo-cdn.sigstore.dev.json
 verifier/
 tinfoil/tinfoil_verifier/
 .DS_Store
+
+# Logs
+*.log
+
+# Generated documentation
+docs/_build/

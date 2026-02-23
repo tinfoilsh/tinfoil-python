@@ -20,6 +20,7 @@ dependencies = [
     "requests>=2.31.0",
     "cryptography>=42.0.0",
     "pyOpenSSL>=25.0.0",
+    "pyasn1>=0.4.0",
     "sigstore>=4.1.0",
     "platformdirs>=4.2.0",
     "pytest-asyncio>=0.26.0"
