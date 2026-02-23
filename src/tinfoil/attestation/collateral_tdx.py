@@ -365,6 +365,20 @@ def _is_crl_fresh(crl: x509.CertificateRevocationList) -> bool:
 # Intel-defined field sizes (hex character counts)
 # =============================================================================
 
+# Minimum required tcbEvaluationDataNumber.
+# This prevents accepting collateral issued before critical security updates.
+# See: https://www.intel.com/content/www/us/en/developer/topic-technology/software-security-guidance/trusted-computing-base-recovery-attestation.html
+#
+# This value should ideally be set dynamically using:
+#   from tinfoil.attestation.collateral_tdx import calculate_min_tcb_evaluation_data_number
+#   min_num = calculate_min_tcb_evaluation_data_number()
+#
+# That function queries Intel PCS and returns the lowest tcbEvaluationDataNumber
+# whose TCB recovery event date is within the last year.
+#
+# Current value 18 corresponds to TCB recovery event date 2024-11-12.
+DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER = 18
+
 TDX_MRSIGNER_SIZE = 48       # TDX module MRSIGNER: 48 bytes
 QE_MRSIGNER_SIZE = 32        # QE enclave MRSIGNER: 32 bytes
 QE_ATTRIBUTES_SIZE = 16      # QE enclave attributes: 16 bytes
@@ -2010,7 +2024,7 @@ class CollateralValidationResult:
 def validate_collateral(
     quote: "QuoteV4",
     pck_chain: "PCKCertificateChain",
-    min_tcb_evaluation_data_number: int = 18,
+    min_tcb_evaluation_data_number: int = DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER,
 ) -> CollateralValidationResult:
     """
     Validate all collateral for a TDX quote.
