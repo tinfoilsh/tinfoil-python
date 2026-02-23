@@ -111,12 +111,12 @@ class SecureClient:
             return sock
         return wrap_socket
 
-    def _create_bio_wrapper(self, expected_fp: str):
+    def _create_bio_wrapper(self, original_wrap_bio, expected_fp: str):
         """
         Creates a wrap_bio replacement that verifies the certificate's public key fingerprint
         after the TLS handshake completes.
         """
-        def pinned_wrap_bio(original_wrap_bio, *args, **kwargs):
+        def pinned_wrap_bio(*args, **kwargs):
             ssl_object = original_wrap_bio(*args, **kwargs)
             original_do_handshake = ssl_object.do_handshake
 
@@ -147,11 +147,9 @@ class SecureClient:
         Build an httpx.AsyncClient that pins the enclave's TLS cert
         """
         expected_fp = self.verify().public_key
-        pinned_wrap_bio = self._create_bio_wrapper(expected_fp)
 
         ctx = ssl.create_default_context()
-        original_wrap_bio = ctx.wrap_bio
-        ctx.wrap_bio = lambda *args, **kwargs: pinned_wrap_bio(original_wrap_bio, *args, **kwargs)
+        ctx.wrap_bio = self._create_bio_wrapper(ctx.wrap_bio, expected_fp)
         return httpx.AsyncClient(verify=ctx, follow_redirects=True)
 
     def verify(self) -> GroundTruth:
