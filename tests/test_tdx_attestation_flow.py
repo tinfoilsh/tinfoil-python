@@ -3,13 +3,13 @@ Integration test for TDX attestation verification flow.
 
 Tests the complete verification using the SecureClient API.
 
-Configure via environment variables:
-    TINFOIL_TEST_REPO    - GitHub repo (e.g., tinfoilsh/confidential-gpt-oss-120b-free)
-    TINFOIL_TEST_ENCLAVE - Enclave hostname (e.g., gpt-oss-120b-free.inf5.tinfoil.sh)
+Configure via environment variables (both required):
+    TINFOIL_TEST_REPO    - Tinfoil config repo (org/repo)
+    TINFOIL_TEST_ENCLAVE - Enclave hostname
 
 Example:
-    TINFOIL_TEST_REPO=tinfoilsh/confidential-deepseek-r1-0528 \
-    TINFOIL_TEST_ENCLAVE=deepseek-r1-0528.inf9.tinfoil.sh \
+    TINFOIL_TEST_REPO=<org/repo> \
+    TINFOIL_TEST_ENCLAVE=<enclave-hostname> \
     python -m pytest tests/test_tdx_attestation_flow.py -v -s
 """
 
@@ -21,9 +21,15 @@ from tinfoil.attestation import PredicateType, TDX_TYPES
 
 pytestmark = pytest.mark.integration  # allows pytest -m integration filtering
 
-# Test configuration from environment or defaults
-REPO = os.environ.get("TINFOIL_TEST_REPO", "tinfoilsh/confidential-gpt-oss-120b-free")
-ENCLAVE = os.environ.get("TINFOIL_TEST_ENCLAVE", "gpt-oss-120b-free.inf5.tinfoil.sh")
+# Test configuration from environment (required)
+REPO = os.environ.get("TINFOIL_TEST_REPO")
+ENCLAVE = os.environ.get("TINFOIL_TEST_ENCLAVE")
+
+if not REPO or not ENCLAVE:
+    pytest.skip(
+        "TINFOIL_TEST_REPO and TINFOIL_TEST_ENCLAVE must be set",
+        allow_module_level=True,
+    )
 
 
 def test_tdx_full_verification_flow():

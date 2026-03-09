@@ -7,7 +7,13 @@ and mismatched repos.
 
 This guards against bugs like the Go verifier issue where hardware
 measurement mismatches would silently continue instead of failing.
+
+Configure via environment variables (both required):
+    TINFOIL_TEST_CORRECT_REPO - Tinfoil config repo that matches the router enclave
+    TINFOIL_TEST_WRONG_REPO   - Tinfoil config repo that does NOT match the router enclave
 """
+
+import os
 
 import pytest
 
@@ -16,9 +22,16 @@ from tinfoil.attestation import MeasurementMismatchError
 
 pytestmark = pytest.mark.integration
 
-# Router runs confidential-model-router, use gpt-oss as wrong repo
-CORRECT_REPO = "tinfoilsh/confidential-model-router"
-WRONG_REPO = "tinfoilsh/confidential-gpt-oss-120b-free"
+# TINFOIL_TEST_CORRECT_REPO: Tinfoil config repo that matches the router enclave
+# TINFOIL_TEST_WRONG_REPO: Tinfoil config repo that does NOT match the router enclave
+CORRECT_REPO = os.environ.get("TINFOIL_TEST_CORRECT_REPO")
+WRONG_REPO = os.environ.get("TINFOIL_TEST_WRONG_REPO")
+
+if not CORRECT_REPO or not WRONG_REPO:
+    pytest.skip(
+        "TINFOIL_TEST_CORRECT_REPO and TINFOIL_TEST_WRONG_REPO must be set",
+        allow_module_level=True,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -42,7 +55,7 @@ class TestMeasurementMismatchIntegration:
 
         This test:
         1. Gets a real router enclave
-        2. Tries to verify it against gpt-oss-120b-free repo (WRONG)
+        2. Tries to verify it against the wrong repo
         3. Expects MeasurementMismatchError
 
         This catches bugs where measurement comparison is skipped.
