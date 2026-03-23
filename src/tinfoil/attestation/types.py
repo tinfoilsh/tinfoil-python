@@ -95,12 +95,16 @@ class Measurement:
 
     def fingerprint(self) -> str:
         """
-        Computes the SHA-256 hash of the predicate type and all measurement
-        registers.  Always returns a 64-char hex digest regardless of the
-        number of registers, so callers get a uniform format.
+        Computes a fingerprint for a measurement. For single-register
+        measurements, the register value is returned directly. For multi-register
+        measurements, SHA-256 is computed over the type URL concatenated with all
+        register values (no separator).
         """
         if not self.registers:
             raise ValueError("Cannot compute fingerprint: no measurement registers")
+
+        if len(self.registers) == 1:
+            return self.registers[0]
 
         all_data = self.type.value + "".join(self.registers)
         return hashlib.sha256(all_data.encode()).hexdigest()
