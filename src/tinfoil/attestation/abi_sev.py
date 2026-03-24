@@ -323,8 +323,13 @@ class Report:
         except ValueError as e:
             raise ValueError(f"launch_tcb not correctly formed: {e}")
 
+        # 0x1F8-0x200: launch_mit_vector (valid field in v5+)
+        # 0x200-0x208: current_mit_vector (valid field in v5+)
+        # For v2/v3 these bytes are reserved MBZ; for v5+ they are valid fields.
+        # 0x208-0x2A0: Reserved before signature (must be zero for all versions)
+        mbz_before_sig = 0x1F8 if self.version < 5 else 0x208
         try:
-            mbz(data, 0x1F8, SIGNATURE_OFFSET)
+            mbz(data, mbz_before_sig, SIGNATURE_OFFSET)
         except ValueError as e:
             raise ValueError(f"report_data not correctly formed: {e}")
         
