@@ -217,14 +217,41 @@ class SecureClient:
         handler = TLSBoundHTTPSHandler(self._ground_truth.public_key)
         return urllib.request.build_opener(handler)
 
+    def reverify(self) -> GroundTruth:
+        """Force re-verification of the enclave attestation.
+
+        Use this after a certificate rotation causes connection failures.
+        For httpx clients, call this then create a new client via
+        make_secure_http_client() or make_secure_async_http_client().
+        """
+        self._ground_truth = None
+        return self.verify()
+
     def make_request(self, req: urllib.request.Request) -> Response:
-        """Makes an HTTP request using the secure client"""
-        client = self.get_http_client()
-        
+        """Makes an HTTP request using the secure client.
+
+        If the request fails with a connection or certificate error (e.g. TLS
+        certificate rotation), performs full re-attestation and retries once.
+        If re-verification fails, the original error is raised.
+        """
         # If URL doesn't have a host, assume it's relative to the enclave
         if not urlparse(req.full_url).netloc:
             req.full_url = f"https://{self.enclave}{req.full_url}"
-        
+
+        try:
+            return self._send_request(req)
+        except ValueError as first_err:
+            # Certificate fingerprint mismatch — attempt re-verification and retry once.
+            # If re-verification fails, return the original error.
+            try:
+                self.reverify()
+            except Exception:
+                raise first_err from None
+            return self._send_request(req)
+
+    def _send_request(self, req: urllib.request.Request) -> Response:
+        """Send a single request using the current pinned client."""
+        client = self.get_http_client()
         with client.open(req) as resp:
             return Response(
                 status=f"{resp.status} {resp.reason}",
