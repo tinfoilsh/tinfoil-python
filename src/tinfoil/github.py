@@ -6,6 +6,8 @@ import os
 import platformdirs
 import sys
 
+GITHUB_PROXY = "https://github-proxy.tinfoil.sh"
+
 # --- Cache Setup ---
 _GITHUB_CACHE_DIR = platformdirs.user_cache_dir("tinfoil", "tinfoil")
 
@@ -38,7 +40,7 @@ def fetch_latest_digest(repo: str) -> str:
     Raises:
         Exception: If there's any error fetching or parsing the data
     """
-    url = f"https://api-github-proxy.tinfoil.sh/repos/{repo}/releases/latest"
+    url = f"{GITHUB_PROXY}/repos/{repo}/releases/latest"
     release_response = requests.get(url, timeout=15)
     release_response.raise_for_status()
     
@@ -61,7 +63,7 @@ def fetch_latest_digest(repo: str) -> str:
         return matches.group(1)
     
     # Fallback option: fetch digest from github special endpoint
-    digest_url = f"https://github-proxy.tinfoil.sh/{repo}/releases/download/{tag_name}/tinfoil.hash"
+    digest_url = f"{GITHUB_PROXY}/{repo}/releases/download/{tag_name}/tinfoil.hash"
     response = requests.get(digest_url, timeout=15)
     if response.status_code != 200:
         raise Exception(f"Failed to fetch attestation digest: {response.status_code} {response.reason}")
@@ -104,7 +106,7 @@ def fetch_attestation_bundle(repo: str, digest: str) -> bytes:
             # Proceed to fetch from network
 
     # 2. Cache miss or error - fetch from GitHub API
-    url = f"https://api-github-proxy.tinfoil.sh/repos/{repo}/attestations/sha256:{digest}"
+    url = f"{GITHUB_PROXY}/repos/{repo}/attestations/sha256:{digest}"
     try:
         bundle_response = requests.get(url, timeout=15)
         bundle_response.raise_for_status()
