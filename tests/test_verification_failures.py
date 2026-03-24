@@ -11,6 +11,7 @@ connections to proceed.
 """
 
 import ssl
+import urllib.error
 
 import pytest
 from unittest.mock import patch, MagicMock
@@ -267,6 +268,85 @@ class TestSecureClientVerificationFailures:
 
         with pytest.raises(Exception, match="Verification failed"):
             client.make_request(req)
+
+
+class TestMakeRequestReverification:
+    """Tests that make_request() correctly handles reverification on cert rotation."""
+
+    def _make_verified_client(self):
+        """Create a SecureClient with a fake ground_truth already set."""
+        client = SecureClient(enclave="test.enclave.sh", repo="test/repo")
+        ground_truth = MagicMock()
+        ground_truth.public_key = "a" * 64
+        client._ground_truth = ground_truth
+        return client
+
+    @patch('tinfoil.client.SecureClient.reverify')
+    @patch('tinfoil.client.SecureClient._send_request')
+    def test_reverifies_and_retries_on_fingerprint_mismatch(self, mock_send, mock_reverify):
+        """On ValueError (fingerprint mismatch), must reverify and retry once."""
+        import urllib.request
+
+        expected_response = MagicMock()
+        mock_send.side_effect = [
+            ValueError("Certificate fingerprint mismatch"),
+            expected_response,
+        ]
+
+        client = self._make_verified_client()
+        req = urllib.request.Request("https://test.enclave.sh/api")
+        result = client.make_request(req)
+
+        mock_reverify.assert_called_once()
+        assert mock_send.call_count == 2
+        assert result is expected_response
+
+    @patch('tinfoil.client.SecureClient.reverify')
+    @patch('tinfoil.client.SecureClient._send_request')
+    def test_raises_original_error_if_reverify_fails(self, mock_send, mock_reverify):
+        """If reverification itself fails, the original error must be raised."""
+        import urllib.request
+
+        mock_send.side_effect = ValueError("Certificate fingerprint mismatch")
+        mock_reverify.side_effect = Exception("Attestation failed")
+
+        client = self._make_verified_client()
+        req = urllib.request.Request("https://test.enclave.sh/api")
+
+        with pytest.raises(ValueError, match="Certificate fingerprint mismatch"):
+            client.make_request(req)
+
+    @patch('tinfoil.client.SecureClient.reverify')
+    @patch('tinfoil.client.SecureClient._send_request')
+    def test_does_not_reverify_on_non_valueerror(self, mock_send, mock_reverify):
+        """Non-ValueError errors must propagate without reverification."""
+        import urllib.request
+
+        mock_send.side_effect = urllib.error.URLError("connection refused")
+
+        client = self._make_verified_client()
+        req = urllib.request.Request("https://test.enclave.sh/api")
+
+        with pytest.raises(urllib.error.URLError):
+            client.make_request(req)
+
+        mock_reverify.assert_not_called()
+
+    @patch('tinfoil.client.SecureClient.reverify')
+    @patch('tinfoil.client.SecureClient._send_request')
+    def test_does_not_reverify_on_oserror(self, mock_send, mock_reverify):
+        """OSError must propagate without reverification."""
+        import urllib.request
+
+        mock_send.side_effect = OSError("network unreachable")
+
+        client = self._make_verified_client()
+        req = urllib.request.Request("https://test.enclave.sh/api")
+
+        with pytest.raises(OSError):
+            client.make_request(req)
+
+        mock_reverify.assert_not_called()
 
 
 class TestDirectMeasurementVerification:
