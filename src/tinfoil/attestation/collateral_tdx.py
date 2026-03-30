@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from .abi_tdx import QuoteV4
     from .verify_tdx import PCKCertificateChain
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
@@ -49,18 +49,30 @@ from .cert_utils import (
 INTEL_PCS_TDX_BASE_URL = "https://api.trustedservices.intel.com/tdx/certification/v4"
 INTEL_PCS_SGX_BASE_URL = "https://api.trustedservices.intel.com/sgx/certification/v4"
 
+TDX_PROXY_HOST = "tdx-proxy.tinfoil.sh"
+
 # Type alias for the HTTP session used by fetch functions.
 # Pass a requests.Session to reuse connections, inject retries, or mock in tests.
 HttpSession = Optional[requests.Session]
 
 
+def _proxy_url(url: str) -> str:
+    """Rewrite *url* to route through the TDX collateral proxy."""
+    parsed = urlparse(url)
+    proxied = f"https://{TDX_PROXY_HOST}/{parsed.hostname}{parsed.path}"
+    if parsed.query:
+        return f"{proxied}?{parsed.query}"
+    return proxied
+
+
 def _http_get(url: str, timeout: float, session: HttpSession = None) -> requests.Response:
     """Issue a GET request via *session* (or a one-shot ``requests.get``)."""
+    fetch_url = _proxy_url(url) if TDX_PROXY_HOST else url
     try:
         if session is not None:
-            resp = session.get(url, timeout=timeout)
+            resp = session.get(fetch_url, timeout=timeout)
         else:
-            resp = requests.get(url, timeout=timeout)
+            resp = requests.get(fetch_url, timeout=timeout)
         resp.raise_for_status()
         return resp
     except requests.RequestException as e:
@@ -375,9 +387,7 @@ def _is_crl_fresh(crl: x509.CertificateRevocationList) -> bool:
 #
 # That function queries Intel PCS and returns the lowest tcbEvaluationDataNumber
 # whose TCB recovery event date is within the last year.
-#
-# Current value 18 corresponds to TCB recovery event date 2024-11-12.
-DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER = 18
+DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER = 19
 
 TDX_MRSIGNER_SIZE = 48       # TDX module MRSIGNER: 48 bytes
 QE_MRSIGNER_SIZE = 32        # QE enclave MRSIGNER: 32 bytes
@@ -831,7 +841,10 @@ def fetch_tcb_info(
             pass
 
     # Cache miss or stale - fetch from Intel PCS
-    url = f"{INTEL_PCS_TDX_BASE_URL}/tcb?fmspc={fmspc}"
+    url = (
+        f"{INTEL_PCS_TDX_BASE_URL}/tcb?fmspc={fmspc}"
+        f"&tcbEvaluationDataNumber={DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER}"
+    )
     response = _http_get(url, timeout, session)
 
     raw_bytes = response.content
@@ -897,7 +910,10 @@ def fetch_qe_identity(
             pass
 
     # Cache miss or stale - fetch from Intel PCS
-    url = f"{INTEL_PCS_TDX_BASE_URL}/qe/identity"
+    url = (
+        f"{INTEL_PCS_TDX_BASE_URL}/qe/identity"
+        f"?tcbEvaluationDataNumber={DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER}"
+    )
     response = _http_get(url, timeout, session)
 
     raw_bytes = response.content
