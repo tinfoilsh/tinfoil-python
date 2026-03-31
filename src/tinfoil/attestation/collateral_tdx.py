@@ -830,7 +830,9 @@ def fetch_tcb_info(
     if cached_entry is not None and cached_entry.issuer_chain_pem is not None:
         try:
             cached_tcb_info = parse_tcb_info_response(cached_entry.body)
-            if _is_tcb_info_fresh(cached_tcb_info):
+            if (_is_tcb_info_fresh(cached_tcb_info)
+                    and cached_tcb_info.tcb_info.tcb_evaluation_data_number
+                    >= DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER):
                 # Re-verify signature on cache hit
                 issuer_chain = parse_pem_chain(cached_entry.issuer_chain_pem.encode("utf-8"))
                 verify_tcb_info_signature(
@@ -899,7 +901,9 @@ def fetch_qe_identity(
     if cached_entry is not None and cached_entry.issuer_chain_pem is not None:
         try:
             cached_qe_identity = parse_qe_identity_response(cached_entry.body)
-            if _is_qe_identity_fresh(cached_qe_identity):
+            if (_is_qe_identity_fresh(cached_qe_identity)
+                    and cached_qe_identity.enclave_identity.tcb_evaluation_data_number
+                    >= DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER):
                 # Re-verify signature on cache hit
                 issuer_chain = parse_pem_chain(cached_entry.issuer_chain_pem.encode("utf-8"))
                 verify_qe_identity_signature(
