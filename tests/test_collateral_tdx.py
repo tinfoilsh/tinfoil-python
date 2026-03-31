@@ -60,7 +60,7 @@ SAMPLE_TCB_INFO_JSON = """
     "fmspc": "90c06f000000",
     "pceId": "0000",
     "tcbType": 0,
-    "tcbEvaluationDataNumber": 18,
+    "tcbEvaluationDataNumber": 19,
     "tdxModule": {
       "mrsigner": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
       "attributes": "0000000000000000",
@@ -134,7 +134,7 @@ SAMPLE_QE_IDENTITY_JSON = """
     "version": 2,
     "issueDate": "2025-12-17T18:48:11Z",
     "nextUpdate": "2026-01-16T18:48:11Z",
-    "tcbEvaluationDataNumber": 18,
+    "tcbEvaluationDataNumber": 19,
     "miscselect": "00000000",
     "miscselectMask": "FFFFFFFF",
     "attributes": "11000000000000000000000000000000",
@@ -173,7 +173,7 @@ SAMPLE_STALE_TCB_INFO_JSON = """
     "fmspc": "90c06f000000",
     "pceId": "0000",
     "tcbType": 0,
-    "tcbEvaluationDataNumber": 18,
+    "tcbEvaluationDataNumber": 19,
     "tdxModuleIdentities": [],
     "tcbLevels": []
   },
@@ -874,8 +874,8 @@ class TestCheckCollateralFreshness:
         with patch('tinfoil.attestation.collateral_tdx.datetime') as mock_dt:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
-            # Sample data has tcbEvaluationDataNumber=18, threshold of 18 should pass
-            check_collateral_freshness(collateral, min_tcb_evaluation_data_number=18)
+            # Sample data has tcbEvaluationDataNumber=19, threshold of 19 should pass
+            check_collateral_freshness(collateral, min_tcb_evaluation_data_number=19)
 
             # Lower threshold should also pass
             check_collateral_freshness(collateral, min_tcb_evaluation_data_number=10)
@@ -897,19 +897,19 @@ class TestCheckCollateralFreshness:
         with patch('tinfoil.attestation.collateral_tdx.datetime') as mock_dt:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
-            # Sample data has tcbEvaluationDataNumber=18, threshold of 19 should fail
+            # Sample data has tcbEvaluationDataNumber=19, threshold of 20 should fail
             with pytest.raises(CollateralError, match="TCB Info tcbEvaluationDataNumber .* is below"):
-                check_collateral_freshness(collateral, min_tcb_evaluation_data_number=19)
+                check_collateral_freshness(collateral, min_tcb_evaluation_data_number=20)
 
     def test_qe_identity_evaluation_data_number_below_threshold(self):
         """Test failure when QE Identity tcbEvaluationDataNumber is below threshold."""
         # Create TCB Info with high tcbEvaluationDataNumber
         high_eval_tcb_json = SAMPLE_TCB_INFO_JSON.replace(
-            '"tcbEvaluationDataNumber": 18',
+            '"tcbEvaluationDataNumber": 19',
             '"tcbEvaluationDataNumber": 25'
         )
         tcb_info = parse_tcb_info_response(high_eval_tcb_json.encode())
-        # QE Identity still has tcbEvaluationDataNumber=18
+        # QE Identity still has tcbEvaluationDataNumber=19
         qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
 
         collateral = TdxCollateral(
@@ -924,7 +924,7 @@ class TestCheckCollateralFreshness:
         with patch('tinfoil.attestation.collateral_tdx.datetime') as mock_dt:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
-            # TCB Info has 25, QE Identity has 18, threshold of 20 should fail on QE Identity
+            # TCB Info has 25, QE Identity has 19, threshold of 20 should fail on QE Identity
             with pytest.raises(CollateralError, match="QE Identity tcbEvaluationDataNumber .* is below"):
                 check_collateral_freshness(collateral, min_tcb_evaluation_data_number=20)
 
@@ -1216,6 +1216,43 @@ class TestFetchTcbInfoWithCache:
                         # Should call network because cache is stale
                         mock_get.assert_called_once()
 
+    def test_old_tcb_eval_number_cache_triggers_refetch(self, tmp_path):
+        """Test that cached data with tcbEvaluationDataNumber below threshold triggers re-fetch."""
+        import base64
+        import json as json_mod
+        old_json = SAMPLE_TCB_INFO_JSON.replace(
+            '"tcbEvaluationDataNumber": 19',
+            '"tcbEvaluationDataNumber": 17',
+        )
+        old_response = old_json.encode()
+
+        with patch('tinfoil.attestation.collateral_tdx._TDX_CACHE_DIR', str(tmp_path)):
+            cache_path = tmp_path / "tdx_tcb_info_00a06d080000.json"
+            cache_data = {
+                "body": base64.b64encode(old_response).decode("ascii"),
+                "issuer_chain_pem": "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+            }
+            cache_path.write_text(json_mod.dumps(cache_data))
+
+            mock_now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+            with patch('tinfoil.attestation.collateral_tdx.datetime') as mock_dt:
+                mock_dt.now.return_value = mock_now
+                mock_dt.fromisoformat = datetime.fromisoformat
+                with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
+                    with patch('tinfoil.attestation.collateral_tdx.verify_tcb_info_signature'):
+                        mock_response = MagicMock()
+                        mock_response.content = SAMPLE_TCB_INFO_RESPONSE
+                        mock_response.raise_for_status = MagicMock()
+                        mock_response.headers = {"TCB-Info-Issuer-Chain": "dummy"}
+                        mock_get.return_value = mock_response
+
+                        with patch('tinfoil.attestation.collateral_tdx._parse_issuer_chain_header') as mock_parse:
+                            mock_parse.return_value = []
+                            tcb_info, raw, _chain = fetch_tcb_info("00A06D080000")
+
+                            mock_get.assert_called_once()
+                            assert tcb_info.tcb_info.tcb_evaluation_data_number == 19
+
 
 class TestFetchQeIdentityWithCache:
     """Test fetch_qe_identity caching behavior."""
@@ -1267,6 +1304,43 @@ class TestFetchQeIdentityWithCache:
                             # Should not call network
                             mock_get.assert_not_called()
                             assert qe_identity.enclave_identity.id == "TD_QE"
+
+    def test_old_tcb_eval_number_cache_triggers_refetch(self, tmp_path):
+        """Test that cached QE Identity with tcbEvaluationDataNumber below threshold triggers re-fetch."""
+        import base64
+        import json as json_mod
+        old_json = SAMPLE_QE_IDENTITY_JSON.replace(
+            '"tcbEvaluationDataNumber": 19',
+            '"tcbEvaluationDataNumber": 17',
+        )
+        old_response = old_json.encode()
+
+        with patch('tinfoil.attestation.collateral_tdx._TDX_CACHE_DIR', str(tmp_path)):
+            cache_path = tmp_path / "tdx_qe_identity.json"
+            cache_data = {
+                "body": base64.b64encode(old_response).decode("ascii"),
+                "issuer_chain_pem": "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
+            }
+            cache_path.write_text(json_mod.dumps(cache_data))
+
+            mock_now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+            with patch('tinfoil.attestation.collateral_tdx.datetime') as mock_dt:
+                mock_dt.now.return_value = mock_now
+                mock_dt.fromisoformat = datetime.fromisoformat
+                with patch('tinfoil.attestation.collateral_tdx.requests.get') as mock_get:
+                    with patch('tinfoil.attestation.collateral_tdx.verify_qe_identity_signature'):
+                        mock_response = MagicMock()
+                        mock_response.content = SAMPLE_QE_IDENTITY_RESPONSE
+                        mock_response.raise_for_status = MagicMock()
+                        mock_response.headers = {"SGX-Enclave-Identity-Issuer-Chain": "dummy"}
+                        mock_get.return_value = mock_response
+
+                        with patch('tinfoil.attestation.collateral_tdx._parse_issuer_chain_header') as mock_parse:
+                            mock_parse.return_value = []
+                            qe_identity, raw, _chain = fetch_qe_identity()
+
+                            mock_get.assert_called_once()
+                            assert qe_identity.enclave_identity.tcb_evaluation_data_number == 19
 
 
 # =============================================================================
