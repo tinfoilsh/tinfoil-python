@@ -115,4 +115,4 @@ def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model
     tf_client = SecureClient(enclave, repo, measurement)
     return _HTTPSecureClient(enclave, tf_client, api_key)
 
-__all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient"]
+__all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient", "SecureClient"]
