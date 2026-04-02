@@ -5,7 +5,7 @@ from openai.resources.embeddings import Embeddings as OpenAIEmbeddings
 from openai.resources.audio import Audio as OpenAIAudio
 import httpx
 
-from .client import SecureClient, get_router_address
+from .client import SecureClient, VerificationDocument, get_router_address
 
 class TinfoilAI:
     chat: OpenAIChat
@@ -28,8 +28,8 @@ class TinfoilAI:
         
         self.enclave = enclave
         self.api_key = api_key
-        tf_client = SecureClient(enclave, repo, measurement)
-        secure_http = tf_client.make_secure_http_client()
+        self._secure_client = SecureClient(enclave, repo, measurement)
+        secure_http = self._secure_client.make_secure_http_client()
         self.client = OpenAI(
             base_url=f"https://{enclave}/v1/",
             api_key=api_key,
@@ -38,6 +38,10 @@ class TinfoilAI:
         self.chat = self.client.chat
         self.embeddings = self.client.embeddings
         self.audio = self.client.audio
+
+    def get_verification_document(self) -> Optional[VerificationDocument]:
+        """Returns the detailed verification document with per-step status"""
+        return self._secure_client.get_verification_document()
 
 class AsyncTinfoilAI:
     """
@@ -64,8 +68,8 @@ class AsyncTinfoilAI:
         self.enclave = enclave
         self.api_key = api_key
         # verifier client remains sync; only used to fetch the expected public key
-        tf_client = SecureClient(enclave, repo, measurement)
-        async_http = tf_client.make_secure_async_http_client()
+        self._secure_client = SecureClient(enclave, repo, measurement)
+        async_http = self._secure_client.make_secure_async_http_client()
         self.client = AsyncOpenAI(
             base_url=f"https://{enclave}/v1/",
             api_key=api_key,
@@ -74,6 +78,10 @@ class AsyncTinfoilAI:
         self.chat = self.client.chat
         self.embeddings = self.client.embeddings
         self.audio = self.client.audio
+
+    def get_verification_document(self) -> Optional[VerificationDocument]:
+        """Returns the detailed verification document with per-step status"""
+        return self._secure_client.get_verification_document()
 
 class _HTTPSecureClient:
     """Low-level HTTP client with enclave-pinned TLS."""
@@ -115,4 +123,4 @@ def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model
     tf_client = SecureClient(enclave, repo, measurement)
     return _HTTPSecureClient(enclave, tf_client, api_key)
 
-__all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient", "SecureClient"]
+__all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient", "SecureClient", "VerificationDocument"]
