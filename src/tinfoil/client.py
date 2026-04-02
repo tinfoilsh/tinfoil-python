@@ -5,8 +5,8 @@ import urllib.error
 import urllib.request
 import httpx
 import random
-from dataclasses import dataclass
-from typing import Dict, Optional
+from dataclasses import dataclass, field
+from typing import Dict, Literal, Optional
 from urllib.parse import urlparse, urlencode
 import cryptography.x509
 from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
@@ -14,6 +14,7 @@ import hashlib
 
 from .attestation import fetch_attestation, TDX_TYPES
 from .attestation.attestation_tdx import verify_tdx_hardware
+from .attestation.types import Measurement, HardwareMeasurement, Verification
 from .github import fetch_latest_digest, fetch_attestation_bundle
 from .sigstore import verify_attestation, fetch_latest_hardware_measurements
 
@@ -24,6 +25,43 @@ class GroundTruth:
     public_key: str  # Changed from cert_fingerprint to public_key
     digest: str
     measurement: str
+
+
+@dataclass
+class VerificationStepState:
+    """Represents the state of a single verification step"""
+    status: Literal["pending", "success", "failed", "skipped"]
+    error: Optional[str] = None
+
+
+@dataclass
+class VerificationDocument:
+    """Captures the full result and per-step status of enclave verification"""
+    config_repo: str = ""
+    enclave_host: str = ""
+    release_digest: str = ""
+    code_measurement: Optional[Measurement] = None
+    enclave_measurement: Optional[Verification] = None
+    tls_public_key: str = ""
+    hpke_public_key: str = ""
+    hardware_measurement: Optional[HardwareMeasurement] = None
+    code_fingerprint: str = ""
+    enclave_fingerprint: str = ""
+    selected_router_endpoint: str = ""
+    security_verified: bool = False
+    steps: Dict[str, VerificationStepState] = field(default_factory=lambda: {
+        "fetch_digest": VerificationStepState(status="pending"),
+        "verify_code": VerificationStepState(status="pending"),
+        "verify_enclave": VerificationStepState(status="pending"),
+        "compare_measurements": VerificationStepState(status="pending"),
+    })
+
+
+def _attach_verification_document(exc: Exception, verification_document: VerificationDocument) -> None:
+    try:
+        setattr(exc, "verification_document", verification_document)
+    except Exception:
+        pass
 
 
 class Response:
@@ -92,11 +130,16 @@ class SecureClient:
         self.repo = repo
         self.measurement = measurement
         self._ground_truth: Optional[GroundTruth] = None
+        self._verification_document: Optional[VerificationDocument] = None
 
     @property
     def ground_truth(self) -> Optional[GroundTruth]:
         """Returns the last verified enclave state"""
         return self._ground_truth
+
+    def get_verification_document(self) -> Optional[VerificationDocument]:
+        """Returns the detailed verification document from the last verify() call"""
+        return self._verification_document
 
     def _create_socket_wrapper(self, expected_fp: str):
         """
@@ -155,57 +198,104 @@ class SecureClient:
     def verify(self) -> GroundTruth:
         """
         Fetches the latest verification information from GitHub and Sigstore
-        and stores the ground truth results in the client
-        """
+        and stores the ground truth results in the client.
 
-        enclave_attestation = fetch_attestation(self.enclave)
-        verification = enclave_attestation.verify()
+        Also populates the verification document with per-step status.
+        """
+        doc = VerificationDocument(
+            config_repo=self.repo or "",
+            enclave_host=self.enclave,
+            selected_router_endpoint=self.enclave,
+        )
+        self._verification_document = doc
+
+        # Step 1: Verify enclave (fetch attestation, verify cryptographically, verify hardware)
+        try:
+            enclave_attestation = fetch_attestation(self.enclave)
+            verification = enclave_attestation.verify()
+
+            # For TDX, also verify hardware measurements
+            if verification.measurement.type in TDX_TYPES and self.measurement is None:
+                hw_measurements = fetch_latest_hardware_measurements()
+                doc.hardware_measurement = verify_tdx_hardware(hw_measurements, verification.measurement)
+
+            doc.enclave_measurement = verification
+            doc.tls_public_key = verification.public_key_fp
+            doc.hpke_public_key = verification.hpke_public_key or ""
+            doc.enclave_fingerprint = verification.measurement.fingerprint()
+            doc.steps["verify_enclave"] = VerificationStepState(status="success")
+        except Exception as e:
+            doc.steps["verify_enclave"] = VerificationStepState(status="failed", error=str(e))
+            _attach_verification_document(e, doc)
+            raise
 
         if self.measurement is not None:
-            # Use provided measurement directly
-            # Verify the SNP measurement matches the provided one
-            expected_snp_measurement = self.measurement.get("snp_measurement")
-            if expected_snp_measurement is None:
-                raise ValueError("snp_measurement not found in provided measurement")
-            
-            if not verification.measurement.registers:
-                raise ValueError("No measurement registers found in attestation")
-            actual_measurement = verification.measurement.registers[0]
-            
-            if actual_measurement != expected_snp_measurement:
-                raise ValueError(f"SNP measurement mismatch: expected {expected_snp_measurement}, got {actual_measurement}")
-            
-            # Build ground truth from the verified attestation
+            # Pinned measurement mode — code steps not applicable
+            doc.steps["fetch_digest"] = VerificationStepState(status="skipped")
+            doc.steps["verify_code"] = VerificationStepState(status="skipped")
+
+            try:
+                expected_snp_measurement = self.measurement.get("snp_measurement")
+                if expected_snp_measurement is None:
+                    raise ValueError("snp_measurement not found in provided measurement")
+                if not verification.measurement.registers:
+                    raise ValueError("No measurement registers found in attestation")
+                actual_measurement = verification.measurement.registers[0]
+                if actual_measurement != expected_snp_measurement:
+                    raise ValueError(f"SNP measurement mismatch: expected {expected_snp_measurement}, got {actual_measurement}")
+                doc.steps["compare_measurements"] = VerificationStepState(status="success")
+            except Exception as e:
+                doc.steps["compare_measurements"] = VerificationStepState(status="failed", error=str(e))
+                _attach_verification_document(e, doc)
+                raise
+
+            doc.release_digest = "pinned_no_digest"
+            doc.security_verified = True
             self._ground_truth = GroundTruth(
                 public_key=verification.public_key_fp,
-                digest="pinned_no_digest",  # No digest when using direct measurement
-                measurement=verification.measurement
+                digest="pinned_no_digest",
+                measurement=verification.measurement,
             )
             return self._ground_truth
         else:
             # GitHub-based verification
-            digest = fetch_latest_digest(self.repo)
-            sigstore_bundle = fetch_attestation_bundle(self.repo, digest)
 
-            code_measurements = verify_attestation(
-                sigstore_bundle,
-                digest,
-                self.repo
-            )
+            # Step 2: Fetch release digest
+            try:
+                digest = fetch_latest_digest(self.repo)
+                doc.release_digest = digest
+                doc.steps["fetch_digest"] = VerificationStepState(status="success")
+            except Exception as e:
+                doc.steps["fetch_digest"] = VerificationStepState(status="failed", error=str(e))
+                _attach_verification_document(e, doc)
+                raise
 
-            # For TDX, verify hardware measurements (MRTD and RTMR0)
-            if verification.measurement.type in TDX_TYPES:
-                hardware_measurements = fetch_latest_hardware_measurements()
-                verify_tdx_hardware(hardware_measurements, verification.measurement)
+            # Step 3: Verify code via Sigstore
+            try:
+                sigstore_bundle = fetch_attestation_bundle(self.repo, digest)
+                code_measurements = verify_attestation(sigstore_bundle, digest, self.repo)
+                doc.code_measurement = code_measurements
+                doc.code_fingerprint = code_measurements.fingerprint()
+                doc.steps["verify_code"] = VerificationStepState(status="success")
+            except Exception as e:
+                doc.steps["verify_code"] = VerificationStepState(status="failed", error=str(e))
+                _attach_verification_document(e, doc)
+                raise
 
-            # Verify measurements match (handles cross-platform comparison)
-            code_measurements.assert_equal(verification.measurement)
+            # Step 4: Compare code and enclave measurements
+            try:
+                code_measurements.assert_equal(verification.measurement)
+                doc.steps["compare_measurements"] = VerificationStepState(status="success")
+            except Exception as e:
+                doc.steps["compare_measurements"] = VerificationStepState(status="failed", error=str(e))
+                _attach_verification_document(e, doc)
+                raise
 
-            # Build ground truth from the verified attestation
+            doc.security_verified = True
             self._ground_truth = GroundTruth(
                 public_key=verification.public_key_fp,
                 digest=digest,
-                measurement=verification.measurement
+                measurement=verification.measurement,
             )
             return self._ground_truth
 

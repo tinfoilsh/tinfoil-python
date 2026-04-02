@@ -139,8 +139,14 @@ class TestSecureClientVerificationFailures:
 
         client = SecureClient(enclave="test.enclave.sh", repo="test/repo")
 
-        with pytest.raises(ValueError, match="TDX attestation verification failed"):
+        with pytest.raises(ValueError, match="TDX attestation verification failed") as exc_info:
             client.verify()
+
+        verification_document = client.get_verification_document()
+        assert verification_document is not None
+        assert verification_document.steps["verify_enclave"].status == "failed"
+        assert verification_document.steps["verify_enclave"].error == "TDX attestation verification failed"
+        assert getattr(exc_info.value, "verification_document", None) is verification_document
 
     @patch('tinfoil.client.fetch_attestation')
     @patch('tinfoil.client.fetch_latest_digest')
@@ -292,8 +298,15 @@ class TestDirectMeasurementVerification:
             measurement={"snp_measurement": "expected_snp_measurement"}
         )
 
-        with pytest.raises(ValueError, match="SNP measurement mismatch"):
+        with pytest.raises(ValueError, match="SNP measurement mismatch") as exc_info:
             client.verify()
+
+        verification_document = client.get_verification_document()
+        assert verification_document is not None
+        assert verification_document.steps["fetch_digest"].status == "skipped"
+        assert verification_document.steps["verify_code"].status == "skipped"
+        assert verification_document.steps["compare_measurements"].status == "failed"
+        assert getattr(exc_info.value, "verification_document", None) is verification_document
 
 
 class TestVerifyPeerFingerprint:
