@@ -55,7 +55,7 @@ jobs:
       uses: pypa/gh-action-pypi-publish@release/v1
 
     - name: Make GitHub release
-      uses: softprops/action-gh-release@v2
-      with:
-        files: dist/*.whl
-        token: ${{ secrets.GITHUB_TOKEN }}
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG_NAME: ${{ github.ref_name }}
+      run: gh release create "$TAG_NAME" --generate-notes dist/*.whl
