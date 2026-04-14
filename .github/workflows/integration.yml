@@ -6,9 +6,13 @@ on:
   push:
     branches: [main]
 
+permissions: {}
+
 jobs:
   integration:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         python-version: ["3.11"]   # pick one stable Python
@@ -30,6 +34,8 @@ jobs:
       # ─── Core steps (only when run=true) ────────────────────────────────
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: steps.gate.outputs.run == 'true'
+        with:
+          persist-credentials: false
 
       # 1. Set up Python & install Pybindgen early for gopy’s build.py
       - name: Set up Python
