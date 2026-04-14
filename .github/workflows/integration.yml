@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.gate.outputs.run == 'true'
 
-      # 1️⃣ Set up Python & install Pybindgen early for gopy’s build.py
+      # 1. Set up Python & install Pybindgen early for gopy’s build.py
       - name: Set up Python
         if: steps.gate.outputs.run == 'true'
         uses: actions/setup-python@v5
@@ -44,7 +44,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pybindgen pytest pytest-asyncio
 
-      # 2️⃣ Install the package and run integration tests
+      # 2. Install the package and run integration tests
       - name: Install package
         if: steps.gate.outputs.run == 'true'
         run: pip install -e .
