@@ -207,35 +207,35 @@ def _validate_policy(report_policy: SnpPolicy, required: SnpPolicy):
         raise ValueError(f"Required ABI version ({required.abi_major}.{required.abi_minor}) is greater than report's ABI version ({report_policy.abi_major}.{report_policy.abi_minor})")
     
     # Unauthorized capabilities (report has them enabled, but required doesn't allow)
-    if not required.migrate_ma and report_policy.migrate_ma:
+    if _unauthorized_flag_is_set(required.migrate_ma, report_policy.migrate_ma):
         raise ValueError(f"Found unauthorized migration agent capability. Report policy: {report_policy}, Required policy: {required}")
     
-    if not required.debug and report_policy.debug:
+    if _unauthorized_flag_is_set(required.debug, report_policy.debug):
         raise ValueError(f"Found unauthorized debug capability. Report policy: {report_policy}, Required policy: {required}")
     
-    if not required.smt and report_policy.smt:
+    if _unauthorized_flag_is_set(required.smt, report_policy.smt):
         raise ValueError(f"Found unauthorized symmetric multithreading (SMT) capability. Report policy: {report_policy}, Required policy: {required}")
     
-    if not required.cxl_allowed and report_policy.cxl_allowed:
+    if _unauthorized_flag_is_set(required.cxl_allowed, report_policy.cxl_allowed):
         raise ValueError(f"Found unauthorized CXL capability. Report policy: {report_policy}, Required policy: {required}")
     
-    if not required.mem_aes256_xts and report_policy.mem_aes256_xts:
-        raise ValueError(f"Found unauthorized memory encryption mode. Report policy: {report_policy}, Required policy: {required}")
+    if _unauthorized_flag_is_set(required.mem_aes256_xts, report_policy.mem_aes256_xts):
+        raise ValueError(f"Found unauthorized AES256-XTS memory encryption mode. Report policy: {report_policy}, Required policy: {required}")
     
     # Required restrictions/features (report lacks what required mandates)
-    if required.single_socket and not report_policy.single_socket:
+    if _required_flag_is_unset(required.single_socket, report_policy.single_socket):
         raise ValueError(f"Required single socket restriction not present. Report policy: {report_policy}, Required policy: {required}")
     
-    if required.mem_aes256_xts and not report_policy.mem_aes256_xts:
-        raise ValueError(f"Found unauthorized memory encryption mode. Report policy: {report_policy}, Required policy: {required}")
+    if _required_flag_is_unset(required.mem_aes256_xts, report_policy.mem_aes256_xts):
+        raise ValueError(f"Required AES256-XTS memory encryption mode is not set. Report policy: {report_policy}, Required policy: {required}")
     
-    if required.rapl_dis and not report_policy.rapl_dis:
-        raise ValueError(f"Found unauthorized RAPL capability. Report policy: {report_policy}, Required policy: {required}")
+    if _required_flag_is_unset(required.rapl_dis, report_policy.rapl_dis):
+        raise ValueError(f"RAPL is required to be disabled. Report policy: {report_policy}, Required policy: {required}")
     
-    if required.ciphertext_hiding_dram and not report_policy.ciphertext_hiding_dram:
+    if _required_flag_is_unset(required.ciphertext_hiding_dram, report_policy.ciphertext_hiding_dram):
         raise ValueError(f"Ciphertext hiding in DRAM isn't enforced. Report policy: {report_policy}, Required policy: {required}")
 
-    if required.page_swap_disabled and not report_policy.page_swap_disabled:
+    if _required_flag_is_unset(required.page_swap_disabled, report_policy.page_swap_disabled):
         raise ValueError(f"Page swap isn't disabled. Report policy: {report_policy}, Required policy: {required}")
 
 def _compare_policy_versions(required: SnpPolicy, report: SnpPolicy) -> int:
@@ -265,24 +265,33 @@ def _validate_platform_info(report_info: SnpPlatformInfo, required: SnpPlatformI
     Raises ValueError if validation fails.
     """
     # Unauthorized features (report has it enabled, but required doesn't allow it)
-    if report_info.smt_enabled and not required.smt_enabled:
+    if _unauthorized_flag_is_set(required.smt_enabled, report_info.smt_enabled):
         raise ValueError(f"Unauthorized platform feature SMT enabled. Report platform info: {report_info}, Required platform info: {required}")
     
     # Required features (report lacks something that required mandates)
-    if not report_info.ecc_enabled and required.ecc_enabled:
+    if _required_flag_is_unset(required.ecc_enabled, report_info.ecc_enabled):
         raise ValueError(f"Required platform feature ECC not enabled. Report platform info: {report_info}, Required platform info: {required}")
     
-    if not report_info.tsme_enabled and required.tsme_enabled:
+    if _required_flag_is_unset(required.tsme_enabled, report_info.tsme_enabled):
         raise ValueError(f"Required platform feature TSME not enabled. Report platform info: {report_info}, Required platform info: {required}") 
     
-    if not report_info.rapl_disabled and required.rapl_disabled:
+    if _required_flag_is_unset(required.rapl_disabled, report_info.rapl_disabled):
         raise ValueError(f"Required platform feature RAPL not disabled. Report platform info: {report_info}, Required platform info: {required}")
     
-    if not report_info.ciphertext_hiding_dram_enabled and required.ciphertext_hiding_dram_enabled:
+    if _required_flag_is_unset(required.ciphertext_hiding_dram_enabled, report_info.ciphertext_hiding_dram_enabled):
         raise ValueError(f"Required ciphertext hiding in DRAM not enforced. Report platform info: {report_info}, Required platform info: {required}")
     
-    if not report_info.alias_check_complete and required.alias_check_complete:
+    if _required_flag_is_unset(required.alias_check_complete, report_info.alias_check_complete):
         raise ValueError(f"Required memory alias check hasn't been completed. Report platform info: {report_info}, Required platform info: {required}")
 
-    if not report_info.tio_enabled and required.tio_enabled:
+    if _required_flag_is_unset(required.tio_enabled, report_info.tio_enabled):
         raise ValueError(f"Required TIO not enabled. Report platform info: {report_info}, Required platform info: {required}")
+
+def _unauthorized_flag_is_set(required: bool, reported: bool) -> bool:
+    """Returns true if the required flag is not set but is reported as set."""
+    return not required and reported
+
+def _required_flag_is_unset(required: bool, reported: bool) -> bool:
+    """Returns true if the required flag is set but is reported as unset."""
+    return required and not reported
+

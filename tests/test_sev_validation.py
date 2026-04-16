@@ -240,9 +240,9 @@ class TestValidatePolicy:
             mem_aes256_xts=True, rapl_dis=False, ciphertext_hiding_dram=False,
             page_swap_disabled=False
         )
-        with pytest.raises(ValueError, match="unauthorized memory encryption mode"):
+        with pytest.raises(ValueError, match="Required AES256-XTS memory encryption mode is not set"):
             _validate_policy(base_report, required_policy)
-        
+
         # rapl_dis
         required_policy = SnpPolicy(
             abi_minor=1, abi_major=2, smt=False, migrate_ma=False,
@@ -250,7 +250,7 @@ class TestValidatePolicy:
             mem_aes256_xts=False, rapl_dis=True, ciphertext_hiding_dram=False,
             page_swap_disabled=False
         )
-        with pytest.raises(ValueError, match="unauthorized RAPL capability"):
+        with pytest.raises(ValueError, match="RAPL is required to be disabled"):
             _validate_policy(base_report, required_policy)
         
         # ciphertext_hiding_dram
