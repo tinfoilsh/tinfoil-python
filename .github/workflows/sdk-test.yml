@@ -21,40 +21,22 @@ jobs:
       TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
 
     steps:
-      # ─── Gate: skip entire job if secrets aren't set (e.g. forks) ────────
-      - name: Check integration secrets
-        id: gate
-        run: |
-          if [ -z "$TINFOIL_API_KEY" ]; then
-            echo "run=false" >> $GITHUB_OUTPUT
-          else
-            echo "run=true"  >> $GITHUB_OUTPUT
-          fi
-
-      # ─── Core steps (only when run=true) ────────────────────────────────
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        if: steps.gate.outputs.run == 'true'
         with:
           persist-credentials: false
 
-      # 1. Set up Python & install Pybindgen early for gopy’s build.py
       - name: Set up Python
-        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies
-        if: steps.gate.outputs.run == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install pybindgen pytest pytest-asyncio
 
-      # 2. Install the package and run integration tests
       - name: Install package
-        if: steps.gate.outputs.run == 'true'
         run: pip install -e .
 
       - name: Run integration tests
-        if: steps.gate.outputs.run == 'true'
         run: pytest -q -m integration
