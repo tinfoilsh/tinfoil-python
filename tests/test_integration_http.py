@@ -7,7 +7,7 @@ API_KEY = os.getenv("TINFOIL_API_KEY", "tinfoil")
 pytestmark = pytest.mark.integration
 
 def test_http_integration():
-    client = NewSecureClient(api_key=API_KEY)
+    client = NewSecureClient()
 
     url = f"https://{client.enclave}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {API_KEY}"}

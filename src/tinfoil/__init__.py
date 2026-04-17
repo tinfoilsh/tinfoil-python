@@ -85,11 +85,10 @@ class AsyncTinfoilAI:
 
 class _HTTPSecureClient:
     """Low-level HTTP client with enclave-pinned TLS."""
-    def __init__(self, enclave: str, tf_client: SecureClient, api_key: str):
+    def __init__(self, enclave: str, tf_client: SecureClient):
         self.enclave = enclave
         self._tf_client = tf_client
         self._http_client = tf_client.make_secure_http_client()
-        self._api_key = api_key
 
     def get(self, url: str, headers: Optional[dict] = None, params: Optional[dict] = None, timeout: Optional[int] = None) -> httpx.Response:
         return self._http_client.get(url, headers=headers, params=params, timeout=timeout)
@@ -105,22 +104,20 @@ class _HTTPSecureClient:
         return self._http_client.post(url, headers=headers, data=data, json=json, timeout=timeout)
 
 
-def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: Optional[dict] = None):
-    """
-    Create a secure HTTP client for direct GET/POST through the Tinfoil enclave.
-    """
+def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None):
+    """Create a secure HTTP client for direct GET/POST through the Tinfoil enclave."""
     if measurement is not None:
         repo = ""
-    
+
     # Ensure at least one verification method is provided
     if measurement is None and (repo == "" or repo is None):
         raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
-    
+
     # If enclave is empty, fetch a random one from the routers API
     if enclave == "" or enclave is None:
         enclave = get_router_address()
-    
+
     tf_client = SecureClient(enclave, repo, measurement)
-    return _HTTPSecureClient(enclave, tf_client, api_key)
+    return _HTTPSecureClient(enclave, tf_client)
 
 __all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient", "SecureClient", "VerificationDocument"]
