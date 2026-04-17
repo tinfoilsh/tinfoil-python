@@ -22,23 +22,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio
-
-      - name: Install package
-        run: pip install -e .
+      - name: Install dependencies
+        run: uv sync --locked
 
       - name: Run unit tests
-        run: pytest -m "not integration"
+        run: uv run pytest -m "not integration"
 
       - name: Run integration tests
         env:
           TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
-        run: pytest -m "integration"
+        run: uv run pytest -m "integration"

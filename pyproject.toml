@@ -1,10 +1,9 @@
 [build-system]
-requires = ["setuptools >= 61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-packages = ["tinfoil", "tinfoil.attestation"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/tinfoil"]
 
 [project]
 name = "tinfoil"
@@ -15,14 +14,18 @@ requires-python = ">=3.10"
 dependencies = [
     "openai>=1.63.0",
     "httpx>=0.28",
-    "build>=1.2.0",
     "requests>=2.31.0",
     "cryptography>=42.0.0",
     "pyOpenSSL>=25.0.0",
     "pyasn1>=0.4.0",
     "sigstore>=4.1.0",
     "platformdirs>=4.2.0",
-    "pytest-asyncio>=0.26.0"
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio>=0.26.0",
 ]
 
 [tool.pytest.ini_options]
