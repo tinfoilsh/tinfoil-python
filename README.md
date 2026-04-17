@@ -1,7 +1,7 @@
 # Tinfoil Python Library
 
 ![PyPI - Version](https://img.shields.io/pypi/v/tinfoil)
-[![Integration](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/integration.yml/badge.svg)](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/integration.yml)
+[![SDK Test](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/sdk-test.yml/badge.svg)](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/sdk-test.yml)
 [![Documentation](https://img.shields.io/badge/docs-tinfoil.sh-blue)](https://docs.tinfoil.sh/sdk/python-sdk)
 
 A Python client for secure AI model inference through Tinfoil.
@@ -9,6 +9,10 @@ A Python client for secure AI model inference through Tinfoil.
 ## Installation
 
 ```bash
+# With uv
+uv add tinfoil
+
+# With pip
 pip install tinfoil
 ```
 
@@ -119,21 +123,22 @@ resp = tfclient.post(
 print(resp.status_code, resp.text)
 ```
 
-## Requirements
+## Development
 
-- Python 3.10 through 3.13
-
-## Testing
-
-Run unit and integration tests:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) before following these instructions.
 
 ```bash
-pytest -q
-```
+# Set up the development environment and install the package
+uv sync
 
-Integration tests require the `TINFOIL_API_KEY` environment variable:
-
-```bash
+# Run all tests (requires the TINFOIL_API_KEY environment variable)
 export TINFOIL_API_KEY="..."
-pytest -q -m integration
+uv run pytest
+
+# Run unit tests
+uv run pytest -m "not integration"
+
+# Run integration tests (requires the TINFOIL_API_KEY environment variable)
+export TINFOIL_API_KEY="..."
+uv run pytest -m integration
 ```
