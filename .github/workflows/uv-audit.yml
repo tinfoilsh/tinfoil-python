@@ -1,0 +1,32 @@
+name: uv audit
+
+on:
+  workflow_dispatch:
+
+  # The actor associated with the schedule trigger will be the user who last
+  # modified the cron line below or who re-enables the workflow.
+  # See the following resources for more details:
+  # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#actor-for-scheduled-workflows
+  # https://docs.github.com/en/actions/concepts/workflows-and-actions/notifications-for-workflow-runs
+  schedule: # daily at 10:55 UTC
+    - cron: "55 10 * * *"
+
+permissions: {}
+
+jobs:
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Audit dependencies
+        run: uv audit
