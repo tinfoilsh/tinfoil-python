@@ -93,13 +93,13 @@ You can also perform arbitrary GET/POST requests that are verified:
 import os
 from tinfoil import NewSecureClient
 
-tfclient = NewSecureClient(
-    api_key=os.getenv("TINFOIL_API_KEY"),
-)
+api_key = os.getenv("TINFOIL_API_KEY")
+tfclient = NewSecureClient()
 
 # GET example
 resp = tfclient.get(
     "https://example.com/health",
+    headers={"Authorization": f"Bearer {api_key}"},
     params={"query": "value"},
     timeout=30,
 )
@@ -109,7 +109,10 @@ print(resp.status_code, resp.text)
 payload = {"key": "value"}
 resp = tfclient.post(
     "https://example.com/analyze",
-    headers={"Content-Type": "application/json"},
+    headers={
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    },
     json=payload,
     timeout=30,
 )
