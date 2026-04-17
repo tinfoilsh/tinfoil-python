@@ -12,6 +12,8 @@ from tinfoil import TinfoilAI, AsyncTinfoilAI
 TEST_AUDIO_PATH = Path(__file__).parent / "jackhammer.wav"
 TEST_AUDIO_TEXT = "The stale smell of old beer lingers."
 
+pytestmark = pytest.mark.integration
+
 @pytest.fixture(scope="session")
 def client() -> TinfoilAI:
     return TinfoilAI(
