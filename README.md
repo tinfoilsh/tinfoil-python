@@ -123,6 +123,12 @@ resp = tfclient.post(
 print(resp.status_code, resp.text)
 ```
 
+## Security
+
+Please report security vulnerabilities by emailing [security@tinfoil.sh](mailto:security@tinfoil.sh).
+
+We aim to respond to (legitimate) security reports within 24 hours.
+
 ## Development
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) before following these instructions.
