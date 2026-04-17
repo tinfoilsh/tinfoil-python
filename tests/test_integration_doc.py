@@ -2,6 +2,10 @@ import os
 import pytest
 from tinfoil import SecureClient
 
+API_KEY = os.getenv("TINFOIL_API_KEY", "tinfoil")
+
+pytestmark = pytest.mark.integration
+
 @pytest.fixture(scope="session")
 def client() -> SecureClient:
     return SecureClient()
@@ -14,6 +18,7 @@ def test_doc_upload(client):
         response = httpx_client.post(
             f"https://{client.enclave}/v1/convert/file",
             files={'files': file},
+            headers={"Authorization": f"Bearer {API_KEY}"},
             timeout=30,
         )
         assert response.status_code == 200
@@ -28,6 +33,7 @@ async def test_doc_upload_async(client):
         response = await httpx_client.post(
             f"https://{client.enclave}/v1/convert/file",
             files={'files': file},
+            headers={"Authorization": f"Bearer {API_KEY}"},
             timeout=30,
         )
         assert response.status_code == 200
