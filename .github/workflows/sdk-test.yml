@@ -38,5 +38,8 @@ jobs:
       - name: Install package
         run: pip install -e .
 
+      - name: Run unit tests
+        run: pytest -m "not integration"
+
       - name: Run integration tests
-        run: pytest -q -m integration
+        run: pytest -m "integration"
