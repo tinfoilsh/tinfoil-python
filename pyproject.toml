@@ -1,9 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.28.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tinfoil"]
+sbom-files = ["sbom.cdx.json"]
 
 [project]
 name = "tinfoil"
