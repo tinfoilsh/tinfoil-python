@@ -2,8 +2,8 @@ name: SDK Release
 
 on:
   push:
-    tags:
-      - "v*"
+    # tags:
+    #   - "v*"
 
 permissions: {}
 
@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/tinfoil
+      url: https://test.pypi.org/p/tinfoil
     permissions:
       id-token: write
       contents: write
@@ -51,6 +51,8 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
 
       - name: Make GitHub release
         env:
