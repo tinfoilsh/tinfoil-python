@@ -1,0 +1,15 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "properties": [
+      {
+        "name": "placeholder",
+        "value": "This is a placeholder file to satisfy the hatchling build backend. The real SBOM is populated in the release flow."
+      }
+    ]
+  },
+  "components": []
+}
