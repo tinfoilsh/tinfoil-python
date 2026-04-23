@@ -1,5 +1,5 @@
 from typing import Optional
-from openai import OpenAI, AsyncOpenAI
+from openai import OpenAI, AsyncOpenAI, NOT_GIVEN, NotGiven
 from openai.resources.chat import Chat as OpenAIChat
 from openai.resources.embeddings import Embeddings as OpenAIEmbeddings
 from openai.resources.audio import Audio as OpenAIAudio
@@ -14,7 +14,14 @@ class TinfoilAI:
     api_key: str
     enclave: str
 
-    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: Optional[dict] = None):
+    def __init__(
+        self,
+        enclave: str = "",
+        repo: str = "tinfoilsh/confidential-model-router",
+        api_key: str = "tinfoil",
+        measurement: Optional[dict] = None,
+        timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
+    ):
         if measurement is not None:
             repo = ""
         
@@ -33,6 +40,7 @@ class TinfoilAI:
         self.client = OpenAI(
             base_url=f"https://{enclave}/v1/",
             api_key=api_key,
+            timeout=timeout,
             http_client=secure_http,
         )
         self.chat = self.client.chat
@@ -53,7 +61,14 @@ class AsyncTinfoilAI:
     api_key: str
     enclave: str
 
-    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", api_key: str = "tinfoil", measurement: Optional[dict] = None):
+    def __init__(
+        self,
+        enclave: str = "",
+        repo: str = "tinfoilsh/confidential-model-router",
+        api_key: str = "tinfoil",
+        measurement: Optional[dict] = None,
+        timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
+    ):
         if measurement is not None:
             repo = ""
         
@@ -73,6 +88,7 @@ class AsyncTinfoilAI:
         self.client = AsyncOpenAI(
             base_url=f"https://{enclave}/v1/",
             api_key=api_key,
+            timeout=timeout,
             http_client=async_http,
         )
         self.chat = self.client.chat
