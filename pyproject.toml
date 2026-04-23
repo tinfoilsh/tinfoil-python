@@ -8,7 +8,7 @@ sbom-files = ["sbom.cdx.json"]
 
 [project]
 name = "tinfoil"
-version = "0.11.2"
+version = "0.11.3"
 description = "Python client for Tinfoil"
 readme = "README.md"
 requires-python = ">=3.10"
