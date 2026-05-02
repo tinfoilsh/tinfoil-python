@@ -248,6 +248,18 @@ class TestParseTcbInfoResponse:
         with pytest.raises(CollateralError, match="must be 3"):
             parse_tcb_info_response(bad_json.encode())
 
+    def test_reject_duplicate_tcb_info_key(self):
+        """Reject duplicate top-level keys: signature verification extracts the
+        first textual occurrence while json.loads keeps the last, so a duplicate
+        could pass signature check over one object while parsing another."""
+        attacker_obj = '{"id":"TDX","version":3,"fmspc":"deadbeefdead"}'
+        bad_json = (
+            '{"tcbInfo":' + attacker_obj
+            + ',' + SAMPLE_TCB_INFO_JSON.strip().lstrip('{')
+        )
+        with pytest.raises(CollateralError, match="Duplicate JSON key"):
+            parse_tcb_info_response(bad_json.encode())
+
 
 class TestParseQeIdentityResponse:
     """Test QE Identity parsing."""
@@ -274,6 +286,16 @@ class TestParseQeIdentityResponse:
         """Test that non-TD_QE ID is rejected."""
         bad_json = SAMPLE_QE_IDENTITY_JSON.replace('"id": "TD_QE"', '"id": "QE"')
         with pytest.raises(CollateralError, match="must be 'TD_QE'"):
+            parse_qe_identity_response(bad_json.encode())
+
+    def test_reject_duplicate_enclave_identity_key(self):
+        """Reject duplicate top-level keys (see TestParseTcbInfoResponse for rationale)."""
+        attacker_obj = '{"id":"TD_QE","version":2,"mrsigner":"' + ("00" * 32) + '"}'
+        bad_json = (
+            '{"enclaveIdentity":' + attacker_obj
+            + ',' + SAMPLE_QE_IDENTITY_JSON.strip().lstrip('{')
+        )
+        with pytest.raises(CollateralError, match="Duplicate JSON key"):
             parse_qe_identity_response(bad_json.encode())
 
 
@@ -1842,6 +1864,16 @@ class TestParseTcbEvalNumbersResponse:
         """Test that invalid JSON raises error."""
         with pytest.raises(CollateralError, match="Failed to parse"):
             _parse_tcb_eval_numbers_response(b"not json")
+
+    def test_reject_duplicate_tcb_eval_numbers_key(self):
+        """Reject duplicate top-level keys (see TestParseTcbInfoResponse for rationale)."""
+        attacker_obj = b'{"id":"TDX","version":1,"tcbEvalNumbers":[]}'
+        bad_json = (
+            b'{"tcbEvaluationDataNumbers":' + attacker_obj
+            + b',' + SAMPLE_TCB_EVAL_NUMBERS_RESPONSE.strip().lstrip(b'{')
+        )
+        with pytest.raises(CollateralError, match="Duplicate JSON key"):
+            _parse_tcb_eval_numbers_response(bad_json)
 
 
 class TestFetchTcbEvaluationDataNumbers:

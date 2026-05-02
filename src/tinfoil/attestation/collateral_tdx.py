@@ -402,6 +402,24 @@ ECDSA_SIGNATURE_SIZE = 64       # R || S (32 + 32 bytes)
 # Parsing Functions
 # =============================================================================
 
+def _reject_duplicate_keys(pairs):
+    # Signature verification extracts the FIRST textual occurrence of a top-level
+    # key, while json.loads() keeps the LAST. A duplicate-key payload could pass
+    # signature verification over one object while validation consumes another.
+    seen = set()
+    out = {}
+    for key, value in pairs:
+        if key in seen:
+            raise CollateralError(f"Duplicate JSON key: {key!r}")
+        seen.add(key)
+        out[key] = value
+    return out
+
+
+def _strict_json_loads(response_bytes: bytes):
+    return json.loads(response_bytes, object_pairs_hook=_reject_duplicate_keys)
+
+
 def _parse_hex_bytes(hex_str: str) -> bytes:
     """Parse hex string to bytes."""
     return bytes.fromhex(hex_str)
@@ -549,7 +567,7 @@ def parse_tcb_info_response(response_bytes: bytes) -> TdxTcbInfo:
         CollateralError: If parsing fails
     """
     try:
-        data = json.loads(response_bytes)
+        data = _strict_json_loads(response_bytes)
     except json.JSONDecodeError as e:
         raise CollateralError(f"Failed to parse TCB Info JSON: {e}")
 
@@ -581,7 +599,7 @@ def parse_qe_identity_response(response_bytes: bytes) -> QeIdentity:
         CollateralError: If parsing fails
     """
     try:
-        data = json.loads(response_bytes)
+        data = _strict_json_loads(response_bytes)
     except json.JSONDecodeError as e:
         raise CollateralError(f"Failed to parse QE Identity JSON: {e}")
 
@@ -1258,7 +1276,7 @@ def _parse_tcb_eval_numbers_response(response_bytes: bytes) -> TcbEvaluationData
         CollateralError: If parsing fails
     """
     try:
-        data = json.loads(response_bytes)
+        data = _strict_json_loads(response_bytes)
     except json.JSONDecodeError as e:
         raise CollateralError(f"Failed to parse TCB evaluation data numbers JSON: {e}")
 
