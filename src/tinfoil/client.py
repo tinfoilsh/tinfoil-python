@@ -1,6 +1,9 @@
+import asyncio
+import contextlib
 import http.client
 import json
 import ssl
+import threading
 import urllib.error
 import urllib.request
 import httpx
@@ -17,6 +20,23 @@ from .attestation.attestation_tdx import verify_tdx_hardware
 from .attestation.types import Measurement, HardwareMeasurement, Verification
 from .github import fetch_latest_digest, fetch_attestation_bundle
 from .sigstore import verify_attestation, fetch_latest_hardware_measurements
+
+
+_CERTIFICATE_VERIFY_ERROR_MARKERS = (
+    "certificate_verify_failed",
+    "certificate verify failed",
+)
+
+
+class _PinMismatchError(ValueError):
+    """
+    Raised when the enclave's TLS certificate fails our pin check (wrong
+    public-key fingerprint, missing cert, or no TLS connection).
+
+    Subclasses ValueError so existing callers that do `except ValueError`
+    keep working; existence as a distinct type lets `_is_certificate_error`
+    detect pin failures via `isinstance` instead of string-matching.
+    """
 
 
 @dataclass
@@ -75,14 +95,14 @@ class Response:
 def _verify_peer_fingerprint(cert_binary: Optional[bytes], expected_fp: str) -> None:
     """Verify that a certificate's public key fingerprint matches the expected value."""
     if not cert_binary:
-        raise ValueError("No certificate found")
+        raise _PinMismatchError("No certificate found")
     cert = cryptography.x509.load_der_x509_certificate(cert_binary)
     pub_der = cert.public_key().public_bytes(
         Encoding.DER, PublicFormat.SubjectPublicKeyInfo
     )
     pk_fp = hashlib.sha256(pub_der).hexdigest()
     if pk_fp != expected_fp:
-        raise ValueError(f"Certificate fingerprint mismatch: expected {expected_fp}, got {pk_fp}")
+        raise _PinMismatchError(f"Certificate fingerprint mismatch: expected {expected_fp}, got {pk_fp}")
 
 
 class TLSBoundHTTPSHandler(urllib.request.HTTPSHandler):
@@ -101,13 +121,146 @@ class TLSBoundHTTPSHandler(urllib.request.HTTPSHandler):
         conn.connect()
         
         if not conn.sock:
-            raise ValueError("No TLS connection")
+            raise _PinMismatchError("No TLS connection")
         
         _verify_peer_fingerprint(
             conn.sock.getpeercert(binary_form=True), self.expected_pubkey
         )
         
         return conn
+
+
+def _is_certificate_error(exc: BaseException) -> bool:
+    """
+    Detect whether an exception originated from TLS certificate verification,
+    including the fingerprint pin check raised by `_verify_peer_fingerprint`.
+
+    Only certificate verification and pinning failures are safe to use as a
+    re-verification signal: they happen while establishing the connection,
+    before HTTP request bytes are sent. Generic ssl.SSLError instances can occur
+    later during request/response I/O and must not be retried automatically.
+    """
+    current: Optional[BaseException] = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+
+        if isinstance(current, _PinMismatchError):
+            return True
+
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+
+        if isinstance(current, ssl.SSLError):
+            msg = str(current).lower()
+            if any(marker in msg for marker in _CERTIFICATE_VERIFY_ERROR_MARKERS):
+                return True
+
+        # httpx wraps low-level errors; walk the cause/context chain.
+        current = current.__cause__ or current.__context__
+    return False
+
+
+class _ReVerifyingTransport(httpx.BaseTransport):
+    """
+    Wraps an httpx transport and transparently re-verifies the enclave's
+    attestation when a TLS certificate error is encountered.
+
+    This makes long-lived `TinfoilAI` / `SecureClient` instances resilient to
+    server certificate rotation (for example, after an enclave or router
+    restart), mirroring the behaviour of the Go and JavaScript SDKs.
+    """
+
+    def __init__(self, secure_client: "SecureClient", inner: httpx.BaseTransport):
+        self._secure_client = secure_client
+        self._inner = inner
+        self._lock = threading.Lock()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        inner = self._inner
+        try:
+            return inner.handle_request(request)
+        except Exception as exc:
+            if not _is_certificate_error(exc):
+                raise
+
+            old_inner: Optional[httpx.BaseTransport] = None
+            retry_inner: Optional[httpx.BaseTransport] = None
+            reverify_failed = False
+            with self._lock:
+                if self._inner is inner:
+                    try:
+                        retry_inner = self._secure_client._rebuild_sync_transport()
+                    except Exception:
+                        # Re-verification failed; surface the original error so
+                        # the caller sees the genuine TLS failure rather than a
+                        # confusing re-verification failure.
+                        reverify_failed = True
+                    else:
+                        old_inner = self._inner
+                        self._inner = retry_inner
+                else:
+                    retry_inner = self._inner
+
+            if reverify_failed:
+                raise
+
+            assert retry_inner is not None
+            try:
+                return retry_inner.handle_request(request)
+            finally:
+                if old_inner is not None:
+                    with contextlib.suppress(Exception):
+                        old_inner.close()
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class _AsyncReVerifyingTransport(httpx.AsyncBaseTransport):
+    """Async counterpart to :class:`_ReVerifyingTransport`."""
+
+    def __init__(self, secure_client: "SecureClient", inner: httpx.AsyncBaseTransport):
+        self._secure_client = secure_client
+        self._inner = inner
+        self._lock = asyncio.Lock()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        inner = self._inner
+        try:
+            return await inner.handle_async_request(request)
+        except Exception as exc:
+            if not _is_certificate_error(exc):
+                raise
+
+            old_inner: Optional[httpx.AsyncBaseTransport] = None
+            retry_inner: Optional[httpx.AsyncBaseTransport] = None
+            reverify_failed = False
+            async with self._lock:
+                if self._inner is inner:
+                    try:
+                        retry_inner = await self._secure_client._rebuild_async_transport()
+                    except Exception:
+                        reverify_failed = True
+                    else:
+                        old_inner = self._inner
+                        self._inner = retry_inner
+                else:
+                    retry_inner = self._inner
+
+            if reverify_failed:
+                raise
+
+            assert retry_inner is not None
+            try:
+                return await retry_inner.handle_async_request(request)
+            finally:
+                if old_inner is not None:
+                    with contextlib.suppress(Exception):
+                        await old_inner.aclose()
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
 
 
 class SecureClient:
@@ -174,26 +327,58 @@ class SecureClient:
             return ssl_object
         return pinned_wrap_bio
 
-    def make_secure_http_client(self) -> httpx.Client:
-        """
-        Build an httpx.Client that pins the enclave's TLS cert
-        """
-        expected_fp = self.verify().public_key
+    def _build_sync_ssl_context(self, expected_fp: str) -> ssl.SSLContext:
         wrap_socket = self._create_socket_wrapper(expected_fp)
-
         ctx = ssl.create_default_context()
         ctx.wrap_socket = wrap_socket
-        return httpx.Client(verify=ctx, follow_redirects=True)
+        return ctx
+
+    def _build_async_ssl_context(self, expected_fp: str) -> ssl.SSLContext:
+        ctx = ssl.create_default_context()
+        ctx.wrap_bio = self._create_bio_wrapper(ctx.wrap_bio, expected_fp)
+        return ctx
+
+    def _rebuild_sync_transport(self) -> httpx.BaseTransport:
+        """Re-run attestation and return a fresh sync httpx transport."""
+        expected_fp = self.verify().public_key
+        ctx = self._build_sync_ssl_context(expected_fp)
+        return httpx.HTTPTransport(verify=ctx)
+
+    async def _rebuild_async_transport(self) -> httpx.AsyncBaseTransport:
+        """Re-run attestation without blocking the event loop."""
+        expected_fp = (await asyncio.to_thread(self.verify)).public_key
+        ctx = self._build_async_ssl_context(expected_fp)
+        return httpx.AsyncHTTPTransport(verify=ctx)
+
+    def make_secure_http_client(self) -> httpx.Client:
+        """
+        Build an httpx.Client that pins the enclave's TLS cert.
+
+        The returned client is suitable for long-lived use: if the enclave
+        rotates its TLS certificate (for example after a server-side restart),
+        the underlying transport will automatically re-verify attestation and
+        retry the request once.
+        """
+        expected_fp = self.verify().public_key
+        ctx = self._build_sync_ssl_context(expected_fp)
+        inner = httpx.HTTPTransport(verify=ctx)
+        transport = _ReVerifyingTransport(self, inner)
+        return httpx.Client(transport=transport, follow_redirects=True)
 
     def make_secure_async_http_client(self) -> httpx.AsyncClient:
         """
-        Build an httpx.AsyncClient that pins the enclave's TLS cert
+        Build an httpx.AsyncClient that pins the enclave's TLS cert.
+
+        The returned client is suitable for long-lived use: if the enclave
+        rotates its TLS certificate (for example after a server-side restart),
+        the underlying transport will automatically re-verify attestation and
+        retry the request once.
         """
         expected_fp = self.verify().public_key
-
-        ctx = ssl.create_default_context()
-        ctx.wrap_bio = self._create_bio_wrapper(ctx.wrap_bio, expected_fp)
-        return httpx.AsyncClient(verify=ctx, follow_redirects=True)
+        ctx = self._build_async_ssl_context(expected_fp)
+        inner = httpx.AsyncHTTPTransport(verify=ctx)
+        transport = _AsyncReVerifyingTransport(self, inner)
+        return httpx.AsyncClient(transport=transport, follow_redirects=True)
 
     def verify(self) -> GroundTruth:
         """
