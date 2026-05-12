@@ -1,7 +1,7 @@
 # Tinfoil Python Library
 
 ![PyPI - Version](https://img.shields.io/pypi/v/tinfoil)
-[![SDK Test](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/sdk-test.yml/badge.svg)](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/sdk-test.yml)
+[![SDK Test](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/test.yml/badge.svg)](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/test.yml)
 [![Documentation](https://img.shields.io/badge/docs-tinfoil.sh-blue)](https://docs.tinfoil.sh/sdk/python-sdk)
 
 A Python client for secure AI model inference through Tinfoil.
