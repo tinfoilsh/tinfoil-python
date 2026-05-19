@@ -25,6 +25,12 @@ dependencies = [
     "urllib3>=2.7.0",
 ]
 
+[project.scripts]
+# Cross-SDK conformance binary (separate from the consumer-facing SDK API).
+# Speaks the JSON-in / JSON-out CLI contract defined in
+# https://github.com/lsd-cat/tinfoil-conformance .
+tinfoil-conformance = "tinfoil.conformance.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest",
