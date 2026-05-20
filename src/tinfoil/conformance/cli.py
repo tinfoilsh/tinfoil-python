@@ -91,6 +91,15 @@ def _capabilities() -> dict[str, Any]:
             # sigstore-python collapses missing-SCT and duplicate-SCT into
             # the same "Expected one certificate timestamp" error.
             "scts_count_distinguish_missing_vs_duplicate": False,
+            # sigstore-python rejects duplicate SCTs via the same
+            # count-based check (it rejects either case as
+            # "Expected one certificate timestamp").
+            "rejects_duplicate_sct_log": True,
+            # sigstore-python's verify_dsse checks subject[0] only.
+            "checks_only_subject_0": True,
+            # sigstore-python's in-toto parser tolerates extra top-level
+            # fields (pydantic's extra=allow on the statement model).
+            "in_toto_statement_tolerates_extra_fields": True,
         },
         "platforms_supported": ["sev-snp", "tdx"],
         "transport_modes_supported": ["tls-pinning"],
