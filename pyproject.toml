@@ -40,3 +40,6 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.uv]
 exclude-newer = "4 days"
+constraint-dependencies = [
+    "idna>=3.15", # GHSA-65pc-fj4g-8rjx
+]
