@@ -21,8 +21,11 @@ import json
 import sys
 from typing import Any, Tuple
 
+from ..attestation import verify_tdx_hardware
 from ..attestation.types import (
     FormatMismatchError,
+    HardwareMeasurement,
+    HardwareMeasurementError,
     Measurement,
     MeasurementMismatchError,
     PredicateType,
@@ -64,7 +67,11 @@ def _capabilities() -> dict[str, Any]:
         "schema_version": "1",
         "sdk": SDK_NAME,
         "sdk_version": _sdk_version(),
-        "stages_supported": ["verify-sigstore", "verify-measurement"],
+        "stages_supported": [
+            "verify-sigstore",
+            "verify-measurement",
+            "verify-hardware-measurements",
+        ],
         "sigstore": {
             "trust_root_loading": "configurable",
             # `sigstore` 4.2 verifies cert chain validity against the
@@ -498,6 +505,75 @@ def cmd_verify_measurement() -> int:
     return EXIT_ACCEPT
 
 
+# -----------------------------------------------------------------------------
+# verify-hardware-measurements (SPEC §6)
+# -----------------------------------------------------------------------------
+
+TDX_URI = "https://tinfoil.sh/predicate/tdx-guest/v2"
+
+
+def _emit_hardware_rejection(code: str, spec_ref: str, message: str) -> int:
+    body = {
+        "stage": "verify-hardware-measurements",
+        "accepted": False,
+        "rejection": {"code": code, "spec_ref": spec_ref, "message": message},
+    }
+    json.dump(body, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return EXIT_REJECT
+
+
+def cmd_verify_hardware_measurements() -> int:
+    raw = sys.stdin.read()
+    try:
+        inp = json.loads(raw)
+    except Exception as e:
+        sys.stderr.write(f"input schema violation: {e}\n")
+        return EXIT_BAD_INPUT
+    if inp.get("schema_version") != "1":
+        sys.stderr.write('schema_version must be "1"\n')
+        return EXIT_BAD_INPUT
+
+    enc = inp.get("enclave_measurement") or {}
+    if enc.get("type") != TDX_URI:
+        return _emit_hardware_rejection(
+            "ENCLAVE_MEASUREMENT_TYPE_INVALID", "6.3",
+            "enclave measurement type is not TdxGuestV2",
+        )
+    regs = enc.get("registers", [])
+    if not isinstance(regs, list) or len(regs) != TDX_REGISTER_COUNT:
+        return _emit_hardware_rejection(
+            "ENCLAVE_REGISTER_COUNT_INVALID", "6.3",
+            f"TDX enclave measurement must have {TDX_REGISTER_COUNT} registers, got {len(regs)}",
+        )
+
+    # SPEC §7.3 lowercase normalization.
+    enclave_lower = [r.lower() for r in regs]
+    enclave = Measurement(type=PredicateType.TDX_GUEST_V2, registers=enclave_lower)
+    hw_list = [
+        HardwareMeasurement(id=h["id"], mrtd=h["mrtd"].lower(), rtmr0=h["rtmr0"].lower())
+        for h in inp.get("hardware_measurements", [])
+    ]
+
+    try:
+        match = verify_tdx_hardware(hw_list, enclave)
+    except HardwareMeasurementError as e:
+        return _emit_hardware_rejection("HARDWARE_NO_MATCH", "6.3", str(e))
+
+    body = {
+        "stage": "verify-hardware-measurements",
+        "accepted": True,
+        "outputs": {
+            "matched_id": match.id,
+            "matched_mrtd": match.mrtd,
+            "matched_rtmr0": match.rtmr0,
+        },
+    }
+    json.dump(body, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return EXIT_ACCEPT
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -510,6 +586,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_verify_sigstore()
     if sub == "verify-measurement":
         return cmd_verify_measurement()
+    if sub == "verify-hardware-measurements":
+        return cmd_verify_hardware_measurements()
     if sub in ("", "help", "-h", "--help"):
         _print_help()
         return EXIT_ACCEPT
