@@ -21,6 +21,16 @@ import json
 import sys
 from typing import Any, Tuple
 
+from ..attestation.types import (
+    FormatMismatchError,
+    Measurement,
+    MeasurementMismatchError,
+    PredicateType,
+    Rtmr3NotZeroError,
+    MULTIPLATFORM_REGISTER_COUNT,
+    SEV_REGISTER_COUNT,
+    TDX_REGISTER_COUNT,
+)
 from ..sigstore import (
     SigstorePolicy,
     SigstoreVerification,
@@ -54,7 +64,7 @@ def _capabilities() -> dict[str, Any]:
         "schema_version": "1",
         "sdk": SDK_NAME,
         "sdk_version": _sdk_version(),
-        "stages_supported": ["verify-sigstore"],
+        "stages_supported": ["verify-sigstore", "verify-measurement"],
         "sigstore": {
             "trust_root_loading": "configurable",
             # `sigstore` 4.2 verifies cert chain validity against the
@@ -100,6 +110,9 @@ def _capabilities() -> dict[str, Any]:
             # sigstore-python's in-toto parser tolerates extra top-level
             # fields (pydantic's extra=allow on the statement model).
             "in_toto_statement_tolerates_extra_fields": True,
+        },
+        "measurement": {
+            "compare_multiplatform_to_tdx_supported": True,
         },
         "platforms_supported": ["sev-snp", "tdx"],
         "transport_modes_supported": ["tls-pinning"],
@@ -375,6 +388,116 @@ def _print_help() -> None:
     )
 
 
+# -----------------------------------------------------------------------------
+# verify-measurement (SPEC §7)
+# -----------------------------------------------------------------------------
+
+_EXPECTED_REGISTER_COUNT = {
+    PredicateType.SEV_GUEST_V2: SEV_REGISTER_COUNT,
+    PredicateType.TDX_GUEST_V2: TDX_REGISTER_COUNT,
+    PredicateType.SNP_TDX_MULTIPLATFORM_v1: MULTIPLATFORM_REGISTER_COUNT,
+}
+
+
+def _parse_predicate_type(uri: str) -> PredicateType | None:
+    for pt in PredicateType:
+        if pt.value == uri:
+            return pt
+    return None
+
+
+def _normalize_measurement(m: dict[str, Any]) -> Tuple[Measurement | None, str, str]:
+    """Validate type + register count and lowercase-normalize registers per
+    SPEC §7.3. Returns (measurement, code, spec_ref); on success code/spec_ref
+    are empty strings."""
+    t = _parse_predicate_type(m.get("type", ""))
+    if t is None:
+        return None, "MEASUREMENT_TYPE_UNKNOWN", "2.3"
+    expected = _EXPECTED_REGISTER_COUNT.get(t)
+    regs = m.get("registers", [])
+    if expected is None or not isinstance(regs, list) or len(regs) != expected:
+        return None, "MEASUREMENT_REGISTER_COUNT_INVALID", "7.1"
+    normalized = [r.lower() for r in regs]
+    return Measurement(type=t, registers=normalized), "", ""
+
+
+def _emit_measurement_rejection(code: str, spec_ref: str, message: str) -> int:
+    body = {
+        "stage": "verify-measurement",
+        "accepted": False,
+        "rejection": {
+            "code": code,
+            "spec_ref": spec_ref,
+            "message": message,
+        },
+    }
+    json.dump(body, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return EXIT_REJECT
+
+
+def cmd_verify_measurement() -> int:
+    raw = sys.stdin.read()
+    try:
+        inp = json.loads(raw)
+    except Exception as e:
+        sys.stderr.write(f"input schema violation: {e}\n")
+        return EXIT_BAD_INPUT
+    if inp.get("schema_version") != "1":
+        sys.stderr.write('schema_version must be "1"\n')
+        return EXIT_BAD_INPUT
+
+    source_in = inp.get("source")
+    if not isinstance(source_in, dict):
+        return _emit_measurement_rejection(
+            "MEASUREMENT_TYPE_UNKNOWN", "7", "missing source measurement"
+        )
+    source, code, spec_ref = _normalize_measurement(source_in)
+    if source is None:
+        return _emit_measurement_rejection(code, spec_ref, "source measurement invalid")
+
+    target = None
+    target_in = inp.get("target")
+    if target_in is not None:
+        target, code, spec_ref = _normalize_measurement(target_in)
+        if target is None:
+            return _emit_measurement_rejection(
+                code, spec_ref, "target measurement invalid"
+            )
+
+    source_fp = source.fingerprint()
+    target_fp = target.fingerprint() if target is not None else None
+
+    if target is not None:
+        try:
+            source.assert_equal(target)
+        except Rtmr3NotZeroError as e:
+            return _emit_measurement_rejection(
+                "MEASUREMENT_RTMR3_NONZERO", "7.3.2", str(e)
+            )
+        except MeasurementMismatchError as e:
+            return _emit_measurement_rejection(
+                "MEASUREMENT_MISMATCH", "7.3", str(e) or "registers mismatch"
+            )
+        except FormatMismatchError as e:
+            return _emit_measurement_rejection(
+                "MEASUREMENT_TYPE_COMBINATION_UNSUPPORTED", "7.3.5",
+                str(e) or "incompatible measurement types",
+            )
+
+    body = {
+        "stage": "verify-measurement",
+        "accepted": True,
+        "outputs": {
+            "source_fingerprint_hex": source_fp,
+            "target_fingerprint_hex": target_fp,
+        },
+    }
+    json.dump(body, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return EXIT_ACCEPT
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -385,6 +508,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ACCEPT
     if sub == "verify-sigstore":
         return cmd_verify_sigstore()
+    if sub == "verify-measurement":
+        return cmd_verify_measurement()
     if sub in ("", "help", "-h", "--help"):
         _print_help()
         return EXIT_ACCEPT
