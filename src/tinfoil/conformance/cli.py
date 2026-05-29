@@ -121,6 +121,17 @@ def _capabilities() -> dict[str, Any]:
         "measurement": {
             "compare_multiplatform_to_tdx_supported": True,
         },
+        "attestation_tdx": {
+            # tinfoil-python has a deep native TDX verifier
+            # (tinfoil.attestation.verify_tdx) but its public API doesn't
+            # currently expose a collateral-injection entry point — it
+            # fetches from Intel PCS. Conformance support lands in Phase 1.5
+            # once we wrap verify_tdx with an injected-collateral path;
+            # declared false here so attestation-tdx fixtures skip cleanly
+            # until then.
+            "supported": False,
+            "injected_collateral_supported": False,
+        },
         "platforms_supported": ["sev-snp", "tdx"],
         "transport_modes_supported": ["tls-pinning"],
         "flow_modes_supported": ["standard"],
