@@ -140,6 +140,11 @@ def _capabilities() -> dict[str, Any]:
             # lands when Phase 3 fixtures need it.
             "supported": True,
             "injected_collateral_supported": True,
+            # cert_utils.verify_intel_chain calls datetime.now(timezone.utc)
+            # unconditionally — there's no API to inject the verification
+            # time. Fixtures that pin expiration_check_date outside the real-
+            # now window (e.g. 324-pck-leaf-expired) skip honestly.
+            "verification_time_override": "system-clock-only",
         },
         "platforms_supported": ["sev-snp", "tdx"],
         "transport_modes_supported": ["tls-pinning"],
@@ -614,19 +619,43 @@ def _emit_tdx_rejection(code: str, spec_ref: str, message: str) -> int:
 
 def _classify_tdx_error(err: Exception) -> Tuple[str, str]:
     msg = str(err).lower()
-    if "signature" in msg:
-        return "QUOTE_SIGNATURE_INVALID", "4.3"
+    # Order matters: chain errors mention "signature" but should map to
+    # PCK_CHAIN_INVALID, not QUOTE_SIGNATURE_INVALID.
+
+    # Quote header / structural parse failures
+    if "invalid tee type" in msg or "tee type" in msg:
+        return "WRONG_TEE_TYPE", "A.3.1"
+    if "attestation key type" in msg or "unsupported.*key type" in msg:
+        return "ATTESTATION_KEY_TYPE_UNSUPPORTED", "A.3.1"
+    if "qe vendor" in msg or "unknown qe" in msg:
+        return "QE_VENDOR_UNKNOWN", "A.3.1"
+    if "quote too short" in msg or "minimum" in msg and "size" in msg:
+        return "QUOTE_TRUNCATED", "A.3"
+    if "certification data" in msg or "size mismatch" in msg or "data size" in msg:
+        return "QUOTE_FORMAT_UNSUPPORTED", "A.3.9"
+    if "unsupported quote version" in msg or "quote version" in msg or "version" in msg and "supported" in msg:
+        return "QUOTE_FORMAT_UNSUPPORTED", "A.3.1"
+
+    # PCK chain (BEFORE the generic "signature" check)
+    if "pck" in msg and "chain" in msg:
+        return "PCK_CHAIN_INVALID", "4.2"
+    if "certificate chain" in msg or "cert chain" in msg:
+        return "PCK_CHAIN_INVALID", "4.2"
+    if "expired" in msg or "not yet valid" in msg:
+        return "PCK_EXPIRED", "4.2"
+    if ("pck" in msg or "intermediate" in msg or "root" in msg) and "certificate" in msg:
+        return "PCK_CHAIN_INVALID", "4.2"
+
+    # AK / quote signature (generic — must come after chain)
     if "qe report" in msg or "qe_report" in msg:
         return "QE_REPORT_SIGNATURE_INVALID", "4.4"
     if "ak" in msg and ("bind" in msg or "report data" in msg):
         return "AK_BINDING_INVALID", "4.5"
-    if "pck" in msg and "chain" in msg:
-        return "PCK_CHAIN_INVALID", "4.2"
-    if "expired" in msg:
-        return "PCK_EXPIRED", "4.2"
+    if "signature" in msg:
+        return "QUOTE_SIGNATURE_INVALID", "4.3"
     if "root" in msg and ("trust" in msg or "ca" in msg):
         return "ROOT_CA_UNTRUSTED", "4.2"
-    if "format" in msg or "version" in msg:
+    if "format" in msg:
         return "QUOTE_FORMAT_UNSUPPORTED", "A.3"
     return "QV_RESULT_TERMINAL_UNSPECIFIED", "4.1.2"
 
