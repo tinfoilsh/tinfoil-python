@@ -28,7 +28,7 @@ dependencies = [
 [project.scripts]
 # Cross-SDK conformance binary (separate from the consumer-facing SDK API).
 # Speaks the JSON-in / JSON-out CLI contract defined in
-# https://github.com/lsd-cat/tinfoil-conformance .
+# https://github.com/tinfoilsh/tinfoil-conformance .
 tinfoil-conformance = "tinfoil.conformance.cli:main"
 
 [dependency-groups]

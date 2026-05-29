@@ -1,7 +1,7 @@
 name: Tinfoil Conformance
 
 # Runs the cross-SDK Tinfoil conformance suite
-# (https://github.com/lsd-cat/tinfoil-conformance) against this SDK's
+# (https://github.com/tinfoilsh/tinfoil-conformance) against this SDK's
 # `tinfoil-conformance` binary. Speaks the Tinfoil policy-layer CLI
 # contract (JSON-in / JSON-out); distinct from the test/audit workflows
 # which exercise the consumer-facing verifier API.
@@ -37,7 +37,7 @@ jobs:
       - name: Checkout tinfoil-conformance suite
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: lsd-cat/tinfoil-conformance
+          repository: tinfoilsh/tinfoil-conformance
           ref: main
           path: tinfoil-conformance
           persist-credentials: false
