@@ -22,6 +22,11 @@ import sys
 from typing import Any, Tuple
 
 from ..attestation import verify_tdx_hardware
+from ..attestation.abi_tdx import parse_quote as parse_tdx_quote
+from ..attestation.verify_tdx import (
+    TdxVerificationError,
+    verify_tdx_quote as verify_tdx_quote_crypto,
+)
 from ..attestation.types import (
     FormatMismatchError,
     HardwareMeasurement,
@@ -71,6 +76,7 @@ def _capabilities() -> dict[str, Any]:
             "verify-sigstore",
             "verify-measurement",
             "verify-hardware-measurements",
+            "verify-attestation-tdx",
         ],
         "sigstore": {
             "trust_root_loading": "configurable",
@@ -122,15 +128,18 @@ def _capabilities() -> dict[str, Any]:
             "compare_multiplatform_to_tdx_supported": True,
         },
         "attestation_tdx": {
-            # tinfoil-python has a deep native TDX verifier
-            # (tinfoil.attestation.verify_tdx) but its public API doesn't
-            # currently expose a collateral-injection entry point — it
-            # fetches from Intel PCS. Conformance support lands in Phase 1.5
-            # once we wrap verify_tdx with an injected-collateral path;
-            # declared false here so attestation-tdx fixtures skip cleanly
-            # until then.
-            "supported": False,
-            "injected_collateral_supported": False,
+            # tinfoil-python ships a native TDX verifier with clean
+            # injection-friendly APIs:
+            #   * verify_tdx_quote(quote, raw_quote)  — does Intel §4.1.2
+            #     steps 1-4 (PCK chain, quote sig, QE report sig, AK ↔ QE
+            #     report data binding) with no network calls
+            #   * verify_tcb_info_signature / verify_qe_identity_signature
+            #     accept the raw collateral bytes + issuer chain as args
+            # Phase 1.5 wires the structural verification path
+            # (tcb_evaluation_required=false fixtures). Full TCB evaluation
+            # lands when Phase 3 fixtures need it.
+            "supported": True,
+            "injected_collateral_supported": True,
         },
         "platforms_supported": ["sev-snp", "tdx"],
         "transport_modes_supported": ["tls-pinning"],
@@ -585,6 +594,158 @@ def cmd_verify_hardware_measurements() -> int:
     return EXIT_ACCEPT
 
 
+# -----------------------------------------------------------------------------
+# verify-attestation-tdx (SPEC §4 / Intel TDX DCAP §A.3)
+# -----------------------------------------------------------------------------
+
+TDX_GUEST_V2_URI = "https://tinfoil.sh/predicate/tdx-guest/v2"
+
+
+def _emit_tdx_rejection(code: str, spec_ref: str, message: str) -> int:
+    body = {
+        "stage": "verify-attestation-tdx",
+        "accepted": False,
+        "rejection": {"code": code, "spec_ref": spec_ref, "message": message},
+    }
+    json.dump(body, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return EXIT_REJECT
+
+
+def _classify_tdx_error(err: Exception) -> Tuple[str, str]:
+    msg = str(err).lower()
+    if "signature" in msg:
+        return "QUOTE_SIGNATURE_INVALID", "4.3"
+    if "qe report" in msg or "qe_report" in msg:
+        return "QE_REPORT_SIGNATURE_INVALID", "4.4"
+    if "ak" in msg and ("bind" in msg or "report data" in msg):
+        return "AK_BINDING_INVALID", "4.5"
+    if "pck" in msg and "chain" in msg:
+        return "PCK_CHAIN_INVALID", "4.2"
+    if "expired" in msg:
+        return "PCK_EXPIRED", "4.2"
+    if "root" in msg and ("trust" in msg or "ca" in msg):
+        return "ROOT_CA_UNTRUSTED", "4.2"
+    if "format" in msg or "version" in msg:
+        return "QUOTE_FORMAT_UNSUPPORTED", "A.3"
+    return "QV_RESULT_TERMINAL_UNSPECIFIED", "4.1.2"
+
+
+def _decode_td_attributes(td_attrs: bytes) -> dict[str, bool]:
+    n = int.from_bytes(td_attrs, byteorder="little")
+    return {
+        "tud_debug":                 bool(n & (1 << 0)),
+        "tud_reserved_nonzero":      bool(n & 0xFE),
+        "sec_reserved_lower_nonzero":bool(n & 0x0FFFFF00),
+        "sec_sept_ve_disable":       bool(n & (1 << 28)),
+        "sec_reserved_bit29":        bool(n & (1 << 29)),
+        "sec_pks":                   bool(n & (1 << 30)),
+        "sec_kl":                    bool(n & (1 << 31)),
+        "other_reserved_nonzero":    bool(n & 0x7FFFFFFF00000000),
+        "other_perfmon":             bool(n & (1 << 63)),
+    }
+
+
+def cmd_verify_attestation_tdx() -> int:
+    raw = sys.stdin.read()
+    try:
+        inp = json.loads(raw)
+    except Exception as e:
+        sys.stderr.write(f"input schema violation: {e}\n")
+        return EXIT_BAD_INPUT
+    if inp.get("schema_version") != "1":
+        sys.stderr.write('schema_version must be "1"\n')
+        return EXIT_BAD_INPUT
+
+    try:
+        quote_bytes = base64.b64decode(inp["quote_b64"])
+    except Exception as e:
+        return _emit_tdx_rejection(
+            "QUOTE_FORMAT_UNSUPPORTED", "A.3", f"quote_b64 not valid base64: {e}"
+        )
+
+    try:
+        quote = parse_tdx_quote(quote_bytes)
+    except Exception as e:
+        code, ref = _classify_tdx_error(e)
+        return _emit_tdx_rejection(code, ref, str(e))
+
+    policy = inp.get("policy") or {}
+    # Default true (full §4.7 collateral evaluation). False = structural-only
+    # verification (PCK chain + AK + sig + QE report). Matches the Go binary's
+    # semantics and fixture 300's calibration.
+    tcb_eval_required = policy.get("tcb_evaluation_required", True)
+
+    # Phase 1.5: structural verification only. Phase 3 will add the full
+    # collateral path via verify_tcb_info_signature + verify_qe_identity_
+    # signature + the issuer-chain certs.
+    if tcb_eval_required:
+        return _emit_tdx_rejection(
+            "QV_RESULT_TERMINAL_UNSPECIFIED",
+            "4.7",
+            "tcb_evaluation_required=true not yet wired in tinfoil-python; "
+            "Phase 1.5 only handles the structural path. Use "
+            "tcb_evaluation_required=false for now.",
+        )
+
+    try:
+        verify_tdx_quote_crypto(quote, quote_bytes)
+    except TdxVerificationError as e:
+        code, ref = _classify_tdx_error(e)
+        return _emit_tdx_rejection(code, ref, str(e))
+    except Exception as e:
+        code, ref = _classify_tdx_error(e)
+        return _emit_tdx_rejection(code, ref, f"unexpected: {e}")
+
+    # Build outputs from the parsed body.
+    body = quote.td_quote_body
+    header = quote.header
+    tee_type_str = "TDX" if header.tee_type == 0x81 else f"0x{header.tee_type:08x}"
+
+    out_body = {
+        "stage": "verify-attestation-tdx",
+        "accepted": True,
+        "outputs": {
+            "quote_version": header.version,
+            "tee_type": tee_type_str,
+            "qv_result": "OK",
+            "measurement": {
+                "type": TDX_GUEST_V2_URI,
+                "registers": [
+                    body.mr_td.hex(),
+                    body.rtmrs[0].hex(),
+                    body.rtmrs[1].hex(),
+                    body.rtmrs[2].hex(),
+                    body.rtmrs[3].hex(),
+                ],
+            },
+            "header_fields": {
+                "attestation_key_type": header.attestation_key_type,
+                "qe_vendor_id_hex": header.qe_vendor_id.hex(),
+                "user_data_hex": header.user_data.hex(),
+            },
+            "body_fields": {
+                "tee_tcb_svn_hex": body.tee_tcb_svn.hex(),
+                "mrseam_hex": body.mr_seam.hex(),
+                "mrsignerseam_hex": body.mr_signer_seam.hex(),
+                "seam_attributes_hex": body.seam_attributes.hex(),
+                "td_attributes_hex": body.td_attributes.hex(),
+                "td_attributes_decoded": _decode_td_attributes(body.td_attributes),
+                "xfam_hex": body.xfam.hex(),
+                "mrtd_hex": body.mr_td.hex(),
+                "mrconfigid_hex": body.mr_config_id.hex(),
+                "mrowner_hex": body.mr_owner.hex(),
+                "mrownerconfig_hex": body.mr_owner_config.hex(),
+                "rtmrs_hex": [r.hex() for r in body.rtmrs],
+                "report_data_hex": body.report_data.hex(),
+            },
+        },
+    }
+    json.dump(out_body, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return EXIT_ACCEPT
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -599,6 +760,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_verify_measurement()
     if sub == "verify-hardware-measurements":
         return cmd_verify_hardware_measurements()
+    if sub == "verify-attestation-tdx":
+        return cmd_verify_attestation_tdx()
     if sub in ("", "help", "-h", "--help"):
         _print_help()
         return EXIT_ACCEPT
