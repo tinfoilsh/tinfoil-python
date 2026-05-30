@@ -145,6 +145,12 @@ def _capabilities() -> dict[str, Any]:
             # time. Fixtures that pin expiration_check_date outside the real-
             # now window (e.g. 324-pck-leaf-expired) skip honestly.
             "verification_time_override": "system-clock-only",
+            # tinfoil-python's verify_tdx_quote only does §4.1.2 steps 1-4
+            # (structural). The full §4.7 collateral evaluation
+            # (verify_tcb_info_signature + verify_qe_identity_signature +
+            # TCB level matching) needs a wrapper in cmd_verify_attestation_
+            # tdx — not yet wired. Phase 2B fixtures skip cleanly until then.
+            "tcb_evaluation_supported": False,
         },
         "platforms_supported": ["sev-snp", "tdx"],
         "transport_modes_supported": ["tls-pinning"],
