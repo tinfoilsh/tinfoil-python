@@ -151,6 +151,12 @@ def _capabilities() -> dict[str, Any]:
             # TCB level matching) needs a wrapper in cmd_verify_attestation_
             # tdx — not yet wired. Phase 2B fixtures skip cleanly until then.
             "tcb_evaluation_supported": False,
+            # Phase 4: cmd_verify_attestation_tdx applies SPEC §4.8 /
+            # Intel §2.3.2 checks against every policy.expected_*_hex pin
+            # the fixture sets — the unmutated quote's body fields are
+            # parsed and compared without needing any sigstore-python or
+            # lib API surface (pure post-parse Python).
+            "extended_td_checks_supported": True,
         },
         "platforms_supported": ["sev-snp", "tdx"],
         "transport_modes_supported": ["tls-pinning"],
@@ -681,6 +687,87 @@ def _decode_td_attributes(td_attrs: bytes) -> dict[str, bool]:
     }
 
 
+def _enforce_extended_policy(
+    raw_quote: bytes, policy: dict
+) -> tuple[str, str]:
+    """Apply SPEC §4.8 / Intel §2.3.2 checks against quote body fields.
+
+    Each policy.expected_*_hex pin is optional; only enforced when set.
+    Returns ("", "") on success, otherwise (rejection_code, message).
+    """
+    if len(raw_quote) < 48 + 584:
+        return "", ""
+    header = raw_quote[:48]
+    body = raw_quote[48:48 + 584]
+
+    qe_vendor = header[12:28]
+    tee_tcb_svn = body[0:16]
+    mr_seam = body[16:64]
+    mr_signer_seam = body[64:112]
+    seam_attrs = body[112:120]
+    td_attrs = body[120:128]
+    xfam = body[128:136]
+    mr_td = body[136:184]
+    mr_config_id = body[184:232]
+    mr_owner = body[232:280]
+    mr_owner_config = body[280:328]
+    rtmr3 = body[472:520]
+    report_data = body[520:584]
+
+    def match_hex(expected_hex: str | None, got: bytes) -> bool:
+        if not expected_hex:
+            return True
+        try:
+            expected = bytes.fromhex(expected_hex.strip().lower())
+        except ValueError:
+            return False
+        if len(expected) != len(got):
+            return False
+        return got == expected
+
+    pins = [
+        ("expected_td_attributes_hex",      td_attrs,        "TD_ATTRIBUTES_MISMATCH",      "td_attributes"),
+        ("expected_xfam_hex",               xfam,            "XFAM_MISMATCH",               "xfam"),
+        ("expected_mr_signer_seam_hex",     mr_signer_seam,  "MR_SIGNER_SEAM_MISMATCH",     "mr_signer_seam"),
+        ("expected_seam_attributes_hex",    seam_attrs,      "SEAM_ATTRIBUTES_MISMATCH",    "seam_attributes"),
+        ("expected_mrtd_hex",               mr_td,           "MRTD_MISMATCH",               "mrtd"),
+        ("expected_mr_config_id_hex",       mr_config_id,    "MR_CONFIG_ID_MISMATCH",       "mr_config_id"),
+        ("expected_mr_owner_hex",           mr_owner,        "MR_OWNER_MISMATCH",           "mr_owner"),
+        ("expected_mr_owner_config_hex",    mr_owner_config, "MR_OWNER_CONFIG_MISMATCH",    "mr_owner_config"),
+        ("expected_rtmr3_hex",              rtmr3,           "RTMR3_NONZERO",               "rtmr3"),
+        ("expected_report_data_hex",        report_data,     "REPORT_DATA_MISMATCH",        "report_data"),
+        ("expected_qe_vendor_id_hex",       qe_vendor,       "QE_VENDOR_ID_MISMATCH",       "qe_vendor_id"),
+    ]
+    for field_name, got, code, label in pins:
+        expected_hex = policy.get(field_name)
+        if expected_hex is not None and not match_hex(expected_hex, got):
+            return code, f"{label} {got.hex()} != policy expected {expected_hex.strip().lower()}"
+
+    # MR_SEAM allowlist
+    allowlist = policy.get("expected_mrseam_allowlist")
+    if allowlist:
+        got_hex = mr_seam.hex()
+        if not any(got_hex == entry.strip().lower() for entry in allowlist):
+            return ("MR_SEAM_NOT_ALLOWED",
+                    f"mr_seam {got_hex} not in policy allowlist ({len(allowlist)} entries)")
+
+    # Min TEE_TCB_SVN — component-wise comparison (SPEC §4.8.7).
+    min_hex = policy.get("min_tee_tcb_svn_hex")
+    if min_hex:
+        try:
+            minimum = bytes.fromhex(min_hex.strip().lower())
+            if len(minimum) == 16:
+                for i in range(16):
+                    if tee_tcb_svn[i] < minimum[i]:
+                        return ("TEE_TCB_SVN_BELOW_MINIMUM",
+                                f"tee_tcb_svn[{i}]={tee_tcb_svn[i]} < min[{i}]={minimum[i]} "
+                                f"(quote={tee_tcb_svn.hex()}, minimum={minimum.hex()})")
+        except ValueError:
+            pass
+
+    return "", ""
+
+
 def cmd_verify_attestation_tdx() -> int:
     raw = sys.stdin.read()
     try:
@@ -731,6 +818,11 @@ def cmd_verify_attestation_tdx() -> int:
     except Exception as e:
         code, ref = _classify_tdx_error(e)
         return _emit_tdx_rejection(code, ref, f"unexpected: {e}")
+
+    # Phase 4: extended-TD policy checks (SPEC §4.8 / Intel §2.3.2).
+    code, msg = _enforce_extended_policy(quote_bytes, policy)
+    if code:
+        return _emit_tdx_rejection(code, "4.8", msg)
 
     # Build outputs from the parsed body.
     body = quote.td_quote_body
