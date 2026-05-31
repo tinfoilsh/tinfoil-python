@@ -25,8 +25,32 @@ from ..attestation import verify_tdx_hardware
 from ..attestation.abi_tdx import parse_quote as parse_tdx_quote
 from ..attestation.verify_tdx import (
     TdxVerificationError,
+    extract_pck_cert_chain,
     verify_tdx_quote as verify_tdx_quote_crypto,
 )
+from ..attestation import collateral_tdx as _coll
+from ..attestation.collateral_tdx import (
+    CollateralError,
+    PckCrl,
+    RootCrl,
+    TdxCollateral,
+    check_collateral_freshness,
+    parse_qe_identity_response,
+    parse_tcb_info_response,
+    validate_certificate_revocation,
+    validate_qe_identity,
+    validate_tcb_status,
+    validate_tdx_module_identity,
+    verify_qe_identity_signature,
+    verify_tcb_info_signature,
+)
+from ..attestation.cert_utils import parse_pem_chain
+from ..attestation.pck_extensions import extract_pck_extensions
+from ..attestation import intel_root_ca as _intel_root_mod
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from datetime import datetime, timezone
+import contextlib
 from ..attestation.types import (
     FormatMismatchError,
     HardwareMeasurement,
@@ -145,18 +169,25 @@ def _capabilities() -> dict[str, Any]:
             # time. Fixtures that pin expiration_check_date outside the real-
             # now window (e.g. 324-pck-leaf-expired) skip honestly.
             "verification_time_override": "system-clock-only",
-            # tinfoil-python's verify_tdx_quote only does §4.1.2 steps 1-4
-            # (structural). The full §4.7 collateral evaluation
-            # (verify_tcb_info_signature + verify_qe_identity_signature +
-            # TCB level matching) needs a wrapper in cmd_verify_attestation_
-            # tdx — not yet wired. Phase 2B fixtures skip cleanly until then.
-            "tcb_evaluation_supported": False,
+            # Phase 2B/3 wired: cmd_verify_attestation_tdx now orchestrates
+            # the lib's pure validation functions (verify_tcb_info_signature
+            # + verify_qe_identity_signature + check_collateral_freshness +
+            # validate_certificate_revocation + validate_tcb_status +
+            # validate_tdx_module_identity + validate_qe_identity) using
+            # the fixture-injected collateral bytes — no Intel PCS fetch.
+            "tcb_evaluation_supported": True,
             # Phase 4: cmd_verify_attestation_tdx applies SPEC §4.8 /
             # Intel §2.3.2 checks against every policy.expected_*_hex pin
             # the fixture sets — the unmutated quote's body fields are
             # parsed and compared without needing any sigstore-python or
             # lib API surface (pure post-parse Python).
             "extended_td_checks_supported": True,
+            # validate_tcb_status rejects only the terminal statuses
+            # (OutOfDate, OutOfDateConfigurationNeeded, Revoked); the
+            # three non-terminal statuses (SWHardeningNeeded, Config-
+            # urationNeeded, ConfigurationAndSWHardeningNeeded) pass
+            # through per SPEC §4.7.7 default.
+            "accepts_non_terminal_tcb_statuses": True,
         },
         "platforms_supported": ["sev-snp", "tdx"],
         "transport_modes_supported": ["tls-pinning"],
@@ -687,6 +718,184 @@ def _decode_td_attributes(td_attrs: bytes) -> dict[str, bool]:
     }
 
 
+@contextlib.contextmanager
+def _maybe_override_time(timestamp: int | None):
+    """Temporarily replace datetime.now() inside collateral_tdx and
+    cert_utils so all internal freshness/validity checks use the fixture's
+    expiration_check_date instead of real system time. The lib has no
+    public time-injection API; this monkey-patch is the cleanest
+    workaround until verify_intel_chain / check_collateral_freshness /
+    validate_certificate_revocation gain a `now` parameter."""
+    if timestamp is None:
+        yield
+        return
+    import datetime as _dt_module
+    fixed_now = _dt_module.datetime.fromtimestamp(int(timestamp), tz=_dt_module.timezone.utc)
+
+    class _FixedDatetime(_dt_module.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+    from ..attestation import collateral_tdx as _coll_mod
+    from ..attestation import cert_utils as _cert_mod
+    orig_coll_dt = _coll_mod.datetime
+    orig_cert_dt = _cert_mod.datetime
+    _coll_mod.datetime = _FixedDatetime
+    _cert_mod.datetime = _FixedDatetime
+    try:
+        yield
+    finally:
+        _coll_mod.datetime = orig_coll_dt
+        _cert_mod.datetime = orig_cert_dt
+
+
+@contextlib.contextmanager
+def _maybe_override_intel_root(pem: str | None):
+    """Temporarily replace the embedded Intel SGX Root CA with a synthetic
+    one for the duration of the `with` block. Phase 3 synthetic-chain
+    fixtures rely on this so their self-issued root is accepted by
+    cert_utils.verify_intel_chain (which reads the module-level
+    INTEL_SGX_ROOT_CA_PEM via get_intel_root_ca)."""
+    if not pem:
+        yield
+        return
+    orig_pem = _intel_root_mod.INTEL_SGX_ROOT_CA_PEM
+    _intel_root_mod.INTEL_SGX_ROOT_CA_PEM = pem.encode()
+    try:
+        yield
+    finally:
+        _intel_root_mod.INTEL_SGX_ROOT_CA_PEM = orig_pem
+
+
+def _evaluate_collateral(
+    quote, pck_chain, collateral_in: dict, expiration_check_date_unix
+) -> tuple[str, str, str]:
+    """Run Intel §4.7 collateral evaluation against fixture-injected bytes.
+
+    Orchestrates the lib's pure validation functions in the order specified
+    by SPEC §4.9 step 10. Returns (rejection_code, spec_ref, message); empty
+    string code means everything passed."""
+    try:
+        # Step 1: PCK extensions
+        pck_extensions = extract_pck_extensions(pck_chain.pck_cert)
+
+        # Step 2: Parse injected collateral
+        tcb_info_raw = (collateral_in.get("tcb_info_json") or "").encode()
+        qe_identity_raw = (collateral_in.get("qe_identity_json") or "").encode()
+        tcb_info = parse_tcb_info_response(tcb_info_raw)
+        qe_identity = parse_qe_identity_response(qe_identity_raw)
+
+        tcb_issuer_chain_pem = (collateral_in.get("tcb_info_issuer_chain_pem") or "").encode()
+        qe_issuer_chain_pem = (collateral_in.get("qe_identity_issuer_chain_pem") or "").encode()
+        tcb_issuer_chain = parse_pem_chain(tcb_issuer_chain_pem) if tcb_issuer_chain_pem else []
+        qe_issuer_chain = parse_pem_chain(qe_issuer_chain_pem) if qe_issuer_chain_pem else []
+
+        # Step 3: Verify collateral signatures
+        if tcb_issuer_chain:
+            verify_tcb_info_signature(tcb_info_raw, tcb_info, tcb_issuer_chain)
+        if qe_issuer_chain:
+            verify_qe_identity_signature(qe_identity_raw, qe_identity, qe_issuer_chain)
+
+        # Step 4: CRLs
+        pck_crl_der = base64.b64decode(collateral_in.get("pck_crl_der_b64") or "")
+        root_crl_der = base64.b64decode(collateral_in.get("root_crl_der_b64") or "")
+        pck_crl_obj = None
+        root_crl_obj = None
+        if pck_crl_der:
+            crl = x509.load_der_x509_crl(pck_crl_der)
+            pck_crl_obj = PckCrl(crl=crl, ca_type="platform",
+                                 next_update=crl.next_update_utc or datetime.now(timezone.utc))
+        if root_crl_der:
+            crl = x509.load_der_x509_crl(root_crl_der)
+            root_crl_obj = RootCrl(crl=crl,
+                                   next_update=crl.next_update_utc or datetime.now(timezone.utc))
+
+        collateral = TdxCollateral(
+            tcb_info=tcb_info, qe_identity=qe_identity,
+            tcb_info_raw=tcb_info_raw, qe_identity_raw=qe_identity_raw,
+            pck_crl=pck_crl_obj, root_crl=root_crl_obj,
+            tcb_info_issuer_chain=tcb_issuer_chain or None,
+            qe_identity_issuer_chain=qe_issuer_chain or None,
+        )
+
+        # Step 5: Freshness — inline so we can use the fixture-provided
+        # expiration_check_date_unix instead of datetime.now(). The lib's
+        # check_collateral_freshness reads system time directly which
+        # would fire on any older testdata.
+        if expiration_check_date_unix is not None:
+            now_t = datetime.fromtimestamp(int(expiration_check_date_unix), tz=timezone.utc)
+        else:
+            now_t = datetime.now(timezone.utc)
+        if now_t > tcb_info.tcb_info.next_update:
+            return "TCB_INFO_EXPIRED", "4.7", (
+                f"TCB Info nextUpdate {tcb_info.tcb_info.next_update} is past "
+                f"verification_time {now_t}"
+            )
+        if now_t > qe_identity.enclave_identity.next_update:
+            return "QE_IDENTITY_EXPIRED", "4.7", (
+                f"QE Identity nextUpdate {qe_identity.enclave_identity.next_update} "
+                f"is past verification_time {now_t}"
+            )
+
+        # Step 6: Cert revocation
+        validate_certificate_revocation(
+            collateral, pck_chain.pck_cert, pck_chain.intermediate_cert,
+        )
+
+        # Step 7: TCB status (matches level + rejects non-acceptable status)
+        validate_tcb_status(
+            tcb_info.tcb_info,
+            quote.td_quote_body.tee_tcb_svn,
+            pck_extensions,
+        )
+
+        # Step 8: TDX module identity
+        validate_tdx_module_identity(
+            tcb_info.tcb_info,
+            quote.td_quote_body.tee_tcb_svn,
+            quote.td_quote_body.mr_signer_seam,
+            quote.td_quote_body.seam_attributes,
+        )
+
+        # Step 9: QE identity
+        qe_report = quote.signed_data.certification_data.qe_report_data
+        if qe_report is None:
+            return "QE_IDENTITY_FIELD_MISMATCH", "4.4", "Quote missing QE report"
+        qe_parsed = qe_report.qe_report_parsed
+        miscselect_bytes = qe_parsed.misc_select.to_bytes(4, byteorder='little')
+        validate_qe_identity(
+            qe_identity.enclave_identity,
+            qe_parsed.isv_svn, qe_parsed.mr_signer,
+            miscselect_bytes, qe_parsed.attributes, qe_parsed.isv_prod_id,
+        )
+
+    except CollateralError as e:
+        msg = str(e)
+        msg_low = msg.lower()
+        if "tcb status" in msg_low or "no matching tcb" in msg_low or "revoked" in msg_low:
+            return "TCB_REVOKED", "4.7.7", msg
+        if "signature" in msg_low and ("tcb info" in msg_low or "tcbinfo" in msg_low):
+            return "TCB_INFO_SIGNATURE_INVALID", "4.7", msg
+        if "signature" in msg_low and ("qe identity" in msg_low or "enclave identity" in msg_low):
+            return "QE_IDENTITY_SIGNATURE_INVALID", "4.7", msg
+        if "expired" in msg_low and ("tcb" in msg_low or "tcbinfo" in msg_low):
+            return "TCB_INFO_EXPIRED", "4.7", msg
+        if "expired" in msg_low and ("qe" in msg_low or "identity" in msg_low):
+            return "QE_IDENTITY_EXPIRED", "4.7", msg
+        if "mrsigner" in msg_low or "mr_signer" in msg_low:
+            return "QE_IDENTITY_MRSIGNER_MISMATCH", "4.7.9", msg
+        if "qe identity" in msg_low or "enclave identity" in msg_low:
+            return "QE_IDENTITY_FIELD_MISMATCH", "4.7.9", msg
+        if "crl" in msg_low or "revocation" in msg_low:
+            return "PCK_REVOKED", "4.7.4", msg
+        return "QV_RESULT_TERMINAL_UNSPECIFIED", "4.7", msg
+    except Exception as e:
+        return "QV_RESULT_TERMINAL_UNSPECIFIED", "4.7", f"unexpected: {e}"
+
+    return "", "", ""
+
+
 def _enforce_extended_policy(
     raw_quote: bytes, policy: dict
 ) -> tuple[str, str]:
@@ -798,26 +1007,34 @@ def cmd_verify_attestation_tdx() -> int:
     # semantics and fixture 300's calibration.
     tcb_eval_required = policy.get("tcb_evaluation_required", True)
 
-    # Phase 1.5: structural verification only. Phase 3 will add the full
-    # collateral path via verify_tcb_info_signature + verify_qe_identity_
-    # signature + the issuer-chain certs.
-    if tcb_eval_required:
-        return _emit_tdx_rejection(
-            "QV_RESULT_TERMINAL_UNSPECIFIED",
-            "4.7",
-            "tcb_evaluation_required=true not yet wired in tinfoil-python; "
-            "Phase 1.5 only handles the structural path. Use "
-            "tcb_evaluation_required=false for now.",
-        )
+    # Structural verification (Intel §4.1.2 steps 1-4) always runs.
+    # When collateral.intel_root_ca_pem is set (Phase 3 synthetic chain
+    # fixtures), temporarily swap the embedded Intel root for the
+    # synthetic one so chain validation accepts the self-issued chain.
+    collateral_in = inp.get("collateral") or {}
+    custom_root_pem = collateral_in.get("intel_root_ca_pem")
+    # Inject the fixture's verification time into the lib's freshness +
+    # cert-validity checks. This effectively makes
+    # verification_time_override="supported" for the collateral path,
+    # which the structural-only path (verify_tdx_quote) still doesn't honor.
+    fixture_date = inp.get("expiration_check_date_unix")
+    with _maybe_override_intel_root(custom_root_pem), _maybe_override_time(fixture_date):
+        try:
+            pck_chain = verify_tdx_quote_crypto(quote, quote_bytes)
+        except TdxVerificationError as e:
+            code, ref = _classify_tdx_error(e)
+            return _emit_tdx_rejection(code, ref, str(e))
+        except Exception as e:
+            code, ref = _classify_tdx_error(e)
+            return _emit_tdx_rejection(code, ref, f"unexpected: {e}")
 
-    try:
-        verify_tdx_quote_crypto(quote, quote_bytes)
-    except TdxVerificationError as e:
-        code, ref = _classify_tdx_error(e)
-        return _emit_tdx_rejection(code, ref, str(e))
-    except Exception as e:
-        code, ref = _classify_tdx_error(e)
-        return _emit_tdx_rejection(code, ref, f"unexpected: {e}")
+        if tcb_eval_required:
+            code, ref, msg = _evaluate_collateral(
+                quote, pck_chain, collateral_in,
+                inp.get("expiration_check_date_unix"),
+            )
+            if code:
+                return _emit_tdx_rejection(code, ref, msg)
 
     # Phase 4: extended-TD policy checks (SPEC §4.8 / Intel §2.3.2).
     code, msg = _enforce_extended_policy(quote_bytes, policy)
