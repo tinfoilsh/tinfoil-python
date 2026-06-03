@@ -164,11 +164,13 @@ def _capabilities() -> dict[str, Any]:
             # lands when Phase 3 fixtures need it.
             "supported": True,
             "injected_collateral_supported": True,
-            # cert_utils.verify_intel_chain calls datetime.now(timezone.utc)
-            # unconditionally — there's no API to inject the verification
-            # time. Fixtures that pin expiration_check_date outside the real-
-            # now window (e.g. 324-pck-leaf-expired) skip honestly.
-            "verification_time_override": "system-clock-only",
+            # cert_utils.verify_intel_chain et al. call datetime.now()
+            # unconditionally — the lib has no public time-injection API.
+            # cmd_verify_attestation_tdx works around this by monkey-
+            # patching the module-level datetime for the duration of
+            # verification, so functionally the conformance binary
+            # honors policy.expiration_check_date_unix end-to-end.
+            "verification_time_override": "supported",
             # Phase 2B/3 wired: cmd_verify_attestation_tdx now orchestrates
             # the lib's pure validation functions (verify_tcb_info_signature
             # + verify_qe_identity_signature + check_collateral_freshness +
@@ -959,6 +961,28 @@ def _enforce_extended_policy(
         if not any(got_hex == entry.strip().lower() for entry in allowlist):
             return ("MR_SEAM_NOT_ALLOWED",
                     f"mr_seam {got_hex} not in policy allowlist ({len(allowlist)} entries)")
+
+    # SPEC §4.8.1 / §4.8.2 normative defaults — applied regardless of pin
+    # presence when enforce_spec_defaults=true.
+    if policy.get("enforce_spec_defaults"):
+        TD_ATTR_DEBUG  = 1 << 0
+        TD_ATTR_FIXED0 = (1 << 0) | (1 << 28) | (1 << 30) | (1 << 63)
+        XFAM_FIXED1    = 0x3
+        XFAM_FIXED0    = 0x6DBE7
+        td_attr_int = int.from_bytes(td_attrs, byteorder="little")
+        if td_attr_int & TD_ATTR_DEBUG:
+            return ("TD_ATTRIBUTES_DEBUG_SET",
+                    f"TD Attributes DEBUG bit is set (td_attributes={td_attrs.hex()})")
+        if td_attr_int & ~TD_ATTR_FIXED0:
+            return ("TD_ATTRIBUTES_RESERVED_BIT_SET",
+                    f"TD Attributes has bit(s) outside FIXED0 set (td_attributes={td_attrs.hex()})")
+        xfam_int = int.from_bytes(xfam, byteorder="little")
+        if (xfam_int & XFAM_FIXED1) != XFAM_FIXED1:
+            return ("XFAM_REQUIRED_BIT_CLEAR",
+                    f"XFAM required bits 0 (FP) + 1 (SSE) not both set (xfam={xfam.hex()})")
+        if xfam_int & ~XFAM_FIXED0:
+            return ("XFAM_FORBIDDEN_BIT_SET",
+                    f"XFAM has bit(s) outside FIXED0 set (xfam={xfam.hex()})")
 
     # Min TEE_TCB_SVN — component-wise comparison (SPEC §4.8.7).
     min_hex = policy.get("min_tee_tcb_svn_hex")
