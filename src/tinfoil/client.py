@@ -15,6 +15,12 @@ import cryptography.x509
 from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
 import hashlib
 
+from ehbp import (
+    AsyncEHBPTransport,
+    EHBPTransport,
+    KeyConfigMismatchError,
+)
+
 from .attestation import fetch_attestation, TDX_TYPES
 from .attestation.attestation_tdx import verify_tdx_hardware
 from .attestation.types import Measurement, HardwareMeasurement, Verification
@@ -26,6 +32,15 @@ _CERTIFICATE_VERIFY_ERROR_MARKERS = (
     "certificate_verify_failed",
     "certificate verify failed",
 )
+
+# Transport mode for secure communication with the enclave.
+#
+# - "ehbp" encrypts request bodies end-to-end with HPKE via the Encrypted HTTP
+#   Body Protocol, so only the verified enclave can decrypt them. It works
+#   through proxies and is the default.
+# - "tls" pins the enclave's TLS certificate, which requires a direct connection.
+TransportMode = Literal["ehbp", "tls"]
+DEFAULT_TRANSPORT_MODE: TransportMode = "ehbp"
 
 
 class _PinMismatchError(ValueError):
@@ -45,6 +60,7 @@ class GroundTruth:
     public_key: str  # Changed from cert_fingerprint to public_key
     digest: str
     measurement: str
+    hpke_public_key: str = ""
 
 
 @dataclass
@@ -263,10 +279,106 @@ class _AsyncReVerifyingTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
+class _EHBPReVerifyingTransport(httpx.BaseTransport):
+    """
+    Wraps an EHBP transport and transparently re-verifies the enclave's
+    attestation when the server rotates its HPKE key (surfaced as
+    :class:`ehbp.KeyConfigMismatchError`).
+
+    The mismatch is reported before the request is processed, so it is safe to
+    rebuild the transport from the freshly attested key and retry the request
+    once. This mirrors the certificate rotation handling of
+    :class:`_ReVerifyingTransport`.
+    """
+
+    def __init__(self, secure_client: "SecureClient", inner: httpx.BaseTransport):
+        self._secure_client = secure_client
+        self._inner = inner
+        self._lock = threading.Lock()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        inner = self._inner
+        try:
+            return inner.handle_request(request)
+        except KeyConfigMismatchError:
+            old_inner: Optional[httpx.BaseTransport] = None
+            retry_inner: Optional[httpx.BaseTransport] = None
+            reverify_failed = False
+            with self._lock:
+                if self._inner is inner:
+                    try:
+                        retry_inner = self._secure_client._build_ehbp_sync_transport()
+                    except Exception:
+                        # Re-verification failed; surface the original mismatch.
+                        reverify_failed = True
+                    else:
+                        old_inner = self._inner
+                        self._inner = retry_inner
+                else:
+                    retry_inner = self._inner
+
+            if reverify_failed:
+                raise
+
+            assert retry_inner is not None
+            try:
+                return retry_inner.handle_request(request)
+            finally:
+                if old_inner is not None:
+                    with contextlib.suppress(Exception):
+                        old_inner.close()
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class _AsyncEHBPReVerifyingTransport(httpx.AsyncBaseTransport):
+    """Async counterpart to :class:`_EHBPReVerifyingTransport`."""
+
+    def __init__(self, secure_client: "SecureClient", inner: httpx.AsyncBaseTransport):
+        self._secure_client = secure_client
+        self._inner = inner
+        self._lock = asyncio.Lock()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        inner = self._inner
+        try:
+            return await inner.handle_async_request(request)
+        except KeyConfigMismatchError:
+            old_inner: Optional[httpx.AsyncBaseTransport] = None
+            retry_inner: Optional[httpx.AsyncBaseTransport] = None
+            reverify_failed = False
+            async with self._lock:
+                if self._inner is inner:
+                    try:
+                        retry_inner = await self._secure_client._build_ehbp_async_transport()
+                    except Exception:
+                        reverify_failed = True
+                    else:
+                        old_inner = self._inner
+                        self._inner = retry_inner
+                else:
+                    retry_inner = self._inner
+
+            if reverify_failed:
+                raise
+
+            assert retry_inner is not None
+            try:
+                return await retry_inner.handle_async_request(request)
+            finally:
+                if old_inner is not None:
+                    with contextlib.suppress(Exception):
+                        await old_inner.aclose()
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 class SecureClient:
     """A client that verifies and communicates with secure enclaves"""
     
-    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None):
+    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE):
         # Hardcoded measurement takes precedence over repo
         if measurement is not None:
             repo = ""
@@ -275,6 +387,9 @@ class SecureClient:
         if measurement is None and (repo == "" or repo is None):
             raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
 
+        if transport not in ("ehbp", "tls"):
+            raise ValueError(f"Unknown transport mode: {transport!r}. Use 'ehbp' or 'tls'.")
+
         # If enclave is empty, fetch a random one from the routers API
         if enclave == "" or enclave is None:
             enclave = get_router_address()
@@ -282,6 +397,7 @@ class SecureClient:
         self.enclave = enclave
         self.repo = repo
         self.measurement = measurement
+        self.transport = transport
         self._ground_truth: Optional[GroundTruth] = None
         self._verification_document: Optional[VerificationDocument] = None
 
@@ -350,15 +466,44 @@ class SecureClient:
         ctx = self._build_async_ssl_context(expected_fp)
         return httpx.AsyncHTTPTransport(verify=ctx)
 
+    def _require_hpke_public_key(self) -> str:
+        """Re-run attestation and return the attested HPKE public key."""
+        ground_truth = self.verify()
+        if not ground_truth.hpke_public_key:
+            raise ValueError(
+                "Enclave did not expose an HPKE public key; cannot use the "
+                "EHBP transport. Use transport='tls' instead."
+            )
+        return ground_truth.hpke_public_key
+
+    def _build_ehbp_sync_transport(self) -> httpx.BaseTransport:
+        """Build a sync EHBP transport bound to the attested HPKE public key."""
+        hpke_public_key = self._require_hpke_public_key()
+        return EHBPTransport.from_public_key_hex(hpke_public_key, inner=httpx.HTTPTransport())
+
+    async def _build_ehbp_async_transport(self) -> httpx.AsyncBaseTransport:
+        """Build an async EHBP transport without blocking the event loop."""
+        hpke_public_key = await asyncio.to_thread(self._require_hpke_public_key)
+        return AsyncEHBPTransport.from_public_key_hex(hpke_public_key, inner=httpx.AsyncHTTPTransport())
+
     def make_secure_http_client(self) -> httpx.Client:
         """
-        Build an httpx.Client that pins the enclave's TLS cert.
+        Build an httpx.Client that securely communicates with the enclave.
+
+        In the default "ehbp" transport mode, request bodies are encrypted
+        end-to-end with the enclave's attested HPKE public key. In "tls" mode,
+        the enclave's TLS certificate is pinned instead.
 
         The returned client is suitable for long-lived use: if the enclave
-        rotates its TLS certificate (for example after a server-side restart),
-        the underlying transport will automatically re-verify attestation and
-        retry the request once.
+        rotates its key (for example after a server-side restart), the
+        underlying transport automatically re-verifies attestation and retries
+        the request once.
         """
+        if self.transport == "ehbp":
+            inner = self._build_ehbp_sync_transport()
+            transport = _EHBPReVerifyingTransport(self, inner)
+            return httpx.Client(transport=transport, follow_redirects=True)
+
         expected_fp = self.verify().public_key
         ctx = self._build_sync_ssl_context(expected_fp)
         inner = httpx.HTTPTransport(verify=ctx)
@@ -367,13 +512,23 @@ class SecureClient:
 
     def make_secure_async_http_client(self) -> httpx.AsyncClient:
         """
-        Build an httpx.AsyncClient that pins the enclave's TLS cert.
+        Build an httpx.AsyncClient that securely communicates with the enclave.
+
+        In the default "ehbp" transport mode, request bodies are encrypted
+        end-to-end with the enclave's attested HPKE public key. In "tls" mode,
+        the enclave's TLS certificate is pinned instead.
 
         The returned client is suitable for long-lived use: if the enclave
-        rotates its TLS certificate (for example after a server-side restart),
-        the underlying transport will automatically re-verify attestation and
-        retry the request once.
+        rotates its key (for example after a server-side restart), the
+        underlying transport automatically re-verifies attestation and retries
+        the request once.
         """
+        if self.transport == "ehbp":
+            hpke_public_key = self._require_hpke_public_key()
+            inner = AsyncEHBPTransport.from_public_key_hex(hpke_public_key, inner=httpx.AsyncHTTPTransport())
+            transport = _AsyncEHBPReVerifyingTransport(self, inner)
+            return httpx.AsyncClient(transport=transport, follow_redirects=True)
+
         expected_fp = self.verify().public_key
         ctx = self._build_async_ssl_context(expected_fp)
         inner = httpx.AsyncHTTPTransport(verify=ctx)
@@ -440,6 +595,7 @@ class SecureClient:
                 public_key=verification.public_key_fp,
                 digest="pinned_no_digest",
                 measurement=verification.measurement,
+                hpke_public_key=verification.hpke_public_key or "",
             )
             return self._ground_truth
         else:
@@ -481,6 +637,7 @@ class SecureClient:
                 public_key=verification.public_key_fp,
                 digest=digest,
                 measurement=verification.measurement,
+                hpke_public_key=verification.hpke_public_key or "",
             )
             return self._ground_truth
 

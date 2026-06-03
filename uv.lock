@@ -3,8 +3,11 @@ revision = 3
 requires-python = ">=3.10"
 
 [options]
-exclude-newer = "2026-05-18T19:45:30.83521Z"
+exclude-newer = "2026-05-30T19:03:18.634819Z"
 exclude-newer-span = "P4D"
+
+[options.exclude-newer-package]
+tinfoil-ehbp = "2026-06-04T00:00:00Z"
 
 [manifest]
 constraints = [{ name = "idna", specifier = ">=3.15" }]
@@ -759,6 +762,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pyhpke"
+version = "0.6.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/37/1acb2cee5afd3dcf45b425b0d984a9cba8917fd935106ef278b42062ecfa/pyhpke-0.6.4.tar.gz", hash = "sha256:1402c6c41a0605941d2d2a589774d346c0e7a0dc7f745e84c6f0a06c2fd335c9", size = 1638147, upload-time = "2025-12-21T10:38:07.556Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/f6/ff7df9e21b38ec1c827efd90c28b3bc76eddbfdf5a44aaf2fadb59a17cb9/pyhpke-0.6.4-py3-none-any.whl", hash = "sha256:abd0b2fec1424858399ffbed0d236fb7e9740dece9907f59ca40bd567d7fef78", size = 23792, upload-time = "2025-12-21T10:38:06.172Z" },
+]
+
+[[package]]
 name = "pyjwt"
 version = "2.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -961,6 +976,7 @@ dependencies = [
     { name = "pyopenssl" },
     { name = "requests" },
     { name = "sigstore" },
+    { name = "tinfoil-ehbp" },
     { name = "urllib3" },
 ]
 
@@ -980,6 +996,7 @@ requires-dist = [
     { name = "pyopenssl", specifier = ">=25.0.0" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "sigstore", specifier = ">=4.1.0" },
+    { name = "tinfoil-ehbp", specifier = ">=0.2.3" },
     { name = "urllib3", specifier = ">=2.7.0" },
 ]
 
@@ -987,6 +1004,20 @@ requires-dist = [
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio", specifier = ">=0.26.0" },
+]
+
+[[package]]
+name = "tinfoil-ehbp"
+version = "0.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "httpx" },
+    { name = "pyhpke" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/63/4a/59346272c0ccb7f2d086a44f8473ddef2e7d4980e66e6f1bffafef487a8f/tinfoil_ehbp-0.2.3.tar.gz", hash = "sha256:4f072aaaf68fa61cdfb102896aba6fd42a5f4fe5cbb78d09068f27fc527b5f91", size = 15273, upload-time = "2026-06-03T17:20:15.146Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/7d/dffe3d69e8f963ce8d51c2580618da333af15fc41d42f5caffe9bd1ee617/tinfoil_ehbp-0.2.3-py3-none-any.whl", hash = "sha256:7ab32844cfa8a82fe926b39d23cc6ecf5a93ab392d49ba279f8985aac79e2b87", size = 15093, upload-time = "2026-06-03T17:20:13.884Z" },
 ]
 
 [[package]]
