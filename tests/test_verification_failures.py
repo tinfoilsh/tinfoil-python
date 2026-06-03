@@ -390,7 +390,7 @@ class TestAsyncTLSPinning:
 
     def _make_client_with_fake_verify(self):
         """Create a SecureClient that returns a fake fingerprint from verify()."""
-        client = SecureClient(enclave="test.enclave.sh", repo="test/repo")
+        client = SecureClient(enclave="test.enclave.sh", repo="test/repo", transport="tls")
         ground_truth = MagicMock()
         ground_truth.public_key = self.FAKE_FP
         client.verify = MagicMock(return_value=ground_truth)

@@ -5,7 +5,13 @@ from openai.resources.embeddings import Embeddings as OpenAIEmbeddings
 from openai.resources.audio import Audio as OpenAIAudio
 import httpx
 
-from .client import SecureClient, VerificationDocument, get_router_address
+from .client import (
+    DEFAULT_TRANSPORT_MODE,
+    SecureClient,
+    TransportMode,
+    VerificationDocument,
+    get_router_address,
+)
 
 class TinfoilAI:
     chat: OpenAIChat
@@ -21,6 +27,7 @@ class TinfoilAI:
         api_key: str = "tinfoil",
         measurement: Optional[dict] = None,
         timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
+        transport: TransportMode = DEFAULT_TRANSPORT_MODE,
     ):
         if measurement is not None:
             repo = ""
@@ -35,7 +42,7 @@ class TinfoilAI:
         
         self.enclave = enclave
         self.api_key = api_key
-        self._secure_client = SecureClient(enclave, repo, measurement)
+        self._secure_client = SecureClient(enclave, repo, measurement, transport=transport)
         secure_http = self._secure_client.make_secure_http_client()
         self.client = OpenAI(
             base_url=f"https://{enclave}/v1/",
@@ -68,6 +75,7 @@ class AsyncTinfoilAI:
         api_key: str = "tinfoil",
         measurement: Optional[dict] = None,
         timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
+        transport: TransportMode = DEFAULT_TRANSPORT_MODE,
     ):
         if measurement is not None:
             repo = ""
@@ -83,7 +91,7 @@ class AsyncTinfoilAI:
         self.enclave = enclave
         self.api_key = api_key
         # verifier client remains sync; only used to fetch the expected public key
-        self._secure_client = SecureClient(enclave, repo, measurement)
+        self._secure_client = SecureClient(enclave, repo, measurement, transport=transport)
         async_http = self._secure_client.make_secure_async_http_client()
         self.client = AsyncOpenAI(
             base_url=f"https://{enclave}/v1/",
@@ -120,7 +128,7 @@ class _HTTPSecureClient:
         return self._http_client.post(url, headers=headers, data=data, json=json, timeout=timeout)
 
 
-def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None):
+def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE):
     """Create a secure HTTP client for direct GET/POST through the Tinfoil enclave."""
     if measurement is not None:
         repo = ""
@@ -133,7 +141,7 @@ def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model
     if enclave == "" or enclave is None:
         enclave = get_router_address()
 
-    tf_client = SecureClient(enclave, repo, measurement)
+    tf_client = SecureClient(enclave, repo, measurement, transport=transport)
     return _HTTPSecureClient(enclave, tf_client)
 
-__all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient", "SecureClient", "VerificationDocument"]
+__all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient", "SecureClient", "VerificationDocument", "TransportMode"]
