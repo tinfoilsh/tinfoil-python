@@ -19,6 +19,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
+import tinfoil as tinfoil_module
 from tinfoil import AsyncTinfoilAI, SecureClient, TinfoilAI
 from tinfoil.attestation import Bundle, fetch_bundle_from
 from tinfoil.attestation.bundle import _decode_domains, _matches_hostname
@@ -161,6 +162,62 @@ class TestProxyHostBinding:
         with pytest.raises(ValueError, match="evil.example.com"):
             sc.get("https://evil.example.com/v1/models")
         http_client.request.assert_not_called()
+
+
+class TestAssertRequestAllowed:
+    """The low-level escape hatches must stay bound to the enclave/proxy host
+    and refuse plaintext (non-https) destinations."""
+
+    def _sc(self, base_url: str = ""):
+        return SecureClient(enclave="enclave.test", repo="org/repo", transport="ehbp", base_url=base_url)
+
+    def test_allows_enclave_https(self):
+        self._sc().assert_request_allowed("https://enclave.test/v1/models")
+
+    def test_allows_proxy_https(self):
+        self._sc("https://proxy.example.com/").assert_request_allowed("https://proxy.example.com/v1/models")
+
+    def test_rejects_foreign_host(self):
+        with pytest.raises(ValueError, match="evil.example.com"):
+            self._sc().assert_request_allowed("https://evil.example.com/v1/models")
+
+    def test_rejects_non_https(self):
+        with pytest.raises(ValueError, match="non-https"):
+            self._sc().assert_request_allowed("http://enclave.test/v1/models")
+
+
+class TestLowLevelHostBinding:
+    """NewSecureClient's get()/post() must enforce the host/scheme guard so an
+    API key in headers cannot be sent to a caller-supplied host."""
+
+    def _client(self, base_url: str = ""):
+        sc = SecureClient(enclave="enclave.test", repo="org/repo", transport="ehbp", base_url=base_url)
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        client = tinfoil_module._HTTPSecureClient("enclave.test", sc)
+        client._http_client = MagicMock()
+        client._http_client.get.return_value = "ok-get"
+        client._http_client.post.return_value = "ok-post"
+        return client
+
+    def test_get_rejects_foreign_host(self):
+        client = self._client()
+        with pytest.raises(ValueError, match="evil.example.com"):
+            client.get("https://evil.example.com/v1/models")
+        client._http_client.get.assert_not_called()
+
+    def test_post_rejects_non_https(self):
+        client = self._client()
+        with pytest.raises(ValueError, match="non-https"):
+            client.post("http://enclave.test/v1/chat/completions", json={})
+        client._http_client.post.assert_not_called()
+
+    def test_get_allows_enclave_host(self):
+        client = self._client()
+        assert client.get("https://enclave.test/v1/models") == "ok-get"
+
+    def test_get_allows_proxy_host(self):
+        client = self._client("https://proxy.example.com/")
+        assert client.get("https://proxy.example.com/v1/models") == "ok-get"
 
 
 class TestDecodeDomains:

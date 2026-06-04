@@ -824,6 +824,34 @@ class SecureClient:
             self._low_level_http_client = self.make_secure_http_client()
         return self._low_level_http_client
 
+    def _allowed_request_hosts(self) -> set:
+        """Hosts a request may target: the attested enclave and, if set, the proxy."""
+        hosts = set()
+        enclave_host = urlparse(f"//{self.enclave}").hostname
+        if enclave_host:
+            hosts.add(enclave_host)
+        if self.base_url:
+            proxy_host = urlparse(self.base_url).hostname
+            if proxy_host:
+                hosts.add(proxy_host)
+        return hosts
+
+    def assert_request_allowed(self, url: str) -> None:
+        """
+        Guards the low-level escape hatches. Neither EHBP nor TLS pinning
+        encrypts request headers (which may carry the API key), so a request may
+        only target the attested enclave or the configured proxy, and only over
+        https. Raises ValueError otherwise.
+        """
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            raise ValueError(f"refusing to send request over non-https URL {url!r}")
+        if parsed.hostname not in self._allowed_request_hosts():
+            raise ValueError(
+                f"refusing to send request to host {parsed.hostname!r}: this "
+                f"secure client is bound to enclave {self.enclave!r}"
+            )
+
     def make_request(self, req: urllib.request.Request) -> Response:
         """
         Makes an HTTP request using the secure client, honoring the configured
@@ -832,24 +860,15 @@ class SecureClient:
         """
         url = req.full_url
         parsed = urlparse(url)
-        enclave_host = urlparse(f"//{self.enclave}").hostname
-        proxy_host = urlparse(self.base_url).hostname if self.base_url else None
         # If URL doesn't have a host, assume it's relative to the proxy (when
         # configured) or the enclave.
         if not parsed.netloc:
-            if proxy_host:
+            if self.base_url:
                 proxy = urlparse(self.base_url)
                 url = f"{proxy.scheme}://{proxy.netloc}{url}"
             else:
                 url = f"https://{self.enclave}{url}"
-        elif parsed.hostname not in (enclave_host, proxy_host):
-            # EHBP encrypts only the body; headers (which may carry the API key)
-            # reach the destination in plaintext, so never send them to a host
-            # other than the attested enclave or the configured proxy.
-            raise ValueError(
-                f"refusing to send request to host {parsed.hostname!r}: this "
-                f"secure client is bound to enclave {self.enclave!r}"
-            )
+        self.assert_request_allowed(url)
 
         response = self._secure_http_client().request(
             req.get_method(),

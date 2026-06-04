@@ -129,6 +129,7 @@ class _HTTPSecureClient:
         self.enclave = tf_client.enclave or enclave
 
     def get(self, url: str, headers: Optional[dict] = None, params: Optional[dict] = None, timeout: Optional[int] = None) -> httpx.Response:
+        self._tf_client.assert_request_allowed(url)
         return self._http_client.get(url, headers=headers, params=params, timeout=timeout)
 
     def post(
@@ -139,6 +140,7 @@ class _HTTPSecureClient:
         json: Optional[dict] = None,
         timeout: Optional[int] = None,
     ) -> httpx.Response:
+        self._tf_client.assert_request_allowed(url)
         return self._http_client.post(url, headers=headers, data=data, json=json, timeout=timeout)
 
 
