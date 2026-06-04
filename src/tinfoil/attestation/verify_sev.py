@@ -5,7 +5,7 @@ Simplified AMD SEV-SNP Attestation Verifier (VCEK Chain Only)
 
 import os
 from dataclasses import dataclass
-from typing import Dict, TypeAlias
+from typing import Dict, Optional, TypeAlias
 import binascii
 import requests
 from OpenSSL import crypto
@@ -87,7 +87,7 @@ class CertificateChain:
         return cls(ark=ark, ask=ask, vcek=vcek)
     
     @classmethod
-    def from_report(cls, report:Report) -> 'CertificateChain':
+    def from_report(cls, report:Report, vcek_der: Optional[bytes] = None) -> 'CertificateChain':
         productName: str = report.productName
 
         if productName != "Genoa":
@@ -102,31 +102,38 @@ class CertificateChain:
         if signer_info.signingKey != ReportSigner.VcekReportSigner:
             raise ValueError("This implementation only supports VCEK signed reports")
         
-        # Fetch (or load) the VCEK certificate
-        vcek_url = _VCEKCertURL(productName, report.chip_id, report.reported_tcb)
-        cache_path = cls._vcek_cache_path(productName, report.chip_id, report.reported_tcb)
-        
-        # 1. Try the on‑disk cache
-        if os.path.isfile(cache_path):
-            with open(cache_path, "rb") as fh:
-                vcek_cert_data = fh.read()
+        cache_path = None
+        if vcek_der is not None:
+            # VCEK supplied out-of-band (for example from an attestation bundle).
+            # It is still validated against the AMD ARK/ASK root chain in
+            # verify_chain(), so accepting it here does not weaken trust.
+            vcek_cert_data = vcek_der
         else:
-            # 2. Cache miss → fetch from the KDS endpoint
-            try:
-                response = requests.get(vcek_url, timeout=10)
-                response.raise_for_status()
-                vcek_cert_data = response.content
-                # Persist to cache so the next call is instant
-                _ensure_vcek_cache_dir()
+            # Fetch (or load) the VCEK certificate
+            vcek_url = _VCEKCertURL(productName, report.chip_id, report.reported_tcb)
+            cache_path = cls._vcek_cache_path(productName, report.chip_id, report.reported_tcb)
+
+            # 1. Try the on‑disk cache
+            if os.path.isfile(cache_path):
+                with open(cache_path, "rb") as fh:
+                    vcek_cert_data = fh.read()
+            else:
+                # 2. Cache miss → fetch from the KDS endpoint
                 try:
-                    tmp_path = cache_path + ".tmp"
-                    with open(tmp_path, "wb") as fh:
-                        fh.write(vcek_cert_data)
-                    os.replace(tmp_path, cache_path)
-                except OSError:
-                    pass
-            except requests.RequestException as e:
-                raise ValueError(f"Failed to fetch VCEK certificate: {e}") from e
+                    response = requests.get(vcek_url, timeout=10)
+                    response.raise_for_status()
+                    vcek_cert_data = response.content
+                    # Persist to cache so the next call is instant
+                    _ensure_vcek_cache_dir()
+                    try:
+                        tmp_path = cache_path + ".tmp"
+                        with open(tmp_path, "wb") as fh:
+                            fh.write(vcek_cert_data)
+                        os.replace(tmp_path, cache_path)
+                    except OSError:
+                        pass
+                except requests.RequestException as e:
+                    raise ValueError(f"Failed to fetch VCEK certificate: {e}") from e
 
         # Parse the (cached or freshly‑downloaded) certificate
         try:
@@ -141,7 +148,7 @@ class CertificateChain:
                 vcek = x509.load_der_x509_certificate(vcek_cert_data)
         except Exception as e:
             # Corrupted cache?  Remove and propagate error so caller can retry.
-            if os.path.exists(cache_path):
+            if cache_path and os.path.exists(cache_path):
                 try:
                     os.remove(cache_path)
                 except OSError:

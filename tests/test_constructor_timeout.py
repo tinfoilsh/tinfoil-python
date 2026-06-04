@@ -5,11 +5,13 @@ import tinfoil
 
 
 class FakeSecureClient:
-    def __init__(self, enclave, repo, measurement, transport="ehbp"):
+    def __init__(self, enclave, repo, measurement, transport="ehbp", base_url="", attestation_bundle_url=""):
         self.enclave = enclave
         self.repo = repo
         self.measurement = measurement
         self.transport = transport
+        self.base_url = base_url
+        self.attestation_bundle_url = attestation_bundle_url
 
     def make_secure_http_client(self):
         return "sync-http-client"
