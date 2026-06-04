@@ -228,6 +228,18 @@ class TestAssertRequestAllowed:
         with pytest.raises(ValueError, match="non-https"):
             self._sc().assert_request_allowed("http://enclave.test/v1/models")
 
+    def test_rejects_non_default_port_on_allowed_host(self):
+        with pytest.raises(ValueError, match="enclave.test"):
+            self._sc().assert_request_allowed("https://enclave.test:8443/v1/models")
+
+    def test_allows_explicit_default_port(self):
+        self._sc().assert_request_allowed("https://enclave.test:443/v1/models")
+
+    def test_rejects_non_default_port_on_proxy(self):
+        sc = self._sc("https://proxy.example.com/")
+        with pytest.raises(ValueError):
+            sc.assert_request_allowed("https://proxy.example.com:9000/v1/models")
+
 
 class TestLowLevelHostBinding:
     """NewSecureClient's get()/post() must enforce the host/scheme guard so an
@@ -309,6 +321,12 @@ class TestMatchesHostname:
 
     def test_no_match(self):
         assert _matches_hostname("evil.com", ["inference.tinfoil.sh"]) is False
+
+    def test_ignores_non_default_port(self):
+        assert _matches_hostname("inference.tinfoil.sh:8443", ["inference.tinfoil.sh"]) is True
+
+    def test_wildcard_match_ignores_port(self):
+        assert _matches_hostname("foo.tinfoil.sh:8443", ["*.tinfoil.sh"]) is True
 
 
 class TestConstructorValidation:
@@ -517,6 +535,18 @@ class TestEnclaveSpecificBundle:
             fetch_bundle_from("https://atc.tinfoil.sh", enclave="enclave.test")
         mock_get.assert_not_called()
         assert mock_post.call_args.kwargs["json"] == {"enclaveUrl": "https://enclave.test"}
+
+    def test_get_does_not_follow_redirects(self):
+        with patch("tinfoil.attestation.bundle.requests.get", return_value=self._response()) as mock_get, \
+             patch("tinfoil.attestation.bundle.requests.post"):
+            fetch_bundle_from("https://atc.tinfoil.sh")
+        assert mock_get.call_args.kwargs["allow_redirects"] is False
+
+    def test_post_does_not_follow_redirects(self):
+        with patch("tinfoil.attestation.bundle.requests.post", return_value=self._response()) as mock_post, \
+             patch("tinfoil.attestation.bundle.requests.get"):
+            fetch_bundle_from("https://atc.tinfoil.sh", enclave="enclave.test")
+        assert mock_post.call_args.kwargs["allow_redirects"] is False
 
 
 def _require_api_key() -> str:

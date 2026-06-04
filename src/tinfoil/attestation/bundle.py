@@ -43,7 +43,9 @@ def fetch_bundle_from(
     instead of returning the default router bundle (GET).
     """
     # The bundle is the entire trust root; fetching it over plaintext would let
-    # an attacker substitute it (MITM).
+    # an attacker substitute it (MITM). Redirects are refused for the same
+    # reason: a redirect could send the fetch to a non-https or attacker-chosen
+    # target, bypassing the https-only check below.
     if urlparse(attestation_bundle_url).scheme != "https":
         raise ValueError(
             f"attestation bundle URL must use https; got {attestation_bundle_url!r}"
@@ -56,9 +58,13 @@ def fetch_bundle_from(
             body["enclaveUrl"] = enclave if "://" in enclave else f"https://{enclave}"
         if repo:
             body["repo"] = repo
-        response = requests.post(url, json=body, timeout=REQUEST_TIMEOUT_SECONDS)
+        response = requests.post(
+            url, json=body, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False
+        )
     else:
-        response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+        response = requests.get(
+            url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False
+        )
     response.raise_for_status()
 
     try:
@@ -131,8 +137,12 @@ def verify_certificate(
 
 
 def _matches_hostname(domain: str, sans: list) -> bool:
-    """Reports whether domain matches one of the DNS SANs (exact or wildcard)."""
-    domain = domain.lower()
+    """Reports whether domain matches one of the DNS SANs (exact or wildcard).
+
+    Any port in domain is ignored: certificate SANs only ever carry hostnames,
+    so an enclave on a non-default port must still match its DNS SAN.
+    """
+    domain = (urlparse(f"//{domain}").hostname or domain).lower()
     for san in sans:
         san = san.lower()
         if san == domain:

@@ -603,19 +603,23 @@ class SecureClient:
         rotates its key (for example after a server-side restart), the
         underlying transport automatically re-verifies attestation and retries
         the request once.
+
+        Redirects are not followed: a redirect target bypasses the enclave/proxy
+        host binding, so following one could leak plaintext headers (including
+        the API key) to an arbitrary host.
         """
         if self.transport == "ehbp":
             inner = self._build_ehbp_sync_transport()
             transport: httpx.BaseTransport = _EHBPReVerifyingTransport(self, inner)
             if self.base_url:
                 transport = _EnclaveURLHeaderTransport(transport, self)
-            return httpx.Client(transport=transport, follow_redirects=True)
+            return httpx.Client(transport=transport, follow_redirects=False)
 
         expected_fp = self.verify().public_key
         ctx = self._build_sync_ssl_context(expected_fp)
         inner = httpx.HTTPTransport(verify=ctx)
         transport = _ReVerifyingTransport(self, inner)
-        return httpx.Client(transport=transport, follow_redirects=True)
+        return httpx.Client(transport=transport, follow_redirects=False)
 
     def make_secure_async_http_client(self) -> httpx.AsyncClient:
         """
@@ -629,6 +633,10 @@ class SecureClient:
         rotates its key (for example after a server-side restart), the
         underlying transport automatically re-verifies attestation and retries
         the request once.
+
+        Redirects are not followed: a redirect target bypasses the enclave/proxy
+        host binding, so following one could leak plaintext headers (including
+        the API key) to an arbitrary host.
         """
         if self.transport == "ehbp":
             hpke_public_key = self._require_hpke_public_key()
@@ -636,13 +644,13 @@ class SecureClient:
             transport: httpx.AsyncBaseTransport = _AsyncEHBPReVerifyingTransport(self, inner)
             if self.base_url:
                 transport = _AsyncEnclaveURLHeaderTransport(transport, self)
-            return httpx.AsyncClient(transport=transport, follow_redirects=True)
+            return httpx.AsyncClient(transport=transport, follow_redirects=False)
 
         expected_fp = self.verify().public_key
         ctx = self._build_async_ssl_context(expected_fp)
         inner = httpx.AsyncHTTPTransport(verify=ctx)
         transport = _AsyncReVerifyingTransport(self, inner)
-        return httpx.AsyncClient(transport=transport, follow_redirects=True)
+        return httpx.AsyncClient(transport=transport, follow_redirects=False)
 
     def verify(self) -> GroundTruth:
         """
@@ -869,29 +877,30 @@ class SecureClient:
             self._low_level_http_client = self.make_secure_http_client()
         return self._low_level_http_client
 
-    def _allowed_request_hosts(self) -> set:
-        """Hosts a request may target: the attested enclave and, if set, the proxy."""
-        hosts = set()
-        enclave_host = urlparse(f"//{self.enclave}").hostname
-        if enclave_host:
-            hosts.add(enclave_host)
+    def _allowed_request_endpoints(self) -> set:
+        """(host, port) pairs a request may target: the attested enclave and, if set, the proxy."""
+        endpoints = set()
+        enclave = urlparse(f"//{self.enclave}")
+        if enclave.hostname:
+            endpoints.add((enclave.hostname, enclave.port or 443))
         if self.base_url:
-            proxy_host = urlparse(self.base_url).hostname
-            if proxy_host:
-                hosts.add(proxy_host)
-        return hosts
+            proxy = urlparse(self.base_url)
+            if proxy.hostname:
+                endpoints.add((proxy.hostname, proxy.port or 443))
+        return endpoints
 
     def assert_request_allowed(self, url: str) -> None:
         """
         Guards the low-level escape hatches. Neither EHBP nor TLS pinning
         encrypts request headers (which may carry the API key), so a request may
         only target the attested enclave or the configured proxy, and only over
-        https. Raises ValueError otherwise.
+        https. The port is part of the binding so headers cannot be diverted to a
+        different service listening on an allowed host. Raises ValueError otherwise.
         """
         parsed = urlparse(url)
         if parsed.scheme != "https":
             raise ValueError(f"refusing to send request over non-https URL {url!r}")
-        if parsed.hostname not in self._allowed_request_hosts():
+        if (parsed.hostname, parsed.port or 443) not in self._allowed_request_endpoints():
             raise ValueError(
                 f"refusing to send request to host {parsed.hostname!r}: this "
                 f"secure client is bound to enclave {self.enclave!r}"

@@ -110,6 +110,48 @@ class TestTransportSelection:
             inner.close()
 
 
+class TestRedirectsDisabled:
+    """The secure clients must not follow redirects: a redirect target is not
+    re-checked against the enclave/proxy host binding, so following one could
+    leak plaintext headers (including the API key) to an arbitrary host."""
+
+    def test_sync_ehbp_client_does_not_follow_redirects(self):
+        sc = _secure_client("ehbp")
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        client = sc.make_secure_http_client()
+        try:
+            assert client.follow_redirects is False
+        finally:
+            client.close()
+
+    def test_sync_tls_client_does_not_follow_redirects(self):
+        sc = _secure_client("tls")
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        client = sc.make_secure_http_client()
+        try:
+            assert client.follow_redirects is False
+        finally:
+            client.close()
+
+    def test_async_ehbp_client_does_not_follow_redirects(self):
+        sc = _secure_client("ehbp")
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        client = sc.make_secure_async_http_client()
+        try:
+            assert client.follow_redirects is False
+        finally:
+            asyncio.run(client.aclose())
+
+    def test_async_tls_client_does_not_follow_redirects(self):
+        sc = _secure_client("tls")
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        client = sc.make_secure_async_http_client()
+        try:
+            assert client.follow_redirects is False
+        finally:
+            asyncio.run(client.aclose())
+
+
 class TestLowLevelHonorsTransport:
     """The low-level get()/post() path must respect the configured transport."""
 
