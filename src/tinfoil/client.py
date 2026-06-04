@@ -38,6 +38,8 @@ from .sigstore import verify_attestation, fetch_latest_hardware_measurements
 # the request reaches the same enclave the client verified.
 ENCLAVE_URL_HEADER = "X-Tinfoil-Enclave-Url"
 
+DEFAULT_CONFIG_REPO = "tinfoilsh/confidential-model-router"
+
 
 _CERTIFICATE_VERIFY_ERROR_MARKERS = (
     "certificate_verify_failed",
@@ -449,7 +451,7 @@ class _AsyncEnclaveURLHeaderTransport(httpx.AsyncBaseTransport):
 class SecureClient:
     """A client that verifies and communicates with secure enclaves"""
     
-    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: str = "", attestation_bundle_url: str = ""):
+    def __init__(self, enclave: str = "", repo: str = DEFAULT_CONFIG_REPO, measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: str = "", attestation_bundle_url: str = ""):
         # Hardcoded measurement takes precedence over repo
         if measurement is not None:
             repo = ""
@@ -650,9 +652,13 @@ class SecureClient:
         Also populates the verification document with per-step status.
         """
         # When an attestation bundle URL is configured, attest from the bundle so
-        # the enclave does not need to be reached directly (proxy-friendly).
+        # the enclave does not need to be reached directly (proxy-friendly). Ask
+        # for an enclave/repo-specific bundle when either is set.
         if self.attestation_bundle_url:
-            return self.verify_from_bundle(fetch_bundle_from(self.attestation_bundle_url))
+            repo = self.repo if self.repo != DEFAULT_CONFIG_REPO else ""
+            return self.verify_from_bundle(
+                fetch_bundle_from(self.attestation_bundle_url, enclave=self.enclave, repo=repo)
+            )
 
         doc = VerificationDocument(
             config_repo=self.repo or "",

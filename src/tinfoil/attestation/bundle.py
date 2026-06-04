@@ -33,8 +33,15 @@ class Bundle:
     enclave_cert: str  # PEM
 
 
-def fetch_bundle_from(attestation_bundle_url: str) -> Bundle:
-    """Fetches a complete attestation bundle from {url}/attestation."""
+def fetch_bundle_from(
+    attestation_bundle_url: str, enclave: str = "", repo: str = ""
+) -> Bundle:
+    """Fetches a complete attestation bundle from {url}/attestation.
+
+    When an enclave host or a code repository is supplied, asks the bundle
+    service to assemble a bundle for that specific enclave/repo (via POST)
+    instead of returning the default router bundle (GET).
+    """
     # The bundle is the entire trust root; fetching it over plaintext would let
     # an attacker substitute it (MITM).
     if urlparse(attestation_bundle_url).scheme != "https":
@@ -43,7 +50,15 @@ def fetch_bundle_from(attestation_bundle_url: str) -> Bundle:
         )
     base = attestation_bundle_url.rstrip("/")
     url = f"{base}{ATTESTATION_BUNDLE_ENDPOINT}"
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    if enclave or repo:
+        body = {}
+        if enclave:
+            body["enclaveUrl"] = enclave if "://" in enclave else f"https://{enclave}"
+        if repo:
+            body["repo"] = repo
+        response = requests.post(url, json=body, timeout=REQUEST_TIMEOUT_SECONDS)
+    else:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
 
     try:
