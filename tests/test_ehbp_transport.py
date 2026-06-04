@@ -141,6 +141,41 @@ class TestLowLevelHonorsTransport:
         assert sc.get_http_client() is not None
 
 
+class TestMakeRequestHostBinding:
+    """make_request() must stay bound to the attested enclave (headers are not
+    encrypted by EHBP) and preserve the prior unbounded timeout."""
+
+    def _client_with_mock(self, transport: str = "ehbp"):
+        sc = _secure_client(transport)
+        http_client = MagicMock()
+        http_client.request.return_value = httpx.Response(200, content=b"ok")
+        sc._low_level_http_client = http_client
+        return sc, http_client
+
+    def test_rejects_absolute_url_to_foreign_host(self):
+        sc, http_client = self._client_with_mock()
+        with pytest.raises(ValueError, match="evil.example.com"):
+            sc.get("https://evil.example.com/v1/models")
+        http_client.request.assert_not_called()
+
+    def test_rejects_foreign_host_in_tls_mode_too(self):
+        sc, http_client = self._client_with_mock("tls")
+        with pytest.raises(ValueError):
+            sc.get("https://evil.example.com/v1/models")
+        http_client.request.assert_not_called()
+
+    def test_allows_absolute_url_to_enclave_host(self):
+        sc, http_client = self._client_with_mock()
+        resp = sc.get("https://enclave.test/v1/models")
+        assert resp.status_code == 200
+        assert http_client.request.call_args.args[1] == "https://enclave.test/v1/models"
+
+    def test_preserves_unbounded_timeout(self):
+        sc, http_client = self._client_with_mock()
+        sc.post("https://enclave.test/v1/chat/completions", headers={}, body=b"payload")
+        assert http_client.request.call_args.kwargs["timeout"] is None
+
+
 class _RaiseKeyMismatch(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         request.read()  # EHBP consumes the body before reporting the mismatch

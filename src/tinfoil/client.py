@@ -677,15 +677,25 @@ class SecureClient:
         to the enclave, and in "tls" mode the enclave's certificate is pinned.
         """
         url = req.full_url
+        parsed = urlparse(url)
         # If URL doesn't have a host, assume it's relative to the enclave
-        if not urlparse(url).netloc:
+        if not parsed.netloc:
             url = f"https://{self.enclave}{url}"
+        elif parsed.hostname != urlparse(f"//{self.enclave}").hostname:
+            # EHBP encrypts only the body; headers (which may carry the API key)
+            # reach the destination in plaintext, so never send them to a host
+            # other than the attested enclave this client is bound to.
+            raise ValueError(
+                f"refusing to send request to host {parsed.hostname!r}: this "
+                f"secure client is bound to enclave {self.enclave!r}"
+            )
 
         response = self._secure_http_client().request(
             req.get_method(),
             url,
             headers=dict(req.header_items()),
             content=req.data,
+            timeout=None,  # match the prior urllib path, which had no timeout
         )
         return Response(
             status=f"{response.status_code} {response.reason_phrase}",
