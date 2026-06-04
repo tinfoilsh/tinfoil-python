@@ -465,6 +465,59 @@ class TestFetchBundleParsing:
             with pytest.raises(ValueError, match="Invalid attestation bundle"):
                 fetch_bundle_from("https://atc.tinfoil.sh")
 
+    def test_rejects_non_https_url(self):
+        with pytest.raises(ValueError, match="https"):
+            fetch_bundle_from("http://atc.tinfoil.sh")
+
+
+class TestEnclaveSpecificBundle:
+    """fetch_bundle_from issues a POST so the bundle service assembles a bundle
+    for a specific enclave/repo, and a plain GET otherwise."""
+
+    _PAYLOAD = {
+        "domain": "inference.tinfoil.sh",
+        "enclaveAttestationReport": {
+            "format": "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+            "body": "Zm9v",
+        },
+        "digest": "abc123",
+        "sigstoreBundle": {"mediaType": "application/vnd.dev.sigstore.bundle+json"},
+        "vcek": "AAECAw==",
+        "enclaveCert": "",
+    }
+
+    def _response(self):
+        response = MagicMock()
+        response.json.return_value = self._PAYLOAD
+        response.raise_for_status.return_value = None
+        return response
+
+    def test_get_when_no_enclave_or_repo(self):
+        with patch("tinfoil.attestation.bundle.requests.get", return_value=self._response()) as mock_get, \
+             patch("tinfoil.attestation.bundle.requests.post") as mock_post:
+            fetch_bundle_from("https://atc.tinfoil.sh")
+        mock_get.assert_called_once()
+        mock_post.assert_not_called()
+
+    def test_post_with_enclave_and_repo(self):
+        with patch("tinfoil.attestation.bundle.requests.post", return_value=self._response()) as mock_post, \
+             patch("tinfoil.attestation.bundle.requests.get") as mock_get:
+            fetch_bundle_from("https://atc.tinfoil.sh", enclave="enclave.test", repo="org/repo")
+        mock_get.assert_not_called()
+        mock_post.assert_called_once()
+        assert mock_post.call_args.args[0] == "https://atc.tinfoil.sh/attestation"
+        assert mock_post.call_args.kwargs["json"] == {
+            "enclaveUrl": "https://enclave.test",
+            "repo": "org/repo",
+        }
+
+    def test_post_with_only_enclave(self):
+        with patch("tinfoil.attestation.bundle.requests.post", return_value=self._response()) as mock_post, \
+             patch("tinfoil.attestation.bundle.requests.get") as mock_get:
+            fetch_bundle_from("https://atc.tinfoil.sh", enclave="enclave.test")
+        mock_get.assert_not_called()
+        assert mock_post.call_args.kwargs["json"] == {"enclaveUrl": "https://enclave.test"}
+
 
 def _require_api_key() -> str:
     api_key = os.getenv("TINFOIL_API_KEY")
@@ -490,6 +543,19 @@ class TestAttestationBundleIntegration:
         doc = sc.get_verification_document()
         assert doc is not None and doc.security_verified
         assert doc.enclave_host == sc.enclave
+
+    def test_verify_enclave_specific_bundle(self):
+        # Setting an explicit enclave makes the client POST to ATC for a bundle
+        # assembled for that enclave (rather than the default router bundle).
+        default = SecureClient(attestation_bundle_url=ATTESTATION_BUNDLE_URL)
+        default.verify()
+        enclave = default.enclave
+
+        sc = SecureClient(enclave=enclave, attestation_bundle_url=ATTESTATION_BUNDLE_URL)
+        ground_truth = sc.verify()
+        assert sc.enclave == enclave
+        assert ground_truth.hpke_public_key
+        assert sc.get_verification_document().security_verified
 
     def test_bundle_chat_completion(self):
         api_key = _require_api_key()
