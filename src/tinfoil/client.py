@@ -453,6 +453,20 @@ class SecureClient:
         if transport not in ("ehbp", "tls"):
             raise ValueError(f"Unknown transport mode: {transport!r}. Use 'ehbp' or 'tls'.")
 
+        # A pinned measurement and an attestation bundle are mutually exclusive
+        # verification methods: the bundle carries its own Sigstore code
+        # measurement, so honoring a pinned measurement would be ambiguous.
+        if measurement is not None and attestation_bundle_url:
+            raise ValueError(
+                "Cannot combine 'measurement' with 'attestation_bundle_url'; "
+                "the bundle provides its own code measurement."
+            )
+
+        # EHBP and TLS pinning leave request headers (which may carry the API
+        # key) in plaintext, so a proxy base URL must be https.
+        if base_url and urlparse(base_url).scheme != "https":
+            raise ValueError(f"base_url must use https; got {base_url!r}")
+
         # If enclave is empty, fetch a random one from the routers API. When
         # attesting from a bundle, the enclave host comes from the verified
         # bundle, so no router lookup is needed.
@@ -752,6 +766,12 @@ class SecureClient:
         try:
             vcek_der = base64.b64decode(bundle.vcek) if bundle.vcek else None
             verification = bundle.enclave_attestation_report.verify(vcek_der=vcek_der)
+            # For TDX, also verify the firmware/early-boot hardware measurements
+            # (mrtd, rtmr0), matching the direct attestation path; the bundle's
+            # multi-platform code measurement does not cover them.
+            if verification.measurement.type in TDX_TYPES:
+                hw_measurements = fetch_latest_hardware_measurements()
+                doc.hardware_measurement = verify_tdx_hardware(hw_measurements, verification.measurement)
             doc.enclave_measurement = verification
             doc.tls_public_key = verification.public_key_fp
             doc.hpke_public_key = verification.hpke_public_key or ""
