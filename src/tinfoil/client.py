@@ -409,14 +409,20 @@ class _EnclaveURLHeaderTransport(httpx.BaseTransport):
     Injects the X-Tinfoil-Enclave-Url header before delegating to the wrapped
     transport. EHBP leaves request headers in plaintext, so the header reaches
     the proxy while the body stays sealed to the enclave's HPKE key.
+
+    The header is recomputed for every request from the client's current
+    enclave, so it stays correct after a re-verification swaps in a different
+    enclave (for example when attesting from a bundle behind a proxy).
     """
 
-    def __init__(self, inner: httpx.BaseTransport, enclave_url: str):
+    def __init__(self, inner: httpx.BaseTransport, client: "SecureClient"):
         self._inner = inner
-        self._enclave_url = enclave_url
+        self._client = client
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        request.headers[ENCLAVE_URL_HEADER] = self._enclave_url
+        header_value, inject = _enclave_url_header(self._client.base_url, self._client.enclave)
+        if inject:
+            request.headers[ENCLAVE_URL_HEADER] = header_value
         return self._inner.handle_request(request)
 
     def close(self) -> None:
@@ -426,12 +432,14 @@ class _EnclaveURLHeaderTransport(httpx.BaseTransport):
 class _AsyncEnclaveURLHeaderTransport(httpx.AsyncBaseTransport):
     """Async counterpart of _EnclaveURLHeaderTransport."""
 
-    def __init__(self, inner: httpx.AsyncBaseTransport, enclave_url: str):
+    def __init__(self, inner: httpx.AsyncBaseTransport, client: "SecureClient"):
         self._inner = inner
-        self._enclave_url = enclave_url
+        self._client = client
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        request.headers[ENCLAVE_URL_HEADER] = self._enclave_url
+        header_value, inject = _enclave_url_header(self._client.base_url, self._client.enclave)
+        if inject:
+            request.headers[ENCLAVE_URL_HEADER] = header_value
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:
@@ -466,6 +474,14 @@ class SecureClient:
         # key) in plaintext, so a proxy base URL must be https.
         if base_url and urlparse(base_url).scheme != "https":
             raise ValueError(f"base_url must use https; got {base_url!r}")
+
+        # The attestation bundle is the entire trust root for verification.
+        # Fetching it over plaintext would let an attacker substitute the bundle
+        # (MITM), so the bundle URL must be https.
+        if attestation_bundle_url and urlparse(attestation_bundle_url).scheme != "https":
+            raise ValueError(
+                f"attestation_bundle_url must use https; got {attestation_bundle_url!r}"
+            )
 
         # Routing through a proxy base URL relies on EHBP sealing the body to the
         # enclave; TLS certificate pinning would reject the proxy's certificate.
@@ -589,9 +605,8 @@ class SecureClient:
         if self.transport == "ehbp":
             inner = self._build_ehbp_sync_transport()
             transport: httpx.BaseTransport = _EHBPReVerifyingTransport(self, inner)
-            header_value, inject = _enclave_url_header(self.base_url, self.enclave)
-            if inject:
-                transport = _EnclaveURLHeaderTransport(transport, header_value)
+            if self.base_url:
+                transport = _EnclaveURLHeaderTransport(transport, self)
             return httpx.Client(transport=transport, follow_redirects=True)
 
         expected_fp = self.verify().public_key
@@ -617,9 +632,8 @@ class SecureClient:
             hpke_public_key = self._require_hpke_public_key()
             inner = AsyncEHBPTransport.from_public_key_hex(hpke_public_key, inner=httpx.AsyncHTTPTransport())
             transport: httpx.AsyncBaseTransport = _AsyncEHBPReVerifyingTransport(self, inner)
-            header_value, inject = _enclave_url_header(self.base_url, self.enclave)
-            if inject:
-                transport = _AsyncEnclaveURLHeaderTransport(transport, header_value)
+            if self.base_url:
+                transport = _AsyncEnclaveURLHeaderTransport(transport, self)
             return httpx.AsyncClient(transport=transport, follow_redirects=True)
 
         expected_fp = self.verify().public_key
@@ -883,6 +897,11 @@ class SecureClient:
         transport mode: in "ehbp" mode the request body is encrypted end-to-end
         to the enclave, and in "tls" mode the enclave's certificate is pinned.
         """
+        # Build the client first so attestation runs and populates self.enclave.
+        # When attesting from a bundle the enclave host is only known after
+        # verification, so relative URLs must be resolved afterwards.
+        client = self._secure_http_client()
+
         url = req.full_url
         parsed = urlparse(url)
         # If URL doesn't have a host, assume it's relative to the proxy (when
@@ -895,7 +914,7 @@ class SecureClient:
                 url = f"https://{self.enclave}{url}"
         self.assert_request_allowed(url)
 
-        response = self._secure_http_client().request(
+        response = client.request(
             req.get_method(),
             url,
             headers=dict(req.header_items()),

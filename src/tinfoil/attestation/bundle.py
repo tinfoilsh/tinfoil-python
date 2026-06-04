@@ -11,6 +11,7 @@ lets attestation traffic flow through a proxy.
 import base64
 import json
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import requests
 from cryptography import x509
@@ -34,6 +35,12 @@ class Bundle:
 
 def fetch_bundle_from(attestation_bundle_url: str) -> Bundle:
     """Fetches a complete attestation bundle from {url}/attestation."""
+    # The bundle is the entire trust root; fetching it over plaintext would let
+    # an attacker substitute it (MITM).
+    if urlparse(attestation_bundle_url).scheme != "https":
+        raise ValueError(
+            f"attestation bundle URL must use https; got {attestation_bundle_url!r}"
+        )
     base = attestation_bundle_url.rstrip("/")
     url = f"{base}{ATTESTATION_BUNDLE_ENDPOINT}"
     response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
