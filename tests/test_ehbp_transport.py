@@ -108,6 +108,39 @@ class TestTransportSelection:
             inner.close()
 
 
+class TestLowLevelHonorsTransport:
+    """The low-level get()/post() path must respect the configured transport."""
+
+    def test_low_level_client_uses_ehbp_transport(self):
+        sc = _secure_client("ehbp")
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        client = sc._secure_http_client()
+        try:
+            assert isinstance(client._transport, _EHBPReVerifyingTransport)
+        finally:
+            client.close()
+
+    def test_low_level_client_uses_pinned_transport_in_tls_mode(self):
+        sc = _secure_client("tls")
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        client = sc._secure_http_client()
+        try:
+            assert isinstance(client._transport, _ReVerifyingTransport)
+        finally:
+            client.close()
+
+    def test_get_http_client_rejected_in_ehbp_mode(self):
+        sc = _secure_client("ehbp")
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        with pytest.raises(ValueError):
+            sc.get_http_client()
+
+    def test_get_http_client_allowed_in_tls_mode(self):
+        sc = _secure_client("tls")
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        assert sc.get_http_client() is not None
+
+
 class _RaiseKeyMismatch(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         request.read()  # EHBP consumes the body before reporting the mismatch
@@ -203,13 +236,24 @@ class TestAsyncReverify:
         asyncio.run(run())
 
 
+def _require_api_key() -> str:
+    """
+    Return TINFOIL_API_KEY, failing the test if it is missing.
+
+    Integration tests must not be silently skipped when a required secret is
+    absent: that hides misconfigured CI and lets coverage regress unnoticed.
+    """
+    api_key = os.getenv("TINFOIL_API_KEY")
+    if not api_key:
+        pytest.fail("TINFOIL_API_KEY must be set to run the integration tests")
+    return api_key
+
+
 @pytest.mark.integration
 class TestIntegration:
     @pytest.mark.parametrize("transport", ["ehbp", "tls"])
     def test_chat_completion(self, transport):
-        api_key = os.getenv("TINFOIL_API_KEY")
-        if not api_key:
-            pytest.skip("TINFOIL_API_KEY not set")
+        api_key = _require_api_key()
 
         client = TinfoilAI(api_key=api_key, transport=transport)
         response = client.chat.completions.create(
@@ -224,9 +268,7 @@ class TestIntegration:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("transport", ["ehbp", "tls"])
     async def test_async_streaming_chat_completion(self, transport):
-        api_key = os.getenv("TINFOIL_API_KEY")
-        if not api_key:
-            pytest.skip("TINFOIL_API_KEY not set")
+        api_key = _require_api_key()
 
         client = AsyncTinfoilAI(api_key=api_key, transport=transport)
         stream = await client.chat.completions.create(
