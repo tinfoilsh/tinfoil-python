@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.10"
 
 [options]
-exclude-newer = "2026-05-31T04:42:19.940911Z"
+exclude-newer = "2026-05-31T06:04:10.992747Z"
 exclude-newer-span = "P4D"
 
 [options.exclude-newer-package]
@@ -965,7 +965,7 @@ wheels = [
 
 [[package]]
 name = "tinfoil"
-version = "0.12.2"
+version = "0.13.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
