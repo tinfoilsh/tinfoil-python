@@ -7,6 +7,7 @@ the server rotates its HPKE key (surfaced as KeyConfigMismatchError).
 """
 
 import asyncio
+import json
 import os
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,7 @@ from tinfoil import AsyncTinfoilAI, SecureClient, TinfoilAI
 from tinfoil.client import (
     DEFAULT_TRANSPORT_MODE,
     GroundTruth,
+    get_router_address,
     _AsyncEHBPReVerifyingTransport,
     _EHBPReVerifyingTransport,
     _ReVerifyingTransport,
@@ -319,3 +321,54 @@ class TestIntegration:
             if chunk.choices and chunk.choices[0].delta.content:
                 collected.append(chunk.choices[0].delta.content)
         assert "".join(collected)
+
+
+@pytest.mark.integration
+class TestLowLevelEHBPIntegration:
+    """The low-level SecureClient.get()/post() path against a live enclave.
+
+    Covers both transport modes and, for EHBP, both request shapes: a bodyless
+    GET (which SPEC 7.4 sends without body encryption) and a POST whose body is
+    sealed end-to-end to the enclave's HPKE key.
+    """
+
+    REPO = "tinfoilsh/confidential-model-router"
+
+    def _client(self, transport: str) -> SecureClient:
+        try:
+            enclave = get_router_address()
+        except Exception as e:
+            pytest.skip(f"Could not fetch router address from ATC service: {e}")
+        return SecureClient(enclave=enclave, repo=self.REPO, transport=transport)
+
+    @pytest.mark.parametrize("transport", ["ehbp", "tls"])
+    def test_low_level_bodyless_get_models(self, transport):
+        api_key = _require_api_key()
+        client = self._client(transport)
+        resp = client.get(
+            f"https://{client.enclave}/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        assert resp.status_code == 200, resp.body
+
+    @pytest.mark.parametrize("transport", ["ehbp", "tls"])
+    def test_low_level_post_chat(self, transport):
+        api_key = _require_api_key()
+        client = self._client(transport)
+        body = json.dumps(
+            {
+                "model": "llama3-3-70b",
+                "max_tokens": 5,
+                "messages": [
+                    {"role": "system", "content": "No matter what the user says, only respond with: Done."},
+                    {"role": "user", "content": "Is this a test?"},
+                ],
+            }
+        ).encode()
+        resp = client.post(
+            f"https://{client.enclave}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            body=body,
+        )
+        assert resp.status_code == 200, resp.body
+        assert json.loads(resp.body)["choices"]
