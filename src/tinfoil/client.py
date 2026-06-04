@@ -400,6 +400,7 @@ class SecureClient:
         self.transport = transport
         self._ground_truth: Optional[GroundTruth] = None
         self._verification_document: Optional[VerificationDocument] = None
+        self._low_level_http_client: Optional[httpx.Client] = None
 
     @property
     def ground_truth(self) -> Optional[GroundTruth]:
@@ -642,27 +643,55 @@ class SecureClient:
             return self._ground_truth
 
     def get_http_client(self) -> urllib.request.OpenerDirector:
-        """Returns an HTTP client that only accepts TLS connections to the verified enclave"""
+        """
+        Returns a urllib opener that pins the enclave's TLS certificate.
+
+        This accessor is specific to the "tls" transport mode. In the default
+        "ehbp" mode there is no certificate to pin (the connection is
+        proxy-friendly and the body is encrypted end-to-end instead), so use
+        make_secure_http_client() or construct the client with transport="tls".
+        """
         if not self._ground_truth:
             self._ground_truth = self.verify()
-        
+
+        if self.transport == "ehbp":
+            raise ValueError(
+                "get_http_client() pins the enclave's TLS certificate and is "
+                "only available with transport='tls'. Use "
+                "make_secure_http_client() for the EHBP transport."
+            )
+
         handler = TLSBoundHTTPSHandler(self._ground_truth.public_key)
         return urllib.request.build_opener(handler)
 
+    def _secure_http_client(self) -> httpx.Client:
+        """Lazily build the mode-aware httpx client backing get()/post()."""
+        if self._low_level_http_client is None:
+            self._low_level_http_client = self.make_secure_http_client()
+        return self._low_level_http_client
+
     def make_request(self, req: urllib.request.Request) -> Response:
-        """Makes an HTTP request using the secure client"""
-        client = self.get_http_client()
-        
+        """
+        Makes an HTTP request using the secure client, honoring the configured
+        transport mode: in "ehbp" mode the request body is encrypted end-to-end
+        to the enclave, and in "tls" mode the enclave's certificate is pinned.
+        """
+        url = req.full_url
         # If URL doesn't have a host, assume it's relative to the enclave
-        if not urlparse(req.full_url).netloc:
-            req.full_url = f"https://{self.enclave}{req.full_url}"
-        
-        with client.open(req) as resp:
-            return Response(
-                status=f"{resp.status} {resp.reason}",
-                status_code=resp.status,
-                body=resp.read()
-            )
+        if not urlparse(url).netloc:
+            url = f"https://{self.enclave}{url}"
+
+        response = self._secure_http_client().request(
+            req.get_method(),
+            url,
+            headers=dict(req.header_items()),
+            content=req.data,
+        )
+        return Response(
+            status=f"{response.status_code} {response.reason_phrase}",
+            status_code=response.status_code,
+            body=response.content,
+        )
 
     def post(self, url: str, headers: Dict[str, str], body: bytes) -> Response:
         """Makes an HTTP POST request"""
