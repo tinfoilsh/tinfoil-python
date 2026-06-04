@@ -2,6 +2,7 @@ import hashlib
 import json
 import ssl
 from dataclasses import dataclass
+from typing import Optional
 
 import requests
 from cryptography import x509
@@ -28,16 +29,20 @@ class Document:
 
     def hash(self) -> str:
         """Returns the SHA-256 hash of the attestation document"""
-        all_data = str(self.format) + self.body
+        all_data = self.format.value + self.body
         return hashlib.sha256(all_data.encode()).hexdigest()
 
-    def verify(self) -> Verification:
+    def verify(self, vcek_der: Optional[bytes] = None) -> Verification:
         """
         Checks the attestation document against its trust root
-        and returns the inner measurements
+        and returns the inner measurements.
+
+        For SEV-SNP, vcek_der optionally supplies the VCEK certificate (for
+        example from an attestation bundle) instead of fetching it from the AMD
+        KDS proxy. It is ignored for TDX, which uses a different trust chain.
         """
         if self.format == PredicateType.SEV_GUEST_V2:
-            return verify_sev_attestation_v2(self.body)
+            return verify_sev_attestation_v2(self.body, vcek_der=vcek_der)
         elif self.format == PredicateType.TDX_GUEST_V2:
             return verify_tdx_attestation_v2(self.body)
         else:

@@ -71,14 +71,20 @@ default_validation_options = ValidationOptions(
 # Main Entry Points
 # =============================================================================
 
-def verify_sev_attestation_v2(attestation_doc: str) -> Verification:
+def verify_sev_attestation_v2(attestation_doc: str, vcek_der: Optional[bytes] = None) -> Verification:
     """Verify SEV attestation document (v2 format) and return verification result.
+
+    Args:
+        attestation_doc: Base64-encoded attestation document
+        vcek_der: Optional DER-encoded VCEK certificate (for example from an
+            attestation bundle). When omitted, the VCEK is fetched from the AMD
+            KDS proxy. Either way it is validated against the AMD root chain.
 
     Raises:
         ValueError: If verification fails
     """
     try:
-        report = verify_sev_report(attestation_doc)
+        report = verify_sev_report(attestation_doc, vcek_der=vcek_der)
     except SevAttestationError as e:
         raise ValueError(f"SEV attestation verification failed: {e}") from e
 
@@ -110,6 +116,7 @@ def verify_sev_report(
     attestation_doc: str,
     is_compressed: bool = True,
     validation_options: Optional[ValidationOptions] = None,
+    vcek_der: Optional[bytes] = None,
 ) -> Report:
     """Verify SEV attestation document and return the parsed report.
 
@@ -117,6 +124,8 @@ def verify_sev_report(
         attestation_doc: Base64-encoded attestation document
         is_compressed: Whether the document is gzip-compressed (default True)
         validation_options: Custom validation options; uses module defaults if None
+        vcek_der: Optional DER-encoded VCEK certificate; when omitted it is
+            fetched from the AMD KDS proxy.
     """
     options = validation_options if validation_options is not None else default_validation_options
 
@@ -139,7 +148,7 @@ def verify_sev_report(
         raise SevAttestationError(f"Failed to parse report: {e}") from e
 
     try:
-        chain = CertificateChain.from_report(report)
+        chain = CertificateChain.from_report(report, vcek_der=vcek_der)
     except Exception as e:
         raise SevAttestationError(f"Failed to build certificate chain: {e}") from e
 

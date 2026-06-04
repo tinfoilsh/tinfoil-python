@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import http.client
 import json
@@ -21,11 +22,21 @@ from ehbp import (
     KeyConfigMismatchError,
 )
 
-from .attestation import fetch_attestation, TDX_TYPES
+from .attestation import (
+    Bundle,
+    fetch_attestation,
+    fetch_bundle_from,
+    verify_certificate,
+    TDX_TYPES,
+)
 from .attestation.attestation_tdx import verify_tdx_hardware
 from .attestation.types import Measurement, HardwareMeasurement, Verification
 from .github import fetch_latest_digest, fetch_attestation_bundle
 from .sigstore import verify_attestation, fetch_latest_hardware_measurements
+
+# Header that tells a proxy which enclave to forward an encrypted request to, so
+# the request reaches the same enclave the client verified.
+ENCLAVE_URL_HEADER = "X-Tinfoil-Enclave-Url"
 
 
 _CERTIFICATE_VERIFY_ERROR_MARKERS = (
@@ -375,10 +386,62 @@ class _AsyncEHBPReVerifyingTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
+def _enclave_url_header(base_url: str, enclave: str) -> tuple[str, bool]:
+    """
+    Returns the X-Tinfoil-Enclave-Url header value and whether it should be
+    injected. The header is only needed when requests are routed through a proxy
+    whose origin differs from the verified enclave's.
+    """
+    if not base_url or not enclave:
+        return "", False
+    enclave_url = f"https://{enclave}"
+    proxy = urlparse(base_url)
+    if not proxy.netloc:
+        return "", False
+    enclave_parsed = urlparse(enclave_url)
+    if (proxy.scheme, proxy.netloc) == (enclave_parsed.scheme, enclave_parsed.netloc):
+        return "", False
+    return enclave_url, True
+
+
+class _EnclaveURLHeaderTransport(httpx.BaseTransport):
+    """
+    Injects the X-Tinfoil-Enclave-Url header before delegating to the wrapped
+    transport. EHBP leaves request headers in plaintext, so the header reaches
+    the proxy while the body stays sealed to the enclave's HPKE key.
+    """
+
+    def __init__(self, inner: httpx.BaseTransport, enclave_url: str):
+        self._inner = inner
+        self._enclave_url = enclave_url
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        request.headers[ENCLAVE_URL_HEADER] = self._enclave_url
+        return self._inner.handle_request(request)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class _AsyncEnclaveURLHeaderTransport(httpx.AsyncBaseTransport):
+    """Async counterpart of _EnclaveURLHeaderTransport."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport, enclave_url: str):
+        self._inner = inner
+        self._enclave_url = enclave_url
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        request.headers[ENCLAVE_URL_HEADER] = self._enclave_url
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 class SecureClient:
     """A client that verifies and communicates with secure enclaves"""
     
-    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE):
+    def __init__(self, enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: str = "", attestation_bundle_url: str = ""):
         # Hardcoded measurement takes precedence over repo
         if measurement is not None:
             repo = ""
@@ -390,14 +453,18 @@ class SecureClient:
         if transport not in ("ehbp", "tls"):
             raise ValueError(f"Unknown transport mode: {transport!r}. Use 'ehbp' or 'tls'.")
 
-        # If enclave is empty, fetch a random one from the routers API
-        if enclave == "" or enclave is None:
+        # If enclave is empty, fetch a random one from the routers API. When
+        # attesting from a bundle, the enclave host comes from the verified
+        # bundle, so no router lookup is needed.
+        if (enclave == "" or enclave is None) and not attestation_bundle_url:
             enclave = get_router_address()
 
-        self.enclave = enclave
+        self.enclave = enclave or ""
         self.repo = repo
         self.measurement = measurement
         self.transport = transport
+        self.base_url = base_url
+        self.attestation_bundle_url = attestation_bundle_url
         self._ground_truth: Optional[GroundTruth] = None
         self._verification_document: Optional[VerificationDocument] = None
         self._low_level_http_client: Optional[httpx.Client] = None
@@ -502,7 +569,10 @@ class SecureClient:
         """
         if self.transport == "ehbp":
             inner = self._build_ehbp_sync_transport()
-            transport = _EHBPReVerifyingTransport(self, inner)
+            transport: httpx.BaseTransport = _EHBPReVerifyingTransport(self, inner)
+            header_value, inject = _enclave_url_header(self.base_url, self.enclave)
+            if inject:
+                transport = _EnclaveURLHeaderTransport(transport, header_value)
             return httpx.Client(transport=transport, follow_redirects=True)
 
         expected_fp = self.verify().public_key
@@ -527,7 +597,10 @@ class SecureClient:
         if self.transport == "ehbp":
             hpke_public_key = self._require_hpke_public_key()
             inner = AsyncEHBPTransport.from_public_key_hex(hpke_public_key, inner=httpx.AsyncHTTPTransport())
-            transport = _AsyncEHBPReVerifyingTransport(self, inner)
+            transport: httpx.AsyncBaseTransport = _AsyncEHBPReVerifyingTransport(self, inner)
+            header_value, inject = _enclave_url_header(self.base_url, self.enclave)
+            if inject:
+                transport = _AsyncEnclaveURLHeaderTransport(transport, header_value)
             return httpx.AsyncClient(transport=transport, follow_redirects=True)
 
         expected_fp = self.verify().public_key
@@ -543,6 +616,11 @@ class SecureClient:
 
         Also populates the verification document with per-step status.
         """
+        # When an attestation bundle URL is configured, attest from the bundle so
+        # the enclave does not need to be reached directly (proxy-friendly).
+        if self.attestation_bundle_url:
+            return self.verify_from_bundle(fetch_bundle_from(self.attestation_bundle_url))
+
         doc = VerificationDocument(
             config_repo=self.repo or "",
             enclave_host=self.enclave,
@@ -642,6 +720,82 @@ class SecureClient:
             )
             return self._ground_truth
 
+    def verify_from_bundle(self, bundle: Bundle) -> GroundTruth:
+        """
+        Verifies a pre-fetched attestation bundle entirely client-side and
+        stores the ground truth. The bundle supplies the enclave attestation
+        report, release digest, Sigstore bundle, AMD VCEK, and enclave TLS
+        certificate, so verification needs no direct connection to the enclave.
+        """
+        doc = VerificationDocument(
+            config_repo=self.repo or "",
+            enclave_host=bundle.domain,
+            selected_router_endpoint=bundle.domain,
+        )
+        self._verification_document = doc
+
+        # Step 1: Verify code measurement from the bundled Sigstore bundle
+        try:
+            code_measurements = verify_attestation(bundle.sigstore_bundle, bundle.digest, self.repo)
+            doc.release_digest = bundle.digest
+            doc.code_measurement = code_measurements
+            doc.code_fingerprint = code_measurements.fingerprint()
+            doc.steps["fetch_digest"] = VerificationStepState(status="success")
+            doc.steps["verify_code"] = VerificationStepState(status="success")
+        except Exception as e:
+            doc.steps["fetch_digest"] = VerificationStepState(status="failed", error=str(e))
+            doc.steps["verify_code"] = VerificationStepState(status="failed", error=str(e))
+            _attach_verification_document(e, doc)
+            raise
+
+        # Step 2: Verify the enclave attestation report using the bundled VCEK
+        try:
+            vcek_der = base64.b64decode(bundle.vcek) if bundle.vcek else None
+            verification = bundle.enclave_attestation_report.verify(vcek_der=vcek_der)
+            doc.enclave_measurement = verification
+            doc.tls_public_key = verification.public_key_fp
+            doc.hpke_public_key = verification.hpke_public_key or ""
+            doc.enclave_fingerprint = verification.measurement.fingerprint()
+            doc.steps["verify_enclave"] = VerificationStepState(status="success")
+        except Exception as e:
+            doc.steps["verify_enclave"] = VerificationStepState(status="failed", error=str(e))
+            _attach_verification_document(e, doc)
+            raise
+
+        # Step 3: Compare code and enclave measurements
+        try:
+            code_measurements.assert_equal(verification.measurement)
+            doc.steps["compare_measurements"] = VerificationStepState(status="success")
+        except Exception as e:
+            doc.steps["compare_measurements"] = VerificationStepState(status="failed", error=str(e))
+            _attach_verification_document(e, doc)
+            raise
+
+        # Step 4: Bind the enclave certificate to the verified attestation
+        try:
+            if not bundle.enclave_cert:
+                raise ValueError("attestation bundle is missing the enclave certificate")
+            verify_certificate(
+                bundle.enclave_cert,
+                bundle.domain,
+                bundle.enclave_attestation_report,
+                verification.hpke_public_key or "",
+            )
+        except Exception as e:
+            _attach_verification_document(e, doc)
+            raise
+
+        # Attestation came from the bundle; adopt its domain as the enclave host.
+        self.enclave = bundle.domain
+        doc.security_verified = True
+        self._ground_truth = GroundTruth(
+            public_key=verification.public_key_fp,
+            digest=bundle.digest,
+            measurement=verification.measurement,
+            hpke_public_key=verification.hpke_public_key or "",
+        )
+        return self._ground_truth
+
     def get_http_client(self) -> urllib.request.OpenerDirector:
         """
         Returns a urllib opener that pins the enclave's TLS certificate.
@@ -678,13 +832,20 @@ class SecureClient:
         """
         url = req.full_url
         parsed = urlparse(url)
-        # If URL doesn't have a host, assume it's relative to the enclave
+        enclave_host = urlparse(f"//{self.enclave}").hostname
+        proxy_host = urlparse(self.base_url).hostname if self.base_url else None
+        # If URL doesn't have a host, assume it's relative to the proxy (when
+        # configured) or the enclave.
         if not parsed.netloc:
-            url = f"https://{self.enclave}{url}"
-        elif parsed.hostname != urlparse(f"//{self.enclave}").hostname:
+            if proxy_host:
+                proxy = urlparse(self.base_url)
+                url = f"{proxy.scheme}://{proxy.netloc}{url}"
+            else:
+                url = f"https://{self.enclave}{url}"
+        elif parsed.hostname not in (enclave_host, proxy_host):
             # EHBP encrypts only the body; headers (which may carry the API key)
             # reach the destination in plaintext, so never send them to a host
-            # other than the attested enclave this client is bound to.
+            # other than the attested enclave or the configured proxy.
             raise ValueError(
                 f"refusing to send request to host {parsed.hostname!r}: this "
                 f"secure client is bound to enclave {self.enclave!r}"
