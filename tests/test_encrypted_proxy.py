@@ -21,8 +21,9 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 import tinfoil as tinfoil_module
 from tinfoil import AsyncTinfoilAI, SecureClient, TinfoilAI
-from tinfoil.attestation import Bundle, fetch_bundle_from
+from tinfoil.attestation import Bundle, Document, fetch_bundle_from
 from tinfoil.attestation.bundle import _decode_domains, _matches_hostname
+from tinfoil.attestation.types import Measurement, PredicateType, Verification
 from tinfoil.client import (
     ENCLAVE_URL_HEADER,
     GroundTruth,
@@ -266,6 +267,71 @@ class TestMatchesHostname:
 
     def test_no_match(self):
         assert _matches_hostname("evil.com", ["inference.tinfoil.sh"]) is False
+
+
+class TestConstructorValidation:
+    """The constructor rejects insecure or contradictory proxy configuration."""
+
+    def test_base_url_must_be_https(self):
+        with pytest.raises(ValueError, match="https"):
+            SecureClient(enclave="enclave.test", repo="org/repo", base_url="http://proxy.example.com/")
+
+    def test_https_base_url_is_accepted(self):
+        sc = SecureClient(enclave="enclave.test", repo="org/repo", base_url="https://proxy.example.com/")
+        assert sc.base_url == "https://proxy.example.com/"
+
+    def test_measurement_and_bundle_url_are_exclusive(self):
+        with pytest.raises(ValueError, match="attestation_bundle_url"):
+            SecureClient(measurement={"snp_measurement": "abc"}, attestation_bundle_url="https://atc.example")
+
+
+class TestBundleVerifiesTdxHardware:
+    """The bundle path must verify TDX hardware measurements (mrtd/rtmr0) just
+    like the direct attestation path; otherwise a TDX enclave on tampered
+    firmware would pass verification."""
+
+    def _tdx_bundle(self) -> tuple:
+        report = Document(format=PredicateType.TDX_GUEST_V2, body="Zm9v")
+        bundle = Bundle(
+            domain="enclave.test",
+            enclave_attestation_report=report,
+            digest="d",
+            sigstore_bundle=b"{}",
+            vcek="",
+            enclave_cert="cert",
+        )
+        measurement = Measurement(
+            type=PredicateType.TDX_GUEST_V2,
+            registers=["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"],
+        )
+        verification = Verification(measurement=measurement, public_key_fp="fp", hpke_public_key="hpke")
+        return report, bundle, measurement, verification
+
+    def test_tdx_bundle_verifies_hardware_measurements(self):
+        report, bundle, measurement, verification = self._tdx_bundle()
+        sc = SecureClient(repo="org/repo", attestation_bundle_url="https://atc.example")
+
+        with patch.object(report, "verify", return_value=verification), \
+             patch("tinfoil.client.verify_attestation", return_value=MagicMock(spec=Measurement)), \
+             patch("tinfoil.client.fetch_latest_hardware_measurements", return_value="hw") as fetch_hw, \
+             patch("tinfoil.client.verify_tdx_hardware", return_value="hwm") as verify_hw, \
+             patch("tinfoil.client.verify_certificate", return_value="hpke"):
+            sc.verify_from_bundle(bundle)
+
+        fetch_hw.assert_called_once()
+        verify_hw.assert_called_once_with("hw", measurement)
+
+    def test_tdx_bundle_fails_when_hardware_mismatch(self):
+        report, bundle, _, verification = self._tdx_bundle()
+        sc = SecureClient(repo="org/repo", attestation_bundle_url="https://atc.example")
+
+        with patch.object(report, "verify", return_value=verification), \
+             patch("tinfoil.client.verify_attestation", return_value=MagicMock(spec=Measurement)), \
+             patch("tinfoil.client.fetch_latest_hardware_measurements", return_value="hw"), \
+             patch("tinfoil.client.verify_tdx_hardware", side_effect=ValueError("hardware mismatch")), \
+             patch("tinfoil.client.verify_certificate", return_value="hpke"):
+            with pytest.raises(ValueError, match="hardware mismatch"):
+                sc.verify_from_bundle(bundle)
 
 
 class TestFetchBundleParsing:
