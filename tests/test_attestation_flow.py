@@ -121,13 +121,16 @@ def test_sync_pinned_client_rejects_wrong_host():
     """
     A client pinned to the enclave's cert must reject connections
     to a different host (whose cert won't match the pinned fingerprint).
+
+    Certificate pinning is a property of the "tls" transport; the default
+    "ehbp" transport is intentionally proxy-friendly and does not pin the host.
     """
     try:
         enclave = get_router_address()
     except Exception as e:
         pytest.skip(f"Could not fetch router address from ATC service: {e}")
 
-    client = SecureClient(enclave=enclave, repo=REPO)
+    client = SecureClient(enclave=enclave, repo=REPO, transport="tls")
     http_client = client.make_secure_http_client()
 
     try:
@@ -142,13 +145,16 @@ async def test_async_pinned_client_rejects_wrong_host():
     """
     The async pinned client must reject connections to a host
     whose cert doesn't match the pinned fingerprint.
+
+    Certificate pinning is a property of the "tls" transport; the default
+    "ehbp" transport is intentionally proxy-friendly and does not pin the host.
     """
     try:
         enclave = get_router_address()
     except Exception as e:
         pytest.skip(f"Could not fetch router address from ATC service: {e}")
 
-    client = SecureClient(enclave=enclave, repo=REPO)
+    client = SecureClient(enclave=enclave, repo=REPO, transport="tls")
     http_client = client.make_secure_async_http_client()
 
     try:
