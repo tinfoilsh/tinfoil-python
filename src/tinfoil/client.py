@@ -467,6 +467,11 @@ class SecureClient:
         if base_url and urlparse(base_url).scheme != "https":
             raise ValueError(f"base_url must use https; got {base_url!r}")
 
+        # Routing through a proxy base URL relies on EHBP sealing the body to the
+        # enclave; TLS certificate pinning would reject the proxy's certificate.
+        if base_url and transport != "ehbp":
+            raise ValueError("base_url is only supported with the 'ehbp' transport")
+
         # If enclave is empty, fetch a random one from the routers API. When
         # attesting from a bundle, the enclave host comes from the verified
         # bundle, so no router lookup is needed.
