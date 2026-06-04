@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import os
+import urllib.request
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -81,9 +82,13 @@ class _AsyncRecordingTransport(httpx.AsyncBaseTransport):
 
 
 class TestEnclaveURLHeaderTransport:
+    def _client(self, enclave: str, base_url: str):
+        return SecureClient(enclave=enclave, repo="org/repo", transport="ehbp", base_url=base_url)
+
     def test_sync_injects_header(self):
         inner = _RecordingTransport()
-        transport = _EnclaveURLHeaderTransport(inner, "https://enclave.example.com")
+        sc = self._client("enclave.example.com", "https://proxy.example.com/")
+        transport = _EnclaveURLHeaderTransport(inner, sc)
         request = httpx.Request("POST", "https://proxy.example.com/v1/chat/completions", content=b"payload")
         resp = transport.handle_request(request)
         assert resp.status_code == 200
@@ -92,13 +97,39 @@ class TestEnclaveURLHeaderTransport:
     def test_async_injects_header(self):
         async def run():
             inner = _AsyncRecordingTransport()
-            transport = _AsyncEnclaveURLHeaderTransport(inner, "https://enclave.example.com")
+            sc = self._client("enclave.example.com", "https://proxy.example.com/")
+            transport = _AsyncEnclaveURLHeaderTransport(inner, sc)
             request = httpx.Request("POST", "https://proxy.example.com/v1/chat/completions", content=b"payload")
             resp = await transport.handle_async_request(request)
             assert resp.status_code == 200
             assert inner.seen_header == "https://enclave.example.com"
 
         asyncio.run(run())
+
+    def test_no_header_when_same_origin(self):
+        inner = _RecordingTransport()
+        sc = self._client("enclave.test", "https://enclave.test/v1/")
+        transport = _EnclaveURLHeaderTransport(inner, sc)
+        transport.handle_request(
+            httpx.Request("POST", "https://enclave.test/v1/chat/completions", content=b"payload")
+        )
+        assert inner.seen_header is None
+
+    def test_reflects_enclave_change_after_reverification(self):
+        inner = _RecordingTransport()
+        sc = self._client("old.example.com", "https://proxy.example.com/")
+        transport = _EnclaveURLHeaderTransport(inner, sc)
+        transport.handle_request(
+            httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
+        )
+        assert inner.seen_header == "https://old.example.com"
+        # A re-verification (e.g. bundle mode behind a proxy) may swap in a
+        # different enclave; the header must follow the current enclave.
+        sc.enclave = "new.example.com"
+        transport.handle_request(
+            httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
+        )
+        assert inner.seen_header == "https://new.example.com"
 
 
 class TestProxyTransportWiring:
@@ -119,8 +150,19 @@ class TestProxyTransportWiring:
         finally:
             client.close()
 
-    def test_sync_no_wrap_when_same_origin(self):
+    def test_sync_wraps_even_when_same_origin(self):
+        # With base_url set the header transport is always installed; it decides
+        # per request whether to inject, since the enclave can change after a
+        # re-verification.
         sc = self._client("https://enclave.test/v1/")
+        client = sc.make_secure_http_client()
+        try:
+            assert isinstance(client._transport, _EnclaveURLHeaderTransport)
+        finally:
+            client.close()
+
+    def test_sync_no_wrap_without_base_url(self):
+        sc = self._client("")
         client = sc.make_secure_http_client()
         try:
             assert isinstance(client._transport, _EHBPReVerifyingTransport)
@@ -292,6 +334,48 @@ class TestConstructorValidation:
     def test_measurement_and_bundle_url_are_exclusive(self):
         with pytest.raises(ValueError, match="attestation_bundle_url"):
             SecureClient(measurement={"snp_measurement": "abc"}, attestation_bundle_url="https://atc.example")
+
+    def test_attestation_bundle_url_must_be_https(self):
+        with pytest.raises(ValueError, match="https"):
+            SecureClient(attestation_bundle_url="http://atc.example")
+
+    def test_https_attestation_bundle_url_is_accepted(self):
+        sc = SecureClient(attestation_bundle_url="https://atc.example")
+        assert sc.attestation_bundle_url == "https://atc.example"
+
+
+class TestBundleModeRequestRouting:
+    """In bundle mode the enclave host is only known after verification, so
+    make_request must build the client (and run verification) before binding the
+    request to the enclave host."""
+
+    def test_request_allowed_after_bundle_populates_enclave(self):
+        sc = SecureClient(attestation_bundle_url="https://atc.example")
+        assert sc.enclave == ""  # unknown until the bundle is verified
+
+        captured = {}
+        fake_client = MagicMock()
+
+        def fake_request(method, url, **kwargs):
+            captured["url"] = url
+            return httpx.Response(200, content=b"ok")
+
+        fake_client.request.side_effect = fake_request
+
+        def build_client():
+            # Building the secure client runs attestation, which in bundle mode
+            # is what populates self.enclave from the verified bundle.
+            sc.enclave = "enclave-from-bundle.test"
+            sc._low_level_http_client = fake_client
+            return fake_client
+
+        sc._secure_http_client = build_client
+
+        # Before the fix the host check ran while self.enclave was still empty,
+        # so even a request to the real enclave was rejected.
+        resp = sc.get("https://enclave-from-bundle.test/v1/models")
+        assert resp.status_code == 200
+        assert captured["url"] == "https://enclave-from-bundle.test/v1/models"
 
 
 class TestBundleVerifiesTdxHardware:
