@@ -280,6 +280,15 @@ class TestConstructorValidation:
         sc = SecureClient(enclave="enclave.test", repo="org/repo", base_url="https://proxy.example.com/")
         assert sc.base_url == "https://proxy.example.com/"
 
+    def test_base_url_requires_ehbp_transport(self):
+        with pytest.raises(ValueError, match="ehbp"):
+            SecureClient(
+                enclave="enclave.test",
+                repo="org/repo",
+                base_url="https://proxy.example.com/",
+                transport="tls",
+            )
+
     def test_measurement_and_bundle_url_are_exclusive(self):
         with pytest.raises(ValueError, match="attestation_bundle_url"):
             SecureClient(measurement={"snp_measurement": "abc"}, attestation_bundle_url="https://atc.example")
