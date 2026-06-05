@@ -101,6 +101,7 @@ def _capabilities() -> dict[str, Any]:
             "verify-measurement",
             "verify-hardware-measurements",
             "verify-attestation-tdx",
+            "verify-attestation-sev",
         ],
         "sigstore": {
             "trust_root_loading": "configurable",
@@ -190,6 +191,27 @@ def _capabilities() -> dict[str, Any]:
             # urationNeeded, ConfigurationAndSWHardeningNeeded) pass
             # through per SPEC §4.7.7 default.
             "accepts_non_terminal_tcb_statuses": True,
+        },
+        "attestation_sev": {
+            # cmd_verify_attestation_sev builds CertificateChain directly
+            # with the fixture-supplied VCEK + lib's embedded ARK/ASK
+            # (bypassing CertificateChain.from_report's KDS fetch).
+            "supported": True,
+            "injected_collateral_supported": True,
+            # _enforce_sev_policy applies SPEC §3.7/§3.8/§8.2-3 pins from
+            # policy.expected_*_hex and enforce_spec_defaults checks.
+            "extended_checks_supported": True,
+            # Python's verify_chain uses pyOpenSSL X509Store.verify_certificate
+            # which delegates cert validity to OpenSSL's internal system-clock
+            # check. No Python-level monkey-patch can override it; fixture
+            # 240-vcek-expired skips on tinfoil-python.
+            "verification_time_override": "system-clock-only",
+            # cmd_verify_attestation_sev parses input.amd_root_ca_pem /
+            # input.ask_pem when set and passes them into CertificateChain
+            # instead of the lib's embedded ARK_CERT/ASK_CERT constants.
+            # No lib changes required — the conformance binary owns the
+            # construction of CertificateChain.
+            "amd_root_ca_injection_supported": True,
         },
         "platforms_supported": ["sev-snp", "tdx"],
         "transport_modes_supported": ["tls-pinning"],
@@ -1114,6 +1136,452 @@ def cmd_verify_attestation_tdx() -> int:
     return EXIT_ACCEPT
 
 
+# =============================================================================
+# verify-attestation-sev (SPEC §3 / AMD SEV-SNP)
+# =============================================================================
+
+SEV_GUEST_V2_URI = "https://tinfoil.sh/predicate/sev-snp-guest/v2"
+
+
+def _emit_sev_rejection(code: str, spec_ref: str, message: str) -> int:
+    body = {
+        "stage": "verify-attestation-sev",
+        "accepted": False,
+        "rejection": {"code": code, "spec_ref": spec_ref, "message": message},
+    }
+    json.dump(body, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return EXIT_REJECT
+
+
+_SEV_REPORT_LEN = 1184
+
+
+def _decode_sev_body_fields(report: bytes) -> dict[str, Any]:
+    """Decode the 1184-byte SEV-SNP v3 report into the same shape as the
+    Go conformance binary's buildSevOutputs, so expected.json pinned
+    outputs are cross-SDK comparable byte-for-byte."""
+    def u32(off: int) -> int:
+        return int.from_bytes(report[off:off + 4], "little")
+
+    def u64(off: int) -> int:
+        return int.from_bytes(report[off:off + 8], "little")
+
+    policy = u64(0x08)
+    current_tcb = u64(0x38)
+    platform_info = u64(0x40)
+
+    def b(n: int, i: int) -> bool:
+        return bool((n >> i) & 1)
+
+    return {
+        "version": u32(0x00),
+        "guest_svn": u32(0x04),
+        "policy_hex": f"{policy:016x}",
+        "policy_decoded": {
+            "abi_minor": policy & 0xff,
+            "abi_major": (policy >> 8) & 0xff,
+            "smt": b(policy, 16),
+            "reserved_mbo": b(policy, 17),
+            "migrate_ma": b(policy, 18),
+            "debug": b(policy, 19),
+            "single_socket": b(policy, 20),
+            "cxl_allow": b(policy, 21),
+            "mem_aes_256_xts": b(policy, 22),
+            "raplmsr_dis": b(policy, 23),
+            "ciphertext_hiding_dram": b(policy, 24),
+        },
+        "family_id_hex": report[0x10:0x20].hex(),
+        "image_id_hex": report[0x20:0x30].hex(),
+        "vmpl": u32(0x30),
+        "signature_algo": u32(0x34),
+        "current_tcb_hex": f"{current_tcb:016x}",
+        "current_tcb_decoded": {
+            "bl_spl": current_tcb & 0xff,
+            "tee_spl": (current_tcb >> 8) & 0xff,
+            "snp_spl": (current_tcb >> 48) & 0xff,
+            "ucode_spl": (current_tcb >> 56) & 0xff,
+        },
+        "platform_info_hex": f"{platform_info:016x}",
+        "platform_info_decoded": {
+            "smt_en": b(platform_info, 0),
+            "tsme_en": b(platform_info, 1),
+            "ecc_en": b(platform_info, 2),
+            "rapl_dis": b(platform_info, 3),
+            "ciphertext_hiding": b(platform_info, 4),
+        },
+        "signer_info_hex": f"{u32(0x48):08x}",
+        "report_data_hex": report[0x50:0x90].hex(),
+        "measurement_hex": report[0x90:0x90 + 48].hex(),
+        "host_data_hex": report[0xC0:0xC0 + 32].hex(),
+        "id_key_digest_hex": report[0xE0:0xE0 + 48].hex(),
+        "author_key_digest_hex": report[0x110:0x110 + 48].hex(),
+        "report_id_hex": report[0x140:0x140 + 32].hex(),
+        "report_id_ma_hex": report[0x160:0x160 + 32].hex(),
+        "reported_tcb_hex": report[0x180:0x180 + 8].hex(),
+        "chip_id_hex": report[0x1A0:0x1A0 + 64].hex(),
+        "committed_tcb_hex": report[0x1E8:0x1E8 + 8].hex(),
+        "current_build": report[0x1F0],
+        "current_minor": report[0x1F1],
+        "current_major": report[0x1F2],
+        "committed_build": report[0x1F4],
+        "committed_minor": report[0x1F5],
+        "committed_major": report[0x1F6],
+        "launch_tcb_hex": report[0x1F8:0x1F8 + 8].hex(),
+    }
+
+
+def _classify_sev_error(msg: str) -> tuple[str, str]:
+    low = msg.lower()
+    # Order matters — specific before generic.
+    # SPEC §3.2.2: tinfoil-python's Report parser raises various phrasings
+    # for guest_policy bit violations:
+    #   "policy[17] is reserved, must be 1, got 0"   (reserved-MBO at bit 17)
+    #   "policy bits 63-26 must be zero"             (reserved-MBZ at bits 25+)
+    if ("policy[" in low or "guest policy" in low or "policy bit" in low) and (
+        "reserved" in low or "mbz" in low or "must be" in low
+    ):
+        return "GUEST_POLICY_RESERVED_BIT_SET", "3.2.2"
+    if "expired" in low or "not yet valid" in low:
+        return "VCEK_EXPIRED", "3.3.3"
+    if "hwid" in low:
+        return "VCEK_HWID_MISMATCH", "3.4.4"
+    if "vcek" in low and "tcb" in low:
+        return "VCEK_TCB_MISMATCH", "3.4.3"
+    if "report signature" in low or "signature verification failed" in low \
+            or "signature is invalid" in low or "report was not signed" in low:
+        return "REPORT_SIGNATURE_INVALID", "3.6"
+    if "ark" in low and "self-sign" in low:
+        return "ARK_UNTRUSTED", "3.3.1"
+    if ("ask" in low and "not signed" in low) or "ask invalid" in low:
+        return "ASK_INVALID", "3.3.2"
+    if ("vcek" in low and ("chain" in low or "verify" in low or "signed" in low)) \
+            or "amd certificate chain" in low or "certificate chain verification" in low \
+            or "certificate signature failure" in low \
+            or "malformed certificate" in low \
+            or "could not interpret vcek" in low or "failed to build certificate chain" in low \
+            or "invalid vcek" in low or "x509" in low:
+        return "VCEK_CHAIN_INVALID", "3.3.5"
+    if "report length" in low or "less than" in low and "byte" in low:
+        return "REPORT_TRUNCATED", "3.1"
+    if "failed to decompress" in low or "failed to decode base64" in low \
+            or "failed to parse report" in low or "format" in low:
+        return "REPORT_FORMAT_UNSUPPORTED", "3.1"
+    return "QV_RESULT_TERMINAL_UNSPECIFIED", "3"
+
+
+_AMD_OID_BL_SPL = "1.3.6.1.4.1.3704.1.3.1"
+_AMD_OID_TEE_SPL = "1.3.6.1.4.1.3704.1.3.2"
+_AMD_OID_SNP_SPL = "1.3.6.1.4.1.3704.1.3.3"
+_AMD_OID_UCODE_SPL = "1.3.6.1.4.1.3704.1.3.8"
+_AMD_OID_HWID = "1.3.6.1.4.1.3704.1.4"
+
+
+def _decode_int_ext_value(raw: bytes) -> int | None:
+    """Decode an AMD KDS SPL extension value (DER INTEGER) to a Python int."""
+    # raw is the extension OCTET STRING contents — an INTEGER TLV: 02 LL VV...
+    if len(raw) < 3 or raw[0] != 0x02:
+        return None
+    length = raw[1]
+    if len(raw) < 2 + length:
+        return None
+    return int.from_bytes(raw[2:2 + length], "big", signed=False)
+
+
+def _enforce_sev_vcek_cross_checks(
+    report: bytes,
+    vcek_cert,
+) -> tuple[str, str, str] | None:
+    """SPEC §3.4 mandatory cross-checks: VCEK extensions ↔ report fields.
+    The lib's validate_report has these, but we bypass that call so we
+    can run fixture-specific policy enforcement separately. Replicate
+    the mandatory checks here so synth-chain mismatches don't slip
+    through as ACCEPTED."""
+    from cryptography.x509 import ObjectIdentifier as _OID
+    try:
+        ext_map: dict[str, bytes] = {}
+        for ext in vcek_cert.extensions:
+            try:
+                ext_map[ext.oid.dotted_string] = bytes(ext.value.value)
+            except Exception:
+                pass
+    except Exception:
+        return None
+
+    # HWID cross-check
+    hwid_raw = ext_map.get(_AMD_OID_HWID)
+    if hwid_raw is None:
+        return "VCEK_HWID_MISMATCH", "3.4.4", "VCEK certificate missing HWID extension"
+    if hwid_raw != report[0x1A0:0x1A0 + 64]:
+        return ("VCEK_HWID_MISMATCH", "3.4.4",
+                f"VCEK HWID {hwid_raw.hex()} != report chip_id {report[0x1A0:0x1A0 + 64].hex()}")
+
+    # TCB cross-check: each SPL extension must match the corresponding byte
+    # of report.reported_tcb (TCBVersion decomposition per SPEC §3.4.3).
+    reported_tcb = int.from_bytes(report[0x180:0x188], "little")
+    tcb_pairs = [
+        ("bl_spl",    _AMD_OID_BL_SPL,    reported_tcb & 0xff),
+        ("tee_spl",   _AMD_OID_TEE_SPL,   (reported_tcb >> 8) & 0xff),
+        ("snp_spl",   _AMD_OID_SNP_SPL,   (reported_tcb >> 48) & 0xff),
+        ("ucode_spl", _AMD_OID_UCODE_SPL, (reported_tcb >> 56) & 0xff),
+    ]
+    for name, oid, report_val in tcb_pairs:
+        raw = ext_map.get(oid)
+        if raw is None:
+            continue
+        cert_val = _decode_int_ext_value(raw)
+        if cert_val is None:
+            continue
+        if cert_val != report_val:
+            return ("VCEK_TCB_MISMATCH", "3.4.3",
+                    f"VCEK {name}={cert_val} != report.reported_tcb.{name}={report_val}")
+    return None
+
+
+def _enforce_sev_policy(report: bytes, policy: dict[str, Any] | None) -> tuple[str, str, str] | None:
+    # SPEC §3.7 / Tinfoil-policy: migrate_ma=1 MUST be rejected. Run
+    # unconditionally — independent of fixture policy — to mirror what
+    # the lib's validate_report would have caught.
+    guest_policy_pre = int.from_bytes(report[0x08:0x10], "little")
+    if (guest_policy_pre >> 18) & 1:
+        return ("GUEST_POLICY_MIGRATE_MA_SET", "3.7",
+                f"guest_policy MIGRATE_MA bit (18) is set (policy={guest_policy_pre:016x})")
+
+    if not policy:
+        return None
+
+    measurement = report[0x90:0x90 + 48]
+    host_data = report[0xC0:0xC0 + 32]
+    report_data = report[0x50:0x90]
+    id_key_digest = report[0xE0:0xE0 + 48]
+    author_key_digest = report[0x110:0x110 + 48]
+    guest_policy = int.from_bytes(report[0x08:0x10], "little")
+    current_tcb = int.from_bytes(report[0x38:0x40], "little")
+    tcb_bl = current_tcb & 0xff
+    tcb_tee = (current_tcb >> 8) & 0xff
+    tcb_snp = (current_tcb >> 48) & 0xff
+    tcb_ucode = (current_tcb >> 56) & 0xff
+
+    pairs: list[tuple[str, str, str, bytes, str]] = [
+        ("MEASUREMENT_MISMATCH", "3.8", "measurement",
+         measurement, policy.get("expected_measurement_hex", "")),
+        ("HOST_DATA_MISMATCH", "8.3", "host_data",
+         host_data, policy.get("expected_host_data_hex", "")),
+        ("REPORT_DATA_MISMATCH", "8.2", "report_data",
+         report_data, policy.get("expected_report_data_hex", "")),
+        ("ID_KEY_DIGEST_MISMATCH", "3.1.1", "id_key_digest",
+         id_key_digest, policy.get("expected_id_key_digest_hex", "")),
+        ("AUTHOR_KEY_DIGEST_MISMATCH", "3.1.1", "author_key_digest",
+         author_key_digest, policy.get("expected_author_key_digest_hex", "")),
+    ]
+    for code, ref, name, actual, expected in pairs:
+        exp = (expected or "").strip().lower()
+        if not exp:
+            continue
+        if actual.hex() != exp:
+            return code, ref, f"{name} {actual.hex()} != policy expected {exp}"
+
+    for name, actual, min_key in (
+        ("bl_spl", tcb_bl, "min_tcb_bl_spl"),
+        ("tee_spl", tcb_tee, "min_tcb_tee_spl"),
+        ("snp_spl", tcb_snp, "min_tcb_snp_spl"),
+        ("ucode_spl", tcb_ucode, "min_tcb_ucode_spl"),
+    ):
+        m = policy.get(min_key)
+        if m is not None and actual < int(m):
+            return "TCB_OUT_OF_DATE", "3.7", f"tcb.{name}={actual} below minimum {m}"
+
+    if policy.get("enforce_spec_defaults"):
+        if (guest_policy >> 19) & 1:
+            return ("GUEST_POLICY_DEBUG_SET", "3.7",
+                    f"guest_policy DEBUG bit (19) is set (policy={guest_policy:016x})")
+        if not ((guest_policy >> 17) & 1):
+            return ("GUEST_POLICY_RESERVED_BIT_SET", "3.7",
+                    f"guest_policy reserved-MBO bit (17) is clear (policy={guest_policy:016x})")
+        if guest_policy & 0xFFFFFFFFFE000000:
+            return ("GUEST_POLICY_RESERVED_BIT_SET", "3.7",
+                    f"guest_policy reserved-MBZ bit (≥25) set (policy={guest_policy:016x})")
+    return None
+
+
+@contextlib.contextmanager
+def _maybe_override_sev_time(_timestamp: int | None):
+    """No-op for SEV on Python — the lib delegates VCEK NotBefore/NotAfter
+    to pyOpenSSL's X509Store.verify_certificate which uses the OS clock
+    via OpenSSL internals. No Python-level monkey-patch can override it.
+    Fixtures that need time injection (e.g. 240-vcek-expired) gate on
+    attestation_sev.verification_time_override=supported and skip cleanly
+    on tinfoil-python."""
+    yield
+
+
+def cmd_verify_attestation_sev() -> int:
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"input schema violation: {e}\n")
+        return EXIT_BAD_INPUT
+
+    if data.get("schema_version") != "1":
+        sys.stderr.write('schema_version must be "1"\n')
+        return EXIT_BAD_INPUT
+
+    att_doc_b64 = data.get("attestation_doc_b64")
+    vcek_b64 = data.get("vcek_der_b64")
+    if not att_doc_b64 or not vcek_b64:
+        return _emit_sev_rejection(
+            "REPORT_FORMAT_UNSUPPORTED", "3.1",
+            "attestation_doc_b64 and vcek_der_b64 are required",
+        )
+
+    # Decompress + length-check locally so REPORT_TRUNCATED surfaces before
+    # the lib's Report() constructor (which raises a generic parse error).
+    import gzip as _gzip
+    try:
+        gz_bytes = base64.standard_b64decode(att_doc_b64)
+    except Exception as e:
+        return _emit_sev_rejection(
+            "REPORT_FORMAT_UNSUPPORTED", "3.1",
+            f"attestation_doc_b64 not valid base64: {e}",
+        )
+    try:
+        report_bytes = _gzip.decompress(gz_bytes)
+    except Exception as e:
+        return _emit_sev_rejection(
+            "REPORT_FORMAT_UNSUPPORTED", "3.1",
+            f"gzip decompress failed: {e}",
+        )
+    if len(report_bytes) < _SEV_REPORT_LEN:
+        return _emit_sev_rejection(
+            "REPORT_TRUNCATED", "3.1",
+            f"SEV report is {len(report_bytes)} bytes, expected ≥{_SEV_REPORT_LEN}",
+        )
+
+    try:
+        vcek_der = base64.standard_b64decode(vcek_b64)
+    except Exception as e:
+        return _emit_sev_rejection(
+            "VCEK_CHAIN_INVALID", "3.3.3",
+            f"vcek_der_b64 not valid base64: {e}",
+        )
+
+    # Build the chain directly with the supplied VCEK + embedded ARK/ASK.
+    # Bypasses CertificateChain.from_report which would fetch VCEK from KDS.
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes  # noqa: F401
+    from ..attestation.abi_sev import Report as _Report
+    from ..attestation.verify_sev import (
+        CertificateChain, verify_attestation, ARK_CERT, ASK_CERT,
+    )
+    import warnings as _warnings
+    from cryptography.utils import CryptographyDeprecationWarning
+
+    try:
+        report = _Report(report_bytes)
+    except Exception as e:
+        code, ref = _classify_sev_error(f"failed to parse report: {e}")
+        return _emit_sev_rejection(code, ref, str(e))
+
+    # Phase 4B-SEV: if the fixture supplies synthetic ARK/ASK PEMs, parse
+    # those instead of the lib's embedded production constants. Mirrors
+    # the Go binary's TrustedRoots-injection path.
+    fixture_ark_pem = data.get("amd_root_ca_pem", "") or ""
+    fixture_ask_pem = data.get("ask_pem", "") or ""
+    try:
+        ark_pem_bytes = fixture_ark_pem.encode() if fixture_ark_pem else ARK_CERT
+        ask_pem_bytes = fixture_ask_pem.encode() if fixture_ask_pem else ASK_CERT
+        ark = x509.load_pem_x509_certificate(ark_pem_bytes)
+        ask = x509.load_pem_x509_certificate(ask_pem_bytes)
+    except Exception as e:
+        return _emit_sev_rejection(
+            "ARK_UNTRUSTED", "3.3.1",
+            f"failed to parse AMD chain (fixture-supplied={bool(fixture_ark_pem)}): {e}",
+        )
+    try:
+        with _warnings.catch_warnings():
+            _warnings.filterwarnings(
+                "ignore",
+                message=r"Parsed a serial number which wasn't positive",
+                category=CryptographyDeprecationWarning,
+            )
+            vcek = x509.load_der_x509_certificate(vcek_der)
+    except Exception as e:
+        return _emit_sev_rejection(
+            "VCEK_CHAIN_INVALID", "3.3.5",
+            f"could not interpret VCEK DER: {e}",
+        )
+
+    chain = CertificateChain(ark=ark, ask=ask, vcek=vcek)
+
+    expiration_unix = data.get("expiration_check_date_unix")
+
+    # tinfoil-python's verify_attestation / verify_chain print error
+    # diagnostics via print() to stdout when verification fails. The
+    # conformance binary's contract is JSON-only on stdout, so we capture
+    # the lib's stdout and route it to stderr.
+    import io as _io
+    captured = _io.StringIO()
+    orig_stdout = sys.stdout
+    sys.stdout = captured
+    try:
+        with _maybe_override_sev_time(expiration_unix):
+            ok = verify_attestation(chain, report)
+    except Exception as e:
+        sys.stdout = orig_stdout
+        sys.stderr.write(captured.getvalue())
+        code, ref = _classify_sev_error(str(e))
+        return _emit_sev_rejection(code, ref, str(e))
+    sys.stdout = orig_stdout
+    lib_diag = captured.getvalue()
+    if lib_diag:
+        sys.stderr.write(lib_diag)
+    if not ok:
+        # Differentiate signature vs chain failure based on captured lib
+        # output — verify_chain prints "Certificate chain verification
+        # failed" / "VCEK certificate validation failed" etc., while the
+        # report signature path prints "Attestation signature verification
+        # failed". Fall back to a generic REPORT_SIGNATURE_INVALID.
+        diag_msg = lib_diag or "verification returned False"
+        code, ref = _classify_sev_error(diag_msg)
+        if code == "QV_RESULT_TERMINAL_UNSPECIFIED":
+            code, ref = "REPORT_SIGNATURE_INVALID", "3.6"
+        return _emit_sev_rejection(code, ref, diag_msg.strip() or "verification returned False")
+
+    # Skip the lib's validate_report — its hardcoded production policy
+    # (MigrateMA=False, debug=False, smt=True, etc.) is mostly satisfied by
+    # the bundle but we instead enforce the fixture's pinned policy below,
+    # mirroring the Go binary's enforceSevPolicy.
+
+    # SPEC §3.4 mandatory: VCEK ext ↔ report cross-checks. The lib's
+    # validate_report does these but we bypass it to keep policy logic
+    # in our hands. Run before fixture policy pins so VCEK_HWID_MISMATCH /
+    # VCEK_TCB_MISMATCH surface cleanly.
+    vcek_viol = _enforce_sev_vcek_cross_checks(report_bytes, vcek)
+    if vcek_viol:
+        return _emit_sev_rejection(*vcek_viol)
+
+    pol_viol = _enforce_sev_policy(report_bytes, data.get("policy"))
+    if pol_viol:
+        return _emit_sev_rejection(*pol_viol)
+
+    body_fields = _decode_sev_body_fields(report_bytes)
+    out_body = {
+        "stage": "verify-attestation-sev",
+        "accepted": True,
+        "outputs": {
+            "measurement": {
+                "type": SEV_GUEST_V2_URI,
+                "registers": [body_fields["measurement_hex"]],
+            },
+            "body_fields": body_fields,
+        },
+    }
+    json.dump(out_body, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return EXIT_ACCEPT
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -1130,6 +1598,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_verify_hardware_measurements()
     if sub == "verify-attestation-tdx":
         return cmd_verify_attestation_tdx()
+    if sub == "verify-attestation-sev":
+        return cmd_verify_attestation_sev()
     if sub in ("", "help", "-h", "--help"):
         _print_help()
         return EXIT_ACCEPT
