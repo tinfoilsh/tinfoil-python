@@ -20,7 +20,7 @@ dependencies = [
     "cryptography>=42.0.0",
     "pyOpenSSL>=25.0.0",
     "pyasn1>=0.4.0",
-    "sigstore>=4.1.0",
+    "sigstore>=4.3.0",
     "platformdirs>=4.2.0",
     "urllib3>=2.7.0",
 ]
@@ -41,9 +41,13 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.uv]
 exclude-newer = "4 days"
-# tinfoil-ehbp is a first-party package; allow recently published releases past
-# the global exclude-newer cutoff.
-exclude-newer-package = { "tinfoil-ehbp" = "2026-06-04T00:00:00Z" }
 constraint-dependencies = [
     "idna>=3.15", # GHSA-65pc-fj4g-8rjx
 ]
+
+[tool.uv.exclude-newer-package]
+# tinfoil-ehbp is a first-party package; allow recently published releases past
+# the global exclude-newer cutoff.
+"tinfoil-ehbp" = "2026-06-04T00:00:00Z"
+# Addresses GHSA-qp9x-wp8f-qgjj
+"sigstore" = "2026-06-05T00:00:00Z"
