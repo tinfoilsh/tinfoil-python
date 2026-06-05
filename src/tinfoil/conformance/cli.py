@@ -102,6 +102,7 @@ def _capabilities() -> dict[str, Any]:
             "verify-hardware-measurements",
             "verify-attestation-tdx",
             "verify-attestation-sev",
+            "verify-full",
         ],
         "sigstore": {
             "trust_root_loading": "configurable",
@@ -215,7 +216,7 @@ def _capabilities() -> dict[str, Any]:
         },
         "platforms_supported": ["sev-snp", "tdx"],
         "transport_modes_supported": ["tls-pinning"],
-        "flow_modes_supported": ["standard"],
+        "flow_modes_supported": ["standard", "pinned"],
         "known_quirks": {
             "sigstore.workflow_ref_check_via_startswith":
                 "We replaced sigstore.verify.policy's regex-based GitHubWorkflowRefPattern with a strict-prefix startswith() check (SPEC §5.3 reads as prefix, not regex).",
@@ -377,60 +378,29 @@ def _classify(message: str) -> Tuple[str, str]:
     return ("BUNDLE_MALFORMED", "5.2")
 
 
-def cmd_verify_sigstore() -> int:
-    """Read stdin JSON, run verify_sigstore_bundle_with_policy, emit output."""
-    try:
-        raw = sys.stdin.read()
-    except Exception as e:
-        sys.stderr.write(f"error reading stdin: {e}\n")
-        return EXIT_INTERNAL
+def _run_verify_sigstore_inner(inp: dict[str, Any]) -> "SigstoreVerification | tuple[str, str, str]":
+    """Inner sigstore verification logic — shared by cmd_verify_sigstore and
+    cmd_verify_full. Returns the SigstoreVerification on success, or a
+    (code, spec_ref, message) rejection triple on failure.
 
-    try:
-        inp = json.loads(raw)
-    except json.JSONDecodeError as e:
-        return _emit_rejection(
-            "BUNDLE_MALFORMED",
-            "5.2",
-            f"input is not valid JSON: {e}",
-            EXIT_BAD_INPUT,
-        )
-
-    if inp.get("schema_version") != "1":
-        return _emit_rejection(
-            "BUNDLE_MALFORMED",
-            "5.2",
-            'input.schema_version != "1"',
-            EXIT_BAD_INPUT,
-        )
-
+    The verify-full envelope's nested sigstore block omits schema_version
+    (the envelope carries it), so this helper accepts missing schema_version
+    as "1"."""
+    sv = inp.get("schema_version", "1")
+    if sv != "1":
+        return ("BUNDLE_MALFORMED", "5.2", 'input.schema_version != "1"')
     try:
         bundle_bytes = base64.b64decode(inp["bundle_b64"])
     except Exception as e:
-        return _emit_rejection(
-            "BUNDLE_MALFORMED",
-            "5.2",
-            f"bundle_b64 not valid base64: {e}",
-            EXIT_BAD_INPUT,
-        )
-
+        return ("BUNDLE_MALFORMED", "5.2", f"bundle_b64 not valid base64: {e}")
     try:
         trust_root_bytes = base64.b64decode(inp["trust_root_b64"])
     except Exception as e:
-        return _emit_rejection(
-            "TRUST_ROOT_INVALID",
-            "5.1",
-            f"trust_root_b64 not valid base64: {e}",
-            EXIT_BAD_INPUT,
-        )
+        return ("TRUST_ROOT_INVALID", "5.1", f"trust_root_b64 not valid base64: {e}")
     try:
         trust_root_json = trust_root_bytes.decode("utf-8")
     except UnicodeDecodeError as e:
-        return _emit_rejection(
-            "TRUST_ROOT_INVALID",
-            "5.1",
-            f"trust_root is not valid UTF-8: {e}",
-            EXIT_REJECT,
-        )
+        return ("TRUST_ROOT_INVALID", "5.1", f"trust_root is not valid UTF-8: {e}")
 
     policy_in = inp.get("policy") or {}
     defaults = default_sigstore_policy(inp.get("repo", ""))
@@ -454,16 +424,13 @@ def cmd_verify_sigstore() -> int:
     )
 
     try:
-        v = verify_sigstore_bundle_with_policy(
+        return verify_sigstore_bundle_with_policy(
             bundle_bytes=bundle_bytes,
             expected_digest_sha256_hex=inp["expected_digest_sha256_hex"],
             policy=policy,
             trust_root_json=trust_root_json,
         )
     except Exception as e:
-        # Walk the exception chain; sigstore's VerificationError may be
-        # wrapped by our ValueError. Concatenate messages so the classifier
-        # sees the most specific text.
         parts = []
         cur: BaseException | None = e
         while cur is not None and len(parts) < 8:
@@ -471,9 +438,42 @@ def cmd_verify_sigstore() -> int:
             cur = cur.__cause__
         message = " | ".join(parts)
         code, spec_ref = _classify(message)
-        return _emit_rejection(code, spec_ref, message, EXIT_REJECT)
+        return (code, spec_ref, message)
 
-    return _emit_accept(v)
+
+def cmd_verify_sigstore() -> int:
+    """Read stdin JSON, run verify_sigstore_bundle_with_policy, emit output."""
+    try:
+        raw = sys.stdin.read()
+    except Exception as e:
+        sys.stderr.write(f"error reading stdin: {e}\n")
+        return EXIT_INTERNAL
+
+    try:
+        inp = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return _emit_rejection(
+            "BUNDLE_MALFORMED",
+            "5.2",
+            f"input is not valid JSON: {e}",
+            EXIT_BAD_INPUT,
+        )
+
+    # cmd_verify_sigstore requires schema_version explicitly (the verify-full
+    # envelope's sigstore sub-block defaults it instead — see inner helper).
+    if inp.get("schema_version") != "1":
+        return _emit_rejection(
+            "BUNDLE_MALFORMED",
+            "5.2",
+            'input.schema_version != "1"',
+            EXIT_BAD_INPUT,
+        )
+
+    result = _run_verify_sigstore_inner(inp)
+    if isinstance(result, tuple):
+        code, spec_ref, message = result
+        return _emit_rejection(code, spec_ref, message, EXIT_REJECT)
+    return _emit_accept(result)
 
 
 def _print_help() -> None:
@@ -1415,25 +1415,29 @@ def _maybe_override_sev_time(_timestamp: int | None):
     yield
 
 
-def cmd_verify_attestation_sev() -> int:
-    try:
-        raw = sys.stdin.read()
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        sys.stderr.write(f"input schema violation: {e}\n")
-        return EXIT_BAD_INPUT
+def _run_verify_attestation_sev_inner(
+    data: dict[str, Any],
+) -> "tuple[Measurement, bytes, dict[str, Any]] | tuple[str, str, str]":
+    """Inner SEV verification logic — shared by cmd_verify_attestation_sev
+    and cmd_verify_full. On success returns (measurement, report_bytes,
+    body_fields_dict); on failure returns a (code, spec_ref, message) triple.
 
-    if data.get("schema_version") != "1":
-        sys.stderr.write('schema_version must be "1"\n')
-        return EXIT_BAD_INPUT
+    Distinguish by tuple length: success is 3-tuple of (Measurement, bytes,
+    dict); failure is 3-tuple of (str, str, str). Callers should isinstance
+    on the first element.
+
+    schema_version defaults to "1" when absent so the verify-full envelope's
+    nested attestation_sev block (which omits it) works.
+    """
+    sv = data.get("schema_version", "1")
+    if sv != "1":
+        return ("REPORT_FORMAT_UNSUPPORTED", "3.1", 'schema_version != "1"')
 
     att_doc_b64 = data.get("attestation_doc_b64")
     vcek_b64 = data.get("vcek_der_b64")
     if not att_doc_b64 or not vcek_b64:
-        return _emit_sev_rejection(
-            "REPORT_FORMAT_UNSUPPORTED", "3.1",
-            "attestation_doc_b64 and vcek_der_b64 are required",
-        )
+        return ("REPORT_FORMAT_UNSUPPORTED", "3.1",
+                "attestation_doc_b64 and vcek_der_b64 are required")
 
     # Decompress + length-check locally so REPORT_TRUNCATED surfaces before
     # the lib's Report() constructor (which raises a generic parse error).
@@ -1441,30 +1445,22 @@ def cmd_verify_attestation_sev() -> int:
     try:
         gz_bytes = base64.standard_b64decode(att_doc_b64)
     except Exception as e:
-        return _emit_sev_rejection(
-            "REPORT_FORMAT_UNSUPPORTED", "3.1",
-            f"attestation_doc_b64 not valid base64: {e}",
-        )
+        return ("REPORT_FORMAT_UNSUPPORTED", "3.1",
+                f"attestation_doc_b64 not valid base64: {e}")
     try:
         report_bytes = _gzip.decompress(gz_bytes)
     except Exception as e:
-        return _emit_sev_rejection(
-            "REPORT_FORMAT_UNSUPPORTED", "3.1",
-            f"gzip decompress failed: {e}",
-        )
+        return ("REPORT_FORMAT_UNSUPPORTED", "3.1",
+                f"gzip decompress failed: {e}")
     if len(report_bytes) < _SEV_REPORT_LEN:
-        return _emit_sev_rejection(
-            "REPORT_TRUNCATED", "3.1",
-            f"SEV report is {len(report_bytes)} bytes, expected ≥{_SEV_REPORT_LEN}",
-        )
+        return ("REPORT_TRUNCATED", "3.1",
+                f"SEV report is {len(report_bytes)} bytes, expected ≥{_SEV_REPORT_LEN}")
 
     try:
         vcek_der = base64.standard_b64decode(vcek_b64)
     except Exception as e:
-        return _emit_sev_rejection(
-            "VCEK_CHAIN_INVALID", "3.3.3",
-            f"vcek_der_b64 not valid base64: {e}",
-        )
+        return ("VCEK_CHAIN_INVALID", "3.3.3",
+                f"vcek_der_b64 not valid base64: {e}")
 
     # Build the chain directly with the supplied VCEK + embedded ARK/ASK.
     # Bypasses CertificateChain.from_report which would fetch VCEK from KDS.
@@ -1481,7 +1477,7 @@ def cmd_verify_attestation_sev() -> int:
         report = _Report(report_bytes)
     except Exception as e:
         code, ref = _classify_sev_error(f"failed to parse report: {e}")
-        return _emit_sev_rejection(code, ref, str(e))
+        return (code, ref, str(e))
 
     # Phase 4B-SEV: if the fixture supplies synthetic ARK/ASK PEMs, parse
     # those instead of the lib's embedded production constants. Mirrors
@@ -1494,10 +1490,8 @@ def cmd_verify_attestation_sev() -> int:
         ark = x509.load_pem_x509_certificate(ark_pem_bytes)
         ask = x509.load_pem_x509_certificate(ask_pem_bytes)
     except Exception as e:
-        return _emit_sev_rejection(
-            "ARK_UNTRUSTED", "3.3.1",
-            f"failed to parse AMD chain (fixture-supplied={bool(fixture_ark_pem)}): {e}",
-        )
+        return ("ARK_UNTRUSTED", "3.3.1",
+                f"failed to parse AMD chain (fixture-supplied={bool(fixture_ark_pem)}): {e}")
     try:
         with _warnings.catch_warnings():
             _warnings.filterwarnings(
@@ -1507,10 +1501,8 @@ def cmd_verify_attestation_sev() -> int:
             )
             vcek = x509.load_der_x509_certificate(vcek_der)
     except Exception as e:
-        return _emit_sev_rejection(
-            "VCEK_CHAIN_INVALID", "3.3.5",
-            f"could not interpret VCEK DER: {e}",
-        )
+        return ("VCEK_CHAIN_INVALID", "3.3.5",
+                f"could not interpret VCEK DER: {e}")
 
     chain = CertificateChain(ark=ark, ask=ask, vcek=vcek)
 
@@ -1531,22 +1523,17 @@ def cmd_verify_attestation_sev() -> int:
         sys.stdout = orig_stdout
         sys.stderr.write(captured.getvalue())
         code, ref = _classify_sev_error(str(e))
-        return _emit_sev_rejection(code, ref, str(e))
+        return (code, ref, str(e))
     sys.stdout = orig_stdout
     lib_diag = captured.getvalue()
     if lib_diag:
         sys.stderr.write(lib_diag)
     if not ok:
-        # Differentiate signature vs chain failure based on captured lib
-        # output — verify_chain prints "Certificate chain verification
-        # failed" / "VCEK certificate validation failed" etc., while the
-        # report signature path prints "Attestation signature verification
-        # failed". Fall back to a generic REPORT_SIGNATURE_INVALID.
         diag_msg = lib_diag or "verification returned False"
         code, ref = _classify_sev_error(diag_msg)
         if code == "QV_RESULT_TERMINAL_UNSPECIFIED":
             code, ref = "REPORT_SIGNATURE_INVALID", "3.6"
-        return _emit_sev_rejection(code, ref, diag_msg.strip() or "verification returned False")
+        return (code, ref, diag_msg.strip() or "verification returned False")
 
     # Skip the lib's validate_report — its hardcoded production policy
     # (MigrateMA=False, debug=False, smt=True, etc.) is mostly satisfied by
@@ -1559,13 +1546,41 @@ def cmd_verify_attestation_sev() -> int:
     # VCEK_TCB_MISMATCH surface cleanly.
     vcek_viol = _enforce_sev_vcek_cross_checks(report_bytes, vcek)
     if vcek_viol:
-        return _emit_sev_rejection(*vcek_viol)
+        return vcek_viol
 
     pol_viol = _enforce_sev_policy(report_bytes, data.get("policy"))
     if pol_viol:
-        return _emit_sev_rejection(*pol_viol)
+        return pol_viol
 
     body_fields = _decode_sev_body_fields(report_bytes)
+    measurement = Measurement(
+        type=PredicateType.SEV_GUEST_V2,
+        registers=[body_fields["measurement_hex"]],
+    )
+    return (measurement, report_bytes, body_fields)
+
+
+def cmd_verify_attestation_sev() -> int:
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"input schema violation: {e}\n")
+        return EXIT_BAD_INPUT
+
+    # cmd_verify_attestation_sev requires schema_version explicitly (the
+    # verify-full envelope's attestation_sev sub-block omits it; the inner
+    # helper defaults to "1").
+    if data.get("schema_version") != "1":
+        sys.stderr.write('schema_version must be "1"\n')
+        return EXIT_BAD_INPUT
+
+    result = _run_verify_attestation_sev_inner(data)
+    # Disambiguate success (Measurement, bytes, dict) vs rejection (str, str, str).
+    if isinstance(result[0], str):
+        code, spec_ref, message = result  # type: ignore[misc]
+        return _emit_sev_rejection(code, spec_ref, message)
+    _measurement, _report_bytes, body_fields = result
     out_body = {
         "stage": "verify-attestation-sev",
         "accepted": True,
@@ -1580,6 +1595,168 @@ def cmd_verify_attestation_sev() -> int:
     json.dump(out_body, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return EXIT_ACCEPT
+
+
+# =============================================================================
+# verify-full (SPEC §11)
+# =============================================================================
+
+def _emit_full_rejection(code: str, stage: str, spec_ref: str, message: str) -> int:
+    body = {
+        "stage": "verify-full",
+        "accepted": False,
+        "rejection": {
+            "code": code,
+            "stage": stage,
+            "spec_ref": spec_ref,
+            "message": message,
+        },
+    }
+    json.dump(body, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return EXIT_REJECT
+
+
+def _classify_measurement_compare_error(e: Exception) -> tuple[str, str]:
+    """Map measurement-comparison exceptions to SPEC-anchored rejection codes."""
+    if isinstance(e, Rtmr3NotZeroError):
+        return "MEASUREMENT_RTMR3_NONZERO", "7.3.2"
+    if isinstance(e, FormatMismatchError):
+        return "MEASUREMENT_TYPE_COMBINATION_UNSUPPORTED", "7.3.5"
+    if isinstance(e, MeasurementMismatchError):
+        return "MEASUREMENT_MISMATCH", "7.3"
+    return "MEASUREMENT_MISMATCH", "7.3"
+
+
+def cmd_verify_full() -> int:
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return _emit_full_rejection(
+            "BUNDLE_MALFORMED", "verify-full", "11",
+            f"input is not valid JSON: {e}",
+        )
+
+    if data.get("schema_version") != "1":
+        return _emit_full_rejection(
+            "BUNDLE_MALFORMED", "verify-full", "11",
+            'input.schema_version != "1"',
+        )
+
+    mode = data.get("mode", "")
+    if mode in ("standard", "bundle"):
+        sig_in = data.get("sigstore")
+        if not isinstance(sig_in, dict):
+            return _emit_full_rejection(
+                "BUNDLE_MALFORMED", "verify-full", "11.1",
+                'mode="standard"/"bundle" requires "sigstore" input block',
+            )
+        sig_result = _run_verify_sigstore_inner(sig_in)
+        if isinstance(sig_result, tuple):
+            code, spec_ref, msg = sig_result
+            return _emit_full_rejection(code, "verify-sigstore", spec_ref, msg)
+        sig_measurement = sig_result.measurement
+
+        sev_in = data.get("attestation_sev")
+        if not isinstance(sev_in, dict):
+            return _emit_full_rejection(
+                "BUNDLE_MALFORMED", "verify-full", "11.1",
+                'mode="standard"/"bundle" requires attestation_sev '
+                "(TDX path not wired yet on Python)",
+            )
+        sev_result = _run_verify_attestation_sev_inner(sev_in)
+        if isinstance(sev_result[0], str):
+            code, spec_ref, msg = sev_result  # type: ignore[misc]
+            return _emit_full_rejection(code, "verify-attestation-sev", spec_ref, msg)
+        att_measurement, _report, _body = sev_result
+
+        try:
+            sig_measurement.assert_equal(att_measurement)
+        except Exception as e:
+            code, spec_ref = _classify_measurement_compare_error(e)
+            return _emit_full_rejection(code, "verify-measurement", spec_ref, str(e))
+
+        fp = att_measurement.fingerprint()
+        out_body = {
+            "stage": "verify-full",
+            "accepted": True,
+            "outputs": {
+                "mode": mode,
+                "platform": "sev-snp",
+                "sigstore_measurement": {
+                    "type": sig_measurement.type.value
+                    if hasattr(sig_measurement.type, "value")
+                    else str(sig_measurement.type),
+                    "registers": sig_measurement.registers,
+                },
+                "attestation_measurement": {
+                    "type": att_measurement.type.value
+                    if hasattr(att_measurement.type, "value")
+                    else str(att_measurement.type),
+                    "registers": att_measurement.registers,
+                },
+                "final_measurement_fingerprint_hex": fp,
+            },
+        }
+        json.dump(out_body, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return EXIT_ACCEPT
+
+    if mode == "pinned":
+        pin_in = data.get("pinned_measurement")
+        if not isinstance(pin_in, dict):
+            return _emit_full_rejection(
+                "BUNDLE_MALFORMED", "verify-full", "11.3",
+                'mode="pinned" requires "pinned_measurement"',
+            )
+        pin_measurement, code, spec_ref = _normalize_measurement(pin_in)
+        if pin_measurement is None:
+            return _emit_full_rejection(code, "verify-full", spec_ref,
+                                        "pinned_measurement invalid")
+
+        sev_in = data.get("attestation_sev")
+        if not isinstance(sev_in, dict):
+            return _emit_full_rejection(
+                "BUNDLE_MALFORMED", "verify-full", "11.3",
+                'mode="pinned" requires attestation_sev',
+            )
+        sev_result = _run_verify_attestation_sev_inner(sev_in)
+        if isinstance(sev_result[0], str):
+            code, spec_ref, msg = sev_result  # type: ignore[misc]
+            return _emit_full_rejection(code, "verify-attestation-sev", spec_ref, msg)
+        att_measurement, _report, _body = sev_result
+
+        try:
+            pin_measurement.assert_equal(att_measurement)
+        except Exception as e:
+            code, spec_ref = _classify_measurement_compare_error(e)
+            return _emit_full_rejection(code, "verify-measurement", spec_ref, str(e))
+
+        fp = att_measurement.fingerprint()
+        out_body = {
+            "stage": "verify-full",
+            "accepted": True,
+            "outputs": {
+                "mode": "pinned",
+                "platform": "sev-snp",
+                "attestation_measurement": {
+                    "type": att_measurement.type.value
+                    if hasattr(att_measurement.type, "value")
+                    else str(att_measurement.type),
+                    "registers": att_measurement.registers,
+                },
+                "final_measurement_fingerprint_hex": fp,
+            },
+        }
+        json.dump(out_body, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return EXIT_ACCEPT
+
+    return _emit_full_rejection(
+        "BUNDLE_MALFORMED", "verify-full", "11",
+        f"unknown mode {mode!r} (allowed: standard, bundle, pinned)",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1600,6 +1777,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_verify_attestation_tdx()
     if sub == "verify-attestation-sev":
         return cmd_verify_attestation_sev()
+    if sub == "verify-full":
+        return cmd_verify_full()
     if sub in ("", "help", "-h", "--help"):
         _print_help()
         return EXIT_ACCEPT
