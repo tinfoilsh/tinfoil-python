@@ -186,6 +186,11 @@ def _capabilities() -> dict[str, Any]:
             # parsed and compared without needing any sigstore-python or
             # lib API surface (pure post-parse Python).
             "extended_td_checks_supported": True,
+            "enforces_tcb_evaluation_data_number_minimum": True,
+            "policy_fields_supported": {
+                "expected_fmspc_hex": False,
+                "accepted_qv_results": True,
+            },
             # validate_tcb_status rejects only the terminal statuses
             # (OutOfDate, OutOfDateConfigurationNeeded, Revoked); the
             # three non-terminal statuses (SWHardeningNeeded, Config-
@@ -703,6 +708,11 @@ def _classify_tdx_error(err: Exception) -> Tuple[str, str]:
     if "unsupported quote version" in msg or "quote version" in msg or "version" in msg and "supported" in msg:
         return "QUOTE_FORMAT_UNSUPPORTED", "A.3.1"
 
+    # QE-report signature failures mention the PCK certificate because the
+    # PCK leaf is the verification key; classify them before chain errors.
+    if ("qe report" in msg or "qe_report" in msg) and "signature" in msg:
+        return "QE_REPORT_SIGNATURE_INVALID", "4.4"
+
     # PCK chain (BEFORE the generic "signature" check)
     if "pck" in msg and "chain" in msg:
         return "PCK_CHAIN_INVALID", "4.2"
@@ -714,10 +724,13 @@ def _classify_tdx_error(err: Exception) -> Tuple[str, str]:
         return "PCK_CHAIN_INVALID", "4.2"
 
     # AK / quote signature (generic — must come after chain)
+    if (
+        "ak" in msg and ("bind" in msg or "report data" in msg)
+        or "attestation key" in msg and ("bind" in msg or "report data" in msg)
+    ):
+        return "AK_BINDING_INVALID", "4.5"
     if "qe report" in msg or "qe_report" in msg:
         return "QE_REPORT_SIGNATURE_INVALID", "4.4"
-    if "ak" in msg and ("bind" in msg or "report data" in msg):
-        return "AK_BINDING_INVALID", "4.5"
     if "signature" in msg:
         return "QUOTE_SIGNATURE_INVALID", "4.3"
     if "root" in msg and ("trust" in msg or "ca" in msg):
@@ -793,7 +806,8 @@ def _maybe_override_intel_root(pem: str | None):
 
 
 def _evaluate_collateral(
-    quote, pck_chain, collateral_in: dict, expiration_check_date_unix
+    quote, pck_chain, collateral_in: dict, expiration_check_date_unix,
+    policy: dict | None = None,
 ) -> tuple[str, str, str]:
     """Run Intel §4.7 collateral evaluation against fixture-injected bytes.
 
@@ -862,17 +876,59 @@ def _evaluate_collateral(
                 f"is past verification_time {now_t}"
             )
 
+        # SPEC §4.7.11 lets policy require a minimum collateral
+        # tcbEvaluationDataNumber. The underlying lib exposes this in
+        # freshness helpers, but we enforce it inline so injected-collateral
+        # conformance runs stay deterministic.
+        min_eval = (policy or {}).get("min_tcb_evaluation_data_number")
+        if min_eval is not None:
+            min_eval_int = int(min_eval)
+            tcb_eval_num = tcb_info.tcb_info.tcb_evaluation_data_number
+            qe_eval_num = qe_identity.enclave_identity.tcb_evaluation_data_number
+            if tcb_eval_num < min_eval_int:
+                return "TCB_EVAL_DATA_NUMBER_TOO_LOW", "4.7.11", (
+                    f"TCB Info tcbEvaluationDataNumber {tcb_eval_num} "
+                    f"below minimum {min_eval_int}"
+                )
+            if qe_eval_num < min_eval_int:
+                return "TCB_EVAL_DATA_NUMBER_TOO_LOW", "4.7.11", (
+                    f"QE Identity tcbEvaluationDataNumber {qe_eval_num} "
+                    f"below minimum {min_eval_int}"
+                )
+
         # Step 6: Cert revocation
         validate_certificate_revocation(
             collateral, pck_chain.pck_cert, pck_chain.intermediate_cert,
         )
 
         # Step 7: TCB status (matches level + rejects non-acceptable status)
-        validate_tcb_status(
+        matching_tcb_level = validate_tcb_status(
             tcb_info.tcb_info,
             quote.td_quote_body.tee_tcb_svn,
             pck_extensions,
         )
+        accepted_qv_results = (policy or {}).get("accepted_qv_results")
+        if accepted_qv_results:
+            tcb_status_to_qv_result = {
+                "UpToDate": "OK",
+                "SWHardeningNeeded": "SW_HARDENING_NEEDED",
+                "ConfigurationNeeded": "CONFIG_NEEDED",
+                "ConfigurationAndSWHardeningNeeded": "CONFIG_AND_SW_HARDENING_NEEDED",
+                "OutOfDate": "OUT_OF_DATE",
+                "OutOfDateConfigurationNeeded": "OUT_OF_DATE_CONFIG_NEEDED",
+                "Revoked": "REVOKED",
+            }
+            tcb_status = str(getattr(
+                matching_tcb_level.tcb_status,
+                "value",
+                matching_tcb_level.tcb_status,
+            ))
+            qv_result = tcb_status_to_qv_result.get(tcb_status, tcb_status)
+            if qv_result not in set(accepted_qv_results):
+                return "QV_RESULT_NOT_ACCEPTED_BY_POLICY", "4.7.7", (
+                    f"qv_result {qv_result} from TCB status {tcb_status} "
+                    f"not in accepted_qv_results {accepted_qv_results}"
+                )
 
         # Step 8: TDX module identity
         validate_tdx_module_identity(
@@ -897,6 +953,29 @@ def _evaluate_collateral(
     except CollateralError as e:
         msg = str(e)
         msg_low = msg.lower()
+        if "pck crl" in msg_low and "expired" in msg_low:
+            return "PCK_CRL_EXPIRED", "4.7.4", msg
+        if (
+            ("root ca crl" in msg_low or "root crl" in msg_low)
+            and "expired" in msg_low
+        ):
+            return "ROOT_CRL_EXPIRED", "4.7.4", msg
+        if "intermediate ca" in msg_low and "revoked" in msg_low:
+            return "INTERMEDIATE_REVOKED", "4.7.4", msg
+        if "pck certificate" in msg_low and "revoked" in msg_low:
+            return "PCK_REVOKED", "4.7.4", msg
+        if "tcb info issuer chain" in msg_low and (
+            "chain" in msg_low or "certificate" in msg_low or "root" in msg_low
+        ):
+            return "TCB_INFO_CHAIN_INVALID", "4.7.3", msg
+        if "qe identity id" in msg_low and ("td_qe" in msg_low or "must" in msg_low):
+            return "QE_IDENTITY_ID_INVALID", "4.7.9", msg
+        if "qe identity version" in msg_low and "must" in msg_low:
+            return "QE_IDENTITY_VERSION_INVALID", "4.7.9", msg
+        if "mrsigner" in msg_low or "mr_signer" in msg_low:
+            return "QE_IDENTITY_MRSIGNER_MISMATCH", "4.7.9", msg
+        if "miscselect" in msg_low or "attributes" in msg_low or "isv prodid" in msg_low:
+            return "QE_IDENTITY_FIELD_MISMATCH", "4.7.9", msg
         if "tcb status" in msg_low or "no matching tcb" in msg_low or "revoked" in msg_low:
             return "TCB_REVOKED", "4.7.7", msg
         if "signature" in msg_low and ("tcb info" in msg_low or "tcbinfo" in msg_low):
@@ -907,8 +986,6 @@ def _evaluate_collateral(
             return "TCB_INFO_EXPIRED", "4.7", msg
         if "expired" in msg_low and ("qe" in msg_low or "identity" in msg_low):
             return "QE_IDENTITY_EXPIRED", "4.7", msg
-        if "mrsigner" in msg_low or "mr_signer" in msg_low:
-            return "QE_IDENTITY_MRSIGNER_MISMATCH", "4.7.9", msg
         if "qe identity" in msg_low or "enclave identity" in msg_low:
             return "QE_IDENTITY_FIELD_MISMATCH", "4.7.9", msg
         if "crl" in msg_low or "revocation" in msg_low:
@@ -1078,6 +1155,7 @@ def cmd_verify_attestation_tdx() -> int:
             code, ref, msg = _evaluate_collateral(
                 quote, pck_chain, collateral_in,
                 inp.get("expiration_check_date_unix"),
+                policy,
             )
             if code:
                 return _emit_tdx_rejection(code, ref, msg)
