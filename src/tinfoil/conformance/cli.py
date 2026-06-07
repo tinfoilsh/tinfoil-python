@@ -23,6 +23,11 @@ from typing import Any, Tuple
 
 from ..attestation import verify_tdx_hardware
 from ..attestation.abi_tdx import parse_quote as parse_tdx_quote
+from ..attestation.attestation_tdx import (
+    TdxAttestationError,
+    TdxVerificationConfig,
+    verify_tdx_attestation,
+)
 from ..attestation.verify_tdx import (
     TdxVerificationError,
     extract_pck_cert_chain,
@@ -180,6 +185,11 @@ def _capabilities() -> dict[str, Any]:
             # validate_tdx_module_identity + validate_qe_identity) using
             # the fixture-injected collateral bytes — no Intel PCS fetch.
             "tcb_evaluation_supported": True,
+            # execution_mode=public_api calls the public verify_tdx_attestation
+            # path and monkey-patches only the collateral fetch boundary inside
+            # this conformance process, so production attestation modules do
+            # not need test-only hook parameters.
+            "public_api_hooks_supported": True,
             # Phase 4: cmd_verify_attestation_tdx applies SPEC §4.8 /
             # Intel §2.3.2 checks against every policy.expected_*_hex pin
             # the fixture sets — the unmutated quote's body fields are
@@ -694,6 +704,40 @@ def _classify_tdx_error(err: Exception) -> Tuple[str, str]:
     # Order matters: chain errors mention "signature" but should map to
     # PCK_CHAIN_INVALID, not QUOTE_SIGNATURE_INVALID.
 
+    # Collateral-layer failures as surfaced by the public verifier.
+    if "pck crl" in msg and "expired" in msg:
+        return "PCK_CRL_EXPIRED", "4.7.4"
+    if ("root ca crl" in msg or "root crl" in msg) and "expired" in msg:
+        return "ROOT_CRL_EXPIRED", "4.7.4"
+    if "tcb info" in msg and "expired" in msg:
+        return "TCB_INFO_EXPIRED", "4.7"
+    if ("qe identity" in msg or "enclave identity" in msg) and "expired" in msg:
+        return "QE_IDENTITY_EXPIRED", "4.7"
+    if "tcbevaluationdatanumber" in msg or "tcb evaluation data number" in msg:
+        return "TCB_EVAL_DATA_NUMBER_TOO_LOW", "4.7.11"
+    if "intermediate ca" in msg and "revoked" in msg:
+        return "INTERMEDIATE_REVOKED", "4.7.4"
+    if "pck certificate" in msg and "revoked" in msg:
+        return "PCK_REVOKED", "4.7.4"
+    if "tcb info issuer chain" in msg and (
+        "chain" in msg or "certificate" in msg or "root" in msg
+    ):
+        return "TCB_INFO_CHAIN_INVALID", "4.7.3"
+    if "qe identity id" in msg and ("td_qe" in msg or "must" in msg):
+        return "QE_IDENTITY_ID_INVALID", "4.7.9"
+    if "qe identity version" in msg and "must" in msg:
+        return "QE_IDENTITY_VERSION_INVALID", "4.7.9"
+    if ("qe identity" in msg or "enclave identity" in msg) and (
+        "mrsigner" in msg or "mr_signer" in msg
+    ):
+        return "QE_IDENTITY_MRSIGNER_MISMATCH", "4.7.9"
+    if ("qe identity" in msg or "enclave identity" in msg) and (
+        "miscselect" in msg or "attributes" in msg or "isv prodid" in msg
+    ):
+        return "QE_IDENTITY_FIELD_MISMATCH", "4.7.9"
+    if "tcb status" in msg or "no matching tcb" in msg or "tcb is revoked" in msg:
+        return "TCB_REVOKED", "4.7.7"
+
     # Quote header / structural parse failures
     if "invalid tee type" in msg or "tee type" in msg:
         return "WRONG_TEE_TYPE", "A.3.1"
@@ -753,6 +797,125 @@ def _decode_td_attributes(td_attrs: bytes) -> dict[str, bool]:
         "other_reserved_nonzero":    bool(n & 0x7FFFFFFF00000000),
         "other_perfmon":             bool(n & (1 << 63)),
     }
+
+
+def _tdx_acceptance_output(quote) -> dict[str, Any]:
+    body = quote.td_quote_body
+    header = quote.header
+    tee_type_str = "TDX" if header.tee_type == 0x81 else f"0x{header.tee_type:08x}"
+
+    return {
+        "stage": "verify-attestation-tdx",
+        "accepted": True,
+        "outputs": {
+            "quote_version": header.version,
+            "tee_type": tee_type_str,
+            "qv_result": "OK",
+            "measurement": {
+                "type": TDX_GUEST_V2_URI,
+                "registers": [
+                    body.mr_td.hex(),
+                    body.rtmrs[0].hex(),
+                    body.rtmrs[1].hex(),
+                    body.rtmrs[2].hex(),
+                    body.rtmrs[3].hex(),
+                ],
+            },
+            "header_fields": {
+                "attestation_key_type": header.attestation_key_type,
+                "qe_vendor_id_hex": header.qe_vendor_id.hex(),
+                "user_data_hex": header.user_data.hex(),
+            },
+            "body_fields": {
+                "tee_tcb_svn_hex": body.tee_tcb_svn.hex(),
+                "mrseam_hex": body.mr_seam.hex(),
+                "mrsignerseam_hex": body.mr_signer_seam.hex(),
+                "seam_attributes_hex": body.seam_attributes.hex(),
+                "td_attributes_hex": body.td_attributes.hex(),
+                "td_attributes_decoded": _decode_td_attributes(body.td_attributes),
+                "xfam_hex": body.xfam.hex(),
+                "mrtd_hex": body.mr_td.hex(),
+                "mrconfigid_hex": body.mr_config_id.hex(),
+                "mrowner_hex": body.mr_owner.hex(),
+                "mrownerconfig_hex": body.mr_owner_config.hex(),
+                "rtmrs_hex": [r.hex() for r in body.rtmrs],
+                "report_data_hex": body.report_data.hex(),
+            },
+        },
+    }
+
+
+def _tdx_fixture_collateral(
+    collateral_in: dict[str, Any],
+    pck_cert,
+) -> TdxCollateral:
+    tcb_info_raw = (collateral_in.get("tcb_info_json") or "").encode()
+    qe_identity_raw = (collateral_in.get("qe_identity_json") or "").encode()
+    tcb_info = parse_tcb_info_response(tcb_info_raw)
+    qe_identity = parse_qe_identity_response(qe_identity_raw)
+
+    tcb_issuer_chain_pem = (collateral_in.get("tcb_info_issuer_chain_pem") or "").encode()
+    qe_issuer_chain_pem = (collateral_in.get("qe_identity_issuer_chain_pem") or "").encode()
+    pck_crl_issuer_chain_pem = (collateral_in.get("pck_crl_issuer_chain_pem") or "").encode()
+
+    tcb_issuer_chain = parse_pem_chain(tcb_issuer_chain_pem) if tcb_issuer_chain_pem else []
+    qe_issuer_chain = parse_pem_chain(qe_issuer_chain_pem) if qe_issuer_chain_pem else []
+    pck_crl_issuer_chain = (
+        parse_pem_chain(pck_crl_issuer_chain_pem) if pck_crl_issuer_chain_pem else []
+    )
+
+    if tcb_issuer_chain:
+        verify_tcb_info_signature(tcb_info_raw, tcb_info, tcb_issuer_chain)
+    if qe_issuer_chain:
+        verify_qe_identity_signature(qe_identity_raw, qe_identity, qe_issuer_chain)
+
+    pck_crl_obj = None
+    pck_crl_der = base64.b64decode(collateral_in.get("pck_crl_der_b64") or "")
+    if pck_crl_der:
+        pck_crl = x509.load_der_x509_crl(pck_crl_der)
+        ca_type = _coll._determine_pck_ca_type(pck_cert)
+        if pck_crl_issuer_chain:
+            _coll._verify_crl_signature(pck_crl, pck_crl_issuer_chain, ca_type)
+        pck_crl_obj = PckCrl(
+            crl=pck_crl,
+            ca_type=ca_type,
+            next_update=pck_crl.next_update_utc or datetime.now(timezone.utc),
+        )
+
+    root_crl_obj = None
+    root_crl_der = base64.b64decode(collateral_in.get("root_crl_der_b64") or "")
+    if root_crl_der:
+        root_crl = x509.load_der_x509_crl(root_crl_der)
+        _coll._verify_root_crl_signature(root_crl)
+        root_crl_obj = RootCrl(
+            crl=root_crl,
+            next_update=root_crl.next_update_utc or datetime.now(timezone.utc),
+        )
+
+    return TdxCollateral(
+        tcb_info=tcb_info,
+        qe_identity=qe_identity,
+        tcb_info_raw=tcb_info_raw,
+        qe_identity_raw=qe_identity_raw,
+        pck_crl=pck_crl_obj,
+        root_crl=root_crl_obj,
+        tcb_info_issuer_chain=tcb_issuer_chain or None,
+        qe_identity_issuer_chain=qe_issuer_chain or None,
+    )
+
+
+@contextlib.contextmanager
+def _maybe_override_tdx_fetch_collateral(collateral_in: dict[str, Any]):
+    orig_fetch_collateral = _coll.fetch_collateral
+
+    def _fixture_fetch_collateral(pck_extensions, pck_cert, *args, **kwargs):
+        return _tdx_fixture_collateral(collateral_in, pck_cert)
+
+    _coll.fetch_collateral = _fixture_fetch_collateral
+    try:
+        yield
+    finally:
+        _coll.fetch_collateral = orig_fetch_collateral
 
 
 @contextlib.contextmanager
@@ -1100,6 +1263,45 @@ def _enforce_extended_policy(
     return "", ""
 
 
+def _cmd_verify_attestation_tdx_public(inp: dict[str, Any], policy: dict[str, Any]) -> int:
+    collateral_in = inp.get("collateral") or {}
+    custom_root_pem = collateral_in.get("intel_root_ca_pem")
+    fixture_date = inp.get("expiration_check_date_unix")
+
+    config_kwargs: dict[str, Any] = {}
+    if policy.get("min_tcb_evaluation_data_number") is not None:
+        config_kwargs["min_tcb_evaluation_data_number"] = int(
+            policy["min_tcb_evaluation_data_number"]
+        )
+
+    with (
+        _maybe_override_intel_root(custom_root_pem),
+        _maybe_override_time(fixture_date),
+        _maybe_override_tdx_fetch_collateral(collateral_in),
+    ):
+        try:
+            result = verify_tdx_attestation(
+                inp["quote_b64"],
+                is_compressed=False,
+                config=TdxVerificationConfig(**config_kwargs),
+            )
+        except (TdxAttestationError, TdxVerificationError, CollateralError) as e:
+            code, ref = _classify_tdx_error(e)
+            return _emit_tdx_rejection(code, ref, str(e))
+        except Exception as e:
+            code, ref = _classify_tdx_error(e)
+            return _emit_tdx_rejection(code, ref, f"unexpected: {e}")
+
+    quote_bytes = base64.b64decode(inp["quote_b64"])
+    code, msg = _enforce_extended_policy(quote_bytes, policy)
+    if code:
+        return _emit_tdx_rejection(code, "4.8", msg)
+
+    json.dump(_tdx_acceptance_output(result.quote), sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return EXIT_ACCEPT
+
+
 def cmd_verify_attestation_tdx() -> int:
     raw = sys.stdin.read()
     try:
@@ -1129,6 +1331,8 @@ def cmd_verify_attestation_tdx() -> int:
     # verification (PCK chain + AK + sig + QE report). Matches the Go binary's
     # semantics and fixture 300's calibration.
     tcb_eval_required = policy.get("tcb_evaluation_required", True)
+    if inp.get("execution_mode") == "public_api":
+        return _cmd_verify_attestation_tdx_public(inp, policy)
 
     # Structural verification (Intel §4.1.2 steps 1-4) always runs.
     # When collateral.intel_root_ca_pem is set (Phase 3 synthetic chain
@@ -1165,51 +1369,7 @@ def cmd_verify_attestation_tdx() -> int:
     if code:
         return _emit_tdx_rejection(code, "4.8", msg)
 
-    # Build outputs from the parsed body.
-    body = quote.td_quote_body
-    header = quote.header
-    tee_type_str = "TDX" if header.tee_type == 0x81 else f"0x{header.tee_type:08x}"
-
-    out_body = {
-        "stage": "verify-attestation-tdx",
-        "accepted": True,
-        "outputs": {
-            "quote_version": header.version,
-            "tee_type": tee_type_str,
-            "qv_result": "OK",
-            "measurement": {
-                "type": TDX_GUEST_V2_URI,
-                "registers": [
-                    body.mr_td.hex(),
-                    body.rtmrs[0].hex(),
-                    body.rtmrs[1].hex(),
-                    body.rtmrs[2].hex(),
-                    body.rtmrs[3].hex(),
-                ],
-            },
-            "header_fields": {
-                "attestation_key_type": header.attestation_key_type,
-                "qe_vendor_id_hex": header.qe_vendor_id.hex(),
-                "user_data_hex": header.user_data.hex(),
-            },
-            "body_fields": {
-                "tee_tcb_svn_hex": body.tee_tcb_svn.hex(),
-                "mrseam_hex": body.mr_seam.hex(),
-                "mrsignerseam_hex": body.mr_signer_seam.hex(),
-                "seam_attributes_hex": body.seam_attributes.hex(),
-                "td_attributes_hex": body.td_attributes.hex(),
-                "td_attributes_decoded": _decode_td_attributes(body.td_attributes),
-                "xfam_hex": body.xfam.hex(),
-                "mrtd_hex": body.mr_td.hex(),
-                "mrconfigid_hex": body.mr_config_id.hex(),
-                "mrowner_hex": body.mr_owner.hex(),
-                "mrownerconfig_hex": body.mr_owner_config.hex(),
-                "rtmrs_hex": [r.hex() for r in body.rtmrs],
-                "report_data_hex": body.report_data.hex(),
-            },
-        },
-    }
-    json.dump(out_body, sys.stdout, indent=2, sort_keys=True)
+    json.dump(_tdx_acceptance_output(quote), sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return EXIT_ACCEPT
 
