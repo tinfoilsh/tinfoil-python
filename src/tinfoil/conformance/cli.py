@@ -68,7 +68,7 @@ from ..attestation.types import (
     SEV_REGISTER_COUNT,
     TDX_REGISTER_COUNT,
 )
-from ..sigstore import (
+from .sigstore import (
     SigstorePolicy,
     SigstoreVerification,
     default_sigstore_policy,
