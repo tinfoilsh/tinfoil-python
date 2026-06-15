@@ -230,8 +230,14 @@ def _capabilities() -> dict[str, Any]:
             "amd_root_ca_injection_supported": True,
         },
         "platforms_supported": ["sev-snp", "tdx"],
-        "transport_modes_supported": ["tls-pinning"],
-        "flow_modes_supported": ["standard", "pinned"],
+        # EHBP (Encrypted HTTP Body Protocol) transport is implemented in the
+        # SDK and is the default — see client.py (_EHBPReVerifyingTransport,
+        # make_secure_http_client). No fixture gates on transport today; this
+        # declares library capability. "bundle" flow: cmd_verify_full accepts
+        # bundle mode and the SDK ships a full bundle pipeline (attestation/
+        # bundle.py, client.verify_from_bundle).
+        "transport_modes_supported": ["tls-pinning", "ehbp"],
+        "flow_modes_supported": ["standard", "bundle", "pinned"],
         "known_quirks": {
             "sigstore.workflow_ref_check_via_startswith":
                 "We replaced sigstore.verify.policy's regex-based GitHubWorkflowRefPattern with a strict-prefix startswith() check (SPEC §5.3 reads as prefix, not regex).",
