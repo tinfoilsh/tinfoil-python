@@ -756,6 +756,42 @@ def _classify_tdx_error(err: Exception) -> Tuple[str, str]:
     if "tcb status" in msg or "no matching tcb" in msg or "tcb is revoked" in msg:
         return "TCB_REVOKED", "4.7.7"
 
+    # SPEC §4.8 extended-TD policy validation, as surfaced by the lib's
+    # validate_tdx_policy in the full (public) path. (In the adapter path these
+    # codes come from _enforce_extended_policy instead.) Messages look like
+    # "Policy validation failed: TD_ATTRIBUTES 0x1: DEBUG bit must not be set"
+    # or "Unauthorized XFAM 0x2: FIXED1 0x3 bits are unset".
+    if "td_attributes" in msg and "debug" in msg:
+        return "TD_ATTRIBUTES_DEBUG_SET", "4.8"
+    if "td_attributes" in msg and "expected" in msg:
+        return "TD_ATTRIBUTES_MISMATCH", "4.8"
+    if "td_attributes" in msg:
+        return "TD_ATTRIBUTES_RESERVED_BIT_SET", "4.8"
+    if "xfam" in msg and "fixed1" in msg:
+        return "XFAM_REQUIRED_BIT_CLEAR", "4.8"
+    if "xfam" in msg:
+        return "XFAM_FORBIDDEN_BIT_SET", "4.8"
+
+    # Collateral field-mismatch / CRL-signature checks reached in the full
+    # (public) path. These mention "qe report" / "fmspc" / "root ... crl" and
+    # must be classified before the generic qe-report-signature / pck-chain /
+    # signature patterns below.
+    if ("qe report" in msg or "qe_report" in msg) and (
+        "mrsigner" in msg or "mr_signer" in msg
+    ):
+        return "QE_IDENTITY_MRSIGNER_MISMATCH", "4.7.9"
+    if ("qe report" in msg or "qe_report" in msg) and (
+        "isv prodid" in msg or "isvprodid" in msg or "prod id" in msg
+        or "miscselect" in msg or "attributes" in msg
+    ):
+        return "QE_IDENTITY_FIELD_MISMATCH", "4.7.9"
+    if "fmspc" in msg and "mismatch" in msg:
+        return "PCK_FMSPC_MISMATCH", "4.7.2"
+    if ("root ca crl" in msg or "root crl" in msg or ("root" in msg and "crl" in msg)) and (
+        "signature" in msg or "sig " in msg or "verif" in msg
+    ):
+        return "ROOT_CA_UNTRUSTED", "4.7.4"
+
     # Quote header / structural parse failures
     if "invalid tee type" in msg or "tee type" in msg:
         return "WRONG_TEE_TYPE", "A.3.1"
@@ -1291,6 +1327,24 @@ def _cmd_verify_attestation_tdx_public(inp: dict[str, Any], policy: dict[str, An
         config_kwargs["min_tcb_evaluation_data_number"] = int(
             policy["min_tcb_evaluation_data_number"]
         )
+    else:
+        # Synthetic collateral's tcbEvaluationDataNumber is below the lib's
+        # production minimum; the adapter passes 0 so this gate doesn't fire
+        # for vectors not testing it. Fixture 346 pins a minimum (above).
+        config_kwargs["min_tcb_evaluation_data_number"] = 0
+    # The lib's policy baseline (expected_td_attributes/xfam/tee_tcb_svn/
+    # mr_seams) targets production Tinfoil enclaves and would reject these
+    # synthetic vectors at the baseline gate before the fixture's targeted
+    # check. Re-baseline to the quote's own values; the fixture's SPEC §4.8
+    # pins are then enforced precisely by _enforce_extended_policy below.
+    try:
+        _tb = parse_tdx_quote(base64.b64decode(inp["quote_b64"])).td_quote_body
+        config_kwargs.setdefault("expected_td_attributes", _tb.td_attributes)
+        config_kwargs.setdefault("expected_xfam", _tb.xfam)
+        config_kwargs.setdefault("expected_minimum_tee_tcb_svn", _tb.tee_tcb_svn)
+        config_kwargs.setdefault("accepted_mr_seams", (_tb.mr_seam,))
+    except Exception:
+        pass
 
     with (
         _maybe_override_intel_root(custom_root_pem),
@@ -1314,6 +1368,30 @@ def _cmd_verify_attestation_tdx_public(inp: dict[str, Any], policy: dict[str, An
     code, msg = _enforce_extended_policy(quote_bytes, policy)
     if code:
         return _emit_tdx_rejection(code, "4.8", msg)
+
+    # SPEC §4.7.7 policy gate: the verifier accepts non-terminal TCB statuses
+    # (SWHardeningNeeded, etc.) by default, but a fixture policy may restrict
+    # accepted_qv_results. The verifier doesn't apply caller QV-result policy,
+    # so enforce it here against the matched TCB level (mirrors the adapter).
+    accepted_qv_results = (policy or {}).get("accepted_qv_results")
+    if accepted_qv_results:
+        _tcb_status_to_qv_result = {
+            "UpToDate": "OK",
+            "SWHardeningNeeded": "SW_HARDENING_NEEDED",
+            "ConfigurationNeeded": "CONFIG_NEEDED",
+            "ConfigurationAndSWHardeningNeeded": "CONFIG_AND_SW_HARDENING_NEEDED",
+            "OutOfDate": "OUT_OF_DATE",
+            "OutOfDateConfigurationNeeded": "OUT_OF_DATE_CONFIG_NEEDED",
+            "Revoked": "REVOKED",
+        }
+        _st = getattr(result.tcb_level, "tcb_status", None)
+        tcb_status = str(getattr(_st, "value", _st))
+        qv_result = _tcb_status_to_qv_result.get(tcb_status, tcb_status)
+        if qv_result not in set(accepted_qv_results):
+            return _emit_tdx_rejection(
+                "QV_RESULT_NOT_ACCEPTED_BY_POLICY", "4.7.7",
+                f"qv_result {qv_result} from TCB status {tcb_status} "
+                f"not in accepted_qv_results {accepted_qv_results}")
 
     json.dump(_tdx_acceptance_output(result.quote), sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
