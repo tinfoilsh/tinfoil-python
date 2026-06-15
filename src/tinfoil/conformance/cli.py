@@ -217,6 +217,11 @@ def _capabilities() -> dict[str, Any]:
             # (bypassing CertificateChain.from_report's KDS fetch).
             "supported": True,
             "injected_collateral_supported": True,
+            # execution_mode=public_api drives the SDK's real public verifier
+            # (attestation.verify_sev_attestation_v2) with only the VCEK
+            # injected (embedded ARK/ASK, no network) — see
+            # _cmd_verify_attestation_sev_public.
+            "public_api_hooks_supported": True,
             # _enforce_sev_policy applies SPEC §3.7/§3.8/§8.2-3 pins from
             # policy.expected_*_hex and enforce_spec_defaults checks.
             "extended_checks_supported": True,
@@ -1811,6 +1816,87 @@ def _run_verify_attestation_sev_inner(
     return (measurement, report_bytes, body_fields)
 
 
+def _cmd_verify_attestation_sev_public(data: dict[str, Any]) -> int:
+    """execution_mode=public_api: drive the SDK's real public SEV verifier
+    (attestation.verify_sev_attestation_v2) with only the VCEK injected — the
+    SDK uses its embedded Genoa ARK/ASK, so no AMD KDS network call. Confirms
+    the report-parse / signature / VCEK-chain checks are reachable from the
+    SDK's public surface, unlike the adapter path which assembles the chain and
+    runs verify_attestation directly.
+
+    Fixtures needing an injected ARK/ASK, a verification-time override, or §3.7
+    policy pins enforced by the verifier stay adapter-only.
+    """
+    import gzip as _gzip
+    import io as _io
+
+    from ..attestation import verify_sev_attestation_v2
+
+    doc_b64 = data.get("attestation_doc_b64", "")
+    # Length pre-check keeps REPORT_TRUNCATED distinct from the parser's generic
+    # REPORT_FORMAT_UNSUPPORTED, matching the adapter and the Go binary.
+    try:
+        report_bytes = _gzip.decompress(base64.standard_b64decode(doc_b64))
+    except Exception as e:
+        return _emit_sev_rejection(
+            "REPORT_FORMAT_UNSUPPORTED", "3.1",
+            f"attestation_doc_b64 decode/decompress failed: {e}")
+    if len(report_bytes) < _SEV_REPORT_LEN:
+        return _emit_sev_rejection(
+            "REPORT_TRUNCATED", "3.1",
+            f"SEV report is {len(report_bytes)} bytes, expected ≥{_SEV_REPORT_LEN}")
+
+    try:
+        vcek_der = base64.standard_b64decode(data.get("vcek_der_b64", ""))
+    except Exception as e:
+        return _emit_sev_rejection(
+            "VCEK_CHAIN_INVALID", "3.3", f"vcek_der_b64 not valid base64: {e}")
+
+    # verify_sev_attestation_v2 / verify_chain print failure diagnostics via
+    # print() to stdout; the conformance contract is JSON-only on stdout, so
+    # capture stdout, route it to stderr, and classify on the captured text +
+    # the raised exception (the lib often raises a generic message while the
+    # specific reason is printed).
+    captured = _io.StringIO()
+    orig_stdout = sys.stdout
+    sys.stdout = captured
+    err: Exception | None = None
+    try:
+        verify_sev_attestation_v2(doc_b64, vcek_der=vcek_der)
+    except Exception as e:  # noqa: BLE001 — lib raises ValueError/SevAttestationError
+        err = e
+    finally:
+        sys.stdout = orig_stdout
+    lib_diag = captured.getvalue()
+    if lib_diag:
+        sys.stderr.write(lib_diag)
+    if err is not None:
+        diag = f"{lib_diag} {err}".strip()
+        code, ref = _classify_sev_error(diag)
+        if code == "QV_RESULT_TERMINAL_UNSPECIFIED":
+            # A verify-stage failure the classifier couldn't pin: it is a
+            # report/VCEK signature problem (§3.6).
+            code, ref = "REPORT_SIGNATURE_INVALID", "3.6"
+        return _emit_sev_rejection(code, ref, str(err) or diag)
+
+    # Verifier accepted. Emit the same body_fields output shape as the adapter.
+    body_fields = _decode_sev_body_fields(report_bytes)
+    out_body = {
+        "stage": "verify-attestation-sev",
+        "accepted": True,
+        "outputs": {
+            "measurement": {
+                "type": SEV_GUEST_V2_URI,
+                "registers": [body_fields["measurement_hex"]],
+            },
+            "body_fields": body_fields,
+        },
+    }
+    json.dump(out_body, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return EXIT_ACCEPT
+
+
 def cmd_verify_attestation_sev() -> int:
     try:
         raw = sys.stdin.read()
@@ -1825,6 +1911,9 @@ def cmd_verify_attestation_sev() -> int:
     if data.get("schema_version") != "1":
         sys.stderr.write('schema_version must be "1"\n')
         return EXIT_BAD_INPUT
+
+    if data.get("execution_mode") == "public_api":
+        return _cmd_verify_attestation_sev_public(data)
 
     result = _run_verify_attestation_sev_inner(data)
     # Disambiguate success (Measurement, bytes, dict) vs rejection (str, str, str).
