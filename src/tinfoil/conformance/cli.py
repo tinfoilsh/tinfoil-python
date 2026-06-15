@@ -1879,7 +1879,16 @@ def _cmd_verify_attestation_sev_public(data: dict[str, Any]) -> int:
             code, ref = "REPORT_SIGNATURE_INVALID", "3.6"
         return _emit_sev_rejection(code, ref, str(err) or diag)
 
-    # Verifier accepted. Emit the same body_fields output shape as the adapter.
+    # The lib's verifier ran the §3.4 VCEK cross-checks and crypto. Apply the
+    # fixture's §3.7 policy pins (measurement, host_data, report_data, key
+    # digests, TCB minimums) — caller policy the public verifier doesn't know
+    # about — mirroring the Go public handler and the adapter path. Without
+    # this, policy-mismatch fixtures would wrongly accept in full flow.
+    pol_viol = _enforce_sev_policy(report_bytes, data.get("policy"))
+    if pol_viol:
+        code, ref, msg = pol_viol
+        return _emit_sev_rejection(code, ref, msg)
+
     body_fields = _decode_sev_body_fields(report_bytes)
     out_body = {
         "stage": "verify-attestation-sev",
