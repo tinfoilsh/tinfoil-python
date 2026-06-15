@@ -67,6 +67,8 @@ from ..attestation.types import (
     MULTIPLATFORM_REGISTER_COUNT,
     SEV_REGISTER_COUNT,
     TDX_REGISTER_COUNT,
+    TLS_KEY_FP_SIZE,
+    HPKE_KEY_SIZE,
 )
 from .sigstore import (
     SigstorePolicy,
@@ -108,6 +110,7 @@ def _capabilities() -> dict[str, Any]:
             "verify-attestation-tdx",
             "verify-attestation-sev",
             "verify-full",
+            "verify-ehbp-key-binding",
         ],
         "sigstore": {
             "trust_root_loading": "configurable",
@@ -238,6 +241,10 @@ def _capabilities() -> dict[str, Any]:
         # bundle.py, client.verify_from_bundle).
         "transport_modes_supported": ["tls-pinning", "ehbp"],
         "flow_modes_supported": ["standard", "bundle", "pinned"],
+        # SPEC §14.2 EHBP key binding: the transport HPKE key must equal the
+        # attested key from report_data[32:64]. The SDK binds by construction
+        # (_build_ehbp_sync_transport seals only to the attested key).
+        "ehbp": {"key_binding_supported": True},
         "known_quirks": {
             "sigstore.workflow_ref_check_via_startswith":
                 "We replaced sigstore.verify.policy's regex-based GitHubWorkflowRefPattern with a strict-prefix startswith() check (SPEC §5.3 reads as prefix, not regex).",
@@ -2003,6 +2010,88 @@ def cmd_verify_full() -> int:
     )
 
 
+# -----------------------------------------------------------------------------
+# verify-ehbp-key-binding (SPEC §14.2)
+# -----------------------------------------------------------------------------
+
+
+def cmd_verify_ehbp_key_binding() -> int:
+    """Tinfoil SPEC §14.2: the EHBP transport HPKE key MUST equal the attested
+    key from report_data[32:64]; a server-offered key that differs is rejected.
+    Hermetic — no network. Uses the SDK's real report_data layout constants and
+    the real ehbp ServerIdentity key parser the transport relies on."""
+    try:
+        raw = sys.stdin.read()
+    except Exception as e:  # pragma: no cover
+        sys.stderr.write(f"error reading stdin: {e}\n")
+        return EXIT_INTERNAL
+
+    try:
+        inp = json.loads(raw)
+    except json.JSONDecodeError as e:
+        sys.stderr.write(f"input is not valid JSON: {e}\n")
+        return EXIT_BAD_INPUT
+    if inp.get("schema_version") != "1":
+        sys.stderr.write('input.schema_version != "1"\n')
+        return EXIT_BAD_INPUT
+
+    try:
+        report_data = bytes.fromhex(inp.get("report_data_hex", ""))
+    except ValueError as e:
+        sys.stderr.write(f"report_data_hex not valid hex: {e}\n")
+        return EXIT_BAD_INPUT
+
+    # SPEC §14.2 layout: [0:32] = TLS SPKI fingerprint, [32:64] = HPKE key.
+    # Uses the SDK's own size constants (the same slice verify_sev/tdx applies).
+    if len(report_data) != TLS_KEY_FP_SIZE + HPKE_KEY_SIZE:
+        sys.stderr.write(
+            f"report_data must be {TLS_KEY_FP_SIZE + HPKE_KEY_SIZE} bytes, "
+            f"got {len(report_data)}\n"
+        )
+        return EXIT_BAD_INPUT
+    tls_fingerprint = report_data[:TLS_KEY_FP_SIZE].hex()
+    attested = report_data[TLS_KEY_FP_SIZE:TLS_KEY_FP_SIZE + HPKE_KEY_SIZE].hex()
+
+    # Validate the offered key through the same EHBP key parser the transport
+    # uses (_build_ehbp_sync_transport -> EHBPTransport.from_public_key_hex ->
+    # ehbp.ServerIdentity.from_public_key_hex).
+    from ehbp import ServerIdentity
+
+    try:
+        offered = ServerIdentity.from_public_key_hex(
+            inp.get("offered_hpke_public_key_hex", "")
+        ).public_key_hex()
+    except Exception as e:
+        sys.stderr.write(f"offered hpke key not a valid X25519 public key: {e}\n")
+        return EXIT_BAD_INPUT
+
+    if offered.lower() != attested.lower():
+        body = {
+            "stage": "verify-ehbp-key-binding",
+            "accepted": False,
+            "rejection": {
+                "code": "EHBP_KEY_BINDING_MISMATCH",
+                "spec_ref": "14.2",
+                "message": "offered HPKE key does not match the attested key in report_data[32:64]",
+            },
+        }
+        json.dump(body, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return EXIT_REJECT
+
+    body = {
+        "stage": "verify-ehbp-key-binding",
+        "accepted": True,
+        "outputs": {
+            "attested_hpke_public_key_hex": attested,
+            "tls_fingerprint_hex": tls_fingerprint,
+        },
+    }
+    json.dump(body, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return EXIT_ACCEPT
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -2023,6 +2112,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_verify_attestation_sev()
     if sub == "verify-full":
         return cmd_verify_full()
+    if sub == "verify-ehbp-key-binding":
+        return cmd_verify_ehbp_key_binding()
     if sub in ("", "help", "-h", "--help"):
         _print_help()
         return EXIT_ACCEPT
