@@ -147,9 +147,10 @@ def _capabilities() -> dict[str, Any]:
             # V2 (.1.8) extension first and falls back to the deprecated V1
             # (.1.1) only when V2 is absent — matching go/rs/js. See SPEC §5.3.
             "oidc_issuer_v2_preferred": True,
-            # sigstore-python collapses missing-SCT and duplicate-SCT into
-            # the same "Expected one certificate timestamp" error.
-            "scts_count_distinguish_missing_vs_duplicate": False,
+            # reject_duplicate_sct_logs runs ahead of sigstore-python's
+            # exactly-one check, so missing SCTs classify as SCT_INSUFFICIENT
+            # while a repeated log id classifies as SCT_DUPLICATE_LOG.
+            "scts_count_distinguish_missing_vs_duplicate": True,
             # sigstore-python rejects duplicate SCTs via the same
             # count-based check (it rejects either case as
             # "Expected one certificate timestamp").
