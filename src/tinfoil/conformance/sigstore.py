@@ -18,7 +18,7 @@ from sigstore.verify.policy import (
 )
 
 from ..attestation import Measurement, PredicateType
-from ..sigstore import OIDCIssuerV2Preferred
+from ..sigstore import OIDCIssuerV2Preferred, reject_duplicate_sct_logs
 
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 
@@ -104,6 +104,9 @@ def verify_sigstore_bundle_with_policy(
 
     verifier = Verifier(trusted_root=trusted_root)
     bundle = Bundle.from_json(bundle_bytes)
+
+    # SPEC §5.2: reject duplicate-log SCTs before signature/SCT verification.
+    reject_duplicate_sct_logs(bundle)
 
     cert_policy = AllOf(
         [
