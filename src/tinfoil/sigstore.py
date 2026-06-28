@@ -13,6 +13,27 @@ from .github import fetch_latest_digest, fetch_attestation_bundle
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 
 
+def reject_legacy_bundle_format(bundle_json: bytes) -> None:
+    """SPEC §5.2: only the v0.3 single-certificate bundle layout is accepted.
+
+    The legacy v0.1/v0.2 layout conveys the signing certificate under
+    verificationMaterial.x509CertificateChain, which may also carry intermediate
+    or root CA certificates — a misuse vector the v0.3 single-certificate form
+    avoids. sigstore-python parses the legacy layout, so we reject it explicitly,
+    matching tinfoil-go / -rs.
+    """
+    try:
+        b = json.loads(bundle_json)
+    except (ValueError, TypeError):
+        return
+    vm = b.get("verificationMaterial") if isinstance(b, dict) else None
+    if isinstance(vm, dict) and "x509CertificateChain" in vm:
+        raise VerificationError(
+            "legacy bundle format not supported: the x509CertificateChain "
+            "layout requires the v0.3 single-certificate form"
+        )
+
+
 def reject_duplicate_sct_logs(bundle: Bundle) -> None:
     """SPEC §5.2 anti-replay guard: reject a leaf certificate whose embedded
     SCT list contains two or more SCTs that share the same CT log ID, so a
@@ -110,6 +131,10 @@ def _verify_dsse_bundle(bundle_json: bytes, digest: str, repo: str) -> dict:
         ValueError: If any verification step fails
     """
     verifier = Verifier.production()
+
+    # SPEC §5.2: reject the legacy x509CertificateChain bundle layout.
+    reject_legacy_bundle_format(bundle_json)
+
     bundle = Bundle.from_json(bundle_json)
 
     # SPEC §5.2: reject duplicate-log SCTs before signature/SCT verification.
