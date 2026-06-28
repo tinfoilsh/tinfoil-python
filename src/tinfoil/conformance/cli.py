@@ -137,9 +137,9 @@ def _capabilities() -> dict[str, Any]:
             "predicate_types_understood": [
                 "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1",
             ],
-            # sigstore-python 4.x normalizes bundles via Bundle.from_json
-            # which only accepts the v0.3 mediaType; the older
-            # x509CertificateChain layout would need conversion before load.
+            # reject_legacy_bundle_format rejects the v0.1/v0.2
+            # x509CertificateChain layout; only the v0.3 single-certificate
+            # form is accepted. SPEC §5.2.
             "legacy_bundle_format_supported": False,
             # sigstore-python hardcodes len(tlog_entries) == 1.
             "accepts_multi_tlog_entries": False,
@@ -333,6 +333,11 @@ def _classify(message: str) -> Tuple[str, str]:
         if message.startswith(prefix) or prefix in message:
             return (code, spec_ref)
     low = message.lower()
+
+    # Legacy (v0.1/v0.2 x509CertificateChain) bundle layout, rejected by
+    # reject_legacy_bundle_format.
+    if "legacy bundle format" in low:
+        return ("BUNDLE_MALFORMED", "5.2")
 
     # sigstore-python's `OIDCIssuer` (V1) and `OIDCIssuerV2` policies raise
     # stable English message forms. Catch them before generic patterns. Note

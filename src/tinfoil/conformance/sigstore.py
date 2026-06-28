@@ -18,7 +18,11 @@ from sigstore.verify.policy import (
 )
 
 from ..attestation import Measurement, PredicateType
-from ..sigstore import OIDCIssuerV2Preferred, reject_duplicate_sct_logs
+from ..sigstore import (
+    OIDCIssuerV2Preferred,
+    reject_duplicate_sct_logs,
+    reject_legacy_bundle_format,
+)
 
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 
@@ -103,6 +107,10 @@ def verify_sigstore_bundle_with_policy(
         trusted_root = TrustedRoot.from_file(tr_path)
 
     verifier = Verifier(trusted_root=trusted_root)
+
+    # SPEC §5.2: reject the legacy x509CertificateChain bundle layout.
+    reject_legacy_bundle_format(bundle_bytes)
+
     bundle = Bundle.from_json(bundle_bytes)
 
     # SPEC §5.2: reject duplicate-log SCTs before signature/SCT verification.
