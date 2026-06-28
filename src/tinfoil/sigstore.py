@@ -2,6 +2,7 @@ from sigstore.verify import Verifier
 from sigstore.verify.policy import AllOf, OIDCIssuer, OIDCIssuerV2, GitHubWorkflowRepository, Certificate, _OIDC_GITHUB_WORKFLOW_REF_OID, _OIDC_ISSUER_V2_OID, ExtensionNotFound
 from sigstore.models import Bundle
 from sigstore.errors import VerificationError
+from cryptography.x509 import PrecertificateSignedCertificateTimestamps
 import json
 import re
 
@@ -10,6 +11,32 @@ from .attestation import Measurement, PredicateType, HardwareMeasurement
 from .github import fetch_latest_digest, fetch_attestation_bundle
 
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+
+
+def reject_duplicate_sct_logs(bundle: Bundle) -> None:
+    """SPEC §5.2 anti-replay guard: reject a leaf certificate whose embedded
+    SCT list contains two or more SCTs that share the same CT log ID, so a
+    single (compromised or replayed) log cannot contribute more than one SCT
+    toward the requirement.
+
+    sigstore-python verifies exactly one SCT, so it already rejects this case
+    generically ("Expected one certificate timestamp, found N"); we check
+    explicitly so the rejection is principled and on the same log-ID basis as
+    tinfoil-rs / -js / -go.
+    """
+    try:
+        scts = bundle.signing_certificate.extensions.get_extension_for_class(
+            PrecertificateSignedCertificateTimestamps
+        ).value
+    except ExtensionNotFound:
+        # No SCT extension: the missing-SCT case is the main verifier's concern.
+        return
+    log_ids = [sct.log_id for sct in scts]
+    if len(set(log_ids)) != len(log_ids):
+        raise VerificationError(
+            "duplicate SCT log id: leaf certificate carries multiple SCTs "
+            "from the same CT log"
+        )
 
 
 class OIDCIssuerV2Preferred:
@@ -84,6 +111,9 @@ def _verify_dsse_bundle(bundle_json: bytes, digest: str, repo: str) -> dict:
     """
     verifier = Verifier.production()
     bundle = Bundle.from_json(bundle_json)
+
+    # SPEC §5.2: reject duplicate-log SCTs before signature/SCT verification.
+    reject_duplicate_sct_logs(bundle)
 
     policy = AllOf([
         OIDCIssuerV2Preferred(OIDC_ISSUER),
