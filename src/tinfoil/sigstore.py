@@ -1,5 +1,5 @@
-from sigstore.verify import Verifier 
-from sigstore.verify.policy import AllOf, OIDCIssuer, GitHubWorkflowRepository, Certificate, _OIDC_GITHUB_WORKFLOW_REF_OID, ExtensionNotFound
+from sigstore.verify import Verifier
+from sigstore.verify.policy import AllOf, OIDCIssuer, OIDCIssuerV2, GitHubWorkflowRepository, Certificate, _OIDC_GITHUB_WORKFLOW_REF_OID, _OIDC_ISSUER_V2_OID, ExtensionNotFound
 from sigstore.models import Bundle
 from sigstore.errors import VerificationError
 import json
@@ -10,6 +10,36 @@ from .attestation import Measurement, PredicateType, HardwareMeasurement
 from .github import fetch_latest_digest, fetch_attestation_bundle
 
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+
+
+class OIDCIssuerV2Preferred:
+    """
+    Verifies the certificate's OIDC issuer, preferring the canonical V2
+    extension (1.3.6.1.4.1.57264.1.8) and falling back to the deprecated V1
+    extension (1.3.6.1.4.1.57264.1.1) only when V2 is absent.
+
+    Fulcio populates both extensions from the same OIDC token, but V1 is
+    officially deprecated in favor of V2. Verifying V1 while V2 is present
+    (sigstore-python's default `OIDCIssuer` only reads V1) would let a
+    certificate whose canonical V2 issuer is untrusted pass on a stale or
+    mismatched V1 value, and diverges from tinfoil-go / -rs / -js, which all
+    key on V2 with a V1 fallback. See SPEC §5.3.
+    """
+
+    def __init__(self, issuer: str) -> None:
+        self._v2 = OIDCIssuerV2(issuer)
+        self._v1 = OIDCIssuer(issuer)
+
+    def verify(self, cert: Certificate) -> None:
+        try:
+            cert.extensions.get_extension_for_oid(_OIDC_ISSUER_V2_OID)
+        except ExtensionNotFound:
+            # V2 absent: fall back to the deprecated V1 extension.
+            self._v1.verify(cert)
+            return
+        # V2 present: it is authoritative; the deprecated V1 is ignored.
+        self._v2.verify(cert)
+
 
 class GitHubWorkflowRefPattern:
     """
@@ -56,7 +86,7 @@ def _verify_dsse_bundle(bundle_json: bytes, digest: str, repo: str) -> dict:
     bundle = Bundle.from_json(bundle_json)
 
     policy = AllOf([
-        OIDCIssuer(OIDC_ISSUER),
+        OIDCIssuerV2Preferred(OIDC_ISSUER),
         GitHubWorkflowRepository(repo),
         GitHubWorkflowRefPattern("refs/tags/.*")
     ])
