@@ -14,11 +14,11 @@ from sigstore.verify.policy import (
     Certificate,
     ExtensionNotFound,
     GitHubWorkflowRepository,
-    OIDCIssuer,
     _OIDC_GITHUB_WORKFLOW_REF_OID,
 )
 
 from ..attestation import Measurement, PredicateType
+from ..sigstore import OIDCIssuerV2Preferred
 
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 
@@ -107,7 +107,7 @@ def verify_sigstore_bundle_with_policy(
 
     cert_policy = AllOf(
         [
-            OIDCIssuer(policy.oidc_issuer),
+            OIDCIssuerV2Preferred(policy.oidc_issuer),
             GitHubWorkflowRepository(policy.workflow_repository),
             GitHubWorkflowRefPrefix(policy.workflow_ref_prefix),
         ]
