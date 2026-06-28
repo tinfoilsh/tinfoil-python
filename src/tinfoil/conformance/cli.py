@@ -143,8 +143,10 @@ def _capabilities() -> dict[str, Any]:
             "legacy_bundle_format_supported": False,
             # sigstore-python hardcodes len(tlog_entries) == 1.
             "accepts_multi_tlog_entries": False,
-            # sigstore-python's policy.OIDCIssuer reads V1 (.1.1) before V2.
-            "oidc_issuer_v2_preferred": False,
+            # tinfoil-python's OIDCIssuerV2Preferred policy reads the canonical
+            # V2 (.1.8) extension first and falls back to the deprecated V1
+            # (.1.1) only when V2 is absent — matching go/rs/js. See SPEC §5.3.
+            "oidc_issuer_v2_preferred": True,
             # sigstore-python collapses missing-SCT and duplicate-SCT into
             # the same "Expected one certificate timestamp" error.
             "scts_count_distinguish_missing_vs_duplicate": False,
@@ -331,9 +333,14 @@ def _classify(message: str) -> Tuple[str, str]:
             return (code, spec_ref)
     low = message.lower()
 
-    # sigstore-python's `policy.OIDCIssuer.verify` raises with a stable
-    # English message form. Catch it before generic patterns.
-    if "oidcissuer does not match" in low or "oidc issuer does not match" in low:
+    # sigstore-python's `OIDCIssuer` (V1) and `OIDCIssuerV2` policies raise
+    # stable English message forms. Catch them before generic patterns. Note
+    # "oidcissuerv2 does not match" contains the "oidcissuer" substring, so the
+    # same check covers both the V1 and V2 phrasings; "does not contain"
+    # handles the missing-extension case (cert carries neither .1.1 nor .1.8).
+    if "oidc issuer does not match" in low or (
+        "oidcissuer" in low and ("does not match" in low or "does not contain" in low)
+    ):
         return ("OIDC_ISSUER_MISMATCH", "5.3")
     if "githubworkflowrepository does not match" in low:
         return ("WORKFLOW_REPOSITORY_MISMATCH", "5.3")
