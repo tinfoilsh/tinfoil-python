@@ -13,6 +13,24 @@ from .github import fetch_latest_digest, fetch_attestation_bundle
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 
 
+_INTOTO_STATEMENT_FIELDS = frozenset({"_type", "subject", "predicateType", "predicate"})
+
+
+def reject_unknown_intoto_fields(statement: dict) -> None:
+    """SPEC §5.4: the in-toto statement MUST contain only the recognized
+    top-level fields (_type, subject, predicateType, predicate). Reject any
+    unknown top-level field, matching tinfoil-go (sigstore-go's strict protojson
+    parser rejects them). Tinfoil produces canonical statements, so an unknown
+    top-level field signals a non-canonical or malformed statement.
+    """
+    extra = set(statement) - _INTOTO_STATEMENT_FIELDS
+    if extra:
+        raise VerificationError(
+            "in-toto statement has unknown top-level field(s): "
+            + ", ".join(sorted(extra))
+        )
+
+
 def reject_duplicate_sct_logs(bundle: Bundle) -> None:
     """SPEC §5.2 anti-replay guard: reject a leaf certificate whose embedded
     SCT list contains two or more SCTs that share the same CT log ID, so a
@@ -127,6 +145,7 @@ def _verify_dsse_bundle(bundle_json: bytes, digest: str, repo: str) -> dict:
         raise ValueError(f"Unsupported payload type: {payload_type}")
 
     statement = json.loads(payload_bytes)
+    reject_unknown_intoto_fields(statement)
 
     subjects = statement.get("subject", [])
     if not subjects or "digest" not in subjects[0] or "sha256" not in subjects[0].get("digest", {}):
