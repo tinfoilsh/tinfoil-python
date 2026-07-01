@@ -22,6 +22,7 @@ from ..sigstore import (
     OIDCIssuerV2Preferred,
     reject_duplicate_sct_logs,
     reject_legacy_bundle_format,
+    reject_unknown_intoto_fields,
 )
 
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
@@ -132,6 +133,7 @@ def verify_sigstore_bundle_with_policy(
         )
 
     statement = json.loads(payload_bytes)
+    reject_unknown_intoto_fields(statement)
     stmt_type = statement.get("_type")
     if (
         policy.in_toto_statement_types_allowed is not None
