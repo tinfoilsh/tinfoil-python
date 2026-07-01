@@ -157,9 +157,9 @@ def _capabilities() -> dict[str, Any]:
             "rejects_duplicate_sct_log": True,
             # sigstore-python's verify_dsse checks subject[0] only.
             "checks_only_subject_0": True,
-            # sigstore-python's in-toto parser tolerates extra top-level
-            # fields (pydantic's extra=allow on the statement model).
-            "in_toto_statement_tolerates_extra_fields": True,
+            # reject_unknown_intoto_fields rejects statements with unknown
+            # top-level fields (SPEC §5.4), matching go.
+            "in_toto_statement_tolerates_extra_fields": False,
         },
         "measurement": {
             "compare_multiplatform_to_tdx_supported": True,
@@ -338,6 +338,11 @@ def _classify(message: str) -> Tuple[str, str]:
     # reject_legacy_bundle_format.
     if "legacy bundle format" in low:
         return ("BUNDLE_MALFORMED", "5.2")
+
+    # in-toto statement with unknown top-level fields, rejected by
+    # reject_unknown_intoto_fields (SPEC §5.4).
+    if "unknown top-level field" in low:
+        return ("BUNDLE_MALFORMED", "5.4")
 
     # sigstore-python's `OIDCIssuer` (V1) and `OIDCIssuerV2` policies raise
     # stable English message forms. Catch them before generic patterns. Note
