@@ -177,6 +177,9 @@ def _capabilities() -> dict[str, Any]:
             # lands when Phase 3 fixtures need it.
             "supported": True,
             "injected_collateral_supported": True,
+            # verify-full's TDX sub-runner (_run_verify_attestation_tdx_inner)
+            # is wired, so standard/bundle-flow TDX fixtures run end-to-end.
+            "verify_full_supported": True,
             # cert_utils.verify_intel_chain et al. call datetime.now()
             # unconditionally — the lib has no public time-injection API.
             # cmd_verify_attestation_tdx works around this by monkey-
@@ -2073,6 +2076,63 @@ def _classify_measurement_compare_error(e: Exception) -> tuple[str, str]:
     return "MEASUREMENT_MISMATCH", "7.3"
 
 
+def _run_verify_attestation_tdx_inner(
+    inp: dict[str, Any],
+) -> "Measurement | tuple[str, str, str]":
+    """Inner TDX verification — shared by cmd_verify_full. Verifies the quote the
+    same way the standalone verify-attestation-tdx stage does (parse +
+    verify_tdx_quote_crypto + collateral evaluation + extended-TD policy) and
+    returns a TdxGuestV2 Measurement on success, or an (code, spec_ref, message)
+    tuple on failure."""
+    try:
+        quote_bytes = base64.b64decode(inp["quote_b64"])
+    except Exception as e:
+        return ("QUOTE_FORMAT_UNSUPPORTED", "A.3", f"quote_b64 not valid base64: {e}")
+    try:
+        quote = parse_tdx_quote(quote_bytes)
+    except Exception as e:
+        code, ref = _classify_tdx_error(e)
+        return (code, ref, str(e))
+
+    policy = inp.get("policy") or {}
+    tcb_eval_required = policy.get("tcb_evaluation_required", True)
+    collateral_in = inp.get("collateral") or {}
+    custom_root_pem = collateral_in.get("intel_root_ca_pem")
+    fixture_date = inp.get("expiration_check_date_unix")
+    with _maybe_override_intel_root(custom_root_pem), _maybe_override_time(fixture_date):
+        try:
+            pck_chain = verify_tdx_quote_crypto(quote, quote_bytes)
+        except TdxVerificationError as e:
+            code, ref = _classify_tdx_error(e)
+            return (code, ref, str(e))
+        except Exception as e:
+            code, ref = _classify_tdx_error(e)
+            return (code, ref, f"unexpected: {e}")
+
+        if tcb_eval_required:
+            code, ref, msg = _evaluate_collateral(
+                quote, pck_chain, collateral_in, fixture_date, policy
+            )
+            if code:
+                return (code, ref, msg)
+
+    code, msg = _enforce_extended_policy(quote_bytes, policy)
+    if code:
+        return (code, "4.8", msg)
+
+    body = quote.td_quote_body
+    return Measurement(
+        type=PredicateType.TDX_GUEST_V2,
+        registers=[
+            body.mr_td.hex(),
+            body.rtmrs[0].hex(),
+            body.rtmrs[1].hex(),
+            body.rtmrs[2].hex(),
+            body.rtmrs[3].hex(),
+        ],
+    )
+
+
 def cmd_verify_full() -> int:
     try:
         raw = sys.stdin.read()
@@ -2104,17 +2164,26 @@ def cmd_verify_full() -> int:
         sig_measurement = sig_result.measurement
 
         sev_in = data.get("attestation_sev")
-        if not isinstance(sev_in, dict):
+        tdx_in = data.get("attestation_tdx")
+        if isinstance(sev_in, dict):
+            platform = "sev-snp"
+            sev_result = _run_verify_attestation_sev_inner(sev_in)
+            if isinstance(sev_result[0], str):
+                code, spec_ref, msg = sev_result  # type: ignore[misc]
+                return _emit_full_rejection(code, "verify-attestation-sev", spec_ref, msg)
+            att_measurement, _report, _body = sev_result
+        elif isinstance(tdx_in, dict):
+            platform = "tdx"
+            tdx_result = _run_verify_attestation_tdx_inner(tdx_in)
+            if isinstance(tdx_result, tuple):
+                code, spec_ref, msg = tdx_result
+                return _emit_full_rejection(code, "verify-attestation-tdx", spec_ref, msg)
+            att_measurement = tdx_result
+        else:
             return _emit_full_rejection(
                 "BUNDLE_MALFORMED", "verify-full", "11.1",
-                'mode="standard"/"bundle" requires attestation_sev '
-                "(TDX path not wired yet on Python)",
+                'mode="standard"/"bundle" requires attestation_sev or attestation_tdx',
             )
-        sev_result = _run_verify_attestation_sev_inner(sev_in)
-        if isinstance(sev_result[0], str):
-            code, spec_ref, msg = sev_result  # type: ignore[misc]
-            return _emit_full_rejection(code, "verify-attestation-sev", spec_ref, msg)
-        att_measurement, _report, _body = sev_result
 
         try:
             sig_measurement.assert_equal(att_measurement)
@@ -2128,7 +2197,7 @@ def cmd_verify_full() -> int:
             "accepted": True,
             "outputs": {
                 "mode": mode,
-                "platform": "sev-snp",
+                "platform": platform,
                 "sigstore_measurement": {
                     "type": sig_measurement.type.value
                     if hasattr(sig_measurement.type, "value")
