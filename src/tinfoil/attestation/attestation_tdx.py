@@ -70,8 +70,8 @@ EXPECTED_MINIMUM_TEE_TCB_SVN = bytes.fromhex("03010200000000000000000000000000")
 ACCEPTED_MR_SEAMS: tuple[bytes, ...] = (
     bytes.fromhex("476a2997c62bccc78370913d0a80b956e3721b24272bc66c4d6307ced4be2865c40e26afac75f12df3425b03eb59ea7c"),  # TDX Module 2.0.08
     bytes.fromhex("7bf063280e94fb051f5dd7b1fc59ce9aac42bb961df8d44b709c9b0ff87a7b4df648657ba6d1189589feab1d5a3c9a9d"),  # TDX Module 1.5.16
-    bytes.fromhex("685f891ea5c20e8fa27b151bf34bf3b50fbaf7143cc53662727cbdb167c0ad8385f1f6f3571539a91e104a1c96d75e04"),  # TDX Module 2.0.02
-    bytes.fromhex("49b66faa451d19ebbdbe89371b8daf2b65aa3984ec90110343e9e2eec116af08850fa20e3b1aa9a874d77a65380ee7e6"),  # TDX Module 1.5.08
+    bytes.fromhex("fca4ff221293807e3d247416299ca39a236872df4eb414567ca96072d3fde7dead740f807eefe2f7d938499c03cc8aba"),  # TDX Module 1.5.25
+    bytes.fromhex("aef4ed3e686fe6cf44c9a8d1cc63105443b558ac4f40c282abf78271e9a4586c50408c8584c7b43fd21edb736700ba5f"),  # TDX Module 2.0.14
 )
 
 
