@@ -56,6 +56,31 @@ TransportMode = Literal["ehbp", "tls"]
 DEFAULT_TRANSPORT_MODE: TransportMode = "ehbp"
 
 
+def _parse_http_url(url: str, parameter: str, *, https_only: bool = False):
+    try:
+        parsed = urlparse(url)
+        parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{parameter} must be a valid absolute URL; got {url!r}") from exc
+
+    scheme = parsed.scheme.lower()
+    allowed_schemes = ("https",) if https_only else ("http", "https")
+    if scheme not in allowed_schemes or not parsed.netloc or not parsed.hostname:
+        requirement = "https" if https_only else "http or https"
+        raise ValueError(
+            f"{parameter} must be a valid absolute URL using {requirement}; got {url!r}"
+        )
+    return parsed
+
+
+def _url_origin(url: str) -> tuple[str, str, int]:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    default_port = 443 if scheme == "https" else 80
+    port = parsed.port if parsed.port is not None else default_port
+    return scheme, parsed.hostname or "", port
+
+
 class _PinMismatchError(ValueError):
     """
     Raised when the enclave's TLS certificate fails our pin check (wrong
@@ -397,11 +422,7 @@ def _enclave_url_header(base_url: str, enclave: str) -> tuple[str, bool]:
     if not base_url or not enclave:
         return "", False
     enclave_url = f"https://{enclave}"
-    proxy = urlparse(base_url)
-    if not proxy.netloc:
-        return "", False
-    enclave_parsed = urlparse(enclave_url)
-    if (proxy.scheme, proxy.netloc) == (enclave_parsed.scheme, enclave_parsed.netloc):
+    if _url_origin(base_url) == _url_origin(enclave_url):
         return "", False
     return enclave_url, True
 
@@ -451,7 +472,7 @@ class _AsyncEnclaveURLHeaderTransport(httpx.AsyncBaseTransport):
 class SecureClient:
     """A client that verifies and communicates with secure enclaves"""
     
-    def __init__(self, enclave: str = "", repo: str = DEFAULT_CONFIG_REPO, measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: str = "", attestation_bundle_url: str = ""):
+    def __init__(self, enclave: str = "", repo: str = DEFAULT_CONFIG_REPO, measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: Optional[str] = None, attestation_bundle_url: str = ""):
         # Hardcoded measurement takes precedence over repo
         if measurement is not None:
             repo = ""
@@ -472,23 +493,18 @@ class SecureClient:
                 "the bundle provides its own code measurement."
             )
 
-        # EHBP and TLS pinning leave request headers (which may carry the API
-        # key) in plaintext, so a proxy base URL must be https.
-        if base_url and urlparse(base_url).scheme != "https":
-            raise ValueError(f"base_url must use https; got {base_url!r}")
+        if base_url is not None:
+            _parse_http_url(base_url, "base_url")
 
         # The attestation bundle is the entire trust root for verification.
         # Fetching it over plaintext would let an attacker substitute the bundle
         # (MITM), so the bundle URL must be https.
-        if attestation_bundle_url and urlparse(attestation_bundle_url).scheme != "https":
-            raise ValueError(
-                f"attestation_bundle_url must use https; got {attestation_bundle_url!r}"
+        if attestation_bundle_url:
+            _parse_http_url(
+                attestation_bundle_url,
+                "attestation_bundle_url",
+                https_only=True,
             )
-
-        # Routing through a proxy base URL relies on EHBP sealing the body to the
-        # enclave; TLS certificate pinning would reject the proxy's certificate.
-        if base_url and transport != "ehbp":
-            raise ValueError("base_url is only supported with the 'ehbp' transport")
 
         # If enclave is empty, fetch a random one from the routers API. When
         # attesting from a bundle, the enclave host comes from the verified
@@ -500,11 +516,12 @@ class SecureClient:
         self.repo = repo
         self.measurement = measurement
         self.transport = transport
-        self.base_url = base_url
+        self.base_url = base_url or ""
         self.attestation_bundle_url = attestation_bundle_url
         self._ground_truth: Optional[GroundTruth] = None
         self._verification_document: Optional[VerificationDocument] = None
         self._low_level_http_client: Optional[httpx.Client] = None
+        self._validate_tls_base_url()
 
     @property
     def ground_truth(self) -> Optional[GroundTruth]:
@@ -562,14 +579,27 @@ class SecureClient:
     def _rebuild_sync_transport(self) -> httpx.BaseTransport:
         """Re-run attestation and return a fresh sync httpx transport."""
         expected_fp = self.verify().public_key
+        self._validate_tls_base_url()
         ctx = self._build_sync_ssl_context(expected_fp)
         return httpx.HTTPTransport(verify=ctx)
 
     async def _rebuild_async_transport(self) -> httpx.AsyncBaseTransport:
         """Re-run attestation without blocking the event loop."""
         expected_fp = (await asyncio.to_thread(self.verify)).public_key
+        self._validate_tls_base_url()
         ctx = self._build_async_ssl_context(expected_fp)
         return httpx.AsyncHTTPTransport(verify=ctx)
+
+    def _validate_tls_base_url(self) -> None:
+        if self.transport != "tls" or not self.base_url or not self.enclave:
+            return
+        enclave_url = f"https://{self.enclave}"
+        enclave_origin = _url_origin(enclave_url)
+        if _url_origin(self.base_url) != enclave_origin:
+            raise ValueError(
+                "TLS base_url must use the verified enclave origin "
+                f"{enclave_url!r}"
+            )
 
     def _require_hpke_public_key(self) -> str:
         """Re-run attestation and return the attested HPKE public key."""
@@ -605,8 +635,8 @@ class SecureClient:
         the request once.
 
         Redirects are not followed: a redirect target bypasses the enclave/proxy
-        host binding, so following one could leak plaintext headers (including
-        the API key) to an arbitrary host.
+        host binding, so following one could disclose sensitive headers
+        (including the API key) to an arbitrary host.
         """
         if self.transport == "ehbp":
             inner = self._build_ehbp_sync_transport()
@@ -616,6 +646,7 @@ class SecureClient:
             return httpx.Client(transport=transport, follow_redirects=False)
 
         expected_fp = self.verify().public_key
+        self._validate_tls_base_url()
         ctx = self._build_sync_ssl_context(expected_fp)
         inner = httpx.HTTPTransport(verify=ctx)
         transport = _ReVerifyingTransport(self, inner)
@@ -635,8 +666,8 @@ class SecureClient:
         the request once.
 
         Redirects are not followed: a redirect target bypasses the enclave/proxy
-        host binding, so following one could leak plaintext headers (including
-        the API key) to an arbitrary host.
+        host binding, so following one could disclose sensitive headers
+        (including the API key) to an arbitrary host.
         """
         if self.transport == "ehbp":
             hpke_public_key = self._require_hpke_public_key()
@@ -647,6 +678,7 @@ class SecureClient:
             return httpx.AsyncClient(transport=transport, follow_redirects=False)
 
         expected_fp = self.verify().public_key
+        self._validate_tls_base_url()
         ctx = self._build_async_ssl_context(expected_fp)
         inner = httpx.AsyncHTTPTransport(verify=ctx)
         transport = _AsyncReVerifyingTransport(self, inner)
@@ -860,6 +892,7 @@ class SecureClient:
         """
         if not self._ground_truth:
             self._ground_truth = self.verify()
+        self._validate_tls_base_url()
 
         if self.transport == "ehbp":
             raise ValueError(
@@ -877,30 +910,25 @@ class SecureClient:
             self._low_level_http_client = self.make_secure_http_client()
         return self._low_level_http_client
 
-    def _allowed_request_endpoints(self) -> set:
-        """(host, port) pairs a request may target: the attested enclave and, if set, the proxy."""
-        endpoints = set()
-        enclave = urlparse(f"//{self.enclave}")
-        if enclave.hostname:
-            endpoints.add((enclave.hostname, enclave.port or 443))
+    def _allowed_request_origins(self) -> set:
+        """Origins a request may target: the attested enclave and, if set, the proxy."""
+        origins = set()
+        if self.enclave:
+            origins.add(_url_origin(f"https://{self.enclave}"))
         if self.base_url:
-            proxy = urlparse(self.base_url)
-            if proxy.hostname:
-                endpoints.add((proxy.hostname, proxy.port or 443))
-        return endpoints
+            origins.add(_url_origin(self.base_url))
+        return origins
 
     def assert_request_allowed(self, url: str) -> None:
         """
-        Guards the low-level escape hatches. Neither EHBP nor TLS pinning
-        encrypts request headers (which may carry the API key), so a request may
-        only target the attested enclave or the configured proxy, and only over
-        https. The port is part of the binding so headers cannot be diverted to a
-        different service listening on an allowed host. Raises ValueError otherwise.
+        Guards the low-level escape hatches. EHBP does not encrypt request
+        headers end-to-end; TLS encrypts them in transit, but another endpoint
+        would still receive them. A request may therefore only target the
+        attested enclave or configured proxy over its exact HTTP(S) origin. The
+        scheme and port are part of the binding. Raises ValueError otherwise.
         """
         parsed = urlparse(url)
-        if parsed.scheme != "https":
-            raise ValueError(f"refusing to send request over non-https URL {url!r}")
-        if (parsed.hostname, parsed.port or 443) not in self._allowed_request_endpoints():
+        if _url_origin(url) not in self._allowed_request_origins():
             raise ValueError(
                 f"refusing to send request to host {parsed.hostname!r}: this "
                 f"secure client is bound to enclave {self.enclave!r}"

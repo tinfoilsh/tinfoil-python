@@ -28,7 +28,7 @@ class TinfoilAI:
         measurement: Optional[dict] = None,
         timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
         transport: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: str = "",
+        base_url: Optional[str] = None,
         attestation_bundle_url: str = "",
     ):
         if measurement is not None:
@@ -82,7 +82,7 @@ class AsyncTinfoilAI:
         measurement: Optional[dict] = None,
         timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
         transport: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: str = "",
+        base_url: Optional[str] = None,
         attestation_bundle_url: str = "",
     ):
         if measurement is not None:
@@ -144,7 +144,7 @@ class _HTTPSecureClient:
         return self._http_client.post(url, headers=headers, data=data, json=json, timeout=timeout)
 
 
-def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: str = "", attestation_bundle_url: str = ""):
+def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: Optional[str] = None, attestation_bundle_url: str = ""):
     """Create a secure HTTP client for direct GET/POST through the Tinfoil enclave."""
     if measurement is not None:
         repo = ""

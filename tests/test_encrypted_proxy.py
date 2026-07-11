@@ -136,13 +136,13 @@ class TestProxyTransportWiring:
     """make_secure_http_client wraps the EHBP transport with the header
     transport only when routing through a proxy of a different origin."""
 
-    def _client(self, base_url: str):
+    def _client(self, base_url: str | None):
         sc = SecureClient(enclave="enclave.test", repo="org/repo", transport="ehbp", base_url=base_url)
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
         return sc
 
     def test_sync_wraps_when_proxying(self):
-        sc = self._client("https://proxy.example.com/")
+        sc = self._client("http://proxy.example.com/")
         client = sc.make_secure_http_client()
         try:
             assert isinstance(client._transport, _EnclaveURLHeaderTransport)
@@ -162,7 +162,7 @@ class TestProxyTransportWiring:
             client.close()
 
     def test_sync_no_wrap_without_base_url(self):
-        sc = self._client("")
+        sc = self._client(None)
         client = sc.make_secure_http_client()
         try:
             assert isinstance(client._transport, _EHBPReVerifyingTransport)
@@ -180,9 +180,9 @@ class TestProxyTransportWiring:
 
 class TestProxyHostBinding:
     """make_request must accept the configured proxy host in addition to the
-    enclave host, and still reject unrelated hosts (headers are plaintext)."""
+    enclave host, and still reject unrelated hosts that could receive headers."""
 
-    def _client_with_mock(self, base_url: str = ""):
+    def _client_with_mock(self, base_url: str | None = None):
         sc = SecureClient(enclave="enclave.test", repo="org/repo", transport="ehbp", base_url=base_url)
         http_client = MagicMock()
         http_client.request.return_value = httpx.Response(200, content=b"ok")
@@ -190,10 +190,10 @@ class TestProxyHostBinding:
         return sc, http_client
 
     def test_allows_proxy_host(self):
-        sc, http_client = self._client_with_mock("https://proxy.example.com/")
-        resp = sc.get("https://proxy.example.com/v1/models")
+        sc, http_client = self._client_with_mock("http://proxy.example.com/")
+        resp = sc.get("http://proxy.example.com/v1/models")
         assert resp.status_code == 200
-        assert http_client.request.call_args.args[1] == "https://proxy.example.com/v1/models"
+        assert http_client.request.call_args.args[1] == "http://proxy.example.com/v1/models"
 
     def test_still_allows_enclave_host(self):
         sc, http_client = self._client_with_mock("https://proxy.example.com/")
@@ -209,9 +209,9 @@ class TestProxyHostBinding:
 
 class TestAssertRequestAllowed:
     """The low-level escape hatches must stay bound to the enclave/proxy host
-    and refuse plaintext (non-https) destinations."""
+    and exact configured origin."""
 
-    def _sc(self, base_url: str = ""):
+    def _sc(self, base_url: str | None = None):
         return SecureClient(enclave="enclave.test", repo="org/repo", transport="ehbp", base_url=base_url)
 
     def test_allows_enclave_https(self):
@@ -220,13 +220,20 @@ class TestAssertRequestAllowed:
     def test_allows_proxy_https(self):
         self._sc("https://proxy.example.com/").assert_request_allowed("https://proxy.example.com/v1/models")
 
+    def test_allows_proxy_http(self):
+        self._sc("http://proxy.example.com/").assert_request_allowed("http://proxy.example.com/v1/models")
+
     def test_rejects_foreign_host(self):
         with pytest.raises(ValueError, match="evil.example.com"):
             self._sc().assert_request_allowed("https://evil.example.com/v1/models")
 
-    def test_rejects_non_https(self):
-        with pytest.raises(ValueError, match="non-https"):
+    def test_rejects_unconfigured_http_origin(self):
+        with pytest.raises(ValueError, match="enclave.test"):
             self._sc().assert_request_allowed("http://enclave.test/v1/models")
+
+    def test_rejects_unsupported_scheme(self):
+        with pytest.raises(ValueError, match="enclave.test"):
+            self._sc().assert_request_allowed("ftp://enclave.test/v1/models")
 
     def test_rejects_non_default_port_on_allowed_host(self):
         with pytest.raises(ValueError, match="enclave.test"):
@@ -240,12 +247,20 @@ class TestAssertRequestAllowed:
         with pytest.raises(ValueError):
             sc.assert_request_allowed("https://proxy.example.com:9000/v1/models")
 
+    def test_http_proxy_uses_port_80_by_default(self):
+        sc = self._sc("http://proxy.example.com/")
+        sc.assert_request_allowed("http://proxy.example.com:80/v1/models")
+        with pytest.raises(ValueError):
+            sc.assert_request_allowed("http://proxy.example.com:443/v1/models")
+        with pytest.raises(ValueError):
+            sc.assert_request_allowed("http://proxy.example.com:0/v1/models")
+
 
 class TestLowLevelHostBinding:
     """NewSecureClient's get()/post() must enforce the host/scheme guard so an
     API key in headers cannot be sent to a caller-supplied host."""
 
-    def _client(self, base_url: str = ""):
+    def _client(self, base_url: str | None = None):
         sc = SecureClient(enclave="enclave.test", repo="org/repo", transport="ehbp", base_url=base_url)
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
         client = tinfoil_module._HTTPSecureClient("enclave.test", sc)
@@ -260,9 +275,9 @@ class TestLowLevelHostBinding:
             client.get("https://evil.example.com/v1/models")
         client._http_client.get.assert_not_called()
 
-    def test_post_rejects_non_https(self):
+    def test_post_rejects_unconfigured_http_origin(self):
         client = self._client()
-        with pytest.raises(ValueError, match="non-https"):
+        with pytest.raises(ValueError, match="enclave.test"):
             client.post("http://enclave.test/v1/chat/completions", json={})
         client._http_client.post.assert_not_called()
 
@@ -330,22 +345,50 @@ class TestMatchesHostname:
 
 
 class TestConstructorValidation:
-    """The constructor rejects insecure or contradictory proxy configuration."""
+    """The constructor validates proxy and attestation URL configuration."""
 
-    def test_base_url_must_be_https(self):
-        with pytest.raises(ValueError, match="https"):
-            SecureClient(enclave="enclave.test", repo="org/repo", base_url="http://proxy.example.com/")
+    def test_http_base_url_is_accepted(self):
+        sc = SecureClient(enclave="enclave.test", repo="org/repo", base_url="http://proxy.example.com/")
+        assert sc.base_url == "http://proxy.example.com/"
 
     def test_https_base_url_is_accepted(self):
         sc = SecureClient(enclave="enclave.test", repo="org/repo", base_url="https://proxy.example.com/")
         assert sc.base_url == "https://proxy.example.com/"
 
-    def test_base_url_requires_ehbp_transport(self):
-        with pytest.raises(ValueError, match="ehbp"):
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "",
+            "proxy.example.com",
+            "ftp://proxy.example.com",
+            "https://",
+            "https://proxy.example.com:bad",
+            "://",
+        ],
+    )
+    def test_base_url_must_be_absolute_http_url(self, base_url):
+        with pytest.raises(ValueError, match="valid absolute URL"):
+            SecureClient(enclave="enclave.test", repo="org/repo", base_url=base_url)
+
+    def test_tls_base_url_allows_same_origin_path(self):
+        sc = SecureClient(
+            enclave="enclave.test",
+            repo="org/repo",
+            base_url="https://enclave.test/custom/v1/",
+            transport="tls",
+        )
+        assert sc.base_url == "https://enclave.test/custom/v1/"
+
+    @pytest.mark.parametrize(
+        "base_url",
+        ["https://proxy.example.com/v1/", "http://enclave.test/v1/"],
+    )
+    def test_tls_base_url_rejects_other_origins(self, base_url):
+        with pytest.raises(ValueError, match="verified enclave origin"):
             SecureClient(
                 enclave="enclave.test",
                 repo="org/repo",
-                base_url="https://proxy.example.com/",
+                base_url=base_url,
                 transport="tls",
             )
 
