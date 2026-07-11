@@ -113,7 +113,7 @@ class TestTransportSelection:
 class TestRedirectsDisabled:
     """The secure clients must not follow redirects: a redirect target is not
     re-checked against the enclave/proxy host binding, so following one could
-    leak plaintext headers (including the API key) to an arbitrary host."""
+    disclose sensitive headers (including the API key) to an arbitrary host."""
 
     def test_sync_ehbp_client_does_not_follow_redirects(self):
         sc = _secure_client("ehbp")
