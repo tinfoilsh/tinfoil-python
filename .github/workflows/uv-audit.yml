@@ -29,4 +29,14 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
 
       - name: Audit dependencies
-        run: uv audit
+        # GHSA-537c-gmf6-5ccf: vulnerable OpenSSL statically linked into
+        # cryptography wheels (<48.0.1). Not reachable from tinfoil: the bundle's
+        # only High-severity CVE (CVE-2026-45447) is in OpenSSL's PKCS7_verify /
+        # S/MIME path, which we never use. Our sole OpenSSL usage is X.509
+        # cert-chain verification and ECDSA signature checks (attestation/verify_sev.py);
+        # the only theoretically-reachable CVEs are Low-severity ASN.1 bugs that
+        # require multi-gigabyte inputs and, worst case, crash the client (fail-closed).
+        # TODO: we can remove this flag and bump the cryptography version
+        # directly once pyhpke creates a new release (see
+        # https://github.com/dajiaji/pyhpke/pull/340)
+        run: uv audit --ignore GHSA-537c-gmf6-5ccf
