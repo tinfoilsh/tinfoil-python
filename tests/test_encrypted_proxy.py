@@ -28,10 +28,17 @@ from tinfoil.attestation.types import Measurement, PredicateType, Verification
 from tinfoil.client import (
     ENCLAVE_URL_HEADER,
     GroundTruth,
+    _AsyncEHBPReVerifyingTransport,
     _AsyncEnclaveURLHeaderTransport,
+    _AsyncHostBoundTransport,
     _EHBPReVerifyingTransport,
     _EnclaveURLHeaderTransport,
+    _HostBoundTransport,
     _enclave_url_header,
+)
+from tinfoil.user_cache_secret import (
+    _AsyncUserCacheSecretTransport,
+    _UserCacheSecretTransport,
 )
 
 
@@ -145,8 +152,14 @@ class TestProxyTransportWiring:
         sc = self._client("http://proxy.example.com/")
         client = sc.make_secure_http_client()
         try:
-            assert isinstance(client._transport, _EnclaveURLHeaderTransport)
-            assert isinstance(client._transport._inner, _EHBPReVerifyingTransport)
+            # The user-cache-secret layer injects into the body before the
+            # EHBP re-verifying transport seals it.
+            assert isinstance(client._transport, _HostBoundTransport)
+            header = client._transport._inner
+            assert isinstance(header, _EnclaveURLHeaderTransport)
+            ucs = header._inner
+            assert isinstance(ucs, _UserCacheSecretTransport)
+            assert isinstance(ucs._inner, _EHBPReVerifyingTransport)
         finally:
             client.close()
 
@@ -157,7 +170,8 @@ class TestProxyTransportWiring:
         sc = self._client("https://enclave.test/v1/")
         client = sc.make_secure_http_client()
         try:
-            assert isinstance(client._transport, _EnclaveURLHeaderTransport)
+            assert isinstance(client._transport, _HostBoundTransport)
+            assert isinstance(client._transport._inner, _EnclaveURLHeaderTransport)
         finally:
             client.close()
 
@@ -165,7 +179,11 @@ class TestProxyTransportWiring:
         sc = self._client(None)
         client = sc.make_secure_http_client()
         try:
-            assert isinstance(client._transport, _EHBPReVerifyingTransport)
+            # No header transport without a proxy; the user-cache-secret layer
+            # still wraps the sealing transport.
+            assert isinstance(client._transport, _HostBoundTransport)
+            assert isinstance(client._transport._inner, _UserCacheSecretTransport)
+            assert isinstance(client._transport._inner._inner, _EHBPReVerifyingTransport)
         finally:
             client.close()
 
@@ -173,7 +191,12 @@ class TestProxyTransportWiring:
         sc = self._client("https://proxy.example.com/")
         client = sc.make_secure_async_http_client()
         try:
-            assert isinstance(client._transport, _AsyncEnclaveURLHeaderTransport)
+            assert isinstance(client._transport, _AsyncHostBoundTransport)
+            header = client._transport._inner
+            assert isinstance(header, _AsyncEnclaveURLHeaderTransport)
+            ucs = header._inner
+            assert isinstance(ucs, _AsyncUserCacheSecretTransport)
+            assert isinstance(ucs._inner, _AsyncEHBPReVerifyingTransport)
         finally:
             asyncio.run(client.aclose())
 

@@ -5,7 +5,7 @@ import tinfoil
 
 
 class FakeSecureClient:
-    def __init__(self, enclave, repo, measurement, transport="ehbp", base_url="", attestation_bundle_url=""):
+    def __init__(self, enclave, repo, measurement, transport="ehbp", base_url="", attestation_bundle_url="", user_cache_secret=None):
         self.enclave = enclave
         self.repo = repo
         self.measurement = measurement

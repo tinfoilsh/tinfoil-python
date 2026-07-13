@@ -123,6 +123,36 @@ resp = tfclient.post(
 print(resp.status_code, resp.text)
 ```
 
+## Prompt Cache Scoping
+
+The inference router partitions its prompt cache per API identity, so your cached prompts are never observable by other tenants. Within your tenant, the SDK scopes caching further with a `user_cache_secret`: requests carrying the same secret share cached prompt prefixes, requests carrying different secrets cannot observe each other's cache timing. The secret never reaches the model — the router consumes it to derive the cache namespace and strips it from the request.
+
+By default the SDK generates a random secret and persists it at `~/.tinfoil/user_cache_secret` (mode `0600`, shared with the other Tinfoil SDKs on the same machine), so caching just works with per-machine scoping. You can control it explicitly:
+
+```python
+from tinfoil import TinfoilAI
+
+# Pin the secret for this client (e.g. one stable value per end user)
+client = TinfoilAI(api_key=api_key, user_cache_secret=secret)
+
+# Or provision it via the environment
+#   TINFOIL_USER_CACHE_SECRET=<secret>   use this value
+#   TINFOIL_USER_CACHE_SECRET=           (set but empty) disable: tenant-wide caching
+
+# Servers that hold many end users' conversations should scope per request;
+# a field set here always wins over the client-level secret:
+chat_completion = client.chat.completions.create(
+    model="llama3-3-70b",
+    messages=[{"role": "user", "content": "Hi"}],
+    extra_body={"user_cache_secret": per_user_secret},
+)
+
+# Opt out entirely (tenant-wide caching, no file written)
+client = TinfoilAI(api_key=api_key, user_cache_secret="")
+```
+
+`AsyncTinfoilAI` and `NewSecureClient` accept the same `user_cache_secret` parameter. If the secret cannot be persisted (no home directory, read-only filesystem), the SDK falls back to an in-memory secret and warns once: cache continuity then resets on every process restart. Containerized deployments should set `TINFOIL_USER_CACHE_SECRET` explicitly — one value per end user if requests are per-user, or empty to keep tenant-wide caching across replicas.
+
 ## Security
 
 Please report security vulnerabilities by emailing [security@tinfoil.sh](mailto:security@tinfoil.sh).

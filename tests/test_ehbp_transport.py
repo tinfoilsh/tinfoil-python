@@ -16,6 +16,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from ehbp import EHBPTransport, KeyConfigMismatchError
+from openai import APIConnectionError, OpenAI
 
 from tinfoil import AsyncTinfoilAI, SecureClient, TinfoilAI
 from tinfoil.client import (
@@ -23,8 +24,14 @@ from tinfoil.client import (
     GroundTruth,
     get_router_address,
     _AsyncEHBPReVerifyingTransport,
+    _AsyncHostBoundTransport,
     _EHBPReVerifyingTransport,
+    _HostBoundTransport,
     _ReVerifyingTransport,
+)
+from tinfoil.user_cache_secret import (
+    _AsyncUserCacheSecretTransport,
+    _UserCacheSecretTransport,
 )
 
 
@@ -73,12 +80,18 @@ class TestRequireHPKEKey:
 
 
 class TestTransportSelection:
+    # The user-cache-secret layer (the conftest fixture pins the secret)
+    # injects into the body before the sealing transport encrypts it.
     def test_ehbp_mode_builds_ehbp_transport(self):
         sc = _secure_client("ehbp")
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
         client = sc.make_secure_http_client()
         try:
-            assert isinstance(client._transport, _EHBPReVerifyingTransport)
+            bound = client._transport
+            assert isinstance(bound, _HostBoundTransport)
+            ucs = bound._inner
+            assert isinstance(ucs, _UserCacheSecretTransport)
+            assert isinstance(ucs._inner, _EHBPReVerifyingTransport)
         finally:
             client.close()
 
@@ -87,7 +100,11 @@ class TestTransportSelection:
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
         client = sc.make_secure_http_client()
         try:
-            assert isinstance(client._transport, _ReVerifyingTransport)
+            bound = client._transport
+            assert isinstance(bound, _HostBoundTransport)
+            ucs = bound._inner
+            assert isinstance(ucs, _UserCacheSecretTransport)
+            assert isinstance(ucs._inner, _ReVerifyingTransport)
         finally:
             client.close()
 
@@ -96,7 +113,11 @@ class TestTransportSelection:
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
         client = sc.make_secure_async_http_client()
         try:
-            assert isinstance(client._transport, _AsyncEHBPReVerifyingTransport)
+            bound = client._transport
+            assert isinstance(bound, _AsyncHostBoundTransport)
+            ucs = bound._inner
+            assert isinstance(ucs, _AsyncUserCacheSecretTransport)
+            assert isinstance(ucs._inner, _AsyncEHBPReVerifyingTransport)
         finally:
             asyncio.run(client.aclose())
 
@@ -111,10 +132,6 @@ class TestTransportSelection:
 
 
 class TestRedirectsDisabled:
-    """The secure clients must not follow redirects: a redirect target is not
-    re-checked against the enclave/proxy host binding, so following one could
-    disclose sensitive headers (including the API key) to an arbitrary host."""
-
     def test_sync_ehbp_client_does_not_follow_redirects(self):
         sc = _secure_client("ehbp")
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
@@ -160,7 +177,9 @@ class TestLowLevelHonorsTransport:
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
         client = sc._secure_http_client()
         try:
-            assert isinstance(client._transport, _EHBPReVerifyingTransport)
+            assert isinstance(client._transport, _HostBoundTransport)
+            assert isinstance(client._transport._inner, _UserCacheSecretTransport)
+            assert isinstance(client._transport._inner._inner, _EHBPReVerifyingTransport)
         finally:
             client.close()
 
@@ -169,7 +188,9 @@ class TestLowLevelHonorsTransport:
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
         client = sc._secure_http_client()
         try:
-            assert isinstance(client._transport, _ReVerifyingTransport)
+            assert isinstance(client._transport, _HostBoundTransport)
+            assert isinstance(client._transport._inner, _UserCacheSecretTransport)
+            assert isinstance(client._transport._inner._inner, _ReVerifyingTransport)
         finally:
             client.close()
 
@@ -183,6 +204,61 @@ class TestLowLevelHonorsTransport:
         sc = _secure_client("tls")
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
         assert sc.get_http_client() is not None
+
+
+class TestHTTPXClientHostBinding:
+    @pytest.mark.parametrize("transport", ["ehbp", "tls"])
+    def test_sync_client_rejects_foreign_origin(self, transport):
+        sc = _secure_client(transport)
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        client = sc.make_secure_http_client()
+        try:
+            with pytest.raises(ValueError, match="evil.example.com"):
+                client.get(
+                    "https://evil.example.com/v1/models",
+                    headers={"Authorization": "Bearer secret"},
+                )
+        finally:
+            client.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("transport", ["ehbp", "tls"])
+    async def test_async_client_rejects_foreign_origin(self, transport):
+        sc = _secure_client(transport)
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        client = sc.make_secure_async_http_client()
+        try:
+            with pytest.raises(ValueError, match="evil.example.com"):
+                await client.get(
+                    "https://evil.example.com/v1/models",
+                    headers={"Authorization": "Bearer secret"},
+                )
+        finally:
+            await client.aclose()
+
+    def test_openai_base_url_override_rejects_foreign_origin(self):
+        sc = _secure_client()
+        sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
+        http_client = sc.make_secure_http_client()
+        client = OpenAI(
+            api_key="secret",
+            base_url="https://enclave.test/v1",
+            http_client=http_client,
+            max_retries=0,
+        )
+        try:
+            foreign_client = client.with_options(
+                base_url="https://evil.example.com/v1"
+            )
+            with pytest.raises(APIConnectionError) as exc_info:
+                foreign_client.chat.completions.create(
+                    model="gpt-oss-120b",
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+            assert isinstance(exc_info.value.__cause__, ValueError)
+            assert "evil.example.com" in str(exc_info.value.__cause__)
+        finally:
+            http_client.close()
 
 
 class TestMakeRequestHostBinding:
@@ -258,6 +334,25 @@ class TestSyncReverify:
         assert ok.seen_body == b"payload"
         assert sc._build_ehbp_sync_transport.call_count == 1
 
+    def test_retry_replays_injected_cache_secret(self):
+        sc = _secure_client()
+        ok = _OK()
+        sc._build_ehbp_sync_transport = MagicMock(return_value=ok)
+
+        transport = _UserCacheSecretTransport(
+            "cache-secret",
+            _EHBPReVerifyingTransport(sc, _RaiseKeyMismatch()),
+        )
+        request = httpx.Request(
+            "POST",
+            "https://enclave.test/v1/chat/completions",
+            content=b'{"model":"m"}',
+        )
+        response = transport.handle_request(request)
+
+        assert response.status_code == 200
+        assert json.loads(ok.seen_body)["user_cache_secret"] == "cache-secret"
+
     def test_passes_through_other_errors_without_reverify(self):
         sc = _secure_client()
         sc._build_ehbp_sync_transport = MagicMock()
@@ -311,6 +406,28 @@ class TestAsyncReverify:
             assert ok.calls == 1
             assert ok.seen_body == b"payload"
             assert sc._build_ehbp_async_transport.await_count == 1
+
+        asyncio.run(run())
+
+    def test_retry_replays_injected_cache_secret(self):
+        async def run():
+            sc = _secure_client()
+            ok = _AsyncOK()
+            sc._build_ehbp_async_transport = AsyncMock(return_value=ok)
+
+            transport = _AsyncUserCacheSecretTransport(
+                "cache-secret",
+                _AsyncEHBPReVerifyingTransport(sc, _AsyncRaiseKeyMismatch()),
+            )
+            request = httpx.Request(
+                "POST",
+                "https://enclave.test/v1/chat/completions",
+                content=b'{"model":"m"}',
+            )
+            response = await transport.handle_async_request(request)
+
+            assert response.status_code == 200
+            assert json.loads(ok.seen_body)["user_cache_secret"] == "cache-secret"
 
         asyncio.run(run())
 

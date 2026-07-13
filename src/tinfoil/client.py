@@ -33,6 +33,11 @@ from .attestation.attestation_tdx import verify_tdx_hardware
 from .attestation.types import Measurement, HardwareMeasurement, Verification
 from .github import fetch_latest_digest, fetch_attestation_bundle
 from .sigstore import verify_attestation, fetch_latest_hardware_measurements
+from .user_cache_secret import (
+    resolve_user_cache_secret,
+    _AsyncUserCacheSecretTransport,
+    _UserCacheSecretTransport,
+)
 
 # Header that tells a proxy which enclave to forward an encrypted request to, so
 # the request reaches the same enclave the client verified.
@@ -469,10 +474,40 @@ class _AsyncEnclaveURLHeaderTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
+class _HostBoundTransport(httpx.BaseTransport):
+    """Rejects requests outside the verified enclave or configured proxy."""
+
+    def __init__(self, inner: httpx.BaseTransport, client: "SecureClient"):
+        self._inner = inner
+        self._client = client
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self._client.assert_request_allowed(str(request.url))
+        return self._inner.handle_request(request)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class _AsyncHostBoundTransport(httpx.AsyncBaseTransport):
+    """Async counterpart of _HostBoundTransport."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport, client: "SecureClient"):
+        self._inner = inner
+        self._client = client
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self._client.assert_request_allowed(str(request.url))
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 class SecureClient:
     """A client that verifies and communicates with secure enclaves"""
     
-    def __init__(self, enclave: str = "", repo: str = DEFAULT_CONFIG_REPO, measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: Optional[str] = None, attestation_bundle_url: str = ""):
+    def __init__(self, enclave: str = "", repo: str = DEFAULT_CONFIG_REPO, measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: Optional[str] = None, attestation_bundle_url: str = "", user_cache_secret: Optional[str] = None):
         # Hardcoded measurement takes precedence over repo
         if measurement is not None:
             repo = ""
@@ -518,6 +553,12 @@ class SecureClient:
         self.transport = transport
         self.base_url = base_url or ""
         self.attestation_bundle_url = attestation_bundle_url
+        # The client-level prompt-cache secret, resolved once per client: the
+        # explicit parameter (None = unset; "" disables) beats the
+        # TINFOIL_USER_CACHE_SECRET environment variable, which beats the
+        # secret persisted at ~/.tinfoil/user_cache_secret. Empty means no
+        # injection: requests stay in the tenant-wide cache namespace.
+        self._user_cache_secret = resolve_user_cache_secret(user_cache_secret)
         self._ground_truth: Optional[GroundTruth] = None
         self._verification_document: Optional[VerificationDocument] = None
         self._low_level_http_client: Optional[httpx.Client] = None
@@ -621,6 +662,26 @@ class SecureClient:
         hpke_public_key = await asyncio.to_thread(self._require_hpke_public_key)
         return AsyncEHBPTransport.from_public_key_hex(hpke_public_key, inner=httpx.AsyncHTTPTransport())
 
+    def _wrap_sync_transport(
+        self, transport: httpx.BaseTransport
+    ) -> httpx.BaseTransport:
+        if self._user_cache_secret:
+            transport = _UserCacheSecretTransport(self._user_cache_secret, transport)
+        if self.transport == "ehbp" and self.base_url:
+            transport = _EnclaveURLHeaderTransport(transport, self)
+        return _HostBoundTransport(transport, self)
+
+    def _wrap_async_transport(
+        self, transport: httpx.AsyncBaseTransport
+    ) -> httpx.AsyncBaseTransport:
+        if self._user_cache_secret:
+            transport = _AsyncUserCacheSecretTransport(
+                self._user_cache_secret, transport
+            )
+        if self.transport == "ehbp" and self.base_url:
+            transport = _AsyncEnclaveURLHeaderTransport(transport, self)
+        return _AsyncHostBoundTransport(transport, self)
+
     def make_secure_http_client(self) -> httpx.Client:
         """
         Build an httpx.Client that securely communicates with the enclave.
@@ -634,15 +695,13 @@ class SecureClient:
         underlying transport automatically re-verifies attestation and retries
         the request once.
 
-        Redirects are not followed: a redirect target bypasses the enclave/proxy
-        host binding, so following one could disclose sensitive headers
-        (including the API key) to an arbitrary host.
+        Redirects are not followed, and every request is bound to the verified
+        enclave or configured proxy before any plaintext headers are sent.
         """
         if self.transport == "ehbp":
             inner = self._build_ehbp_sync_transport()
             transport: httpx.BaseTransport = _EHBPReVerifyingTransport(self, inner)
-            if self.base_url:
-                transport = _EnclaveURLHeaderTransport(transport, self)
+            transport = self._wrap_sync_transport(transport)
             return httpx.Client(transport=transport, follow_redirects=False)
 
         expected_fp = self.verify().public_key
@@ -650,6 +709,7 @@ class SecureClient:
         ctx = self._build_sync_ssl_context(expected_fp)
         inner = httpx.HTTPTransport(verify=ctx)
         transport = _ReVerifyingTransport(self, inner)
+        transport = self._wrap_sync_transport(transport)
         return httpx.Client(transport=transport, follow_redirects=False)
 
     def make_secure_async_http_client(self) -> httpx.AsyncClient:
@@ -665,16 +725,14 @@ class SecureClient:
         underlying transport automatically re-verifies attestation and retries
         the request once.
 
-        Redirects are not followed: a redirect target bypasses the enclave/proxy
-        host binding, so following one could disclose sensitive headers
-        (including the API key) to an arbitrary host.
+        Redirects are not followed, and every request is bound to the verified
+        enclave or configured proxy before any plaintext headers are sent.
         """
         if self.transport == "ehbp":
             hpke_public_key = self._require_hpke_public_key()
             inner = AsyncEHBPTransport.from_public_key_hex(hpke_public_key, inner=httpx.AsyncHTTPTransport())
             transport: httpx.AsyncBaseTransport = _AsyncEHBPReVerifyingTransport(self, inner)
-            if self.base_url:
-                transport = _AsyncEnclaveURLHeaderTransport(transport, self)
+            transport = self._wrap_async_transport(transport)
             return httpx.AsyncClient(transport=transport, follow_redirects=False)
 
         expected_fp = self.verify().public_key
@@ -682,6 +740,7 @@ class SecureClient:
         ctx = self._build_async_ssl_context(expected_fp)
         inner = httpx.AsyncHTTPTransport(verify=ctx)
         transport = _AsyncReVerifyingTransport(self, inner)
+        transport = self._wrap_async_transport(transport)
         return httpx.AsyncClient(transport=transport, follow_redirects=False)
 
     def verify(self) -> GroundTruth:
