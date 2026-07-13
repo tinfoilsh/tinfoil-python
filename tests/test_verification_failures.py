@@ -398,11 +398,13 @@ class TestAsyncTLSPinning:
 
     def _get_ssl_context(self, async_http_client):
         """Extract the SSL context from an httpx.AsyncClient."""
+        # The transport is wrapped with the user-cache-secret injection layer
+        # and _AsyncReVerifyingTransport for long-lived client support; unwrap
+        # to reach the real httpx transport.
         transport = async_http_client._transport
-        # The transport is wrapped with _AsyncReVerifyingTransport for
-        # long-lived client support; unwrap to reach the real httpx transport.
-        inner = getattr(transport, "_inner", transport)
-        return inner._pool._ssl_context
+        while hasattr(transport, "_inner"):
+            transport = transport._inner
+        return transport._pool._ssl_context
 
     def _call_pinned_wrap_bio(self, ssl_ctx, fake_ssl_object):
         """

@@ -30,22 +30,23 @@ class TinfoilAI:
         transport: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: Optional[str] = None,
         attestation_bundle_url: str = "",
+        user_cache_secret: Optional[str] = None,
     ):
         if measurement is not None:
             repo = ""
-        
+
         # Ensure at least one verification method is provided
         if measurement is None and (repo == "" or repo is None):
             raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
-        
+
         # If enclave is empty, fetch a random one from the routers API. When
         # attesting from a bundle, the enclave host comes from the verified
         # bundle, so no router lookup is needed.
         if (enclave == "" or enclave is None) and not attestation_bundle_url:
             enclave = get_router_address()
-        
+
         self.api_key = api_key
-        self._secure_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url)
+        self._secure_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
         secure_http = self._secure_client.make_secure_http_client()
         # Building the secure transport verifies attestation, so the enclave host
         # is now known even when it came from a bundle.
@@ -84,23 +85,24 @@ class AsyncTinfoilAI:
         transport: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: Optional[str] = None,
         attestation_bundle_url: str = "",
+        user_cache_secret: Optional[str] = None,
     ):
         if measurement is not None:
             repo = ""
-        
+
         # Ensure at least one verification method is provided
         if measurement is None and (repo == "" or repo is None):
             raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
-        
+
         # If enclave is empty, fetch a random one from the routers API. When
         # attesting from a bundle, the enclave host comes from the verified
         # bundle, so no router lookup is needed.
         if (enclave == "" or enclave is None) and not attestation_bundle_url:
             enclave = get_router_address()
-        
+
         self.api_key = api_key
         # verifier client remains sync; only used to fetch the expected public key
-        self._secure_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url)
+        self._secure_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
         async_http = self._secure_client.make_secure_async_http_client()
         # Building the secure transport verifies attestation, so the enclave host
         # is now known even when it came from a bundle.
@@ -144,7 +146,7 @@ class _HTTPSecureClient:
         return self._http_client.post(url, headers=headers, data=data, json=json, timeout=timeout)
 
 
-def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: Optional[str] = None, attestation_bundle_url: str = ""):
+def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: Optional[str] = None, attestation_bundle_url: str = "", user_cache_secret: Optional[str] = None):
     """Create a secure HTTP client for direct GET/POST through the Tinfoil enclave."""
     if measurement is not None:
         repo = ""
@@ -158,7 +160,7 @@ def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model
     if (enclave == "" or enclave is None) and not attestation_bundle_url:
         enclave = get_router_address()
 
-    tf_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url)
+    tf_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
     return _HTTPSecureClient(tf_client.enclave, tf_client)
 
 __all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient", "SecureClient", "VerificationDocument", "TransportMode"]
