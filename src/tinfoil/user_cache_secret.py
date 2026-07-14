@@ -12,7 +12,7 @@ Resolution order, mirroring the other Tinfoil clients:
 2. the `user_cache_secret` client parameter,
 3. the TINFOIL_USER_CACHE_SECRET environment variable,
 4. a generated secret persisted at ~/.tinfoil/user_cache_secret (0600), shared
-   with the other Tinfoil SDKs on the same machine.
+   with other Tinfoil SDKs using the same home directory.
 
 Injection happens in the transport, before the EHBP (or pinned-TLS) transport
 seals the body, so the secret is only ever visible to the verified enclave.
