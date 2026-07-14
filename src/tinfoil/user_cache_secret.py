@@ -8,8 +8,7 @@ is stripped by the router and never reaches the model.
 
 Resolution order, mirroring the other Tinfoil clients:
 
-1. an explicit per-request `user_cache_secret` field in the body (never
-   overwritten here),
+1. a non-empty per-request `user_cache_secret` field in the body,
 2. the `user_cache_secret` client parameter,
 3. the TINFOIL_USER_CACHE_SECRET environment variable,
 4. a generated secret persisted at ~/.tinfoil/user_cache_secret (0600), shared
@@ -34,14 +33,11 @@ import httpx
 logger = logging.getLogger("tinfoil")
 
 # USER_CACHE_SECRET_FIELD is the router-only request-body field. A non-empty
-# string scopes the prompt cache to that secret; an absent or empty value
-# leaves the request in the tenant-wide namespace.
+# string scopes the prompt cache to that secret.
 USER_CACHE_SECRET_FIELD = "user_cache_secret"
 
-# USER_CACHE_SECRET_ENV provisions the secret via the environment. Setting it
-# to an empty string disables generation entirely (tenant-wide caching), which
-# is the right call for pooled multi-user deployments that would otherwise
-# mint a fresh namespace per container.
+# USER_CACHE_SECRET_ENV provisions the secret via the environment. An empty
+# value is treated as unset.
 USER_CACHE_SECRET_ENV = "TINFOIL_USER_CACHE_SECRET"
 
 # The persisted-secret path under the home directory. The other Tinfoil SDKs
@@ -77,17 +73,15 @@ _UNICODE_WHITESPACE = (
 
 def resolve_user_cache_secret(explicit: Optional[str]) -> str:
     """
-    Resolve the client-level secret: the explicit parameter wins (None means
-    unset; an empty string disables provisioning entirely), then the
-    environment, then the persisted (or generated) secret. An empty result
-    means injection is disabled and requests stay in the tenant-wide cache
-    namespace. Never raises: persistence and generation failures fall back as
+    Resolve the client-level secret: a non-empty explicit parameter wins,
+    then a non-empty environment value, then the persisted (or generated)
+    secret. Never raises: persistence and generation failures fall back as
     documented on the helpers below.
     """
-    if explicit is not None:
+    if explicit:
         return explicit
     env = os.environ.get(USER_CACHE_SECRET_ENV)
-    if env is not None:
+    if env:
         return env
     return _load_or_generate_user_cache_secret()
 
@@ -97,11 +91,9 @@ def _new_user_cache_secret() -> str:
     try:
         return secrets.token_hex(32)
     except Exception as e:
-        # Never fall back to a weak secret: no secret means tenant-wide
-        # caching, which is safe.
         logger.warning(
-            "tinfoil: could not generate a user cache secret; requests stay "
-            "in the tenant-wide cache namespace: %s",
+            "tinfoil: could not generate a user cache secret; automatic "
+            "prompt-cache scoping is unavailable: %s",
             e,
         )
         return ""
@@ -350,9 +342,8 @@ class _UserCacheSecretTransport(httpx.BaseTransport):
     out. It sits above the sealing transport (EHBP or pinned TLS), so the
     field is added before the body is sealed, and above the re-verifying retry
     layer, so retries beneath it (EHBP key rotation) replay the injected body.
-    A field already present in the body is never overwritten — an explicit
-    per-request value, including an explicit empty string (= opt out for that
-    request), always wins.
+    A non-empty or non-string field already present in the body is never
+    overwritten. An empty string is replaced with the resolved client secret.
     """
 
     def __init__(self, secret: str, inner: httpx.BaseTransport):
@@ -453,10 +444,10 @@ def _body_with_user_cache_secret(raw: bytes, secret: str) -> Optional[bytes]:
     """
     The body with the field spliced in before the object's closing brace, or
     None — forward the original bytes — for non-object bodies, trailing data,
-    or a body that already carries the field. Splicing instead of
+    or a body that already carries a non-empty or non-string field. An empty
+    string is replaced with the resolved client secret. Splicing instead of
     re-serializing keeps everything the caller sent byte-identical, including
-    number precision: int64-range values such as seed would be corrupted by a
-    float round-trip.
+    number precision.
     """
     try:
         text = raw.decode("utf-8")
@@ -477,11 +468,62 @@ def _body_with_user_cache_secret(raw: bytes, secret: str) -> Optional[bytes]:
     if not isinstance(body, dict) or text[end:].strip(_JSON_WHITESPACE):
         return None
     if USER_CACHE_SECRET_FIELD in body:
-        return None
+        if body[USER_CACHE_SECRET_FIELD] != "":
+            return None
+        value_span = _top_level_value_span(text, USER_CACHE_SECRET_FIELD)
+        if value_span is None:
+            return None
+        value_start, value_end = value_span
+        return (
+            text[:value_start] + json.dumps(secret) + text[value_end:]
+        ).encode()
     field = f'"{USER_CACHE_SECRET_FIELD}":{json.dumps(secret)}'
     comma = "," if body else ""
     prefix, _, suffix = text.rpartition("}")
     return f"{prefix}{comma}{field}}}{suffix}".encode()
+
+
+def _top_level_value_span(text: str, field: str) -> Optional[tuple[int, int]]:
+    index = len(text) - len(text.lstrip(_JSON_WHITESPACE))
+    if index >= len(text) or text[index] != "{":
+        return None
+    index += 1
+
+    while index < len(text):
+        index += len(text[index:]) - len(text[index:].lstrip(_JSON_WHITESPACE))
+        if index < len(text) and text[index] == "}":
+            return None
+        try:
+            key, key_end = _STRICT_JSON_DECODER.raw_decode(text, index)
+        except (ValueError, RecursionError):
+            return None
+        if not isinstance(key, str):
+            return None
+        index = key_end + len(text[key_end:]) - len(
+            text[key_end:].lstrip(_JSON_WHITESPACE)
+        )
+        if index >= len(text) or text[index] != ":":
+            return None
+        value_start = index + 1
+        value_start += len(text[value_start:]) - len(
+            text[value_start:].lstrip(_JSON_WHITESPACE)
+        )
+        try:
+            _, value_end = _STRICT_JSON_DECODER.raw_decode(text, value_start)
+        except (ValueError, RecursionError):
+            return None
+        if key == field:
+            return value_start, value_end
+        index = value_end + len(text[value_end:]) - len(
+            text[value_end:].lstrip(_JSON_WHITESPACE)
+        )
+        if index < len(text) and text[index] == ",":
+            index += 1
+        elif index < len(text) and text[index] == "}":
+            return None
+        else:
+            return None
+    return None
 
 
 def _reject_json_constant(value: str) -> float:

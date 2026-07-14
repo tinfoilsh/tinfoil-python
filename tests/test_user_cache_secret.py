@@ -59,11 +59,9 @@ class TestResolvePrecedence:
         monkeypatch.setenv(USER_CACHE_SECRET_ENV, "from-env")
         assert resolve_user_cache_secret("explicit") == "explicit"
 
-    def test_explicit_empty_disables_even_with_environment_set(self, monkeypatch):
-        # An explicit empty secret still counts as "set": it disables
-        # provisioning rather than falling through to the environment.
+    def test_explicit_empty_is_treated_as_unset(self, monkeypatch):
         monkeypatch.setenv(USER_CACHE_SECRET_ENV, "from-env")
-        assert resolve_user_cache_secret("") == ""
+        assert resolve_user_cache_secret("") == "from-env"
 
     def test_environment_beats_generation_and_touches_no_file(self, secret_home, monkeypatch):
         monkeypatch.setenv(USER_CACHE_SECRET_ENV, "from-env")
@@ -72,12 +70,11 @@ class TestResolvePrecedence:
             "an environment-provided secret must not create the secret file"
         )
 
-    def test_environment_set_but_empty_disables_generation(self, secret_home, monkeypatch):
+    def test_environment_set_but_empty_falls_through(self, secret_home, monkeypatch):
         monkeypatch.setenv(USER_CACHE_SECRET_ENV, "")
-        assert resolve_user_cache_secret(None) == ""
-        assert not (secret_home / USER_CACHE_SECRET_DIR_NAME).exists(), (
-            "a disabled secret must not create the secret file"
-        )
+        resolved = resolve_user_cache_secret(None)
+        assert len(resolved) == 64
+        assert (secret_home / USER_CACHE_SECRET_DIR_NAME).exists()
 
 
 class TestPersistence:
@@ -405,7 +402,7 @@ class TestTransportSkips:
         assert recorder.body == b""
         assert recorder.request is request
 
-    def test_empty_secret_disables_injection(self, use_async):
+    def test_missing_resolved_secret_skips_injection(self, use_async):
         raw = b'{"model":"m"}'
         request = _post("/v1/chat/completions", raw)
         recorder, _ = _roundtrip("", request, use_async)
@@ -416,17 +413,38 @@ class TestTransportSkips:
         "raw",
         [
             b'{"model":"m","user_cache_secret":"end-user-7"}',
-            b'{"model":"m","user_cache_secret":""}',
+            b'{"model":"m","user_cache_secret":null}',
         ],
-        ids=["explicit per-request secret", "explicit empty opt-out"],
+        ids=["explicit per-request secret", "explicit null"],
     )
-    def test_never_clobbers_a_present_field(self, raw, use_async):
+    def test_never_clobbers_a_non_empty_or_non_string_field(self, raw, use_async):
         request = _post("/v1/chat/completions", raw)
         recorder, _ = _roundtrip("client-level", request, use_async)
         assert recorder.body == raw, (
             "a body that already carries the field must pass through byte-identical"
         )
         assert recorder.request is request
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (
+                b'{"large":9007199254740993,"user_cache_secret":"","nested":{"value":1}}  ',
+                b'{"large":9007199254740993,"user_cache_secret":"client-level","nested":{"value":1}}  ',
+            ),
+            (
+                b'{"user_cache_secre\\u0074":""}',
+                b'{"user_cache_secre\\u0074":"client-level"}',
+            ),
+        ],
+    )
+    def test_replaces_empty_per_request_field(self, raw, expected, use_async):
+        recorder, _ = _roundtrip(
+            "client-level",
+            _post("/v1/chat/completions", raw),
+            use_async,
+        )
+        assert recorder.body == expected
 
     @pytest.mark.parametrize(
         "raw",
@@ -523,8 +541,8 @@ class TestSecureClientResolution:
     def test_explicit_parameter_wins(self):
         assert _secure_client(user_cache_secret="s1")._user_cache_secret == "s1"
 
-    def test_explicit_empty_counts_as_set_and_disables(self):
-        assert _secure_client(user_cache_secret="")._user_cache_secret == ""
+    def test_explicit_empty_falls_back_to_environment(self):
+        assert _secure_client(user_cache_secret="")._user_cache_secret == "test-secret"
 
     def test_unset_falls_back_to_environment(self):
         assert _secure_client()._user_cache_secret == "test-secret"
@@ -533,7 +551,7 @@ class TestSecureClientResolution:
 class TestSecureClientWiring:
     """The cache-secret layer must sit inside any header-level wrapping and
     above the sealing transport, so the injected field is encrypted with the
-    rest of the body — and it must be omitted when the secret is empty."""
+    rest of the body."""
 
     def test_sync_ehbp_stack(self):
         client = _secure_client().make_secure_http_client()
@@ -568,11 +586,13 @@ class TestSecureClientWiring:
         finally:
             asyncio.run(client.aclose())
 
-    def test_empty_secret_omits_the_layer(self):
+    def test_empty_secret_uses_the_resolved_layer(self):
         client = _secure_client(user_cache_secret="").make_secure_http_client()
         try:
             assert isinstance(client._transport, _HostBoundTransport)
-            assert isinstance(client._transport._inner, _EHBPReVerifyingTransport)
+            user_cache_secret = client._transport._inner
+            assert isinstance(user_cache_secret, _UserCacheSecretTransport)
+            assert isinstance(user_cache_secret._inner, _EHBPReVerifyingTransport)
         finally:
             client.close()
 
