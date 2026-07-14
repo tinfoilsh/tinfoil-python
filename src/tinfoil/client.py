@@ -554,10 +554,10 @@ class SecureClient:
         self.base_url = base_url or ""
         self.attestation_bundle_url = attestation_bundle_url
         # The client-level prompt-cache secret, resolved once per client: the
-        # explicit parameter (None = unset; "" disables) beats the
+        # non-empty explicit parameter beats the
         # TINFOIL_USER_CACHE_SECRET environment variable, which beats the
-        # secret persisted at ~/.tinfoil/user_cache_secret. Empty means no
-        # injection: requests stay in the tenant-wide cache namespace.
+        # secret persisted at ~/.tinfoil/user_cache_secret. Empty values are
+        # treated as unset.
         self._user_cache_secret = resolve_user_cache_secret(user_cache_secret)
         self._ground_truth: Optional[GroundTruth] = None
         self._verification_document: Optional[VerificationDocument] = None
