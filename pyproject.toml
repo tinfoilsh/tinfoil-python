@@ -46,8 +46,3 @@ constraint-dependencies = [
 ]
 
 [tool.uv.exclude-newer-package]
-# tinfoil-ehbp is a first-party package; allow recently published releases past
-# the global exclude-newer cutoff.
-"tinfoil-ehbp" = "2026-06-04T00:00:00Z"
-# Addresses GHSA-qp9x-wp8f-qgjj
-"sigstore" = "2026-06-05T00:00:00Z"
