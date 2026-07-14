@@ -449,6 +449,25 @@ class TestTransportSkips:
     @pytest.mark.parametrize(
         "raw",
         [
+            b'{"user_cache_secret":"","user_cache_secret":""}',
+            b'{"user_cache_secret":"end-user-7","user_cache_secre\\u0074":""}',
+            b'{"user_cache_secre\\u0074":"","user_cache_secret":""}',
+        ],
+        ids=[
+            "duplicate literal keys",
+            "escaped effective key",
+            "escaped first key",
+        ],
+    )
+    def test_duplicate_per_request_fields_forwarded_untouched(self, raw, use_async):
+        request = _post("/v1/chat/completions", raw)
+        recorder, _ = _roundtrip("client-level", request, use_async)
+        assert recorder.body == raw
+        assert recorder.request is request
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
             b"not json",
             b"[1,2,3]",
             b"null",

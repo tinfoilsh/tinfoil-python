@@ -484,46 +484,48 @@ def _body_with_user_cache_secret(raw: bytes, secret: str) -> Optional[bytes]:
 
 
 def _top_level_value_span(text: str, field: str) -> Optional[tuple[int, int]]:
-    index = len(text) - len(text.lstrip(_JSON_WHITESPACE))
+    index = _skip_json_whitespace(text, 0)
     if index >= len(text) or text[index] != "{":
         return None
     index += 1
+    field_span = None
 
     while index < len(text):
-        index += len(text[index:]) - len(text[index:].lstrip(_JSON_WHITESPACE))
+        index = _skip_json_whitespace(text, index)
         if index < len(text) and text[index] == "}":
-            return None
+            return field_span
         try:
             key, key_end = _STRICT_JSON_DECODER.raw_decode(text, index)
         except (ValueError, RecursionError):
             return None
         if not isinstance(key, str):
             return None
-        index = key_end + len(text[key_end:]) - len(
-            text[key_end:].lstrip(_JSON_WHITESPACE)
-        )
+        index = _skip_json_whitespace(text, key_end)
         if index >= len(text) or text[index] != ":":
             return None
-        value_start = index + 1
-        value_start += len(text[value_start:]) - len(
-            text[value_start:].lstrip(_JSON_WHITESPACE)
-        )
+        value_start = _skip_json_whitespace(text, index + 1)
         try:
             _, value_end = _STRICT_JSON_DECODER.raw_decode(text, value_start)
         except (ValueError, RecursionError):
             return None
         if key == field:
-            return value_start, value_end
-        index = value_end + len(text[value_end:]) - len(
-            text[value_end:].lstrip(_JSON_WHITESPACE)
-        )
+            if field_span is not None:
+                return None
+            field_span = value_start, value_end
+        index = _skip_json_whitespace(text, value_end)
         if index < len(text) and text[index] == ",":
             index += 1
         elif index < len(text) and text[index] == "}":
-            return None
+            return field_span
         else:
             return None
     return None
+
+
+def _skip_json_whitespace(text: str, index: int) -> int:
+    while index < len(text) and text[index] in _JSON_WHITESPACE:
+        index += 1
+    return index
 
 
 def _reject_json_constant(value: str) -> float:
