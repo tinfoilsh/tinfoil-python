@@ -15,7 +15,7 @@ requires-python = ">=3.10"
 dependencies = [
     "openai>=1.63.0",
     "httpx>=0.28",
-    "tinfoil-ehbp>=0.2.3",
+    "tinfoil-ehbp>=0.3.0",
     "requests>=2.31.0",
     "cryptography>=42.0.0",
     "pyOpenSSL>=25.0.0",
@@ -46,3 +46,5 @@ constraint-dependencies = [
 ]
 
 [tool.uv.exclude-newer-package]
+# Allow the just-released EHBP client (first-party dependency).
+tinfoil-ehbp = "2026-07-23T00:00:00Z"

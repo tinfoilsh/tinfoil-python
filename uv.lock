@@ -3,8 +3,11 @@ revision = 3
 requires-python = ">=3.10"
 
 [options]
-exclude-newer = "2026-07-11T00:12:56.54894Z"
+exclude-newer = "2026-07-18T22:25:22.197611Z"
 exclude-newer-span = "P4D"
+
+[options.exclude-newer-package]
+tinfoil-ehbp = "2026-07-23T00:00:00Z"
 
 [manifest]
 constraints = [{ name = "idna", specifier = ">=3.15" }]
@@ -995,7 +998,7 @@ requires-dist = [
     { name = "pyopenssl", specifier = ">=25.0.0" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "sigstore", specifier = ">=4.3.0" },
-    { name = "tinfoil-ehbp", specifier = ">=0.2.3" },
+    { name = "tinfoil-ehbp", specifier = ">=0.3.0" },
     { name = "urllib3", specifier = ">=2.7.0" },
 ]
 
@@ -1007,16 +1010,16 @@ dev = [
 
 [[package]]
 name = "tinfoil-ehbp"
-version = "0.2.5"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "pyhpke" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/16/75/1cb8cd79944f32a4e3951acc44e5c8a598174706729d4f33541d93344c9c/tinfoil_ehbp-0.2.5.tar.gz", hash = "sha256:e45dae49681f31d26bb59a9efe6a648da73b68a8bb0113c606ffbec594bb1c01", size = 15275, upload-time = "2026-07-01T17:06:59.94Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cb/95/aabb64b33a28a9307349624b07400b9c1e819706ff0733b8b3506aa1b76e/tinfoil_ehbp-0.3.0.tar.gz", hash = "sha256:601db7ff77fc2cc0b28943c468f58f4eb180de02ee9a41bff8a2c12e1e2403fa", size = 16199, upload-time = "2026-07-22T22:21:44.168Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d1/fd/c8f8891cf72fc11e2212193513484e53078a818d6b1f6e64f2840790b375/tinfoil_ehbp-0.2.5-py3-none-any.whl", hash = "sha256:ce15e194ddfdbe7a1be98c4743bb0748fbffe45fd2210d9cb7697df62473466f", size = 15092, upload-time = "2026-07-01T17:06:58.589Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/1f/ae06385b661d121118c2f1bd36f831c41b431b2dd6f60aa4bd85572b0a4e/tinfoil_ehbp-0.3.0-py3-none-any.whl", hash = "sha256:8391ebef7cb6f70240cbcd9ed54c5470bef35443744ef851024b0c6032d92182", size = 15424, upload-time = "2026-07-22T22:21:42.99Z" },
 ]
 
 [[package]]
