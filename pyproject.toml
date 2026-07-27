@@ -46,5 +46,5 @@ constraint-dependencies = [
 ]
 
 [tool.uv.exclude-newer-package]
-# Allow the just-released EHBP client (first-party dependency).
-tinfoil-ehbp = "2026-07-23T00:00:00Z"
+# tinfoil-ehbp is maintained by tinfoil (first-party dependency)
+tinfoil-ehbp = false
