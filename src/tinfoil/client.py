@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import contextlib
+import copy
 import http.client
 import json
 import ssl
@@ -159,10 +160,62 @@ class VerificationDocument:
     verifier: SoftwareIdentity = field(default_factory=_verifier_identity)
     verified_at: Optional[str] = None
 
+    def to_dict(self) -> dict:
+        def measurement(value: Measurement) -> dict:
+            return {"type": value.type.value, "registers": list(value.registers)}
+
+        result = {
+            "schemaVersion": self.schema_version,
+            "configRepo": self.config_repo,
+            "enclaveHost": self.enclave_host,
+            "releaseTag": self.release_tag,
+            "releaseDigest": self.release_digest,
+            "codeMeasurement": measurement(self.code_measurement) if self.code_measurement else None,
+            "enclaveMeasurement": {
+                key: value
+                for key, value in {
+                    "measurement": measurement(self.enclave_measurement.measurement),
+                    "tlsPublicKeyFingerprint": self.enclave_measurement.public_key_fp,
+                    "hpkePublicKey": self.enclave_measurement.hpke_public_key,
+                }.items()
+                if value is not None
+            } if self.enclave_measurement else None,
+            "tlsPublicKey": self.tls_public_key,
+            "hpkePublicKey": self.hpke_public_key,
+            "hardwareMeasurement": {
+                "ID": self.hardware_measurement.id,
+                "MRTD": self.hardware_measurement.mrtd,
+                "RTMR0": self.hardware_measurement.rtmr0,
+            } if self.hardware_measurement else None,
+            "codeFingerprint": self.code_fingerprint,
+            "enclaveFingerprint": self.enclave_fingerprint,
+            "selectedRouterEndpoint": self.selected_router_endpoint,
+            "securityVerified": self.security_verified,
+            "verifier": {"name": self.verifier.name, "version": self.verifier.version},
+            "verifiedAt": self.verified_at,
+            "steps": {
+                {
+                    "fetch_digest": "fetchDigest",
+                    "verify_code": "verifyCode",
+                    "verify_enclave": "verifyEnclave",
+                    "compare_measurements": "compareMeasurements",
+                }.get(name, name): {
+                    key: value
+                    for key, value in {"status": step.status, "error": step.error}.items()
+                    if value is not None
+                }
+                for name, step in self.steps.items()
+            },
+        }
+        return {key: value for key, value in result.items() if value is not None}
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
 
 def _attach_verification_document(exc: Exception, verification_document: VerificationDocument) -> None:
     try:
-        setattr(exc, "verification_document", verification_document)
+        setattr(exc, "verification_document", copy.deepcopy(verification_document))
     except Exception:
         pass
 
@@ -595,7 +648,7 @@ class SecureClient:
 
     def get_verification_document(self) -> Optional[VerificationDocument]:
         """Returns the detailed verification document from the last verify() call"""
-        return self._verification_document
+        return copy.deepcopy(self._verification_document)
 
     def _create_socket_wrapper(self, expected_fp: str):
         """
@@ -862,7 +915,6 @@ class SecureClient:
             try:
                 release = fetch_latest_release(self.repo)
                 digest = release.digest
-                doc.release_tag = release.tag
                 doc.release_digest = release.digest
                 doc.steps["fetch_digest"] = VerificationStepState(status="success")
             except Exception as e:
@@ -873,7 +925,10 @@ class SecureClient:
             # Step 3: Verify code via Sigstore
             try:
                 sigstore_bundle = fetch_attestation_bundle(self.repo, digest)
-                code_measurements = verify_attestation(sigstore_bundle, digest, self.repo)
+                code_measurements = verify_attestation(
+                    sigstore_bundle, digest, self.repo, release.tag
+                )
+                doc.release_tag = release.tag
                 doc.code_measurement = code_measurements
                 doc.code_fingerprint = code_measurements.fingerprint()
                 doc.steps["verify_code"] = VerificationStepState(status="success")
@@ -909,11 +964,14 @@ class SecureClient:
 
         # Step 1: Verify code measurement from the bundled Sigstore bundle
         try:
-            code_measurements = verify_attestation(bundle.sigstore_bundle, bundle.digest, self.repo)
+            code_measurements = verify_attestation(
+                bundle.sigstore_bundle, bundle.digest, self.repo, bundle.release_tag
+            )
             doc.release_digest = bundle.digest
+            doc.release_tag = bundle.release_tag
             doc.code_measurement = code_measurements
             doc.code_fingerprint = code_measurements.fingerprint()
-            doc.steps["fetch_digest"] = VerificationStepState(status="success")
+            doc.steps["fetch_digest"] = VerificationStepState(status="skipped")
             doc.steps["verify_code"] = VerificationStepState(status="success")
         except Exception as e:
             doc.steps["fetch_digest"] = VerificationStepState(status="failed", error=str(e))

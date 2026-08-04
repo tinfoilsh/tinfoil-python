@@ -11,6 +11,7 @@ lets attestation traffic flow through a proxy.
 import base64
 import json
 from dataclasses import dataclass
+from typing import Optional
 from urllib.parse import urlparse
 
 import requests
@@ -31,6 +32,7 @@ class Bundle:
     sigstore_bundle: bytes
     vcek: str  # base64-encoded DER
     enclave_cert: str  # PEM
+    release_tag: Optional[str] = None
 
 
 def fetch_bundle_from(
@@ -80,6 +82,7 @@ def fetch_bundle_from(
             sigstore_bundle=json.dumps(data["sigstoreBundle"]).encode(),
             vcek=data.get("vcek", ""),
             enclave_cert=data.get("enclaveCert", ""),
+            release_tag=data.get("releaseTag"),
         )
     except (KeyError, TypeError, ValueError) as e:
         raise ValueError(f"Invalid attestation bundle from {base}: {e}") from e
