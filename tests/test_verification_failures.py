@@ -16,6 +16,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from tinfoil.client import SecureClient, _verify_peer_fingerprint
+from tinfoil.github import Release
 from tinfoil.attestation import (
     Measurement,
     PredicateType,
@@ -149,7 +150,7 @@ class TestSecureClientVerificationFailures:
         assert getattr(exc_info.value, "verification_document", None) is verification_document
 
     @patch('tinfoil.client.fetch_attestation')
-    @patch('tinfoil.client.fetch_latest_digest')
+    @patch('tinfoil.client.fetch_latest_release')
     @patch('tinfoil.client.fetch_attestation_bundle')
     @patch('tinfoil.client.verify_attestation')
     def test_measurement_mismatch_blocks_verify(
@@ -157,7 +158,7 @@ class TestSecureClientVerificationFailures:
     ):
         """If code measurements don't match runtime, verify() must raise."""
         # Setup mocks
-        mock_fetch_digest.return_value = "test_digest"
+        mock_fetch_digest.return_value = Release(tag="v1.2.3", digest="test_digest")
         mock_fetch_bundle.return_value = {}
 
         # Runtime measurement from enclave
@@ -184,7 +185,7 @@ class TestSecureClientVerificationFailures:
             client.verify()
 
     @patch('tinfoil.client.fetch_attestation')
-    @patch('tinfoil.client.fetch_latest_digest')
+    @patch('tinfoil.client.fetch_latest_release')
     @patch('tinfoil.client.fetch_attestation_bundle')
     @patch('tinfoil.client.verify_attestation')
     @patch('tinfoil.client.fetch_latest_hardware_measurements')
@@ -195,7 +196,7 @@ class TestSecureClientVerificationFailures:
     ):
         """If TDX hardware measurements don't match, verify() must raise."""
         # Setup mocks
-        mock_fetch_digest.return_value = "test_digest"
+        mock_fetch_digest.return_value = Release(tag="v1.2.3", digest="test_digest")
         mock_fetch_bundle.return_value = {}
 
         # TDX runtime measurement from enclave

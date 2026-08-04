@@ -5,8 +5,15 @@ from typing import Dict, Any
 import os
 import platformdirs
 import sys
+from dataclasses import dataclass
 
 GITHUB_PROXY = "https://github-proxy.tinfoil.sh"
+
+
+@dataclass(frozen=True)
+class Release:
+    tag: str
+    digest: str
 
 # --- Cache Setup ---
 _GITHUB_CACHE_DIR = platformdirs.user_cache_dir("tinfoil", "tinfoil")
@@ -27,7 +34,7 @@ def _attestation_bundle_cache_path(repo: str, digest: str) -> str:
     return os.path.join(_GITHUB_CACHE_DIR, filename)
 # --- End Cache Setup ---
 
-def fetch_latest_digest(repo: str) -> str:
+def fetch_latest_release(repo: str) -> Release:
     """
     Gets the latest release and attestation digest of a repo.
     
@@ -35,7 +42,7 @@ def fetch_latest_digest(repo: str) -> str:
         repo: The GitHub repository in format "owner/repo"
         
     Returns:
-        The digest string
+        The selected release tag and digest
         
     Raises:
         Exception: If there's any error fetching or parsing the data
@@ -54,20 +61,25 @@ def fetch_latest_digest(repo: str) -> str:
     eif_regex = re.compile(r'EIF hash: ([a-fA-F0-9]{64})')
     matches = eif_regex.search(body)
     if matches:
-        return matches.group(1)
+        return Release(tag=tag_name, digest=matches.group(1))
     
     # Other format to fetch Digest
     digest_regex = re.compile(r'Digest: `([a-fA-F0-9]{64})`')
     matches = digest_regex.search(body)
     if matches:
-        return matches.group(1)
+        return Release(tag=tag_name, digest=matches.group(1))
     
     # Fallback option: fetch digest from github special endpoint
     digest_url = f"{GITHUB_PROXY}/{repo}/releases/download/{tag_name}/tinfoil.hash"
     response = requests.get(digest_url, timeout=15)
     if response.status_code != 200:
         raise Exception(f"Failed to fetch attestation digest: {response.status_code} {response.reason}")
-    return response.text.strip()
+    return Release(tag=tag_name, digest=response.text.strip())
+
+
+def fetch_latest_digest(repo: str) -> str:
+    """Gets the attestation digest of the latest release of a repo."""
+    return fetch_latest_release(repo).digest
 
 def fetch_attestation_bundle(repo: str, digest: str) -> bytes:
     """

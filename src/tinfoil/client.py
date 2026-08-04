@@ -15,6 +15,8 @@ from urllib.parse import urlparse, urlencode
 import cryptography.x509
 from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
 import hashlib
+from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 
 from ehbp import (
     AsyncEHBPTransport,
@@ -31,7 +33,7 @@ from .attestation import (
 )
 from .attestation.attestation_tdx import verify_tdx_hardware
 from .attestation.types import Measurement, HardwareMeasurement, Verification
-from .github import fetch_latest_digest, fetch_attestation_bundle
+from .github import fetch_latest_release, fetch_attestation_bundle
 from .sigstore import verify_attestation, fetch_latest_hardware_measurements
 from .user_cache_secret import (
     resolve_user_cache_secret,
@@ -113,6 +115,24 @@ class VerificationStepState:
     error: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class SoftwareIdentity:
+    name: str
+    version: str
+
+
+def _verifier_identity() -> SoftwareIdentity:
+    try:
+        package_version = version("tinfoil")
+    except PackageNotFoundError:
+        package_version = "unknown"
+    return SoftwareIdentity(name="tinfoil", version=package_version)
+
+
+def _verified_at_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 @dataclass
 class VerificationDocument:
     """Captures the full result and per-step status of enclave verification"""
@@ -134,6 +154,10 @@ class VerificationDocument:
         "verify_enclave": VerificationStepState(status="pending"),
         "compare_measurements": VerificationStepState(status="pending"),
     })
+    schema_version: int = 1
+    release_tag: str = ""
+    verifier: SoftwareIdentity = field(default_factory=_verifier_identity)
+    verified_at: Optional[str] = None
 
 
 def _attach_verification_document(exc: Exception, verification_document: VerificationDocument) -> None:
@@ -801,6 +825,11 @@ class SecureClient:
                 if actual_measurement != expected_snp_measurement:
                     raise ValueError(f"SNP measurement mismatch: expected {expected_snp_measurement}, got {actual_measurement}")
                 doc.steps["compare_measurements"] = VerificationStepState(status="success")
+                doc.code_measurement = Measurement(
+                    type=verification.measurement.type,
+                    registers=[expected_snp_measurement],
+                )
+                doc.code_fingerprint = doc.code_measurement.fingerprint()
             except Exception as e:
                 doc.steps["compare_measurements"] = VerificationStepState(status="failed", error=str(e))
                 _attach_verification_document(e, doc)
@@ -808,6 +837,7 @@ class SecureClient:
 
             doc.release_digest = "pinned_no_digest"
             doc.security_verified = True
+            doc.verified_at = _verified_at_now()
             self._ground_truth = GroundTruth(
                 public_key=verification.public_key_fp,
                 digest="pinned_no_digest",
@@ -820,8 +850,10 @@ class SecureClient:
 
             # Step 2: Fetch release digest
             try:
-                digest = fetch_latest_digest(self.repo)
-                doc.release_digest = digest
+                release = fetch_latest_release(self.repo)
+                digest = release.digest
+                doc.release_tag = release.tag
+                doc.release_digest = release.digest
                 doc.steps["fetch_digest"] = VerificationStepState(status="success")
             except Exception as e:
                 doc.steps["fetch_digest"] = VerificationStepState(status="failed", error=str(e))
@@ -850,6 +882,7 @@ class SecureClient:
                 raise
 
             doc.security_verified = True
+            doc.verified_at = _verified_at_now()
             self._ground_truth = GroundTruth(
                 public_key=verification.public_key_fp,
                 digest=digest,
@@ -932,6 +965,7 @@ class SecureClient:
         # Attestation came from the bundle; adopt its domain as the enclave host.
         self.enclave = bundle.domain
         doc.security_verified = True
+        doc.verified_at = _verified_at_now()
         self._ground_truth = GroundTruth(
             public_key=verification.public_key_fp,
             digest=bundle.digest,

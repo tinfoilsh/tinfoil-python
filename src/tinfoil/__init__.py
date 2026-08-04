@@ -145,6 +145,10 @@ class _HTTPSecureClient:
         self._tf_client.assert_request_allowed(url)
         return self._http_client.post(url, headers=headers, data=data, json=json, timeout=timeout)
 
+    def get_verification_document(self) -> Optional[VerificationDocument]:
+        """Returns the detailed verification document with per-step status"""
+        return self._tf_client.get_verification_document()
+
 
 def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: Optional[str] = None, attestation_bundle_url: str = "", user_cache_secret: Optional[str] = None):
     """Create a secure HTTP client for direct GET/POST through the Tinfoil enclave."""
