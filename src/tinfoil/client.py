@@ -974,7 +974,7 @@ class SecureClient:
             doc.steps["fetch_digest"] = VerificationStepState(status="skipped")
             doc.steps["verify_code"] = VerificationStepState(status="success")
         except Exception as e:
-            doc.steps["fetch_digest"] = VerificationStepState(status="failed", error=str(e))
+            doc.steps["fetch_digest"] = VerificationStepState(status="skipped")
             doc.steps["verify_code"] = VerificationStepState(status="failed", error=str(e))
             _attach_verification_document(e, doc)
             raise

@@ -231,7 +231,7 @@ def test_verification_document_serializes_to_shared_camel_case_schema():
         "RTMR0": "rtmr0",
     }
     assert serialized["steps"]["compareMeasurements"] == {"status": "pending"}
-    assert "verified_at" not in serialized
+    assert serialized["verifiedAt"] == "2026-08-04T12:00:00Z"
     assert json.loads(document.to_json()) == serialized
 
 

@@ -150,6 +150,7 @@ class TestSecureClientVerificationFailures:
         attached_document = getattr(exc_info.value, "verification_document", None)
         assert attached_document is not None
         assert attached_document is not verification_document
+        assert attached_document.to_dict() == verification_document.to_dict()
 
     @patch('tinfoil.client.fetch_attestation')
     @patch('tinfoil.client.fetch_latest_release')
@@ -291,6 +292,8 @@ class TestDirectMeasurementVerification:
         )
         mock_verification = MagicMock()
         mock_verification.measurement = runtime_measurement
+        mock_verification.public_key_fp = "tls-fingerprint"
+        mock_verification.hpke_public_key = "hpke-key"
         mock_doc = MagicMock()
         mock_doc.verify.return_value = mock_verification
         mock_fetch.return_value = mock_doc
@@ -312,6 +315,7 @@ class TestDirectMeasurementVerification:
         attached_document = getattr(exc_info.value, "verification_document", None)
         assert attached_document is not None
         assert attached_document is not verification_document
+        assert attached_document.to_dict() == verification_document.to_dict()
 
 
 class TestVerifyPeerFingerprint:
