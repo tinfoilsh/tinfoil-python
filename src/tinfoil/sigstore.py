@@ -6,7 +6,7 @@ from cryptography.x509 import PrecertificateSignedCertificateTimestamps
 import json
 import re
 
-from typing import List
+from typing import List, Optional
 from .attestation import Measurement, PredicateType, HardwareMeasurement
 from .github import fetch_latest_digest, fetch_attestation_bundle
 
@@ -130,7 +130,9 @@ class GitHubWorkflowRefPattern:
             )
 
 
-def _verify_dsse_bundle(bundle_json: bytes, digest: str, repo: str) -> dict:
+def _verify_dsse_bundle(
+    bundle_json: bytes, digest: str, repo: str, expected_release_tag: Optional[str] = None
+) -> dict:
     """
     Verify a Sigstore DSSE bundle and return the parsed in-toto payload.
 
@@ -141,6 +143,7 @@ def _verify_dsse_bundle(bundle_json: bytes, digest: str, repo: str) -> dict:
         bundle_json: Raw Sigstore bundle JSON
         digest: Expected SHA256 hex digest of the DSSE payload subject
         repo: GitHub repository (e.g. "tinfoilsh/confidential-router")
+        expected_release_tag: Release tag that must exactly match the signed workflow ref
 
     Returns:
         Parsed in-toto statement dict with predicateType, predicate, subject, etc.
@@ -158,10 +161,15 @@ def _verify_dsse_bundle(bundle_json: bytes, digest: str, repo: str) -> dict:
     # SPEC §5.2: reject duplicate-log SCTs before signature/SCT verification.
     reject_duplicate_sct_logs(bundle)
 
+    workflow_ref_pattern = (
+        rf"^refs/tags/{re.escape(expected_release_tag)}\Z"
+        if expected_release_tag is not None
+        else r"^refs/tags/.+\Z"
+    )
     policy = AllOf([
         OIDCIssuerV2Preferred(OIDC_ISSUER),
         GitHubWorkflowRepository(repo),
-        GitHubWorkflowRefPattern("refs/tags/.*")
+        GitHubWorkflowRefPattern(workflow_ref_pattern)
     ])
 
     payload_type, payload_bytes = verifier.verify_dsse(bundle, policy)
@@ -185,7 +193,9 @@ def _verify_dsse_bundle(bundle_json: bytes, digest: str, repo: str) -> dict:
     return statement
 
 
-def verify_attestation(bundle_json: bytes, digest: str, repo: str) -> Measurement:
+def verify_attestation(
+    bundle_json: bytes, digest: str, repo: str, expected_release_tag: Optional[str] = None
+) -> Measurement:
     """
     Verifies the attested measurements of an enclave image against a trusted root (Sigstore)
     and returns the measurement payload contained in the DSSE.
@@ -202,7 +212,7 @@ def verify_attestation(bundle_json: bytes, digest: str, repo: str) -> Measuremen
         ValueError: If verification fails or digests don't match
     """
     try:
-        statement = _verify_dsse_bundle(bundle_json, digest, repo)
+        statement = _verify_dsse_bundle(bundle_json, digest, repo, expected_release_tag)
 
         predicate_type = PredicateType(statement["predicateType"])
         predicate_fields = statement["predicate"]

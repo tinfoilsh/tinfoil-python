@@ -147,7 +147,9 @@ class TestSecureClientVerificationFailures:
         assert verification_document is not None
         assert verification_document.steps["verify_enclave"].status == "failed"
         assert verification_document.steps["verify_enclave"].error == "TDX attestation verification failed"
-        assert getattr(exc_info.value, "verification_document", None) is verification_document
+        attached_document = getattr(exc_info.value, "verification_document", None)
+        assert attached_document is not None
+        assert attached_document is not verification_document
 
     @patch('tinfoil.client.fetch_attestation')
     @patch('tinfoil.client.fetch_latest_release')
@@ -307,7 +309,9 @@ class TestDirectMeasurementVerification:
         assert verification_document.steps["fetch_digest"].status == "skipped"
         assert verification_document.steps["verify_code"].status == "skipped"
         assert verification_document.steps["compare_measurements"].status == "failed"
-        assert getattr(exc_info.value, "verification_document", None) is verification_document
+        attached_document = getattr(exc_info.value, "verification_document", None)
+        assert attached_document is not None
+        assert attached_document is not verification_document
 
 
 class TestVerifyPeerFingerprint:
