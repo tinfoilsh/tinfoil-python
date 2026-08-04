@@ -155,7 +155,7 @@ class VerificationDocument:
         "compare_measurements": VerificationStepState(status="pending"),
     })
     schema_version: int = 1
-    release_tag: str = ""
+    release_tag: Optional[str] = None
     verifier: SoftwareIdentity = field(default_factory=_verifier_identity)
     verified_at: Optional[str] = None
 
@@ -767,6 +767,23 @@ class SecureClient:
         transport = self._wrap_async_transport(transport)
         return httpx.AsyncClient(transport=transport, follow_redirects=False)
 
+    def _finalize_verification(
+        self,
+        doc: VerificationDocument,
+        verification: Verification,
+        digest: str,
+    ) -> GroundTruth:
+        doc.release_digest = digest
+        doc.security_verified = True
+        doc.verified_at = _verified_at_now()
+        self._ground_truth = GroundTruth(
+            public_key=verification.public_key_fp,
+            digest=digest,
+            measurement=verification.measurement,
+            hpke_public_key=verification.hpke_public_key or "",
+        )
+        return self._ground_truth
+
     def verify(self) -> GroundTruth:
         """
         Fetches the latest verification information from GitHub and Sigstore
@@ -835,16 +852,9 @@ class SecureClient:
                 _attach_verification_document(e, doc)
                 raise
 
-            doc.release_digest = "pinned_no_digest"
-            doc.security_verified = True
-            doc.verified_at = _verified_at_now()
-            self._ground_truth = GroundTruth(
-                public_key=verification.public_key_fp,
-                digest="pinned_no_digest",
-                measurement=verification.measurement,
-                hpke_public_key=verification.hpke_public_key or "",
+            return self._finalize_verification(
+                doc, verification, "pinned_no_digest"
             )
-            return self._ground_truth
         else:
             # GitHub-based verification
 
@@ -881,15 +891,7 @@ class SecureClient:
                 _attach_verification_document(e, doc)
                 raise
 
-            doc.security_verified = True
-            doc.verified_at = _verified_at_now()
-            self._ground_truth = GroundTruth(
-                public_key=verification.public_key_fp,
-                digest=digest,
-                measurement=verification.measurement,
-                hpke_public_key=verification.hpke_public_key or "",
-            )
-            return self._ground_truth
+            return self._finalize_verification(doc, verification, digest)
 
     def verify_from_bundle(self, bundle: Bundle) -> GroundTruth:
         """
@@ -964,15 +966,7 @@ class SecureClient:
 
         # Attestation came from the bundle; adopt its domain as the enclave host.
         self.enclave = bundle.domain
-        doc.security_verified = True
-        doc.verified_at = _verified_at_now()
-        self._ground_truth = GroundTruth(
-            public_key=verification.public_key_fp,
-            digest=bundle.digest,
-            measurement=verification.measurement,
-            hpke_public_key=verification.hpke_public_key or "",
-        )
-        return self._ground_truth
+        return self._finalize_verification(doc, verification, bundle.digest)
 
     def get_http_client(self) -> urllib.request.OpenerDirector:
         """

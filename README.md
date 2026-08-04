@@ -48,7 +48,7 @@ verification completion time are available from the client:
 ```python
 document = client.get_verification_document()
 
-print(document.release_tag)
+print(document.release_tag)  # None for pinned or bundled verification
 print(document.release_digest)
 print(document.code_fingerprint)
 print(document.enclave_fingerprint)
