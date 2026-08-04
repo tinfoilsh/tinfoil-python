@@ -40,6 +40,26 @@ chat_completion = client.chat.completions.create(
 print(chat_completion.choices[0].message.content)
 ```
 
+### Inspecting verification
+
+The verified release, measurements, attested keys, verifier version, and local
+verification completion time are available from the client:
+
+```python
+document = client.get_verification_document()
+
+print(document.release_tag)
+print(document.release_digest)
+print(document.code_fingerprint)
+print(document.enclave_fingerprint)
+print(document.verifier)
+print(document.verified_at)
+```
+
+`verified_at` is recorded from the local clock after every successful
+verification or re-verification. It is not an attested evidence timestamp or a
+freshness guarantee.
+
 ### Audio Transcription with Whisper
 
 You can transcribe audio files using OpenAI's Whisper model:
