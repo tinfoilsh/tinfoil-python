@@ -26,6 +26,7 @@ from tinfoil.attestation import Bundle, Document, fetch_bundle_from
 from tinfoil.attestation.bundle import _decode_domains, _matches_hostname
 from tinfoil.attestation.types import Measurement, PredicateType, Verification
 from tinfoil.client import (
+    DEFAULT_INFERENCE_HOST,
     ENCLAVE_URL_HEADER,
     GroundTruth,
     _AsyncEHBPReVerifyingTransport,
@@ -35,6 +36,7 @@ from tinfoil.client import (
     _EnclaveURLHeaderTransport,
     _HostBoundTransport,
     _enclave_url_header,
+    _resolve_enclave_for_base_url,
 )
 from tinfoil.user_cache_secret import (
     _AsyncUserCacheSecretTransport,
@@ -426,6 +428,88 @@ class TestConstructorValidation:
     def test_https_attestation_bundle_url_is_accepted(self):
         sc = SecureClient(attestation_bundle_url="https://atc.example")
         assert sc.attestation_bundle_url == "https://atc.example"
+
+    def test_official_inference_base_uses_matching_enclave(self):
+        sc = SecureClient(
+            base_url="https://INFERENCE.TINFOIL.SH:443/v1/",
+            attestation_bundle_url="https://atc.example",
+        )
+        assert sc.enclave == DEFAULT_INFERENCE_HOST
+        assert sc._configured_enclave == DEFAULT_INFERENCE_HOST
+
+    def test_official_inference_base_rejects_another_enclave(self):
+        with pytest.raises(ValueError, match="cannot route"):
+            SecureClient(
+                enclave="router.example.com",
+                base_url="https://inference.tinfoil.sh/v1/",
+                attestation_bundle_url="https://atc.example",
+            )
+
+    def test_custom_proxy_preserves_automatic_selection(self):
+        sc = SecureClient(
+            base_url="https://proxy.example.com/v1/",
+            attestation_bundle_url="https://atc.example",
+        )
+        assert sc.enclave == ""
+        assert sc._configured_enclave == ""
+
+
+class TestBundleRecoveryRouting:
+    def test_proxy_recovery_can_rotate_complete_router_identity(self):
+        sc = SecureClient(
+            base_url="https://proxy.example.com/v1/",
+            attestation_bundle_url="https://atc.example",
+        )
+        sc.enclave = "old-router.example"
+        assert sc._bundle_request_enclave() == ""
+
+    def test_direct_recovery_refetches_current_domains_bundle(self):
+        sc = SecureClient(attestation_bundle_url="https://atc.example")
+        sc.enclave = "selected-router.example"
+        assert sc._bundle_request_enclave() == "selected-router.example"
+
+    def test_explicit_enclave_remains_pinned(self):
+        sc = SecureClient(
+            enclave="configured.example",
+            base_url="https://proxy.example.com/v1/",
+            attestation_bundle_url="https://atc.example",
+        )
+        sc.enclave = "configured.example"
+        assert sc._bundle_request_enclave() == "configured.example"
+
+    def test_configured_bundle_domain_mismatch_is_rejected_before_verification(self):
+        sc = SecureClient(
+            enclave="configured.example",
+            attestation_bundle_url="https://atc.example",
+        )
+        with pytest.raises(ValueError, match="does not match configured enclave"):
+            sc.verify_from_bundle(
+                Bundle(
+                    domain="other.example",
+                    enclave_attestation_report=Document(
+                        format=PredicateType.SEV_GUEST_V2,
+                        body="Zm9v",
+                    ),
+                    digest="",
+                    sigstore_bundle=b"",
+                    vcek="",
+                    enclave_cert="",
+                )
+            )
+
+
+class TestOfficialInferenceResolution:
+    @pytest.mark.parametrize(
+        "base_url,enclave,want",
+        [
+            ("https://inference.tinfoil.sh/v1/", "", DEFAULT_INFERENCE_HOST),
+            ("https://INFERENCE.TINFOIL.SH:443/v1/", DEFAULT_INFERENCE_HOST, DEFAULT_INFERENCE_HOST),
+            ("https://proxy.example.com/v1/", "", ""),
+            ("http://inference.tinfoil.sh/v1/", "", ""),
+        ],
+    )
+    def test_resolution(self, base_url, enclave, want):
+        assert _resolve_enclave_for_base_url(base_url, enclave) == want
 
 
 class TestBundleModeRequestRouting:

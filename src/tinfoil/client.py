@@ -47,6 +47,7 @@ from .user_cache_secret import (
 ENCLAVE_URL_HEADER = "X-Tinfoil-Enclave-Url"
 
 DEFAULT_CONFIG_REPO = "tinfoilsh/confidential-model-router"
+DEFAULT_INFERENCE_HOST = "inference.tinfoil.sh"
 
 
 _CERTIFICATE_VERIFY_ERROR_MARKERS = (
@@ -87,6 +88,34 @@ def _url_origin(url: str) -> tuple[str, str, int]:
     default_port = 443 if scheme == "https" else 80
     port = parsed.port if parsed.port is not None else default_port
     return scheme, parsed.hostname or "", port
+
+
+def _resolve_enclave_for_base_url(base_url: str, enclave: str) -> str:
+    """Bind the legacy inference endpoint to its matching enclave identity."""
+    if not base_url or _url_origin(base_url) != (
+        "https",
+        DEFAULT_INFERENCE_HOST,
+        443,
+    ):
+        return enclave
+
+    if not enclave:
+        # inference.tinfoil.sh is a stable enclave identity, not a proxy that
+        # forwards X-Tinfoil-Enclave-Url. Its HPKE bundle must therefore be
+        # fetched explicitly instead of combining this destination with a
+        # randomly selected default-router key.
+        return DEFAULT_INFERENCE_HOST
+
+    if _url_origin(f"https://{enclave}") != (
+        "https",
+        DEFAULT_INFERENCE_HOST,
+        443,
+    ):
+        raise ValueError(
+            f"base_url {base_url!r} cannot route to enclave {enclave!r}; "
+            f"use a proxy that forwards {ENCLAVE_URL_HEADER} or connect directly"
+        )
+    return DEFAULT_INFERENCE_HOST
 
 
 class _PinMismatchError(ValueError):
@@ -618,6 +647,12 @@ class SecureClient:
                 https_only=True,
             )
 
+        enclave = _resolve_enclave_for_base_url(base_url or "", enclave or "")
+        # Keep the caller's routing constraint separate from the currently
+        # verified endpoint. A bundle-discovered endpoint may change when a
+        # proxy client recovers from an HPKE key mismatch.
+        self._configured_enclave = enclave
+
         # If enclave is empty, fetch a random one from the routers API. When
         # attesting from a bundle, the enclave host comes from the verified
         # bundle, so no router lookup is needed.
@@ -849,8 +884,14 @@ class SecureClient:
         # for an enclave/repo-specific bundle when either is set.
         if self.attestation_bundle_url:
             repo = self.repo if self.repo != DEFAULT_CONFIG_REPO else ""
+            requested_enclave = self._bundle_request_enclave()
             return self.verify_from_bundle(
-                fetch_bundle_from(self.attestation_bundle_url, enclave=self.enclave, repo=repo)
+                fetch_bundle_from(
+                    self.attestation_bundle_url,
+                    enclave=requested_enclave,
+                    repo=repo,
+                ),
+                expected_enclave=requested_enclave,
             )
 
         doc = VerificationDocument(
@@ -948,13 +989,41 @@ class SecureClient:
 
             return self._finalize_verification(doc, verification, digest)
 
-    def verify_from_bundle(self, bundle: Bundle) -> GroundTruth:
+    def _bundle_request_enclave(self) -> str:
+        """Return routing constraints without pinning proxy discoveries."""
+        if self._configured_enclave:
+            return self._configured_enclave
+        if self.base_url:
+            # A real EHBP proxy can follow the per-request enclave header, so a
+            # retry may rotate the complete endpoint/key pair.
+            return ""
+        # Direct clients have a fixed request destination. Once selected, fetch
+        # that domain's fresh bundle instead of pairing it with another key.
+        return self.enclave
+
+    def verify_from_bundle(
+        self,
+        bundle: Bundle,
+        *,
+        expected_enclave: str = "",
+    ) -> GroundTruth:
         """
         Verifies a pre-fetched attestation bundle entirely client-side and
         stores the ground truth. The bundle supplies the enclave attestation
         report, release digest, Sigstore bundle, AMD VCEK, and enclave TLS
         certificate, so verification needs no direct connection to the enclave.
         """
+        constrained_enclave = expected_enclave or self._configured_enclave
+        if (
+            constrained_enclave
+            and bundle.domain.casefold().rstrip(".")
+            != constrained_enclave.casefold().rstrip(".")
+        ):
+            raise ValueError(
+                f"attestation bundle domain {bundle.domain!r} does not match "
+                f"configured enclave {constrained_enclave!r}"
+            )
+
         doc = VerificationDocument(
             config_repo=self.repo or "",
             enclave_host=bundle.domain,
