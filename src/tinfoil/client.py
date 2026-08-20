@@ -1013,23 +1013,31 @@ class SecureClient:
         report, release digest, Sigstore bundle, AMD VCEK, and enclave TLS
         certificate, so verification needs no direct connection to the enclave.
         """
-        constrained_enclave = expected_enclave or self._configured_enclave
-        if (
-            constrained_enclave
-            and bundle.domain.casefold().rstrip(".")
-            != constrained_enclave.casefold().rstrip(".")
-        ):
-            raise ValueError(
-                f"attestation bundle domain {bundle.domain!r} does not match "
-                f"configured enclave {constrained_enclave!r}"
-            )
-
         doc = VerificationDocument(
             config_repo=self.repo or "",
             enclave_host=bundle.domain,
             selected_router_endpoint=bundle.domain,
         )
         self._verification_document = doc
+
+        # A constructor enclave is a caller-supplied trust constraint and must
+        # never be weakened by a retry-time expectation. The latter only binds
+        # bundle recovery when the client itself was not explicitly pinned.
+        constrained_enclave = self._configured_enclave or expected_enclave
+        if (
+            constrained_enclave
+            and bundle.domain.casefold().rstrip(".")
+            != constrained_enclave.casefold().rstrip(".")
+        ):
+            exc = ValueError(
+                f"attestation bundle domain {bundle.domain!r} does not match "
+                f"configured enclave {constrained_enclave!r}"
+            )
+            doc.steps["verify_enclave"] = VerificationStepState(
+                status="failed", error=str(exc)
+            )
+            _attach_verification_document(exc, doc)
+            raise exc
 
         # Step 1: Verify code measurement from the bundled Sigstore bundle
         try:

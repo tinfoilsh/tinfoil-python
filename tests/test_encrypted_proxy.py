@@ -29,6 +29,7 @@ from tinfoil.client import (
     DEFAULT_INFERENCE_HOST,
     ENCLAVE_URL_HEADER,
     GroundTruth,
+    VerificationDocument,
     _AsyncEHBPReVerifyingTransport,
     _AsyncEnclaveURLHeaderTransport,
     _AsyncHostBoundTransport,
@@ -482,7 +483,9 @@ class TestBundleRecoveryRouting:
             enclave="configured.example",
             attestation_bundle_url="https://atc.example",
         )
-        with pytest.raises(ValueError, match="does not match configured enclave"):
+        sc._verification_document = VerificationDocument(security_verified=True)
+
+        with pytest.raises(ValueError, match="does not match configured enclave") as exc_info:
             sc.verify_from_bundle(
                 Bundle(
                     domain="other.example",
@@ -495,6 +498,34 @@ class TestBundleRecoveryRouting:
                     vcek="",
                     enclave_cert="",
                 )
+            )
+
+        document = sc.get_verification_document()
+        assert not document.security_verified
+        assert document.enclave_host == "other.example"
+        assert document.steps["verify_enclave"].status == "failed"
+        assert getattr(exc_info.value, "verification_document") == document
+
+    def test_retry_expectation_cannot_override_configured_enclave(self):
+        sc = SecureClient(
+            enclave="configured.example",
+            attestation_bundle_url="https://atc.example",
+        )
+
+        with pytest.raises(ValueError, match=r"configured\.example"):
+            sc.verify_from_bundle(
+                Bundle(
+                    domain="retry-selected.example",
+                    enclave_attestation_report=Document(
+                        format=PredicateType.SEV_GUEST_V2,
+                        body="Zm9v",
+                    ),
+                    digest="",
+                    sigstore_bundle=b"",
+                    vcek="",
+                    enclave_cert="",
+                ),
+                expected_enclave="retry-selected.example",
             )
 
 
