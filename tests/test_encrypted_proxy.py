@@ -19,6 +19,7 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from ehbp import KeyConfigMismatchError
 
 import tinfoil as tinfoil_module
 from tinfoil import AsyncTinfoilAI, SecureClient, TinfoilAI
@@ -26,7 +27,6 @@ from tinfoil.attestation import Bundle, Document, fetch_bundle_from
 from tinfoil.attestation.bundle import _decode_domains, _matches_hostname
 from tinfoil.attestation.types import Measurement, PredicateType, Verification
 from tinfoil.client import (
-    DEFAULT_INFERENCE_HOST,
     ENCLAVE_URL_HEADER,
     GroundTruth,
     VerificationDocument,
@@ -37,7 +37,6 @@ from tinfoil.client import (
     _EnclaveURLHeaderTransport,
     _HostBoundTransport,
     _enclave_url_header,
-    _resolve_enclave_for_base_url,
 )
 from tinfoil.user_cache_secret import (
     _AsyncUserCacheSecretTransport,
@@ -91,6 +90,18 @@ class _AsyncRecordingTransport(httpx.AsyncBaseTransport):
         return httpx.Response(200, content=b"ok")
 
 
+class _KeyMismatchTransport(httpx.BaseTransport):
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        request.read()
+        raise KeyConfigMismatchError("rotated")
+
+
+class _AsyncKeyMismatchTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        raise KeyConfigMismatchError("rotated")
+
+
 class TestEnclaveURLHeaderTransport:
     def _client(self, enclave: str, base_url: str):
         return SecureClient(enclave=enclave, repo="org/repo", transport="ehbp", base_url=base_url)
@@ -140,6 +151,52 @@ class TestEnclaveURLHeaderTransport:
             httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
         )
         assert inner.seen_header == "https://new.example.com"
+
+    def test_sync_retry_uses_rotated_enclave_header(self):
+        sc = self._client("old.example.com", "https://proxy.example.com/")
+        recovered = _RecordingTransport()
+
+        def rebuild():
+            sc.enclave = "new.example.com"
+            return recovered
+
+        sc._build_ehbp_sync_transport = MagicMock(side_effect=rebuild)
+        transport = _EnclaveURLHeaderTransport(
+            _EHBPReVerifyingTransport(sc, _KeyMismatchTransport()), sc
+        )
+        response = transport.handle_request(
+            httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
+        )
+
+        assert response.status_code == 200
+        assert recovered.seen_header == "https://new.example.com"
+
+    def test_async_retry_uses_rotated_enclave_header(self):
+        async def run():
+            sc = self._client("old.example.com", "https://proxy.example.com/")
+            recovered = _AsyncRecordingTransport()
+
+            async def rebuild():
+                sc.enclave = "new.example.com"
+                return recovered
+
+            sc._build_ehbp_async_transport = rebuild
+            transport = _AsyncEnclaveURLHeaderTransport(
+                _AsyncEHBPReVerifyingTransport(
+                    sc, _AsyncKeyMismatchTransport()
+                ),
+                sc,
+            )
+            response = await transport.handle_async_request(
+                httpx.Request(
+                    "POST", "https://proxy.example.com/v1/x", content=b"p"
+                )
+            )
+
+            assert response.status_code == 200
+            assert recovered.seen_header == "https://new.example.com"
+
+        asyncio.run(run())
 
 
 class TestProxyTransportWiring:
@@ -430,22 +487,6 @@ class TestConstructorValidation:
         sc = SecureClient(attestation_bundle_url="https://atc.example")
         assert sc.attestation_bundle_url == "https://atc.example"
 
-    def test_official_inference_base_uses_matching_enclave(self):
-        sc = SecureClient(
-            base_url="https://INFERENCE.TINFOIL.SH:443/v1/",
-            attestation_bundle_url="https://atc.example",
-        )
-        assert sc.enclave == DEFAULT_INFERENCE_HOST
-        assert sc._configured_enclave == DEFAULT_INFERENCE_HOST
-
-    def test_official_inference_base_rejects_another_enclave(self):
-        with pytest.raises(ValueError, match="cannot route"):
-            SecureClient(
-                enclave="router.example.com",
-                base_url="https://inference.tinfoil.sh/v1/",
-                attestation_bundle_url="https://atc.example",
-            )
-
     def test_custom_proxy_preserves_automatic_selection(self):
         sc = SecureClient(
             base_url="https://proxy.example.com/v1/",
@@ -527,20 +568,6 @@ class TestBundleRecoveryRouting:
                 ),
                 expected_enclave="retry-selected.example",
             )
-
-
-class TestOfficialInferenceResolution:
-    @pytest.mark.parametrize(
-        "base_url,enclave,want",
-        [
-            ("https://inference.tinfoil.sh/v1/", "", DEFAULT_INFERENCE_HOST),
-            ("https://INFERENCE.TINFOIL.SH:443/v1/", DEFAULT_INFERENCE_HOST, DEFAULT_INFERENCE_HOST),
-            ("https://proxy.example.com/v1/", "", ""),
-            ("http://inference.tinfoil.sh/v1/", "", ""),
-        ],
-    )
-    def test_resolution(self, base_url, enclave, want):
-        assert _resolve_enclave_for_base_url(base_url, enclave) == want
 
 
 class TestBundleModeRequestRouting:

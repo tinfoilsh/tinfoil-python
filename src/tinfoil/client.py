@@ -47,7 +47,6 @@ from .user_cache_secret import (
 ENCLAVE_URL_HEADER = "X-Tinfoil-Enclave-Url"
 
 DEFAULT_CONFIG_REPO = "tinfoilsh/confidential-model-router"
-DEFAULT_INFERENCE_HOST = "inference.tinfoil.sh"
 
 
 _CERTIFICATE_VERIFY_ERROR_MARKERS = (
@@ -88,34 +87,6 @@ def _url_origin(url: str) -> tuple[str, str, int]:
     default_port = 443 if scheme == "https" else 80
     port = parsed.port if parsed.port is not None else default_port
     return scheme, parsed.hostname or "", port
-
-
-def _resolve_enclave_for_base_url(base_url: str, enclave: str) -> str:
-    """Bind the legacy inference endpoint to its matching enclave identity."""
-    if not base_url or _url_origin(base_url) != (
-        "https",
-        DEFAULT_INFERENCE_HOST,
-        443,
-    ):
-        return enclave
-
-    if not enclave:
-        # inference.tinfoil.sh is a stable enclave identity, not a proxy that
-        # forwards X-Tinfoil-Enclave-Url. Its HPKE bundle must therefore be
-        # fetched explicitly instead of combining this destination with a
-        # randomly selected default-router key.
-        return DEFAULT_INFERENCE_HOST
-
-    if _url_origin(f"https://{enclave}") != (
-        "https",
-        DEFAULT_INFERENCE_HOST,
-        443,
-    ):
-        raise ValueError(
-            f"base_url {base_url!r} cannot route to enclave {enclave!r}; "
-            f"use a proxy that forwards {ENCLAVE_URL_HEADER} or connect directly"
-        )
-    return DEFAULT_INFERENCE_HOST
 
 
 class _PinMismatchError(ValueError):
@@ -470,6 +441,7 @@ class _EHBPReVerifyingTransport(httpx.BaseTransport):
                 raise
 
             assert retry_inner is not None
+            _update_enclave_header(request, self._secure_client)
             try:
                 return retry_inner.handle_request(request)
             finally:
@@ -513,6 +485,7 @@ class _AsyncEHBPReVerifyingTransport(httpx.AsyncBaseTransport):
                 raise
 
             assert retry_inner is not None
+            _update_enclave_header(request, self._secure_client)
             try:
                 return await retry_inner.handle_async_request(request)
             finally:
@@ -538,6 +511,15 @@ def _enclave_url_header(base_url: str, enclave: str) -> tuple[str, bool]:
     return enclave_url, True
 
 
+def _update_enclave_header(request: httpx.Request, client: "SecureClient") -> None:
+    """Bind a replayed request to the endpoint selected by re-verification."""
+    value, inject = _enclave_url_header(client.base_url, client.enclave)
+    if inject:
+        request.headers[ENCLAVE_URL_HEADER] = value
+    else:
+        request.headers.pop(ENCLAVE_URL_HEADER, None)
+
+
 class _EnclaveURLHeaderTransport(httpx.BaseTransport):
     """
     Injects the X-Tinfoil-Enclave-Url header before delegating to the wrapped
@@ -554,9 +536,7 @@ class _EnclaveURLHeaderTransport(httpx.BaseTransport):
         self._client = client
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        header_value, inject = _enclave_url_header(self._client.base_url, self._client.enclave)
-        if inject:
-            request.headers[ENCLAVE_URL_HEADER] = header_value
+        _update_enclave_header(request, self._client)
         return self._inner.handle_request(request)
 
     def close(self) -> None:
@@ -571,9 +551,7 @@ class _AsyncEnclaveURLHeaderTransport(httpx.AsyncBaseTransport):
         self._client = client
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        header_value, inject = _enclave_url_header(self._client.base_url, self._client.enclave)
-        if inject:
-            request.headers[ENCLAVE_URL_HEADER] = header_value
+        _update_enclave_header(request, self._client)
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:
@@ -647,7 +625,6 @@ class SecureClient:
                 https_only=True,
             )
 
-        enclave = _resolve_enclave_for_base_url(base_url or "", enclave or "")
         # Keep the caller's routing constraint separate from the currently
         # verified endpoint. A bundle-discovered endpoint may change when a
         # proxy client recovers from an HPKE key mismatch.
