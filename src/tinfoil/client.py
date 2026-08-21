@@ -417,12 +417,13 @@ class _EHBPReVerifyingTransport(httpx.BaseTransport):
         # generation. Reading a single tuple prevents a concurrent, later
         # rotation from pairing this generation's key with another endpoint.
         self._state = (inner, secure_client.enclave)
+        self._base_url = secure_client.base_url
         self._lock = threading.Lock()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         state = self._state
         inner, enclave = state
-        _update_enclave_header(request, self._secure_client, enclave)
+        _update_enclave_header(request, self._base_url, enclave)
         try:
             return inner.handle_request(request)
         except KeyConfigMismatchError:
@@ -448,7 +449,7 @@ class _EHBPReVerifyingTransport(httpx.BaseTransport):
 
             assert retry_state is not None
             retry_inner, retry_enclave = retry_state
-            _update_enclave_header(request, self._secure_client, retry_enclave)
+            _update_enclave_header(request, self._base_url, retry_enclave)
             try:
                 return retry_inner.handle_request(request)
             finally:
@@ -466,12 +467,13 @@ class _AsyncEHBPReVerifyingTransport(httpx.AsyncBaseTransport):
     def __init__(self, secure_client: "SecureClient", inner: httpx.AsyncBaseTransport):
         self._secure_client = secure_client
         self._state = (inner, secure_client.enclave)
+        self._base_url = secure_client.base_url
         self._lock = asyncio.Lock()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         state = self._state
         inner, enclave = state
-        _update_enclave_header(request, self._secure_client, enclave)
+        _update_enclave_header(request, self._base_url, enclave)
         try:
             return await inner.handle_async_request(request)
         except KeyConfigMismatchError:
@@ -496,7 +498,7 @@ class _AsyncEHBPReVerifyingTransport(httpx.AsyncBaseTransport):
 
             assert retry_state is not None
             retry_inner, retry_enclave = retry_state
-            _update_enclave_header(request, self._secure_client, retry_enclave)
+            _update_enclave_header(request, self._base_url, retry_enclave)
             try:
                 return await retry_inner.handle_async_request(request)
             finally:
@@ -524,56 +526,15 @@ def _enclave_url_header(base_url: str, enclave: str) -> tuple[str, bool]:
 
 def _update_enclave_header(
     request: httpx.Request,
-    client: "SecureClient",
-    enclave: Optional[str] = None,
+    base_url: str,
+    enclave: str,
 ) -> None:
     """Bind a request to the endpoint paired with its sealing transport."""
-    value, inject = _enclave_url_header(
-        client.base_url,
-        client.enclave if enclave is None else enclave,
-    )
+    value, inject = _enclave_url_header(base_url, enclave)
     if inject:
         request.headers[ENCLAVE_URL_HEADER] = value
     else:
         request.headers.pop(ENCLAVE_URL_HEADER, None)
-
-
-class _EnclaveURLHeaderTransport(httpx.BaseTransport):
-    """
-    Injects the X-Tinfoil-Enclave-Url header before delegating to the wrapped
-    transport. EHBP leaves request headers in plaintext, so the header reaches
-    the proxy while the body stays sealed to the enclave's HPKE key.
-
-    The header is recomputed for every request from the client's current
-    enclave, so it stays correct after a re-verification swaps in a different
-    enclave (for example when attesting from a bundle behind a proxy).
-    """
-
-    def __init__(self, inner: httpx.BaseTransport, client: "SecureClient"):
-        self._inner = inner
-        self._client = client
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        _update_enclave_header(request, self._client)
-        return self._inner.handle_request(request)
-
-    def close(self) -> None:
-        self._inner.close()
-
-
-class _AsyncEnclaveURLHeaderTransport(httpx.AsyncBaseTransport):
-    """Async counterpart of _EnclaveURLHeaderTransport."""
-
-    def __init__(self, inner: httpx.AsyncBaseTransport, client: "SecureClient"):
-        self._inner = inner
-        self._client = client
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        _update_enclave_header(request, self._client)
-        return await self._inner.handle_async_request(request)
-
-    async def aclose(self) -> None:
-        await self._inner.aclose()
 
 
 class _HostBoundTransport(httpx.BaseTransport):

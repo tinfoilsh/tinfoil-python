@@ -32,10 +32,8 @@ from tinfoil.client import (
     GroundTruth,
     VerificationDocument,
     _AsyncEHBPReVerifyingTransport,
-    _AsyncEnclaveURLHeaderTransport,
     _AsyncHostBoundTransport,
     _EHBPReVerifyingTransport,
-    _EnclaveURLHeaderTransport,
     _HostBoundTransport,
     _enclave_url_header,
 )
@@ -103,55 +101,9 @@ class _AsyncKeyMismatchTransport(httpx.AsyncBaseTransport):
         raise KeyConfigMismatchError("rotated")
 
 
-class TestEnclaveURLHeaderTransport:
+class TestEHBPRouteGeneration:
     def _client(self, enclave: str, base_url: str):
         return SecureClient(enclave=enclave, repo="org/repo", transport="ehbp", base_url=base_url)
-
-    def test_sync_injects_header(self):
-        inner = _RecordingTransport()
-        sc = self._client("enclave.example.com", "https://proxy.example.com/")
-        transport = _EnclaveURLHeaderTransport(inner, sc)
-        request = httpx.Request("POST", "https://proxy.example.com/v1/chat/completions", content=b"payload")
-        resp = transport.handle_request(request)
-        assert resp.status_code == 200
-        assert inner.seen_header == "https://enclave.example.com"
-
-    def test_async_injects_header(self):
-        async def run():
-            inner = _AsyncRecordingTransport()
-            sc = self._client("enclave.example.com", "https://proxy.example.com/")
-            transport = _AsyncEnclaveURLHeaderTransport(inner, sc)
-            request = httpx.Request("POST", "https://proxy.example.com/v1/chat/completions", content=b"payload")
-            resp = await transport.handle_async_request(request)
-            assert resp.status_code == 200
-            assert inner.seen_header == "https://enclave.example.com"
-
-        asyncio.run(run())
-
-    def test_no_header_when_same_origin(self):
-        inner = _RecordingTransport()
-        sc = self._client("enclave.test", "https://enclave.test/v1/")
-        transport = _EnclaveURLHeaderTransport(inner, sc)
-        transport.handle_request(
-            httpx.Request("POST", "https://enclave.test/v1/chat/completions", content=b"payload")
-        )
-        assert inner.seen_header is None
-
-    def test_reflects_enclave_change_after_reverification(self):
-        inner = _RecordingTransport()
-        sc = self._client("old.example.com", "https://proxy.example.com/")
-        transport = _EnclaveURLHeaderTransport(inner, sc)
-        transport.handle_request(
-            httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
-        )
-        assert inner.seen_header == "https://old.example.com"
-        # A re-verification (e.g. bundle mode behind a proxy) may swap in a
-        # different enclave; the header must follow the current enclave.
-        sc.enclave = "new.example.com"
-        transport.handle_request(
-            httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
-        )
-        assert inner.seen_header == "https://new.example.com"
 
     def test_sync_retry_uses_endpoint_bound_to_rebuilt_transport(self):
         sc = self._client("old.example.com", "https://proxy.example.com/")
@@ -165,12 +117,12 @@ class TestEnclaveURLHeaderTransport:
         transport = _EHBPReVerifyingTransport(sc, _KeyMismatchTransport())
         update_header = client_module._update_enclave_header
 
-        def rotate_global_state_again(request, client, enclave=None):
+        def rotate_global_state_again(request, base_url, enclave):
             if enclave == "new.example.com":
                 # Simulate another request installing a later generation after
                 # this request selected its transport but before replay.
                 sc.enclave = "later.example.com"
-            update_header(request, client, enclave)
+            update_header(request, base_url, enclave)
 
         with patch.object(
             client_module,
@@ -200,10 +152,10 @@ class TestEnclaveURLHeaderTransport:
             )
             update_header = client_module._update_enclave_header
 
-            def rotate_global_state_again(request, client, enclave=None):
+            def rotate_global_state_again(request, base_url, enclave):
                 if enclave == "new.example.com":
                     sc.enclave = "later.example.com"
-                update_header(request, client, enclave)
+                update_header(request, base_url, enclave)
 
             with patch.object(
                 client_module,
