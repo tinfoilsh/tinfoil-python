@@ -413,35 +413,42 @@ class _EHBPReVerifyingTransport(httpx.BaseTransport):
 
     def __init__(self, secure_client: "SecureClient", inner: httpx.BaseTransport):
         self._secure_client = secure_client
-        self._inner = inner
+        # Treat the sealing transport and its verified route as one immutable
+        # generation. Reading a single tuple prevents a concurrent, later
+        # rotation from pairing this generation's key with another endpoint.
+        self._state = (inner, secure_client.enclave)
         self._lock = threading.Lock()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        inner = self._inner
+        state = self._state
+        inner, enclave = state
+        _update_enclave_header(request, self._secure_client, enclave)
         try:
             return inner.handle_request(request)
         except KeyConfigMismatchError:
             old_inner: Optional[httpx.BaseTransport] = None
-            retry_inner: Optional[httpx.BaseTransport] = None
+            retry_state: Optional[tuple[httpx.BaseTransport, str]] = None
             reverify_failed = False
             with self._lock:
-                if self._inner is inner:
+                if self._state is state:
                     try:
                         retry_inner = self._secure_client._build_ehbp_sync_transport()
                     except Exception:
                         # Re-verification failed; surface the original mismatch.
                         reverify_failed = True
                     else:
-                        old_inner = self._inner
-                        self._inner = retry_inner
+                        old_inner = state[0]
+                        retry_state = (retry_inner, self._secure_client.enclave)
+                        self._state = retry_state
                 else:
-                    retry_inner = self._inner
+                    retry_state = self._state
 
             if reverify_failed:
                 raise
 
-            assert retry_inner is not None
-            _update_enclave_header(request, self._secure_client)
+            assert retry_state is not None
+            retry_inner, retry_enclave = retry_state
+            _update_enclave_header(request, self._secure_client, retry_enclave)
             try:
                 return retry_inner.handle_request(request)
             finally:
@@ -450,7 +457,7 @@ class _EHBPReVerifyingTransport(httpx.BaseTransport):
                         old_inner.close()
 
     def close(self) -> None:
-        self._inner.close()
+        self._state[0].close()
 
 
 class _AsyncEHBPReVerifyingTransport(httpx.AsyncBaseTransport):
@@ -458,34 +465,38 @@ class _AsyncEHBPReVerifyingTransport(httpx.AsyncBaseTransport):
 
     def __init__(self, secure_client: "SecureClient", inner: httpx.AsyncBaseTransport):
         self._secure_client = secure_client
-        self._inner = inner
+        self._state = (inner, secure_client.enclave)
         self._lock = asyncio.Lock()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        inner = self._inner
+        state = self._state
+        inner, enclave = state
+        _update_enclave_header(request, self._secure_client, enclave)
         try:
             return await inner.handle_async_request(request)
         except KeyConfigMismatchError:
             old_inner: Optional[httpx.AsyncBaseTransport] = None
-            retry_inner: Optional[httpx.AsyncBaseTransport] = None
+            retry_state: Optional[tuple[httpx.AsyncBaseTransport, str]] = None
             reverify_failed = False
             async with self._lock:
-                if self._inner is inner:
+                if self._state is state:
                     try:
                         retry_inner = await self._secure_client._build_ehbp_async_transport()
                     except Exception:
                         reverify_failed = True
                     else:
-                        old_inner = self._inner
-                        self._inner = retry_inner
+                        old_inner = state[0]
+                        retry_state = (retry_inner, self._secure_client.enclave)
+                        self._state = retry_state
                 else:
-                    retry_inner = self._inner
+                    retry_state = self._state
 
             if reverify_failed:
                 raise
 
-            assert retry_inner is not None
-            _update_enclave_header(request, self._secure_client)
+            assert retry_state is not None
+            retry_inner, retry_enclave = retry_state
+            _update_enclave_header(request, self._secure_client, retry_enclave)
             try:
                 return await retry_inner.handle_async_request(request)
             finally:
@@ -494,7 +505,7 @@ class _AsyncEHBPReVerifyingTransport(httpx.AsyncBaseTransport):
                         await old_inner.aclose()
 
     async def aclose(self) -> None:
-        await self._inner.aclose()
+        await self._state[0].aclose()
 
 
 def _enclave_url_header(base_url: str, enclave: str) -> tuple[str, bool]:
@@ -511,9 +522,16 @@ def _enclave_url_header(base_url: str, enclave: str) -> tuple[str, bool]:
     return enclave_url, True
 
 
-def _update_enclave_header(request: httpx.Request, client: "SecureClient") -> None:
-    """Bind a replayed request to the endpoint selected by re-verification."""
-    value, inject = _enclave_url_header(client.base_url, client.enclave)
+def _update_enclave_header(
+    request: httpx.Request,
+    client: "SecureClient",
+    enclave: Optional[str] = None,
+) -> None:
+    """Bind a request to the endpoint paired with its sealing transport."""
+    value, inject = _enclave_url_header(
+        client.base_url,
+        client.enclave if enclave is None else enclave,
+    )
     if inject:
         request.headers[ENCLAVE_URL_HEADER] = value
     else:
@@ -756,8 +774,6 @@ class SecureClient:
     ) -> httpx.BaseTransport:
         if self._user_cache_secret:
             transport = _UserCacheSecretTransport(self._user_cache_secret, transport)
-        if self.transport == "ehbp" and self.base_url:
-            transport = _EnclaveURLHeaderTransport(transport, self)
         return _HostBoundTransport(transport, self)
 
     def _wrap_async_transport(
@@ -767,8 +783,6 @@ class SecureClient:
             transport = _AsyncUserCacheSecretTransport(
                 self._user_cache_secret, transport
             )
-        if self.transport == "ehbp" and self.base_url:
-            transport = _AsyncEnclaveURLHeaderTransport(transport, self)
         return _AsyncHostBoundTransport(transport, self)
 
     def make_secure_http_client(self) -> httpx.Client:

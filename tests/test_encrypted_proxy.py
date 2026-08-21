@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from ehbp import KeyConfigMismatchError
 
 import tinfoil as tinfoil_module
+import tinfoil.client as client_module
 from tinfoil import AsyncTinfoilAI, SecureClient, TinfoilAI
 from tinfoil.attestation import Bundle, Document, fetch_bundle_from
 from tinfoil.attestation.bundle import _decode_domains, _matches_hostname
@@ -152,7 +153,7 @@ class TestEnclaveURLHeaderTransport:
         )
         assert inner.seen_header == "https://new.example.com"
 
-    def test_sync_retry_uses_rotated_enclave_header(self):
+    def test_sync_retry_uses_endpoint_bound_to_rebuilt_transport(self):
         sc = self._client("old.example.com", "https://proxy.example.com/")
         recovered = _RecordingTransport()
 
@@ -161,17 +162,30 @@ class TestEnclaveURLHeaderTransport:
             return recovered
 
         sc._build_ehbp_sync_transport = MagicMock(side_effect=rebuild)
-        transport = _EnclaveURLHeaderTransport(
-            _EHBPReVerifyingTransport(sc, _KeyMismatchTransport()), sc
-        )
-        response = transport.handle_request(
-            httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
-        )
+        transport = _EHBPReVerifyingTransport(sc, _KeyMismatchTransport())
+        update_header = client_module._update_enclave_header
+
+        def rotate_global_state_again(request, client, enclave=None):
+            if enclave == "new.example.com":
+                # Simulate another request installing a later generation after
+                # this request selected its transport but before replay.
+                sc.enclave = "later.example.com"
+            update_header(request, client, enclave)
+
+        with patch.object(
+            client_module,
+            "_update_enclave_header",
+            side_effect=rotate_global_state_again,
+        ):
+            response = transport.handle_request(
+                httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
+            )
 
         assert response.status_code == 200
         assert recovered.seen_header == "https://new.example.com"
+        assert sc.enclave == "later.example.com"
 
-    def test_async_retry_uses_rotated_enclave_header(self):
+    def test_async_retry_uses_endpoint_bound_to_rebuilt_transport(self):
         async def run():
             sc = self._client("old.example.com", "https://proxy.example.com/")
             recovered = _AsyncRecordingTransport()
@@ -181,57 +195,65 @@ class TestEnclaveURLHeaderTransport:
                 return recovered
 
             sc._build_ehbp_async_transport = rebuild
-            transport = _AsyncEnclaveURLHeaderTransport(
-                _AsyncEHBPReVerifyingTransport(
-                    sc, _AsyncKeyMismatchTransport()
-                ),
-                sc,
+            transport = _AsyncEHBPReVerifyingTransport(
+                sc, _AsyncKeyMismatchTransport()
             )
-            response = await transport.handle_async_request(
-                httpx.Request(
-                    "POST", "https://proxy.example.com/v1/x", content=b"p"
+            update_header = client_module._update_enclave_header
+
+            def rotate_global_state_again(request, client, enclave=None):
+                if enclave == "new.example.com":
+                    sc.enclave = "later.example.com"
+                update_header(request, client, enclave)
+
+            with patch.object(
+                client_module,
+                "_update_enclave_header",
+                side_effect=rotate_global_state_again,
+            ):
+                response = await transport.handle_async_request(
+                    httpx.Request(
+                        "POST", "https://proxy.example.com/v1/x", content=b"p"
+                    )
                 )
-            )
 
             assert response.status_code == 200
             assert recovered.seen_header == "https://new.example.com"
+            assert sc.enclave == "later.example.com"
 
         asyncio.run(run())
 
 
 class TestProxyTransportWiring:
-    """make_secure_http_client wraps the EHBP transport with the header
-    transport only when routing through a proxy of a different origin."""
+    """The EHBP generation owns both its sealing key and proxy route."""
 
     def _client(self, base_url: str | None):
         sc = SecureClient(enclave="enclave.test", repo="org/repo", transport="ehbp", base_url=base_url)
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
         return sc
 
-    def test_sync_wraps_when_proxying(self):
+    def test_sync_binds_proxy_route_inside_ehbp_generation(self):
         sc = self._client("http://proxy.example.com/")
         client = sc.make_secure_http_client()
         try:
             # The user-cache-secret layer injects into the body before the
             # EHBP re-verifying transport seals it.
             assert isinstance(client._transport, _HostBoundTransport)
-            header = client._transport._inner
-            assert isinstance(header, _EnclaveURLHeaderTransport)
-            ucs = header._inner
+            ucs = client._transport._inner
             assert isinstance(ucs, _UserCacheSecretTransport)
             assert isinstance(ucs._inner, _EHBPReVerifyingTransport)
         finally:
             client.close()
 
-    def test_sync_wraps_even_when_same_origin(self):
-        # With base_url set the header transport is always installed; it decides
-        # per request whether to inject, since the enclave can change after a
-        # re-verification.
+    def test_sync_same_origin_uses_the_same_generation_model(self):
         sc = self._client("https://enclave.test/v1/")
         client = sc.make_secure_http_client()
         try:
             assert isinstance(client._transport, _HostBoundTransport)
-            assert isinstance(client._transport._inner, _EnclaveURLHeaderTransport)
+            assert isinstance(client._transport._inner, _UserCacheSecretTransport)
+            assert isinstance(
+                client._transport._inner._inner,
+                _EHBPReVerifyingTransport,
+            )
         finally:
             client.close()
 
@@ -247,14 +269,12 @@ class TestProxyTransportWiring:
         finally:
             client.close()
 
-    def test_async_wraps_when_proxying(self):
+    def test_async_binds_proxy_route_inside_ehbp_generation(self):
         sc = self._client("https://proxy.example.com/")
         client = sc.make_secure_async_http_client()
         try:
             assert isinstance(client._transport, _AsyncHostBoundTransport)
-            header = client._transport._inner
-            assert isinstance(header, _AsyncEnclaveURLHeaderTransport)
-            ucs = header._inner
+            ucs = client._transport._inner
             assert isinstance(ucs, _AsyncUserCacheSecretTransport)
             assert isinstance(ucs._inner, _AsyncEHBPReVerifyingTransport)
         finally:
