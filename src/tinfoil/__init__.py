@@ -10,7 +10,6 @@ from .client import (
     SecureClient,
     TransportMode,
     VerificationDocument,
-    get_router_address,
 )
 
 class TinfoilAI:
@@ -38,12 +37,6 @@ class TinfoilAI:
         # Ensure at least one verification method is provided
         if measurement is None and (repo == "" or repo is None):
             raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
-
-        # If enclave is empty, fetch a random one from the routers API. When
-        # attesting from a bundle, the enclave host comes from the verified
-        # bundle, so no router lookup is needed.
-        if (enclave == "" or enclave is None) and not attestation_bundle_url:
-            enclave = get_router_address()
 
         self.api_key = api_key
         self._secure_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
@@ -93,12 +86,6 @@ class AsyncTinfoilAI:
         # Ensure at least one verification method is provided
         if measurement is None and (repo == "" or repo is None):
             raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
-
-        # If enclave is empty, fetch a random one from the routers API. When
-        # attesting from a bundle, the enclave host comes from the verified
-        # bundle, so no router lookup is needed.
-        if (enclave == "" or enclave is None) and not attestation_bundle_url:
-            enclave = get_router_address()
 
         self.api_key = api_key
         # verifier client remains sync; only used to fetch the expected public key
@@ -158,11 +145,6 @@ def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model
     # Ensure at least one verification method is provided
     if measurement is None and (repo == "" or repo is None):
         raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
-
-    # If enclave is empty, fetch a random one from the routers API. When
-    # attesting from a bundle, the enclave host comes from the verified bundle.
-    if (enclave == "" or enclave is None) and not attestation_bundle_url:
-        enclave = get_router_address()
 
     tf_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
     return _HTTPSecureClient(tf_client.enclave, tf_client)
