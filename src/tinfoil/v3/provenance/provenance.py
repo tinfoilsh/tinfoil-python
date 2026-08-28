@@ -446,6 +446,10 @@ def check_duplicate_sct_logs(cert: x509.Certificate) -> None:
         ).value
     except x509.ExtensionNotFound:
         return
+    except Exception:
+        # A malformed SCT extension is the main verifier's concern, not this
+        # guard's (Go: sctLogIDsInCertDER parse errors return nil).
+        return
     seen: set[bytes] = set()
     for sct in scts:
         if sct.log_id in seen:
