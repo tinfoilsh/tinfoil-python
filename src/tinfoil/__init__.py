@@ -13,6 +13,18 @@ from .client import (
     get_router_address,
 )
 
+# v3 Tier-1 verification surface (SDK_SURFACE_SPEC §2). No name collides with
+# the v2 exports above; tinfoil.attestation.fetch_attestation (v2, one-arg) is
+# unaffected — it stays on its subpackage and is not re-exported here.
+from .v3.client import (
+    VerifiedDocumentV3,
+    hpke_public_key,
+    tls_public_key_fp,
+    verify_document_v3,
+)
+from .v3.errors import VerificationError
+from .v3.fetch import NONCE_SIZE, fetch_attestation, random_nonce
+
 class TinfoilAI:
     chat: OpenAIChat
     embeddings: OpenAIEmbeddings
@@ -167,4 +179,20 @@ def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model
     tf_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
     return _HTTPSecureClient(tf_client.enclave, tf_client)
 
-__all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient", "SecureClient", "VerificationDocument", "TransportMode"]
+__all__ = [
+    "TinfoilAI",
+    "AsyncTinfoilAI",
+    "NewSecureClient",
+    "SecureClient",
+    "VerificationDocument",
+    "TransportMode",
+    # v3 Tier-1 surface
+    "verify_document_v3",
+    "VerifiedDocumentV3",
+    "tls_public_key_fp",
+    "hpke_public_key",
+    "fetch_attestation",
+    "random_nonce",
+    "NONCE_SIZE",
+    "VerificationError",
+]

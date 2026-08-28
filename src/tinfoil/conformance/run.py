@@ -1,18 +1,26 @@
 """Pure stage logic of the conformance adapter, mirroring tinfoil-go
-verifier/conformance (Run). Foundation skeleton: v3-check-envelope is
-implemented; the remaining stages exit 20 until their verifier slices land
-(the integration worker replaces the stage dispatch with the full flow)."""
+verifier/conformance (Run). The full-verify stage consumes the SDK's public
+surface (SDK_SURFACE_SPEC §1); block stages deliberately reach internal
+layers."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Optional
 
+from tinfoil import (
+    VerificationError,
+    hpke_public_key,
+    tls_public_key_fp,
+    verify_document_v3,
+)
 from tinfoil.v3 import envelope
 from tinfoil.v3.bytesutil import decode_base64
-from tinfoil.v3.errors import VerificationError
 from tinfoil.v3.measurement import Measurement
 from tinfoil.v3 import provenance
+from tinfoil.v3.quote import quote_authenticate
+from tinfoil.v3.tdx.der import parse_certificate, pem_decode
 
 # Adapter wire-contract version.
 SCHEMA_VERSION = "1"
@@ -42,11 +50,7 @@ ALL_STAGES = (
 )
 
 # Stages this adapter actually implements; capabilities derives from this.
-SUPPORTED_STAGES = (
-    STAGE_CHECK_ENVELOPE,
-    STAGE_AUTHENTICATE_PROVENANCE,
-    STAGE_ASSEMBLE_POLICY,
-)
+SUPPORTED_STAGES = ALL_STAGES
 
 
 @dataclass
@@ -235,11 +239,92 @@ def run(stage: str, in_: Input) -> tuple[dict, int]:
             return _reject(stage, "PROVENANCE_REJECTED")
         return {"stage": stage, "accepted": True}, EXIT_ACCEPTED
 
-    if stage in ALL_STAGES:
-        # Not yet ported (quote/integration phases).
-        return {"stage": stage, "accepted": False}, EXIT_UNSUPPORTED
+    # An injected Intel root is parsed eagerly: a PEM that does not parse is
+    # malformed input, not a rejection (Go: tdx.SetIntelRoot at setQuoteRoots).
+    amd_root_pem = rts.amd.decode() if rts.amd is not None else None
+    intel_root_pem = rts.intel.decode() if rts.intel is not None else None
+    # verification_time_unix pins the validity-window and freshness-appraisal
+    # clock so a frozen document replays at its capture time; 0 uses the
+    # current time (Go: Run's Set/ResetVerificationTime).
+    verification_time = (
+        datetime.fromtimestamp(in_.verification_time_unix, tz=timezone.utc)
+        if in_.verification_time_unix != 0
+        else None
+    )
+
+    if stage == STAGE_AUTHENTICATE_QUOTE:
+        try:
+            parsed = envelope.parse_document(doc)
+        except VerificationError:
+            return malformed(stage)
+        if intel_root_pem is not None and not _parses_as_certificate(intel_root_pem):
+            return malformed(stage)
+        try:
+            auth = quote_authenticate(
+                parsed,
+                amd_root_pem=amd_root_pem,
+                intel_root_pem=intel_root_pem,
+                now=verification_time,
+            )
+        except VerificationError:
+            return _reject(stage, "QUOTE_REJECTED")
+        return {
+            "stage": stage,
+            "accepted": True,
+            "outputs": {"enclave_measurement": _to_measurement(auth.measurement)},
+        }, EXIT_ACCEPTED
+
+    if stage == STAGE_VERIFY:
+        if intel_root_pem is not None and not _parses_as_certificate(intel_root_pem):
+            return malformed(stage)
+        try:
+            verified = verify_document_v3(
+                doc,
+                nonce,
+                in_.repo,
+                sigstore_root_json=rts.sigstore,
+                amd_root_pem=amd_root_pem,
+                intel_root_pem=intel_root_pem,
+                verification_time=verification_time,
+            )
+        except VerificationError as e:
+            # The first failing step names the layer (Go: verifyFull).
+            return _reject(stage, e.layer)
+        # A document that verifies but endorses no usable channel keys is
+        # useless to every real client, so the full stage requires both
+        # (Go: verifyFull); the public accessors raise when a key is absent
+        # or format-mismatched.
+        try:
+            tls_fp = tls_public_key_fp(verified)
+            hpke = hpke_public_key(verified)
+        except ValueError:
+            return _reject(stage, "ENVELOPE_REJECTED")
+        return {
+            "stage": stage,
+            "accepted": True,
+            "outputs": {
+                "code_digest": verified.code_digest,
+                "code_measurement": _to_measurement(verified.code_measurement),
+                "enclave_measurement": _to_measurement(verified.enclave_measurement),
+                "tls_public_key_fp": tls_fp,
+                "hpke_public_key": hpke,
+            },
+        }, EXIT_ACCEPTED
 
     return {"stage": stage, "accepted": False}, EXIT_UNSUPPORTED
+
+
+def _parses_as_certificate(pem: str) -> bool:
+    """The same PEM/DER parse the TDX layer performs on an injected root
+    (tdx/authenticate _root_from_pem), gating malformed input up front."""
+    block = pem_decode(pem)
+    if block is None:
+        return False
+    try:
+        parse_certificate(block.der)
+    except ValueError:
+        return False
+    return True
 
 
 def _to_measurement(m: Measurement) -> dict:
