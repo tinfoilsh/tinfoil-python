@@ -11,6 +11,8 @@ from typing import Any, Optional
 from tinfoil.v3 import envelope
 from tinfoil.v3.bytesutil import decode_base64
 from tinfoil.v3.errors import VerificationError
+from tinfoil.v3.measurement import Measurement
+from tinfoil.v3 import provenance
 
 # Adapter wire-contract version.
 SCHEMA_VERSION = "1"
@@ -39,8 +41,12 @@ ALL_STAGES = (
     STAGE_AUTHENTICATE_QUOTE,
 )
 
-# Stages this skeleton actually implements; capabilities derives from this.
-SUPPORTED_STAGES = (STAGE_CHECK_ENVELOPE,)
+# Stages this adapter actually implements; capabilities derives from this.
+SUPPORTED_STAGES = (
+    STAGE_CHECK_ENVELOPE,
+    STAGE_AUTHENTICATE_PROVENANCE,
+    STAGE_ASSEMBLE_POLICY,
+)
 
 
 @dataclass
@@ -164,9 +170,16 @@ def run(stage: str, in_: Input) -> tuple[dict, int]:
     except MalformedInput:
         return malformed(stage)
     try:
-        _roots(in_)  # validated here; consumed once the quote/provenance slices land
+        rts = _roots(in_)
     except MalformedInput:
         return malformed(stage)
+    # A supplied trusted root that does not parse is malformed input, for
+    # every stage (Go: newProvAuth → provenance.NewClientFromJSON).
+    if rts.sigstore is not None:
+        try:
+            provenance.check_trust_root(rts.sigstore)
+        except VerificationError:
+            return malformed(stage)
 
     if stage == STAGE_CHECK_ENVELOPE:
         try:
@@ -175,8 +188,59 @@ def run(stage: str, in_: Input) -> tuple[dict, int]:
             return _reject(stage, "ENVELOPE_REJECTED")
         return {"stage": stage, "accepted": True}, EXIT_ACCEPTED
 
+    if stage == STAGE_AUTHENTICATE_PROVENANCE:
+        try:
+            parsed = envelope.parse_document(doc)
+        except VerificationError:
+            return malformed(stage)
+        try:
+            code_ref = envelope.reference_values_collateral(
+                parsed, envelope.COLLATERAL_SIGSTORE_CODE_V1_FORMAT
+            )
+            code = provenance.authenticate_code(
+                code_ref.sigstore_bundle,
+                in_.repo,
+                code_ref.tag,
+                code_ref.digest,
+                trust_root_json=rts.sigstore,
+            )
+        except VerificationError:
+            return _reject(stage, "PROVENANCE_REJECTED")
+        return {
+            "stage": stage,
+            "accepted": True,
+            "outputs": {
+                "code_digest": code.digest,
+                "code_measurement": _to_measurement(code.measurement),
+            },
+        }, EXIT_ACCEPTED
+
+    if stage == STAGE_ASSEMBLE_POLICY:
+        try:
+            parsed = envelope.parse_document(doc)
+        except VerificationError:
+            return malformed(stage)
+        try:
+            plat_ref = envelope.reference_values_collateral(
+                parsed, envelope.COLLATERAL_SIGSTORE_PLATFORM_V1_FORMAT
+            )
+            provenance.authenticate_platform_endorsements(
+                plat_ref.sigstore_bundle,
+                plat_ref.repo,
+                plat_ref.tag,
+                plat_ref.digest,
+                trust_root_json=rts.sigstore,
+            )
+        except VerificationError:
+            return _reject(stage, "PROVENANCE_REJECTED")
+        return {"stage": stage, "accepted": True}, EXIT_ACCEPTED
+
     if stage in ALL_STAGES:
-        # Not yet ported (provenance/sev/tdx/integration phases).
+        # Not yet ported (quote/integration phases).
         return {"stage": stage, "accepted": False}, EXIT_UNSUPPORTED
 
     return {"stage": stage, "accepted": False}, EXIT_UNSUPPORTED
+
+
+def _to_measurement(m: Measurement) -> dict:
+    return {"type": m.type, "registers": list(m.registers)}
