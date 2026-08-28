@@ -97,8 +97,6 @@ def test_unimplemented_stages_exit_20():
     in_ = make_input(build_doc())
     for stage in (
         runner.STAGE_VERIFY,
-        runner.STAGE_AUTHENTICATE_PROVENANCE,
-        runner.STAGE_ASSEMBLE_POLICY,
         runner.STAGE_AUTHENTICATE_QUOTE,
         "bogus-stage",
     ):
