@@ -21,6 +21,21 @@ from .measurement import (
     Measurement,
 )
 from .policy import Artifact, Policy, Shape, parse_artifact, policy_for
+from .quote import (
+    AssembledPolicy,
+    Authenticated,
+    assemble_and_validate,
+    assembled_validate,
+    quote_assemble,
+    quote_authenticate,
+)
+from .client import (
+    VerifiedDocumentV3,
+    hpke_public_key,
+    tls_public_key_fp,
+    verify_document_v3,
+)
+from .fetch import fetch_attestation
 
 __all__ = [
     "ENVELOPE_REJECTED",
@@ -42,4 +57,15 @@ __all__ = [
     "Shape",
     "parse_artifact",
     "policy_for",
+    "Authenticated",
+    "AssembledPolicy",
+    "quote_authenticate",
+    "quote_assemble",
+    "assembled_validate",
+    "assemble_and_validate",
+    "VerifiedDocumentV3",
+    "verify_document_v3",
+    "tls_public_key_fp",
+    "hpke_public_key",
+    "fetch_attestation",
 ]

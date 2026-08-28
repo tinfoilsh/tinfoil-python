@@ -93,16 +93,10 @@ def test_input_type_mismatch_is_malformed():
     runner.parse_input({"schema_version": "1", "future_field": 1})
 
 
-def test_unimplemented_stages_exit_20():
-    in_ = make_input(build_doc())
-    for stage in (
-        runner.STAGE_VERIFY,
-        runner.STAGE_AUTHENTICATE_QUOTE,
-        "bogus-stage",
-    ):
-        out, code = runner.run(stage, in_)
-        assert code == runner.EXIT_UNSUPPORTED
-        assert out["accepted"] is False and "rejection" not in out
+def test_unknown_stage_exits_20():
+    out, code = runner.run("bogus-stage", make_input(build_doc()))
+    assert code == runner.EXIT_UNSUPPORTED
+    assert out["accepted"] is False and "rejection" not in out
 
 
 def test_capabilities_shape():
@@ -147,11 +141,15 @@ def test_cli_end_to_end():
         assert p.returncode == 30
         assert json.loads(p.stdout)["rejection"] == {"code": "MALFORMED_INPUT"}
 
+    # The synthetic docbuilder document carries no verifiable quote.
     p = _cli(["v3-authenticate-quote"], req)
-    assert p.returncode == 20
+    assert p.returncode == 10
+    assert json.loads(p.stdout)["rejection"] == {"code": "QUOTE_REJECTED"}
 
+    # live-verify without host/repo is malformed input.
     p = _cli(["live-verify"], b"{}")
-    assert p.returncode == 20
+    assert p.returncode == 30
+    assert json.loads(p.stdout)["rejection"] == {"code": "MALFORMED_INPUT"}
 
     p = _cli([])
     assert p.returncode == 30
