@@ -7,7 +7,6 @@ from .authenticate import (
     PRODUCT_GENOA,
     PRODUCT_TURIN,
     SevQuote,
-    decode_cert_chain,
     sev_authenticate,
 )
 from .expectations import SevExpectations, sev_assemble, sev_validate
@@ -18,7 +17,6 @@ __all__ = [
     "PRODUCT_TURIN",
     "SevQuote",
     "SevExpectations",
-    "decode_cert_chain",
     "identity",
     "sev_authenticate",
     "sev_assemble",

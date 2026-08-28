@@ -1,7 +1,8 @@
 """Pure stage logic of the conformance adapter, mirroring tinfoil-go
-verifier/conformance (Run). The full-verify stage consumes the SDK's public
-surface (SDK_SURFACE_SPEC §1); block stages deliberately reach internal
-layers."""
+verifier/conformance (Run). The full-verify stage runs the public flow through
+the adapter-only root/clock seam (_verify_document_v3, CONFORMANCE_ADAPTER_SPEC
+§3); block stages deliberately reach internal layers. Live verification
+(cli.py) uses the seamless public verify_document_v3."""
 
 from __future__ import annotations
 
@@ -13,10 +14,11 @@ from tinfoil import (
     VerificationError,
     hpke_public_key,
     tls_public_key_fp,
-    verify_document_v3,
 )
 from tinfoil.v3 import envelope
-from tinfoil.v3.bytesutil import decode_base64
+from tinfoil.v3.bytesutil import decode_base64, decode_hex
+# The adapter-only root/clock injection seam (CONFORMANCE_ADAPTER_SPEC §3).
+from tinfoil.v3.client import _verify_document_v3
 from tinfoil.v3.measurement import Measurement
 from tinfoil.v3 import provenance
 from tinfoil.v3.quote import quote_authenticate
@@ -140,15 +142,6 @@ def _roots(in_: Input) -> Roots:
     return r
 
 
-def _hex_to_bytes(value: str) -> bytes:
-    """Go hex.DecodeString: either case, even length, no whitespace."""
-    import re
-
-    if re.fullmatch(r"[0-9a-fA-F]*", value) is None or len(value) % 2 != 0:
-        raise MalformedInput("nonce_hex is not hex")
-    return bytes.fromhex(value)
-
-
 def _reject(stage: str, code: str) -> tuple[dict, int]:
     return {"stage": stage, "accepted": False, "rejection": {"code": code}}, EXIT_REJECTED
 
@@ -170,8 +163,8 @@ def run(stage: str, in_: Input) -> tuple[dict, int]:
     except ValueError:
         return malformed(stage)
     try:
-        nonce = _hex_to_bytes(in_.nonce_hex)
-    except MalformedInput:
+        nonce = decode_hex(in_.nonce_hex)  # Go hex.DecodeString semantics
+    except ValueError:
         return malformed(stage)
     try:
         rts = _roots(in_)
@@ -278,7 +271,7 @@ def run(stage: str, in_: Input) -> tuple[dict, int]:
         if intel_root_pem is not None and not _parses_as_certificate(intel_root_pem):
             return malformed(stage)
         try:
-            verified = verify_document_v3(
+            verified = _verify_document_v3(
                 doc,
                 nonce,
                 in_.repo,

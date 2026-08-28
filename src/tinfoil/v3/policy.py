@@ -571,7 +571,11 @@ def policy_for(a: Artifact, identifier_hex: str, platform: str) -> tuple[str, Po
         raise _policy_error(
             f"platform identifier {_trunc_id(identifier_hex)}... is not endorsed"
         )
-    p = a.policies[name]
+    p = a.policies.get(name)
+    if p is None:
+        raise _policy_error(
+            f"machines map names policy {name!r}, which the artifact does not carry"
+        )
     if p.platform != platform:
         raise _policy_error(
             f"policy {name!r} is for platform {p.platform!r}, evidence is {platform!r}"
@@ -596,7 +600,12 @@ def resolve_platform_measurement(
         raise _policy_error("required VM shape is missing")
     any_shape_match = False
     for ref in p.platform_measurements or []:
-        m = a.measurements[ref]
+        m = a.measurements.get(ref)
+        if m is None:
+            raise _policy_error(
+                f"policy references platform measurement {ref!r}, "
+                "which the artifact does not carry"
+            )
         if m.shape is None or not m.shape.satisfies(required):
             continue
         any_shape_match = True

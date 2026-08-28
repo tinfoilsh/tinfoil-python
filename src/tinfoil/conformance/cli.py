@@ -33,7 +33,20 @@ def _reject_live(code: str) -> int:
 
 
 def _split_host_port(host: str) -> tuple[str, int]:
-    """host may already carry a port (Go: net.SplitHostPort fallback :443)."""
+    """host may already carry a port; default :443 (Go: net.SplitHostPort
+    fallback). A bracketed [v6]:port splits; a bare IPv6 literal (more than
+    one ':' and no brackets) is all host."""
+    if host.startswith("["):
+        end = host.find("]")
+        if end != -1:
+            name = host[1:end]
+            rest = host[end + 1 :]
+            if rest.startswith(":") and rest[1:].isdigit():
+                return name, int(rest[1:])
+            return name, 443
+        return host, 443
+    if host.count(":") > 1:
+        return host, 443  # bare IPv6 literal carries no port
     name, sep, port = host.rpartition(":")
     if sep and port.isdigit():
         return name, int(port)

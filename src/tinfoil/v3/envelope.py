@@ -19,6 +19,7 @@ bytes; verifiers must never re-serialize them.
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 from dataclasses import dataclass, field as dc_field
 from typing import Optional
@@ -27,7 +28,6 @@ from .bytesutil import (
     decode_canonical_base64,
     decode_lower_hex,
     is_lower_hex,
-    sha256,
 )
 from .errors import (
     ENVELOPE_REJECTED,
@@ -353,12 +353,12 @@ def compute_report_data(
             "report data inputs must be 32 bytes each "
             f"(got {len(nonce)}, {len(crypto_material_hash)}, {len(device_evidence_hash)})"
         )
-    digest = sha256(
+    digest = hashlib.sha256(
         REPORT_DATA_V1_ALGORITHM.encode("utf-8")
         + nonce
         + crypto_material_hash
         + device_evidence_hash
-    )
+    ).digest()
     return digest + b"\x00" * 32
 
 
@@ -510,8 +510,8 @@ def check(doc_bytes: bytes, expected_nonce: bytes) -> tuple[Document, bytes]:
     if doc.challenge.nonce != expected_nonce.hex():
         raise _envelope_error("challenge nonce does not match the expected nonce")
 
-    crypto_hash = sha256(doc.crypto_material_bytes)
-    device_hash = sha256(doc.device_evidence_bytes)
+    crypto_hash = hashlib.sha256(doc.crypto_material_bytes).digest()
+    device_hash = hashlib.sha256(doc.device_evidence_bytes).digest()
     if crypto_hash.hex() != doc.cpu_evidence.endorsed.crypto_material_hash:
         raise _envelope_error(
             "crypto_material hash does not match cpu_evidence.endorsed.crypto_material_hash"

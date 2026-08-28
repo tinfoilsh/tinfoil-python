@@ -36,11 +36,13 @@ def test_verification_error_exposes_layer():
 
 
 def test_verify_document_v3_signature():
+    # The public form is exactly the spec's 3-argument surface: no root or
+    # clock seams (those live on the adapter-only tinfoil.v3.client seam).
     sig = inspect.signature(tinfoil.verify_document_v3)
     params = list(sig.parameters)
-    assert params[:3] == ["doc_bytes", "nonce", "repo"]
-    for kw in ("sigstore_root_json", "amd_root_pem", "intel_root_pem", "verification_time"):
-        assert sig.parameters[kw].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params == ["doc_bytes", "nonce", "repo"]
+    for p in sig.parameters.values():
+        assert p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
 
 
 def test_key_accessors_raise_on_absent_material():

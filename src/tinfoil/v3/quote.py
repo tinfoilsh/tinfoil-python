@@ -129,11 +129,15 @@ def quote_assemble(
     assembled = AssembledPolicy(policy_name=name, platform_measurement_name="", quote=q)
     if q.platform == PLATFORM_SEV_SNP:
         digest = _sev_launch_digest(code)
-        assert machine_policy.sev_snp is not None and q.sev is not None
+        if machine_policy.sev_snp is None or q.sev is None:
+            raise _policy_error(
+                f"policy {name!r} and quote do not both carry SEV-SNP data"
+            )
         assembled.sev = sev_assemble(machine_policy.sev_snp, q.sev, digest, report_data)
     elif q.platform == PLATFORM_TDX:
         registers = _tdx_code_registers(code)
-        assert machine_policy.tdx is not None and q.tdx is not None
+        if machine_policy.tdx is None or q.tdx is None:
+            raise _policy_error(f"policy {name!r} and quote do not both carry TDX data")
         assembled.tdx, assembled.platform_measurement_name = tdx_assemble(
             endorsements, machine_policy.tdx, shape, q.tdx, registers, report_data
         )
@@ -146,10 +150,12 @@ def assembled_validate(p: AssembledPolicy) -> None:
     """Compare the captured quote against the assembled policy in a single
     call: no lookups, no translation (Go: AssembledPolicy.Validate)."""
     if p.quote.platform == PLATFORM_SEV_SNP:
-        assert p.sev is not None and p.quote.sev is not None
+        if p.sev is None or p.quote.sev is None:
+            raise _policy_error("assembled policy and quote do not both carry SEV-SNP data")
         sev_validate(p.sev, p.quote.sev)
     elif p.quote.platform == PLATFORM_TDX:
-        assert p.tdx is not None and p.quote.tdx is not None
+        if p.tdx is None or p.quote.tdx is None:
+            raise _policy_error("assembled policy and quote do not both carry TDX data")
         tdx_validate(p.tdx, p.quote.tdx)
     else:
         raise _policy_error(f"unsupported platform {p.quote.platform!r}")

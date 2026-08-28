@@ -94,9 +94,8 @@ python3 /Users/g/tinfoil/tinfoil-conformance/tools/run_adapter.py \
 ```
 
 Per-slice gates as in the playbook; final = full suite + compare_adapters vs
-the Go report + live-verify (NOTE: prod freshness witness is currently stale —
-live-verify must produce the SAME rejection as Go/JS: exit 10 PROVENANCE_REJECTED;
-identical-rejection is the current parity check).
+the Go report + live-verify (parity check: the live facts — accepted output
+or rejection — must be IDENTICAL to Go's and JS's).
 
 ## Python pitfalls (in addition to the playbook's list)
 

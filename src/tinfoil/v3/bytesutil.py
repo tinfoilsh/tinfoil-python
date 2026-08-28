@@ -5,7 +5,6 @@ rejection layer."""
 
 import base64
 import binascii
-import hashlib
 import re
 
 _LOWER_HEX_RE = re.compile(r"^[0-9a-f]*$")
@@ -63,7 +62,3 @@ def decode_canonical_base64(name: str, value: str) -> bytes:
     if base64.b64encode(b).decode("ascii") != value:
         raise ValueError(f"{name} is not canonical base64")
     return b
-
-
-def sha256(data: bytes) -> bytes:
-    return hashlib.sha256(data).digest()

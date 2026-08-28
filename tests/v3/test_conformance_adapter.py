@@ -109,6 +109,37 @@ def test_capabilities_shape():
     assert v3["channel_binding"] in ("tls-spki", "hpke", "none")
 
 
+def test_internal_error_exits_1(monkeypatch, capsys):
+    # An unexpected exception inside a stage is an adapter internal error
+    # (exit 1), never a verdict.
+    import io
+
+    from tinfoil.conformance import cli
+
+    req = json.dumps(
+        {
+            "schema_version": "1",
+            "document_b64": base64.b64encode(build_doc()).decode(),
+            "nonce_hex": NONCE.hex(),
+            "repo": "tinfoilsh/example",
+        }
+    ).encode()
+    monkeypatch.setattr(sys, "argv", ["tinfoil-conformance", "v3-check-envelope"])
+    monkeypatch.setattr(
+        sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(req)})()
+    )
+
+    def boom(stage, in_):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli.runner, "run", boom)
+    with pytest.raises(SystemExit) as ei:
+        cli.main()
+    assert ei.value.code == runner.EXIT_INTERNAL
+    captured = capsys.readouterr()
+    assert "internal error" in captured.err
+
+
 def _cli(args, stdin=b""):
     return subprocess.run(
         [sys.executable, "-m", "tinfoil.conformance.cli", *args],

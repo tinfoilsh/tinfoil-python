@@ -25,7 +25,7 @@ from .envelope import (
     freshness_collateral,
     reference_values_collateral,
 )
-from .errors import PROVENANCE_REJECTED, VerificationError
+from .errors import VerificationError
 from .measurement import Measurement
 from .provenance import (
     Code,
@@ -79,7 +79,19 @@ def _crypto_material_data(v: VerifiedDocumentV3, id_: str, format_: str) -> str:
     raise ValueError(f"document endorses no {id_!r} crypto material")
 
 
-def verify_document_v3(
+def verify_document_v3(doc_bytes: bytes, nonce: bytes, repo: str) -> VerifiedDocumentV3:
+    """Verify a v3 attestation document from its transmitted bytes against
+    the embedded production roots at the current time (Go:
+    client.VerifyDocumentV3; SDK_SURFACE_SPEC §2 three-argument form).
+
+    repo is the code repository the caller trusts (pins the sigstore-code
+    signing identity); the repo named inside the document is not trusted.
+    Channel binding (TLS fingerprint / HPKE key) is the caller's
+    responsibility, using the returned endorsed crypto material."""
+    return _verify_document_v3(doc_bytes, nonce, repo)
+
+
+def _verify_document_v3(
     doc_bytes: bytes,
     nonce: bytes,
     repo: str,
@@ -89,8 +101,7 @@ def verify_document_v3(
     intel_root_pem: Optional[str] = None,
     verification_time: Optional[datetime] = None,
 ) -> VerifiedDocumentV3:
-    """Verify a v3 attestation document from its transmitted bytes (Go:
-    client.VerifyDocumentV3):
+    """The full verification flow behind verify_document_v3:
 
      1. Check the envelope: format, nonce equality, endorsed-section hash
         recomputation, REPORT_DATA recomputation (no authentication).
@@ -101,12 +112,9 @@ def verify_document_v3(
         assemble the complete policy from the reference values, validate in
         one call.
 
-    repo is the code repository the caller trusts (pins the sigstore-code
-    signing identity); the repo named inside the document is not trusted.
-    The keyword overrides are the conformance seams; defaults are the
-    embedded production roots and the current time. Channel binding (TLS
-    fingerprint / HPKE key) is the caller's responsibility, using the
-    returned endorsed crypto material."""
+    The keyword overrides are the conformance adapter's root/clock seams
+    (CONFORMANCE_ADAPTER_SPEC §3) and are not part of the public surface;
+    defaults are the embedded production roots and the current time."""
     doc, report_data = check(doc_bytes, nonce)
 
     # One appraisal datetime pins both freshness proofs and the quote clock.
@@ -178,5 +186,4 @@ def _authenticate_reference_values(
 
 def _wrap(context: str, err: VerificationError) -> VerificationError:
     """Prefix a step's context onto a rejection, preserving its layer."""
-    layer = err.layer if isinstance(err, VerificationError) else PROVENANCE_REJECTED
-    return VerificationError(layer, f"{context}: {err}")
+    return VerificationError(err.layer, f"{context}: {err}")

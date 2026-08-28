@@ -1,8 +1,8 @@
-"""Envelope parse/check unit tests mirroring Go verifier/envelope semantics:
-strict parse order, canonical base64, lowercase hex, duplicate ids, the
-report_data ladder, and the collateral accessors."""
+"""Envelope parse/check unit tests mirroring Go verifier/envelope semantics
+not already covered by test_envelope.py: strict parse order, canonical
+base64, the report_data ladder, and the collateral accessors. Documents come
+from docbuilder.build_doc."""
 
-import base64
 import hashlib
 import json
 
@@ -17,70 +17,30 @@ from tinfoil.v3.errors import (
     VerificationError,
 )
 
-NONCE = bytes(range(32))
+from docbuilder import NONCE, b64, build_doc
 
 
-def b64(b: bytes) -> str:
-    return base64.b64encode(b).decode()
+def crypto_section(items: list) -> dict:
+    return {"format": env.CRYPTO_MATERIAL_V1_FORMAT, "items": items}
 
 
-def section_bytes(fmt: str, items: list) -> bytes:
-    return json.dumps({"format": fmt, "items": items}, separators=(",", ":")).encode()
+def device_section(items: list) -> dict:
+    return {"format": env.DEVICE_EVIDENCE_V1_FORMAT, "items": items}
 
 
-DEFAULT_CRYPTO_ITEMS = [
-    {"id": "tls", "format": env.KEY_SPKI_FP_SHA256_V1_FORMAT, "data": "aa" * 32},
-    {"id": "hpke", "format": env.KEY_X25519_HPKE_V1_FORMAT, "data": "bb" * 32},
-]
+def swap_crypto_section(raw: bytes):
+    """A build_doc mutate() that installs raw crypto_material bytes and
+    re-binds the endorsed hash and REPORT_DATA, so only the targeted
+    property differs."""
 
+    def mutate(d):
+        cmh = hashlib.sha256(raw).digest()
+        deh = bytes.fromhex(d["cpu_evidence"]["endorsed"]["device_evidence_hash"])
+        d["crypto_material"] = b64(raw)
+        d["cpu_evidence"]["endorsed"]["crypto_material_hash"] = cmh.hex()
+        d["challenge"]["report_data"] = env.compute_report_data(NONCE, cmh, deh).hex()
 
-def make_doc(
-    nonce: bytes = NONCE,
-    crypto_items: list = None,
-    device_items: list = None,
-    collateral: list = None,
-    mutate=None,
-) -> bytes:
-    """Builds a self-consistent v3 document. mutate edits the finished dict
-    (after hash/report_data computation), so a mutation breaks exactly the
-    binding it targets."""
-    cm = section_bytes(
-        env.CRYPTO_MATERIAL_V1_FORMAT,
-        DEFAULT_CRYPTO_ITEMS if crypto_items is None else crypto_items,
-    )
-    de = section_bytes(
-        env.DEVICE_EVIDENCE_V1_FORMAT, [] if device_items is None else device_items
-    )
-    cmh = hashlib.sha256(cm).digest()
-    deh = hashlib.sha256(de).digest()
-    rd = (
-        hashlib.sha256(
-            env.REPORT_DATA_V1_ALGORITHM.encode() + nonce + cmh + deh
-        ).digest()
-        + bytes(32)
-    )
-    doc = {
-        "format": env.ATTESTATION_V3_FORMAT,
-        "challenge": {
-            "nonce": nonce.hex(),
-            "report_data": rd.hex(),
-            "report_data_algorithm": env.REPORT_DATA_V1_ALGORITHM,
-        },
-        "cpu_evidence": {
-            "format": env.SEV_SNP_REPORT_V1_FORMAT,
-            "report_base64": b64(b"\x00" * 16),
-            "endorsed": {
-                "crypto_material_hash": cmh.hex(),
-                "device_evidence_hash": deh.hex(),
-            },
-        },
-        "crypto_material": b64(cm),
-        "device_evidence": b64(de),
-        "collateral": [] if collateral is None else collateral,
-    }
-    if mutate is not None:
-        mutate(doc)
-    return json.dumps(doc, separators=(",", ":")).encode()
+    return mutate
 
 
 def expect_envelope_reject(doc_bytes: bytes, nonce: bytes = NONCE):
@@ -94,7 +54,7 @@ def expect_envelope_reject(doc_bytes: bytes, nonce: bytes = NONCE):
 
 
 def test_check_happy_path():
-    doc, rd = env.check(make_doc(), NONCE)
+    doc, rd = env.check(build_doc(), NONCE)
     assert len(rd) == 64
     assert rd[32:] == bytes(32)
     assert rd.hex() == doc.challenge.report_data
@@ -112,56 +72,29 @@ def test_parse_retains_exact_section_bytes():
     # Sections hash over the exact decoded bytes: whitespace inside the
     # encoded section must survive (never re-serialize).
     cm = b'{"format":"' + env.CRYPTO_MATERIAL_V1_FORMAT.encode() + b'", "items": []}'
-    de = section_bytes(env.DEVICE_EVIDENCE_V1_FORMAT, [])
-    cmh, deh = hashlib.sha256(cm).digest(), hashlib.sha256(de).digest()
-    rd = (
-        hashlib.sha256(
-            env.REPORT_DATA_V1_ALGORITHM.encode() + NONCE + cmh + deh
-        ).digest()
-        + bytes(32)
-    )
-    doc_bytes = json.dumps(
-        {
-            "format": env.ATTESTATION_V3_FORMAT,
-            "challenge": {
-                "nonce": NONCE.hex(),
-                "report_data": rd.hex(),
-                "report_data_algorithm": env.REPORT_DATA_V1_ALGORITHM,
-            },
-            "cpu_evidence": {
-                "format": env.SEV_SNP_REPORT_V1_FORMAT,
-                "report_base64": b64(b"x"),
-                "endorsed": {
-                    "crypto_material_hash": cmh.hex(),
-                    "device_evidence_hash": deh.hex(),
-                },
-            },
-            "crypto_material": b64(cm),
-            "device_evidence": b64(de),
-            "collateral": [],
-        }
-    ).encode()
-    doc, _ = env.check(doc_bytes, NONCE)
+    doc, _ = env.check(build_doc(mutate=swap_crypto_section(cm)), NONCE)
     assert doc.crypto_material_bytes == cm
 
 
 def test_device_items_and_accessors():
-    doc_bytes = make_doc(
-        device_items=[
-            {
-                "id": "gpu0",
-                "kind": "gpu",
-                "vendor": "nvidia",
-                "format": env.NVIDIA_GPU_EVIDENCE_V1_FORMAT,
-                "evidence": {"n": 1},
-            }
-        ]
+    doc_bytes = build_doc(
+        device_section=device_section(
+            [
+                {
+                    "id": "gpu0",
+                    "kind": "gpu",
+                    "vendor": "nvidia",
+                    "format": env.NVIDIA_GPU_EVIDENCE_V1_FORMAT,
+                    "evidence": {"n": 1},
+                }
+            ]
+        )
     )
     doc, _ = env.check(doc_bytes, NONCE)
     items = env.device_evidence_items(doc)
     assert len(items) == 1 and items[0].id == "gpu0"
     assert items[0].evidence == b'{"n":1}'  # exact raw source (compact doc)
-    assert env.crypto_material_item(doc, "tls").data == "aa" * 32
+    assert env.crypto_material_item(doc, "tls").data == "11" * 32
     assert env.crypto_material_item(doc, "nope") is None
     assert [i.id for i in env.crypto_material_items(doc)] == ["tls", "hpke"]
 
@@ -170,19 +103,17 @@ def test_device_items_and_accessors():
 
 
 def test_unknown_document_member_rejects():
-    expect_envelope_reject(make_doc(mutate=lambda d: d.update(extra=1)))
+    expect_envelope_reject(build_doc(mutate=lambda d: d.update(extra=1)))
 
 
 def test_duplicate_document_member_rejects():
-    good = make_doc()
-    dup = good.replace(
-        b'{"format":', b'{"format":"x","format":', 1
-    )
+    good = build_doc()
+    dup = good.replace(b'{"format":', b'{"format":"x","format":', 1)
     expect_envelope_reject(dup)
 
 
 def test_trailing_data_rejects():
-    expect_envelope_reject(make_doc() + b" {}")
+    expect_envelope_reject(build_doc() + b" {}")
 
 
 def test_document_invalid_utf8_rejects():
@@ -191,7 +122,7 @@ def test_document_invalid_utf8_rejects():
 
 def test_unsupported_format_rejects():
     expect_envelope_reject(
-        make_doc(mutate=lambda d: d.update(format="https://example.com/v9"))
+        build_doc(mutate=lambda d: d.update(format="https://example.com/v9"))
     )
 
 
@@ -199,34 +130,14 @@ def test_unsupported_report_data_algorithm_rejects():
     def mut(d):
         d["challenge"]["report_data_algorithm"] = "https://tinfoil.sh/report-data/v2"
 
-    expect_envelope_reject(make_doc(mutate=mut))
-
-
-def test_uppercase_nonce_hex_rejects():
-    def mut(d):
-        d["challenge"]["nonce"] = d["challenge"]["nonce"].upper()
-
-    e = expect_envelope_reject(make_doc(mutate=mut))
-    assert "not lowercase hex" in str(e)
+    expect_envelope_reject(build_doc(mutate=mut))
 
 
 def test_wrong_length_report_data_rejects():
     def mut(d):
         d["challenge"]["report_data"] = "ab" * 63
 
-    expect_envelope_reject(make_doc(mutate=mut))
-
-
-def test_incomplete_cpu_evidence_rejects():
-    def mut(d):
-        d["cpu_evidence"]["report_base64"] = ""
-
-    expect_envelope_reject(make_doc(mutate=mut))
-
-
-def test_missing_sections_reject():
-    expect_envelope_reject(make_doc(mutate=lambda d: d.update(crypto_material="")))
-    expect_envelope_reject(make_doc(mutate=lambda d: d.update(device_evidence="")))
+    expect_envelope_reject(build_doc(mutate=mut))
 
 
 # --- canonical base64 --------------------------------------------------------------
@@ -237,116 +148,64 @@ def test_non_canonical_base64_rejects():
     # bits) but the canonical encoding of b"\x00" is "AA==": exactly one
     # accepted encoding per byte string.
     e = expect_envelope_reject(
-        make_doc(mutate=lambda d: d.update(crypto_material="AB=="))
+        build_doc(mutate=lambda d: d.update(crypto_material="AB=="))
     )
     assert "canonical" in str(e)
 
 
 def test_unpadded_base64_rejects():
-    expect_envelope_reject(make_doc(mutate=lambda d: d.update(crypto_material="AA")))
+    expect_envelope_reject(build_doc(mutate=lambda d: d.update(crypto_material="AA")))
 
 
 def test_base64_with_newline_rejects():
     def mut(d):
         d["device_evidence"] = d["device_evidence"][:4] + "\n" + d["device_evidence"][4:]
 
-    expect_envelope_reject(make_doc(mutate=mut))
+    expect_envelope_reject(build_doc(mutate=mut))
 
 
 # --- endorsed sections ---------------------------------------------------------------
 
 
-def test_duplicate_crypto_item_id_rejects():
-    items = [
-        {"id": "tls", "format": env.KEY_SPKI_FP_SHA256_V1_FORMAT, "data": "aa" * 32},
-        {"id": "tls", "format": env.KEY_X25519_HPKE_V1_FORMAT, "data": "bb" * 32},
-    ]
-    e = expect_envelope_reject(make_doc(crypto_items=items))
-    assert "duplicate crypto_material item id" in str(e)
-
-
-def test_known_key_format_wrong_length_rejects():
-    items = [
-        {"id": "tls", "format": env.KEY_SPKI_FP_SHA256_V1_FORMAT, "data": "aa" * 31}
-    ]
-    expect_envelope_reject(make_doc(crypto_items=items))
-
-
 def test_unknown_key_format_odd_or_empty_hex_rejects():
     fmt = "https://example.com/key/v1"
     for data in ("", "abc", "AA"):
-        items = [{"id": "k", "format": fmt, "data": data}]
-        expect_envelope_reject(make_doc(crypto_items=items))
+        section = crypto_section([{"id": "k", "format": fmt, "data": data}])
+        expect_envelope_reject(build_doc(crypto_section=section))
     # even-length lowercase hex of any size is fine for unknown formats
     doc, _ = env.check(
-        make_doc(crypto_items=[{"id": "k", "format": fmt, "data": "abcd"}]), NONCE
+        build_doc(crypto_section=crypto_section([{"id": "k", "format": fmt, "data": "abcd"}])),
+        NONCE,
     )
     assert env.crypto_material_item(doc, "k").data == "abcd"
 
 
 def test_incomplete_crypto_item_rejects():
-    items = [{"id": "", "format": "f", "data": "aa"}]
-    expect_envelope_reject(make_doc(crypto_items=items))
+    section = crypto_section([{"id": "", "format": "f", "data": "aa"}])
+    expect_envelope_reject(build_doc(crypto_section=section))
 
 
 def test_duplicate_device_item_id_rejects():
-    items = [
-        {"id": "d", "kind": "", "vendor": "", "format": "f", "evidence": None},
-        {"id": "d", "kind": "", "vendor": "", "format": "f", "evidence": None},
-    ]
-    expect_envelope_reject(make_doc(device_items=items))
-
-
-def test_duplicate_member_inside_section_rejects():
-    # Duplicate member names reject inside the base64-decoded sections too.
-    cm = (
-        b'{"format":"' + env.CRYPTO_MATERIAL_V1_FORMAT.encode()
-        + b'","items":[],"items":[]}'
+    section = device_section(
+        [
+            {"id": "d", "kind": "", "vendor": "", "format": "f", "evidence": None},
+            {"id": "d", "kind": "", "vendor": "", "format": "f", "evidence": None},
+        ]
     )
-
-    def mut(d):
-        d["crypto_material"] = b64(cm)
-        d["cpu_evidence"]["endorsed"]["crypto_material_hash"] = hashlib.sha256(
-            cm
-        ).hexdigest()
-
-    expect_envelope_reject(make_doc(mutate=mut))
-
-
-def test_wrong_section_format_rejects():
-    cm = section_bytes(env.DEVICE_EVIDENCE_V1_FORMAT, [])
-
-    def mut(d):
-        d["crypto_material"] = b64(cm)
-        d["cpu_evidence"]["endorsed"]["crypto_material_hash"] = hashlib.sha256(
-            cm
-        ).hexdigest()
-
-    expect_envelope_reject(make_doc(mutate=mut))
+    expect_envelope_reject(build_doc(device_section=section))
 
 
 def test_missing_items_member_rejects():
     cm = json.dumps({"format": env.CRYPTO_MATERIAL_V1_FORMAT}).encode()
-
-    def mut(d):
-        d["crypto_material"] = b64(cm)
-        d["cpu_evidence"]["endorsed"]["crypto_material_hash"] = hashlib.sha256(
-            cm
-        ).hexdigest()
-
-    expect_envelope_reject(make_doc(mutate=mut))
+    expect_envelope_reject(build_doc(mutate=swap_crypto_section(cm)))
 
 
 # --- challenge bindings ----------------------------------------------------------------
 
 
-def test_wrong_nonce_rejects():
-    expect_envelope_reject(make_doc(), nonce=bytes(32))
-
-
 def test_bad_expected_nonce_size_rejects():
     with pytest.raises(VerificationError) as ei:
-        env.check(make_doc(), b"\x00" * 31)
+        env.check(build_doc(), b"\x00" * 31)
     assert ei.value.layer == ENVELOPE_REJECTED
 
 
@@ -354,7 +213,7 @@ def test_tampered_crypto_material_hash_rejects():
     def mut(d):
         d["cpu_evidence"]["endorsed"]["crypto_material_hash"] = "00" * 32
 
-    e = expect_envelope_reject(make_doc(mutate=mut))
+    e = expect_envelope_reject(build_doc(mutate=mut))
     assert "crypto_material hash" in str(e)
 
 
@@ -362,15 +221,7 @@ def test_tampered_device_evidence_hash_rejects():
     def mut(d):
         d["cpu_evidence"]["endorsed"]["device_evidence_hash"] = "00" * 32
 
-    expect_envelope_reject(make_doc(mutate=mut))
-
-
-def test_tampered_report_data_rejects():
-    def mut(d):
-        d["challenge"]["report_data"] = "cc" * 64
-
-    e = expect_envelope_reject(make_doc(mutate=mut))
-    assert "report_data" in str(e)
+    expect_envelope_reject(build_doc(mutate=mut))
 
 
 def test_compute_report_data_input_sizes():
@@ -397,23 +248,23 @@ def sig_entry(id_, fmt, bundle=None):
 
 def test_collateral_role_and_id_rules():
     bad_role = [{"id": "x", "role": "verifier", "format": "f", "data": None}]
-    e = expect_envelope_reject(make_doc(collateral=bad_role))
+    e = expect_envelope_reject(build_doc(collateral=bad_role))
     assert "unknown role" in str(e)
 
     dup_ids = [
         {"id": "x", "role": env.ROLE_ENDORSEMENT, "format": "f", "data": None},
         {"id": "x", "role": env.ROLE_ENDORSEMENT, "format": "g", "data": None},
     ]
-    e = expect_envelope_reject(make_doc(collateral=dup_ids))
+    e = expect_envelope_reject(build_doc(collateral=dup_ids))
     assert "duplicate collateral entry id" in str(e)
 
     incomplete = [{"id": "", "role": env.ROLE_ENDORSEMENT, "format": "f"}]
-    e = expect_envelope_reject(make_doc(collateral=incomplete))
+    e = expect_envelope_reject(build_doc(collateral=incomplete))
     assert "incomplete" in str(e)
 
 
 def test_reference_values_collateral_first_wins():
-    doc_bytes = make_doc(
+    doc_bytes = build_doc(
         collateral=[
             sig_entry("code-2", env.COLLATERAL_SIGSTORE_CODE_V1_FORMAT, {"n": 1}),
             sig_entry("code-1", env.COLLATERAL_SIGSTORE_CODE_V1_FORMAT, {"n": 2}),
@@ -426,7 +277,7 @@ def test_reference_values_collateral_first_wins():
 
 
 def test_reference_values_collateral_not_found():
-    doc, _ = env.check(make_doc(), NONCE)
+    doc, _ = env.check(build_doc(), NONCE)
     with pytest.raises(CollateralNotFoundError) as ei:
         env.reference_values_collateral(doc, env.COLLATERAL_SIGSTORE_CODE_V1_FORMAT)
     assert ei.value.layer == PROVENANCE_REJECTED
@@ -435,7 +286,7 @@ def test_reference_values_collateral_not_found():
 def test_reference_values_collateral_strict_data_parse():
     entry = sig_entry("code", env.COLLATERAL_SIGSTORE_CODE_V1_FORMAT)
     entry["data"]["unknown"] = True
-    doc, _ = env.check(make_doc(collateral=[entry]), NONCE)
+    doc, _ = env.check(build_doc(collateral=[entry]), NONCE)
     with pytest.raises(VerificationError) as ei:
         env.reference_values_collateral(doc, env.COLLATERAL_SIGSTORE_CODE_V1_FORMAT)
     assert ei.value.layer == PROVENANCE_REJECTED
@@ -448,7 +299,7 @@ def test_freshness_collateral_lookup_and_duplicate_rejection():
         "format": env.COLLATERAL_SIGSTORE_FRESHNESS_V1_FORMAT,
         "data": {"sigstore_bundle": {"w": 1}},
     }
-    doc, _ = env.check(make_doc(collateral=[fresh]), NONCE)
+    doc, _ = env.check(build_doc(collateral=[fresh]), NONCE)
     assert env.freshness_collateral(doc, env.FRESHNESS_COLLATERAL_ID_CODE) == b'{"w":1}'
 
     with pytest.raises(CollateralNotFoundError):
@@ -459,7 +310,7 @@ def test_freshness_collateral_lookup_and_duplicate_rejection():
     # so duplicate rejection is exercised via a same-id pair, which already
     # rejects at parse — assert that.
     dup = [dict(fresh), dict(fresh)]
-    expect_envelope_reject(make_doc(collateral=dup))
+    expect_envelope_reject(build_doc(collateral=dup))
 
 
 def test_endorsement_collateral_subject_match():
@@ -479,7 +330,7 @@ def test_endorsement_collateral_subject_match():
             "data": {"crl_der_base64": "QUI="},
         },
     ]
-    doc, _ = env.check(make_doc(collateral=entries), NONCE)
+    doc, _ = env.check(build_doc(collateral=entries), NONCE)
     entry = env.endorsement_collateral(
         doc, env.COLLATERAL_AMD_VCEK_V1_FORMAT, env.SUBJECT_CPU
     )

@@ -173,6 +173,12 @@ chat_completion = client.chat.completions.create(
 
 Multi-user services must provide a stable, non-empty, opaque value for each user (or group whose members may share cache-hit timing) on every eligible request. Do not use a raw user identifier, API key, or encryption key. A single client, environment, or generated value groups all requests using it under the same API identity. If persistence is unavailable, the SDK uses an in-memory value and cache continuity ends when the process exits.
 
+## v3 conformance
+
+The package implements CONFORMANCE_ADAPTER_SPEC v1.1 and SDK_SURFACE_SPEC
+v1.0 Tier-1 (Tier-2 product-client wiring is pending). The conformance
+adapter entry point is the `tinfoil-conformance` script.
+
 ## Security
 
 Please report security vulnerabilities by emailing [security@tinfoil.sh](mailto:security@tinfoil.sh).

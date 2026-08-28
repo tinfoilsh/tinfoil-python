@@ -9,7 +9,7 @@ from .envelope import ATTESTATION_ENDPOINT, NONCE_SIZE, random_nonce
 
 __all__ = ["NONCE_SIZE", "fetch_attestation", "random_nonce"]
 
-# Matches Go util.Get's client timeout.
+# Go util.Get sets NO client timeout; this 10s cap is deliberate hardening.
 _FETCH_TIMEOUT_SECONDS = 10
 
 
@@ -19,7 +19,8 @@ def fetch_attestation(host: str, nonce: bytes) -> bytes:
     if len(nonce) != NONCE_SIZE:
         raise ValueError(f"nonce must be {NONCE_SIZE} bytes, got {len(nonce)}")
     url = f"https://{host}{ATTESTATION_ENDPOINT}?nonce={nonce.hex()}"
-    # Go http.Get follows redirects; httpx does not by default.
+    # Go http.Get follows redirects (httpx does not by default), so this v3
+    # fetch mirrors Go; the SDK's v2 clients pin follow_redirects=False.
     resp = httpx.get(url, timeout=_FETCH_TIMEOUT_SECONDS, follow_redirects=True)
     if resp.status_code < 200 or resp.status_code >= 300:
         raise RuntimeError(f"fetching attestation from {host}: HTTP {resp.status_code}")
