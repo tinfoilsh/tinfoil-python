@@ -83,6 +83,10 @@ def tdx_assemble(
     body = q.quote.td_quote_body
     if body is None or len(body.rtmrs) != 4:
         raise _policy_error("TDX quote body must carry exactly 4 RTMRs")
+    if len(report_data) != 64:
+        raise _policy_error(
+            f"expected report data must be 64 bytes, got {len(report_data)}"
+        )
 
     name, m = resolve_platform_measurement(
         a, p, required, body.mr_td.hex(), body.rtmrs[0].hex()
@@ -99,7 +103,8 @@ def tdx_assemble(
     opts.rtmrs = [rtmr0, code.rtmr1, code.rtmr2, code.rtmr3]
     opts.report_data = report_data
 
-    assert p.minimum_tcb_evaluation_data_number is not None  # _options validated
+    if p.minimum_tcb_evaluation_data_number is None:  # _options validated already
+        raise _policy_error("policy minimum_tcb_evaluation_data_number is missing")
     return (
         TdxExpectations(
             opts=opts,
@@ -177,8 +182,15 @@ def _validate_quote(quote: QuoteV4, opts: _ValidateOptions) -> None:
         raise _policy_error("; ".join(errs))
 
 
-def _byte_check(field_name: str, given: bytes, required: bytes, errs: list[str]) -> None:
+def _byte_check(
+    option: str, field_name: str, size: int, given: bytes, required: bytes, errs: list[str]
+) -> None:
+    """Mirror go-tdx-guest validate.byteCheck: skip when unset, reject a
+    wrong-sized expectation before comparing."""
     if len(required) == 0:
+        return
+    if len(required) != size:
+        errs.append(f"option {option} must be nil or {size} bytes")
         return
     if required != given:
         errs.append(f"quote field {field_name} is {given.hex()}. Expect {required.hex()}")
@@ -186,13 +198,15 @@ def _byte_check(field_name: str, given: bytes, required: bytes, errs: list[str])
 
 def _exact_byte_match(quote: QuoteV4, opts: _ValidateOptions, errs: list[str]) -> None:
     body = quote.td_quote_body
-    _byte_check("MR_SEAM", body.mr_seam, opts.mr_seam, errs)
-    _byte_check("TD_ATTRIBUTES", body.td_attributes, opts.td_attributes, errs)
-    _byte_check("XFAM", body.xfam, opts.xfam, errs)
-    _byte_check("MR_TD", body.mr_td, opts.mr_td, errs)
-    _byte_check("MR_CONFIG_ID", body.mr_config_id, opts.mr_config_id, errs)
-    _byte_check("MR_OWNER", body.mr_owner, opts.mr_owner, errs)
-    _byte_check("MR_OWNER_CONFIG", body.mr_owner_config, opts.mr_owner_config, errs)
+    _byte_check("MrSeam", "MR_SEAM", 48, body.mr_seam, opts.mr_seam, errs)
+    _byte_check("TdAttributes", "TD_ATTRIBUTES", 8, body.td_attributes, opts.td_attributes, errs)
+    _byte_check("Xfam", "XFAM", 8, body.xfam, opts.xfam, errs)
+    _byte_check("MrTd", "MR_TD", 48, body.mr_td, opts.mr_td, errs)
+    _byte_check("MrConfigID", "MR_CONFIG_ID", 48, body.mr_config_id, opts.mr_config_id, errs)
+    _byte_check("MrOwner", "MR_OWNER", 48, body.mr_owner, opts.mr_owner, errs)
+    _byte_check(
+        "MrOwnerConfig", "MR_OWNER_CONFIG", 48, body.mr_owner_config, opts.mr_owner_config, errs
+    )
     if len(opts.rtmrs) != 0:
         if len(opts.rtmrs) != 4:
             errs.append(f"RTMR field size({len(opts.rtmrs)}) is not equal to expected size(4)")
@@ -203,9 +217,15 @@ def _exact_byte_match(quote: QuoteV4, opts: _ValidateOptions, errs: list[str]) -
                 if len(opts.rtmrs[i]) != 48:
                     errs.append(f"RTMR[{i}] should be 48 bytes, found {len(opts.rtmrs[i])}")
                     continue
-                _byte_check(f"RTMR[{i}]", body.rtmrs[i], opts.rtmrs[i], errs)
-    _byte_check("REPORT_DATA", body.report_data, opts.report_data, errs)
-    _byte_check("QE_VENDOR_ID", quote.header.qe_vendor_id, opts.qe_vendor_id, errs)
+                if opts.rtmrs[i] != body.rtmrs[i]:
+                    errs.append(
+                        f"quote field RTMR[{i}] is {body.rtmrs[i].hex()}. "
+                        f"Expect {opts.rtmrs[i].hex()}"
+                    )
+    _byte_check("ReportData", "REPORT_DATA", 64, body.report_data, opts.report_data, errs)
+    _byte_check(
+        "QeVendorID", "QE_VENDOR_ID", 16, quote.header.qe_vendor_id, opts.qe_vendor_id, errs
+    )
 
 
 def _min_version_check(quote: QuoteV4, opts: _ValidateOptions, errs: list[str]) -> None:

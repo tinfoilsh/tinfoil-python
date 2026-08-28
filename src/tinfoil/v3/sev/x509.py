@@ -1,52 +1,27 @@
-"""X.509 helpers for the SEV slice over `cryptography`: PEM chain decoding,
-RSASSA-PSS SHA-384 classification/verification (Go x509 SHA384WithRSAPSS:
-hash == MGF1 hash == SHA-384, salt 48), validity windows, CA signer
-constraints, and CRL fields. All errors are ValueError; the calling module
-assigns the rejection layer."""
+"""X.509 helpers for the SEV slice over `cryptography`: RSASSA-PSS SHA-384
+classification/verification (Go x509 SHA384WithRSAPSS: hash == MGF1 hash ==
+SHA-384, salt 48), validity windows, CA signer constraints, and CRL fields.
+PEM decoding and the extension accessors come from v3.x509common. All errors
+are ValueError; the calling module assigns the rejection layer."""
 
 from __future__ import annotations
 
-import base64
-import binascii
-import re
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
-from cryptography.x509.oid import ExtensionOID, NameOID
+from cryptography.x509.oid import NameOID
 
-OID_RSASSA_PSS = "1.2.840.113549.1.1.10"
-
-_PEM_BLOCK_RE = re.compile(
-    r"-----BEGIN ([^-\n]+)-----\n(.*?)-----END \1-----\n?", re.DOTALL
+from .. import x509common
+from ..x509common import (  # noqa: F401 (re-exported for the SEV call sites)
+    PEMBlock,
+    crl_distribution_point_uris,
+    pem_decode_all,
 )
 
-
-@dataclass(frozen=True)
-class PEMBlock:
-    type: str
-    der: bytes
-
-
-def pem_decode_all(text: str) -> tuple[list[PEMBlock], str]:
-    """Decode consecutive PEM blocks (Go pem.Decode loop semantics: junk
-    before a block is skipped; the trailing rest after the last block is
-    returned for the caller's trailing-data checks)."""
-    blocks: list[PEMBlock] = []
-    end = 0
-    for m in _PEM_BLOCK_RE.finditer(text):
-        body = "".join(m.group(2).split())
-        try:
-            der = base64.b64decode(body.encode("ascii"), validate=True)
-        except (binascii.Error, ValueError, UnicodeEncodeError):
-            raise ValueError("malformed PEM block body") from None
-        blocks.append(PEMBlock(type=m.group(1), der=der))
-        end = m.end()
-    return blocks, text[end:]
+OID_RSASSA_PSS = "1.2.840.113549.1.1.10"
 
 
 def load_certificate(der: bytes) -> x509.Certificate:
@@ -115,25 +90,17 @@ def verify_pss_sha384(signer: x509.Certificate, message: bytes, signature: bytes
 
 def check_validity(cert: x509.Certificate, now: datetime, role: str) -> None:
     """Mirror Go x509 isValid's window check against opts.Now."""
-    if now < cert.not_valid_before_utc or now > cert.not_valid_after_utc:
+    if not x509common.check_validity(
+        cert.not_valid_before_utc, cert.not_valid_after_utc, now
+    ):
         raise ValueError(f"{role} certificate has expired or is not yet valid")
-
-
-def _basic_constraints(cert: x509.Certificate) -> Optional[x509.BasicConstraints]:
-    try:
-        return cert.extensions.get_extension_for_oid(
-            ExtensionOID.BASIC_CONSTRAINTS
-        ).value
-    except x509.ExtensionNotFound:
-        return None
 
 
 def key_usage_mask(cert: x509.Certificate) -> int:
     """The certificate's KeyUsage as Go's x509.KeyUsage bitmask (0 when the
     extension is absent)."""
-    try:
-        ku = cert.extensions.get_extension_for_oid(ExtensionOID.KEY_USAGE).value
-    except x509.ExtensionNotFound:
+    ku = x509common.key_usage_ext(cert)
+    if ku is None:
         return 0
     mask = 0
     bits = [
@@ -160,7 +127,7 @@ KEY_USAGE_CRL_SIGN = 1 << 6
 def check_ca_signer_constraints(parent: x509.Certificate, usage_bit: int, role: str) -> None:
     """Mirror Go x509 CheckSignatureFrom / isValid CA constraints for a
     signing parent: basic constraints and key usage."""
-    bc = _basic_constraints(parent)
+    bc = x509common.basic_constraints_ext(parent)
     v3 = parent.version == x509.Version.v3
     if (v3 and bc is None) or (bc is not None and not bc.ca):
         raise ValueError(f"{role} certificate is not a certificate authority")
@@ -181,22 +148,6 @@ def attr_values(name: x509.Name, oid) -> list[str]:
 def common_name(name: x509.Name) -> str:
     values = attr_values(name, NameOID.COMMON_NAME)
     return values[0] if values else ""
-
-
-def crl_distribution_point_uris(cert: x509.Certificate) -> list[str]:
-    """The URI GeneralNames of the CRL Distribution Points extension."""
-    try:
-        dps = cert.extensions.get_extension_for_oid(
-            ExtensionOID.CRL_DISTRIBUTION_POINTS
-        ).value
-    except x509.ExtensionNotFound:
-        return []
-    out: list[str] = []
-    for dp in dps:
-        for gn in dp.full_name or []:
-            if isinstance(gn, x509.UniformResourceIdentifier):
-                out.append(gn.value)
-    return out
 
 
 def verify_ecdsa_p384_sha384(

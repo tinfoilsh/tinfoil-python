@@ -234,6 +234,9 @@ def product_line_from_fms(fms: int) -> str:
 
 def _read_tlv(data: bytes, offset: int = 0) -> tuple[int, int, bytes, int]:
     """Read one DER TLV: (class, tag, content, end). Strict lengths only."""
+    # Sibling: tdx/der.py read_tlv. Kept separate on purpose — this reader
+    # rejects non-minimal long-form lengths (Go asn1 strictness for KDS
+    # extension values); der.py's tolerates them but caps length bytes at 4.
     if offset + 2 > len(data):
         raise ValueError("truncated DER element")
     b0 = data[offset]

@@ -1,57 +1,32 @@
-"""X.509 and DER helpers for the TDX DCAP core: PEM splitting with Go
-encoding/pem rest semantics, certificate/CRL wrappers over `cryptography`
-exposing the exact fields go-tdx-guest compares, ECDSA-P256-SHA256 signature
-checks, and a strict minimal DER (TLV) reader for the Intel SGX extension.
-All errors are ValueError; callers assign the rejection layer."""
+"""X.509 and DER helpers for the TDX DCAP core: certificate/CRL wrappers over
+`cryptography` exposing the exact fields go-tdx-guest compares,
+ECDSA-P256-SHA256 signature checks, and a strict minimal DER (TLV) reader for
+the Intel SGX extension. PEM decoding and the extension accessors come from
+v3.x509common. All errors are ValueError; callers assign the rejection
+layer."""
 
 from __future__ import annotations
 
-import binascii
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
-from cryptography.x509.oid import ExtensionOID, NameOID
+from cryptography.x509.oid import NameOID
+
+from .. import x509common
+from ..x509common import (  # noqa: F401 (re-exported for the TDX call sites)
+    PEMBlock,
+    pem_decode,
+)
 
 # Go's zero time.Time; an absent CRL nextUpdate compares as always expired.
 ZERO_TIME = datetime(1, 1, 1, tzinfo=timezone.utc)
 
 OID_ECDSA_WITH_SHA256 = "1.2.840.10045.4.3.2"
-
-# --- PEM (Go encoding/pem.Decode subset: first block + rest) ------------------
-
-_PEM_RE = re.compile(
-    r"-----BEGIN ([^-]+)-----\r?\n([A-Za-z0-9+/=\r\n]*)-----END \1-----(?:\r?\n)?"
-)
-_B64_RE = re.compile(r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$")
-
-
-@dataclass
-class PEMBlock:
-    type: str
-    der: bytes
-    rest: str
-
-
-def pem_decode(text: str) -> Optional[PEMBlock]:
-    """Decode the first PEM block, returning its DER and the remaining text."""
-    m = _PEM_RE.search(text)
-    if m is None:
-        return None
-    b64 = m.group(2).replace("\r", "").replace("\n", "")
-    if _B64_RE.fullmatch(b64) is None:
-        return None
-    return PEMBlock(
-        type=m.group(1),
-        der=binascii.a2b_base64(b64.encode("ascii")),
-        rest=text[m.end() :],
-    )
 
 
 def bytes_to_latin1(b: bytes) -> str:
@@ -121,36 +96,23 @@ def parse_certificate(der: bytes) -> Certificate:
 
 def basic_constraints(cert: Certificate) -> tuple[bool, bool]:
     """(present, ca) mirroring Go's BasicConstraintsValid / IsCA."""
-    try:
-        ext = cert.obj.extensions.get_extension_for_oid(ExtensionOID.BASIC_CONSTRAINTS)
-    except x509.ExtensionNotFound:
+    bc = x509common.basic_constraints_ext(cert.obj)
+    if bc is None:
         return False, False
-    return True, bool(ext.value.ca)
+    return True, bool(bc.ca)
 
 
 def key_usage(cert: Certificate) -> tuple[bool, bool, bool]:
     """(present, cert_sign, crl_sign) of the KeyUsage extension."""
-    try:
-        ext = cert.obj.extensions.get_extension_for_oid(ExtensionOID.KEY_USAGE)
-    except x509.ExtensionNotFound:
+    ku = x509common.key_usage_ext(cert.obj)
+    if ku is None:
         return False, False, False
-    return True, bool(ext.value.key_cert_sign), bool(ext.value.crl_sign)
+    return True, bool(ku.key_cert_sign), bool(ku.crl_sign)
 
 
 def crl_distribution_point_uris(cert: Certificate) -> list[str]:
     """URI GeneralNames of the CRL Distribution Points extension, or []."""
-    try:
-        ext = cert.obj.extensions.get_extension_for_oid(
-            ExtensionOID.CRL_DISTRIBUTION_POINTS
-        )
-    except x509.ExtensionNotFound:
-        return []
-    out: list[str] = []
-    for dp in ext.value:
-        for gn in dp.full_name or []:
-            if isinstance(gn, x509.UniformResourceIdentifier):
-                out.append(gn.value)
-    return out
+    return x509common.crl_distribution_point_uris(cert.obj)
 
 
 # --- CRLs ---------------------------------------------------------------------
@@ -261,6 +223,9 @@ class TLV:
 
 
 def read_tlv(b: bytes, off: int) -> TLV:
+    # Sibling: sev/kds.py _read_tlv. Kept separate on purpose — this reader
+    # tolerates non-minimal long-form lengths but caps length bytes at 4;
+    # kds's rejects non-minimal lengths and returns content, not offsets.
     if off + 2 > len(b):
         raise ValueError("truncated DER element")
     first = b[off]

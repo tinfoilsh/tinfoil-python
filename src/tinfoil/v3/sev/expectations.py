@@ -534,6 +534,9 @@ def sev_validate(e: SevExpectations, q: SevQuote) -> None:
     validation options plus the strict-equality companions. It is the only
     SEV enforcement entry point, so no subset of the policy can be applied
     (Go Expectations.Validate)."""
+    # SEV validation short-circuits at the first failure while TDX aggregates
+    # all failures (mirrors go-sev-guest vs go-tdx-guest multierr.Combine);
+    # the accept/reject sets are identical, only messages differ.
     _snp_attestation_validate(q, e.opts)
 
     report = q.report

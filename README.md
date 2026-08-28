@@ -124,6 +124,12 @@ print(resp.status_code, resp.text)
 
 This library is a drop-in replacement for the [official OpenAI Python client](https://github.com/openai/openai-python). All methods and types are identical; see the [OpenAI Python client documentation](https://github.com/openai/openai-python) for API usage.
 
+## v3 conformance
+
+The package implements CONFORMANCE_ADAPTER_SPEC v1.1 and SDK_SURFACE_SPEC
+v1.0 Tier-1 (Tier-2 product-client wiring is pending). The conformance
+adapter entry point is the `tinfoil-conformance` script.
+
 ## Development
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:

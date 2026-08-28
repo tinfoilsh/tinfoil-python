@@ -1,5 +1,7 @@
 """Quote v4 ABI parsing (tinfoil.v3.tdx.quote), against synthetic quotes."""
 
+import struct
+
 import pytest
 
 from tdx_material import TdBodyFields, build_synth_chain, build_tdx_quote_v4
@@ -82,4 +84,41 @@ def test_bad_certification_data_type(raw_quote):
     off = 0x27C + 0x80
     tampered = raw_quote[:off] + b"\x05\x00" + raw_quote[off + 2 :]
     with pytest.raises(ValueError, match="certification data type invalid"):
+        quote_to_proto_v4(tampered)
+
+
+def test_reserved_bytes_are_parsed_not_rejected(raw_quote):
+    # The parser exposes reserved header bytes (8-12); authentication pins
+    # them to zero.
+    tampered = raw_quote[:8] + b"\x01\x00\x00\x00" + raw_quote[12:]
+    q = quote_to_proto_v4(tampered)
+    assert q.header.pce_svn == b"\x01\x00"
+    assert q.header.qe_svn == b"\x00\x00"
+
+
+# signed data (0x27C) -> QE report cert data (+0x86) -> QE auth-data size
+# (+0x1C0); the builder emits empty auth data, so the PCK chain's inner
+# section (2-byte type, 4-byte size) follows immediately.
+_AUTH_DATA_SIZE_OFFSET = 0x27C + 0x86 + 0x1C0
+_PCK_CHAIN_SIZE_OFFSET = _AUTH_DATA_SIZE_OFFSET + 2 + 2
+
+
+def test_pck_chain_size_mismatch(raw_quote):
+    tampered = (
+        raw_quote[:_PCK_CHAIN_SIZE_OFFSET]
+        + struct.pack("<I", 7)
+        + raw_quote[_PCK_CHAIN_SIZE_OFFSET + 4 :]
+    )
+    with pytest.raises(ValueError, match="PCK certificate chain size"):
+        quote_to_proto_v4(tampered)
+
+
+def test_auth_data_size_overruns(raw_quote):
+    # A declared auth-data size larger than the remaining bytes truncates.
+    tampered = (
+        raw_quote[:_AUTH_DATA_SIZE_OFFSET]
+        + struct.pack("<H", 9999)
+        + raw_quote[_AUTH_DATA_SIZE_OFFSET + 2 :]
+    )
+    with pytest.raises(ValueError, match="truncated"):
         quote_to_proto_v4(tampered)

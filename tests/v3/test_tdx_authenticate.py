@@ -65,6 +65,12 @@ def test_pcs_collateral_key_sorts_query():
     assert pcs_collateral_key("https://x/y?b=2&a=1") == pcs_collateral_key("https://x/y?a=1&b=2")
 
 
+def test_key_without_query_has_no_question_mark():
+    assert (
+        pcs_collateral_key("https://x.test/p?tcbEvaluationDataNumber=9") == "https://x.test/p"
+    )
+
+
 def test_canonical_mime_header_key():
     assert canonical_mime_header_key("tcb-info-issuer-chain") == "Tcb-Info-Issuer-Chain"
     assert canonical_mime_header_key("SGX-Enclave-Identity-Issuer-Chain") == "Sgx-Enclave-Identity-Issuer-Chain"
@@ -96,6 +102,12 @@ def test_pcs_replay_getter():
 
     with pytest.raises(ValueError, match="no captured response"):
         getter.get("https://api.trustedservices.intel.com/tdx/certification/v4/qe/identity")
+
+
+def test_getter_lookup_is_case_insensitive():
+    getter = PCSReplayGetter([resp("https://X.test/QE/identity", b"{}")], NOW)
+    _, body = getter.get("https://x.test/qe/identity")
+    assert body == b"{}"
 
 
 # --- TcbEvaluationRecorder (Go TestTCBEvaluationRecorder) -------------------------

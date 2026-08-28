@@ -99,7 +99,6 @@ def authenticate_freshness(
     and return the verified transparency-log time (Go:
     Client.AuthenticateFreshness)."""
     _validate_authenticated_artifact(expected)
-    assert expected is not None
     try:
         result = verify_bundle_with_identity(
             bundle_json, FRESHNESS_WITNESS_IDENTITY, expected.digest, trust_root_json
