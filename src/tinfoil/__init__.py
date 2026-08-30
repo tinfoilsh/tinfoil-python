@@ -52,8 +52,8 @@ class TinfoilAI:
             raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
 
         # If enclave is empty, fetch a random one from the routers API. When
-        # attesting from a bundle, the enclave host comes from the verified
-        # bundle, so no router lookup is needed.
+        # an ATC service URL is configured, SecureClient defers discovery to
+        # verification so it can use that service.
         if (enclave == "" or enclave is None) and not attestation_bundle_url:
             enclave = get_router_address()
 
@@ -61,7 +61,7 @@ class TinfoilAI:
         self._secure_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
         secure_http = self._secure_client.make_secure_http_client()
         # Building the secure transport verifies attestation, so the enclave host
-        # is now known even when it came from a bundle.
+        # is now known even when discovery was deferred to verification.
         self.enclave = self._secure_client.enclave
         self.client = OpenAI(
             base_url=base_url or f"https://{self.enclave}/v1/",
@@ -107,8 +107,8 @@ class AsyncTinfoilAI:
             raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
 
         # If enclave is empty, fetch a random one from the routers API. When
-        # attesting from a bundle, the enclave host comes from the verified
-        # bundle, so no router lookup is needed.
+        # an ATC service URL is configured, SecureClient defers discovery to
+        # verification so it can use that service.
         if (enclave == "" or enclave is None) and not attestation_bundle_url:
             enclave = get_router_address()
 
@@ -117,7 +117,7 @@ class AsyncTinfoilAI:
         self._secure_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
         async_http = self._secure_client.make_secure_async_http_client()
         # Building the secure transport verifies attestation, so the enclave host
-        # is now known even when it came from a bundle.
+        # is now known even when discovery was deferred to verification.
         self.enclave = self._secure_client.enclave
         self.client = AsyncOpenAI(
             base_url=base_url or f"https://{self.enclave}/v1/",
@@ -138,8 +138,8 @@ class _HTTPSecureClient:
     def __init__(self, enclave: str, tf_client: SecureClient):
         self._tf_client = tf_client
         self._http_client = tf_client.make_secure_http_client()
-        # Building the transport verifies attestation; for a bundle the enclave
-        # host is only known afterwards.
+        # Building the transport verifies attestation; when discovery is
+        # deferred to verification the enclave host is only known afterwards.
         self.enclave = tf_client.enclave or enclave
 
     def get(self, url: str, headers: Optional[dict] = None, params: Optional[dict] = None, timeout: Optional[int] = None) -> httpx.Response:
@@ -171,8 +171,8 @@ def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model
     if measurement is None and (repo == "" or repo is None):
         raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
 
-    # If enclave is empty, fetch a random one from the routers API. When
-    # attesting from a bundle, the enclave host comes from the verified bundle.
+    # If enclave is empty, fetch a random one from the routers API. When an
+    # ATC service URL is configured, SecureClient defers discovery to verification.
     if (enclave == "" or enclave is None) and not attestation_bundle_url:
         enclave = get_router_address()
 

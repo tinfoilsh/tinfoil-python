@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from sigstore.errors import VerificationError
 
-from tinfoil.attestation import Bundle, Document
 from tinfoil.attestation.bundle import fetch_bundle_from
 from tinfoil.attestation.types import (
     HardwareMeasurement,
@@ -13,8 +12,18 @@ from tinfoil.attestation.types import (
     Verification,
 )
 from tinfoil.client import SecureClient, SoftwareIdentity, VerificationDocument
-from tinfoil.github import Release
 from tinfoil.sigstore import _verify_dsse_bundle
+from tinfoil.v3.client import VerifiedDocumentV3
+from tinfoil.v3.envelope import (
+    CRYPTO_MATERIAL_ID_HPKE,
+    CRYPTO_MATERIAL_ID_TLS,
+    KEY_SPKI_FP_SHA256_V1_FORMAT,
+    KEY_X25519_HPKE_V1_FORMAT,
+    CryptoMaterialItem,
+)
+from tinfoil.v3.errors import PROVENANCE_REJECTED, QUOTE_REJECTED
+from tinfoil.v3.errors import VerificationError as V3VerificationError
+from tinfoil.v3.measurement import SEV_GUEST_V2, Measurement as V3Measurement
 
 
 def _measurement() -> Measurement:
@@ -29,51 +38,60 @@ def _verification() -> Verification:
     )
 
 
+def _verified_v3() -> VerifiedDocumentV3:
+    return VerifiedDocumentV3(
+        code_digest="digest",
+        code_tag="v1.2.3",
+        code_measurement=V3Measurement(type=SEV_GUEST_V2, registers=["measurement"]),
+        enclave_measurement=V3Measurement(type=SEV_GUEST_V2, registers=["measurement"]),
+        crypto_material=[
+            CryptoMaterialItem(
+                id=CRYPTO_MATERIAL_ID_TLS,
+                format=KEY_SPKI_FP_SHA256_V1_FORMAT,
+                data="tls-fingerprint",
+            ),
+            CryptoMaterialItem(
+                id=CRYPTO_MATERIAL_ID_HPKE,
+                format=KEY_X25519_HPKE_V1_FORMAT,
+                data="hpke-key",
+            ),
+        ],
+    )
+
+
 def test_direct_verification_binds_and_reports_selected_release_tag():
-    attestation = MagicMock()
-    attestation.verify.return_value = _verification()
-    code_measurement = _measurement()
     client = SecureClient(enclave="enclave.test", repo="org/repo")
 
     with (
-        patch("tinfoil.client.fetch_attestation", return_value=attestation),
+        patch("tinfoil.client.random_nonce", return_value=b"\x02" * 32),
+        patch("tinfoil.client.fetch_attestation", return_value=b"doc-bytes"),
         patch(
-            "tinfoil.client.fetch_latest_release",
-            return_value=Release(tag="v1.2.3", digest="digest"),
-        ),
-        patch("tinfoil.client.fetch_attestation_bundle", return_value=b"bundle"),
-        patch(
-            "tinfoil.client.verify_attestation", return_value=code_measurement
-        ) as verify_code,
+            "tinfoil.client.verify_document_v3", return_value=_verified_v3()
+        ) as verify_v3,
     ):
         client.verify()
 
-    verify_code.assert_called_once_with(b"bundle", "digest", "org/repo", "v1.2.3")
+    verify_v3.assert_called_once_with(b"doc-bytes", b"\x02" * 32, "org/repo")
     assert client.get_verification_document().release_tag == "v1.2.3"
 
 
-def test_bundle_release_tag_is_reported_only_after_exact_verification():
-    report = Document(format=PredicateType.SEV_GUEST_V2, body="Zm9v")
-    bundle = Bundle(
-        domain="enclave.test",
-        enclave_attestation_report=report,
-        digest="digest",
-        sigstore_bundle=b"bundle",
-        vcek="",
-        enclave_cert="certificate",
-        release_tag="v1.2.3",
-    )
-    client = SecureClient(repo="org/repo", attestation_bundle_url="https://atc.test")
+def test_release_tag_is_reported_only_after_verification_accepts():
+    client = SecureClient(enclave="enclave.test", repo="org/repo")
 
-    with patch(
-        "tinfoil.client.verify_attestation",
-        side_effect=VerificationError("tag mismatch"),
-    ) as verify_code:
-        with pytest.raises(VerificationError, match="tag mismatch"):
-            client.verify_from_bundle(bundle)
+    with (
+        patch("tinfoil.client.random_nonce", return_value=b"\x02" * 32),
+        patch("tinfoil.client.fetch_attestation", return_value=b"doc-bytes"),
+        patch(
+            "tinfoil.client.verify_document_v3",
+            side_effect=V3VerificationError(PROVENANCE_REJECTED, "tag mismatch"),
+        ),
+    ):
+        with pytest.raises(Exception, match="tag mismatch"):
+            client.verify()
 
-    verify_code.assert_called_once_with(b"bundle", "digest", "org/repo", "v1.2.3")
-    assert client.get_verification_document().release_tag is None
+    document = client.get_verification_document()
+    assert document.release_tag is None
+    assert document.steps["verify_code"].status == "failed"
 
 
 def test_fetched_bundle_preserves_optional_release_tag():
@@ -94,29 +112,6 @@ def test_fetched_bundle_preserves_optional_release_tag():
         bundle = fetch_bundle_from("https://atc.test")
 
     assert bundle.release_tag == "v1.2.3"
-
-
-def test_bundle_reports_exactly_verified_release_tag():
-    report = Document(format=PredicateType.SEV_GUEST_V2, body="Zm9v")
-    bundle = Bundle(
-        domain="enclave.test",
-        enclave_attestation_report=report,
-        digest="digest",
-        sigstore_bundle=b"bundle",
-        vcek="",
-        enclave_cert="certificate",
-        release_tag="v1.2.3",
-    )
-    client = SecureClient(repo="org/repo", attestation_bundle_url="https://atc.test")
-
-    with (
-        patch.object(report, "verify", return_value=_verification()),
-        patch("tinfoil.client.verify_attestation", return_value=_measurement()),
-        patch("tinfoil.client.verify_certificate"),
-    ):
-        client.verify_from_bundle(bundle)
-
-    assert client.get_verification_document().release_tag == "v1.2.3"
 
 
 def test_sigstore_rejects_a_different_exact_workflow_tag():
@@ -176,11 +171,15 @@ def test_get_verification_document_returns_an_isolated_copy():
 
 def test_failure_exception_document_cannot_mutate_client_state():
     client = SecureClient(enclave="enclave.test", repo="org/repo")
-    attestation = MagicMock()
-    attestation.verify.side_effect = ValueError("verification failed")
 
-    with patch("tinfoil.client.fetch_attestation", return_value=attestation):
-        with pytest.raises(ValueError) as exc_info:
+    with (
+        patch("tinfoil.client.fetch_attestation", return_value=b"doc-bytes"),
+        patch(
+            "tinfoil.client.verify_document_v3",
+            side_effect=V3VerificationError(QUOTE_REJECTED, "verification failed"),
+        ),
+    ):
+        with pytest.raises(Exception) as exc_info:
             client.verify()
 
     getattr(exc_info.value, "verification_document").steps[
