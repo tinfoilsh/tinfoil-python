@@ -528,13 +528,16 @@ def verify_bundle_with_identity(
     _check_artifact_digest(statement, hex_digest)
     _enforce_subject0_digest(statement, hex_digest)
 
-    # The Type=="Tlog" observer timestamps: the integrated time of every
-    # verified transparency-log entry (sigstore-python bundles carry exactly
-    # one).
+    # The Type=="Tlog" observer timestamps (Go: result.VerifiedTimestamps
+    # filtered to Tlog). integrated_time is only cryptographically bound when
+    # the inclusion promise (SET) is present and verified — the same gate
+    # sigstore-python uses to run _verify_set — so require it before trusting
+    # the time as the freshness anchor. Absent it (e.g. a TSA-only bundle),
+    # integrated_time is unverified and must not anchor freshness.
+    entry = bundle.log_entry._inner
     tlog_timestamps: list[datetime] = []
-    integrated_time = bundle.log_entry._inner.integrated_time
-    if integrated_time is not None:
-        tlog_timestamps.append(datetime.fromtimestamp(integrated_time, tz=timezone.utc))
+    if entry.inclusion_promise is not None and entry.integrated_time is not None:
+        tlog_timestamps.append(datetime.fromtimestamp(entry.integrated_time, tz=timezone.utc))
 
     return VerifiedBundle(
         statement=statement,
