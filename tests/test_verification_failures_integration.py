@@ -18,7 +18,7 @@ import os
 import pytest
 
 from tinfoil.client import SecureClient, get_router_address
-from tinfoil.attestation import MeasurementMismatchError
+from tinfoil.attestation import AttestationError
 
 pytestmark = pytest.mark.integration
 
@@ -56,20 +56,21 @@ class TestMeasurementMismatchIntegration:
         This test:
         1. Gets a real router enclave
         2. Tries to verify it against the wrong repo
-        3. Expects MeasurementMismatchError
+        3. Expects AttestationError (v3 PROVENANCE rejection: the wrong repo
+           cannot authenticate the document's code provenance)
 
-        This catches bugs where measurement comparison is skipped.
+        This catches bugs where code verification is skipped.
         """
         print(f"\nTesting: {router_enclave}")
         print(f"Against WRONG repo: {WRONG_REPO}")
-        print("Expected: MeasurementMismatchError")
+        print("Expected: AttestationError")
 
         client = SecureClient(enclave=router_enclave, repo=WRONG_REPO)
 
-        with pytest.raises(MeasurementMismatchError):
+        with pytest.raises(AttestationError):
             client.verify()
 
-        print("✓ Correctly rejected mismatched measurements")
+        print("✓ Correctly rejected the wrong repo")
 
     def test_wrong_repo_blocks_http_client(self, router_enclave):
         """
@@ -79,7 +80,7 @@ class TestMeasurementMismatchIntegration:
         """
         client = SecureClient(enclave=router_enclave, repo=WRONG_REPO)
 
-        with pytest.raises(MeasurementMismatchError):
+        with pytest.raises(AttestationError):
             client.make_secure_http_client()
 
         # Ground truth should NOT be set if verification failed
@@ -108,22 +109,21 @@ class TestDirectMeasurementIntegration:
     Tests for the direct measurement verification path.
     """
 
-    def test_wrong_pinned_measurement_fails(self, router_enclave):
+    def test_pinned_measurement_is_rejected(self, router_enclave):
         """
-        If user provides a specific measurement that doesn't match
-        the enclave, verification must fail.
+        The v3 flow has no pinned-measurement mode; providing one must fail
+        loudly instead of silently skipping code verification.
         """
-        # This is clearly a fake measurement
         fake_measurement = {
             "snp_measurement": "0000000000000000000000000000000000000000000000000000000000000000"
         }
 
         client = SecureClient(enclave=router_enclave, measurement=fake_measurement)
 
-        with pytest.raises(ValueError, match="measurement mismatch"):
+        with pytest.raises(ValueError, match="not supported by the v3"):
             client.verify()
 
-        print("✓ Correctly rejected fake pinned measurement")
+        print("✓ Correctly rejected the pinned-measurement mode")
 
 
 class TestNoSilentFailures:
@@ -139,14 +139,14 @@ class TestNoSilentFailures:
         client = SecureClient(enclave=router_enclave, repo=WRONG_REPO)
 
         # Try to get HTTP client - should fail
-        with pytest.raises(MeasurementMismatchError):
+        with pytest.raises(AttestationError):
             client.get_http_client()
 
         # Try to make request - should also fail
         import urllib.request
         req = urllib.request.Request(f"https://{router_enclave}/health")
 
-        with pytest.raises(MeasurementMismatchError):
+        with pytest.raises(AttestationError):
             client.make_request(req)
 
         print("✓ All client methods properly block on verification failure")

@@ -25,6 +25,9 @@ dependencies = [
     "urllib3>=2.7.0",
 ]
 
+[project.scripts]
+tinfoil-conformance = "tinfoil.conformance.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest",

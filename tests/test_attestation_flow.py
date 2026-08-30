@@ -22,14 +22,12 @@ def test_full_verification_flow():
     
     Gets a router from the ATC service and verifies it against the
     confidential-model-router repo. Works with any TEE type (SNP or TDX).
-    
-    SecureClient.verify() performs:
-    1. Fetch runtime attestation from enclave
-    2. Verify attestation (cryptographic + policy validation)
-    3. Fetch latest digest from GitHub
-    4. Fetch and verify sigstore attestation bundle
-    5. For TDX: verify hardware measurements (MRTD, RTMR0)
-    6. Compare code measurements with runtime measurements
+
+    SecureClient.verify() runs the v3 single-request flow:
+    1. Fetch the attestation document (evidence + collateral) from the enclave
+    2. Verify it offline against the embedded roots (envelope, code and
+       platform provenance with freshness, quote, policy)
+    3. Recover the endorsed channel keys (TLS fingerprint + HPKE key)
     """
     try:
         enclave = get_router_address()
@@ -61,6 +59,39 @@ def test_full_verification_flow():
         print(f"    RTMR1: {regs[2][:32]}...")
         print(f"    RTMR2: {regs[3][:32]}...")
         print(f"    RTMR3: {regs[4][:32]}...")
+
+
+def test_verification_document_carries_v3_facts():
+    """
+    After a live verify, the verification document must carry the v3 facts:
+    the release digest, both measurement fingerprints, and both endorsed
+    channel keys.
+    """
+    try:
+        enclave = get_router_address()
+    except Exception as e:
+        pytest.skip(f"Could not fetch router address from ATC service: {e}")
+
+    client = SecureClient(enclave=enclave, repo=REPO)
+    ground_truth = client.verify()
+    doc = client.get_verification_document()
+
+    assert doc is not None and doc.security_verified
+    # The code digest names the verified release artifact (sha256 hex).
+    assert len(doc.release_digest) == 64
+    assert all(c in "0123456789abcdef" for c in doc.release_digest)
+    assert doc.release_tag, "release tag should come from the code provenance"
+    # Fingerprints mirror the legacy display flow and must be populated.
+    assert doc.code_fingerprint
+    assert doc.enclave_fingerprint
+    # Both endorsed channel keys are hard requirements in v3.
+    assert doc.tls_public_key and len(doc.tls_public_key) == 64
+    assert doc.hpke_public_key and len(doc.hpke_public_key) == 64
+    assert ground_truth.public_key == doc.tls_public_key
+    assert ground_truth.hpke_public_key == doc.hpke_public_key
+    assert doc.verified_at is not None
+    assert doc.verifier.name == "tinfoil"
+    assert all(step.status == "success" for step in doc.steps.values())
 
 
 def test_secure_http_client():

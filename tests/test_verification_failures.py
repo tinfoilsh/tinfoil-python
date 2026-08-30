@@ -16,14 +16,19 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from tinfoil.client import SecureClient, _verify_peer_fingerprint
-from tinfoil.github import Release
 from tinfoil.attestation import (
+    AttestationError,
     Measurement,
     PredicateType,
     MeasurementMismatchError,
     HardwareMeasurementError,
     verify_tdx_hardware,
     HardwareMeasurement,
+)
+from tinfoil.v3.errors import (
+    POLICY_REJECTED,
+    QUOTE_REJECTED,
+    VerificationError,
 )
 
 
@@ -132,15 +137,17 @@ class TestSecureClientVerificationFailures:
             client.verify()
 
     @patch('tinfoil.client.fetch_attestation')
-    def test_attestation_verification_failure_blocks_verify(self, mock_fetch):
+    @patch('tinfoil.client.verify_document_v3')
+    def test_attestation_verification_failure_blocks_verify(self, mock_verify, mock_fetch):
         """If attestation verification fails, verify() must raise."""
-        mock_doc = MagicMock()
-        mock_doc.verify.side_effect = ValueError("TDX attestation verification failed")
-        mock_fetch.return_value = mock_doc
+        mock_fetch.return_value = b"doc-bytes"
+        mock_verify.side_effect = VerificationError(
+            QUOTE_REJECTED, "TDX attestation verification failed"
+        )
 
         client = SecureClient(enclave="test.enclave.sh", repo="test/repo")
 
-        with pytest.raises(ValueError, match="TDX attestation verification failed") as exc_info:
+        with pytest.raises(AttestationError, match="TDX attestation verification failed") as exc_info:
             client.verify()
 
         verification_document = client.get_verification_document()
@@ -153,81 +160,40 @@ class TestSecureClientVerificationFailures:
         assert attached_document.to_dict() == verification_document.to_dict()
 
     @patch('tinfoil.client.fetch_attestation')
-    @patch('tinfoil.client.fetch_latest_release')
-    @patch('tinfoil.client.fetch_attestation_bundle')
-    @patch('tinfoil.client.verify_attestation')
-    def test_measurement_mismatch_blocks_verify(
-        self, mock_verify_att, mock_fetch_bundle, mock_fetch_digest, mock_fetch_attestation
-    ):
-        """If code measurements don't match runtime, verify() must raise."""
-        # Setup mocks
-        mock_fetch_digest.return_value = Release(tag="v1.2.3", digest="test_digest")
-        mock_fetch_bundle.return_value = {}
-
-        # Runtime measurement from enclave
-        runtime_measurement = Measurement(
-            type=PredicateType.SEV_GUEST_V2,
-            registers=["runtime_measurement"]
+    @patch('tinfoil.client.verify_document_v3')
+    def test_measurement_mismatch_blocks_verify(self, mock_verify, mock_fetch):
+        """If the policy appraisal rejects (measurement mismatch), verify() must raise."""
+        mock_fetch.return_value = b"doc-bytes"
+        mock_verify.side_effect = VerificationError(
+            POLICY_REJECTED, "measurement mismatch"
         )
-        mock_verification = MagicMock()
-        mock_verification.measurement = runtime_measurement
-        mock_doc = MagicMock()
-        mock_doc.verify.return_value = mock_verification
-        mock_fetch_attestation.return_value = mock_doc
-
-        # Code measurement from sigstore (different!)
-        code_measurement = Measurement(
-            type=PredicateType.SEV_GUEST_V2,
-            registers=["different_code_measurement"]
-        )
-        mock_verify_att.return_value = code_measurement
 
         client = SecureClient(enclave="test.enclave.sh", repo="test/repo")
 
-        with pytest.raises(MeasurementMismatchError):
+        with pytest.raises(AttestationError, match="measurement mismatch"):
             client.verify()
+
+        document = client.get_verification_document()
+        assert document.steps["compare_measurements"].status == "failed"
 
     @patch('tinfoil.client.fetch_attestation')
-    @patch('tinfoil.client.fetch_latest_release')
-    @patch('tinfoil.client.fetch_attestation_bundle')
-    @patch('tinfoil.client.verify_attestation')
-    @patch('tinfoil.client.fetch_latest_hardware_measurements')
-    @patch('tinfoil.client.verify_tdx_hardware')
-    def test_hardware_mismatch_blocks_verify(
-        self, mock_verify_hw, mock_fetch_hw, mock_verify_att,
-        mock_fetch_bundle, mock_fetch_digest, mock_fetch_attestation
-    ):
-        """If TDX hardware measurements don't match, verify() must raise."""
-        # Setup mocks
-        mock_fetch_digest.return_value = Release(tag="v1.2.3", digest="test_digest")
-        mock_fetch_bundle.return_value = {}
-
-        # TDX runtime measurement from enclave
-        runtime_measurement = Measurement(
-            type=PredicateType.TDX_GUEST_V2,
-            registers=["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"]
+    @patch('tinfoil.client.verify_document_v3')
+    def test_hardware_mismatch_blocks_verify(self, mock_verify, mock_fetch):
+        """If TDX hardware appraisal rejects the quote, verify() must raise."""
+        # In v3 the platform (mrtd/rtmr0) expectations are part of the quote's
+        # policy appraisal, so a mismatch surfaces as a QUOTE rejection.
+        mock_fetch.return_value = b"doc-bytes"
+        mock_verify.side_effect = VerificationError(
+            QUOTE_REJECTED, "no matching hardware platform"
         )
-        mock_verification = MagicMock()
-        mock_verification.measurement = runtime_measurement
-        mock_doc = MagicMock()
-        mock_doc.verify.return_value = mock_verification
-        mock_fetch_attestation.return_value = mock_doc
-
-        # Code measurement from sigstore
-        code_measurement = Measurement(
-            type=PredicateType.TDX_GUEST_V2,
-            registers=["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"]
-        )
-        mock_verify_att.return_value = code_measurement
-
-        # Hardware verification fails
-        mock_fetch_hw.return_value = []
-        mock_verify_hw.side_effect = HardwareMeasurementError("no matching hardware platform")
 
         client = SecureClient(enclave="test.enclave.sh", repo="test/repo")
 
-        with pytest.raises(HardwareMeasurementError, match="no matching hardware platform"):
+        with pytest.raises(AttestationError, match="no matching hardware platform"):
             client.verify()
+
+        document = client.get_verification_document()
+        assert document.steps["verify_enclave"].status == "failed"
 
     @patch('tinfoil.client.fetch_attestation')
     def test_http_client_not_created_on_verification_failure(self, mock_fetch):
@@ -280,42 +246,19 @@ class TestSecureClientVerificationFailures:
 
 
 class TestDirectMeasurementVerification:
-    """Tests for direct measurement verification (no repo)."""
+    """Tests for direct (pinned) measurement verification (no repo)."""
 
-    @patch('tinfoil.client.fetch_attestation')
-    def test_snp_measurement_mismatch_raises(self, mock_fetch):
-        """If SNP measurement doesn't match provided measurement, must raise."""
-        # Runtime measurement from enclave
-        runtime_measurement = Measurement(
-            type=PredicateType.SEV_GUEST_V2,
-            registers=["actual_snp_measurement"]
-        )
-        mock_verification = MagicMock()
-        mock_verification.measurement = runtime_measurement
-        mock_verification.public_key_fp = "tls-fingerprint"
-        mock_verification.hpke_public_key = "hpke-key"
-        mock_doc = MagicMock()
-        mock_doc.verify.return_value = mock_verification
-        mock_fetch.return_value = mock_doc
-
-        # Expect different measurement
+    def test_pinned_measurement_is_rejected_by_the_v3_flow(self):
+        """The v3 engine always authenticates code provenance from the repo;
+        the legacy pinned-measurement mode must fail loudly, not silently
+        skip code verification."""
         client = SecureClient(
             enclave="test.enclave.sh",
             measurement={"snp_measurement": "expected_snp_measurement"}
         )
 
-        with pytest.raises(ValueError, match="SNP measurement mismatch") as exc_info:
+        with pytest.raises(ValueError, match="not supported by the v3"):
             client.verify()
-
-        verification_document = client.get_verification_document()
-        assert verification_document is not None
-        assert verification_document.steps["fetch_digest"].status == "skipped"
-        assert verification_document.steps["verify_code"].status == "skipped"
-        assert verification_document.steps["compare_measurements"].status == "failed"
-        attached_document = getattr(exc_info.value, "verification_document", None)
-        assert attached_document is not None
-        assert attached_document is not verification_document
-        assert attached_document.to_dict() == verification_document.to_dict()
 
 
 class TestVerifyPeerFingerprint:

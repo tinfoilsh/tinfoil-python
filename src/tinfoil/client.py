@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import contextlib
 import copy
 import http.client
@@ -25,22 +24,27 @@ from ehbp import (
     KeyConfigMismatchError,
 )
 
-from .attestation import (
-    Bundle,
-    fetch_attestation,
-    fetch_bundle_from,
-    verify_certificate,
-    TDX_TYPES,
+from .attestation.types import (
+    AttestationError,
+    HardwareMeasurement,
+    Measurement,
+    PredicateType,
+    Verification,
 )
-from .attestation.attestation_tdx import verify_tdx_hardware
-from .attestation.types import Measurement, HardwareMeasurement, Verification
-from .github import fetch_latest_release, fetch_attestation_bundle
-from .sigstore import verify_attestation, fetch_latest_hardware_measurements
 from .user_cache_secret import (
     resolve_user_cache_secret,
     _AsyncUserCacheSecretTransport,
     _UserCacheSecretTransport,
 )
+
+# The v3 verification engine, consumed through its public Tier-1 surface
+# (SDK_SURFACE_SPEC §2; these are the exact names re-exported from the
+# package root). The v3 document carries all attestation collateral, so the
+# enclave round-trip is the only network request the verify flow makes.
+from .v3 import measurement as v3_measurement
+from .v3.client import hpke_public_key, tls_public_key_fp, verify_document_v3
+from .v3.errors import POLICY_REJECTED, PROVENANCE_REJECTED, VerificationError
+from .v3.fetch import fetch_attestation, random_nonce
 
 # Header that tells a proxy which enclave to forward an encrypted request to, so
 # the request reaches the same enclave the client verified.
@@ -199,6 +203,7 @@ class VerificationDocument:
                     "verify_code": "verifyCode",
                     "verify_enclave": "verifyEnclave",
                     "compare_measurements": "compareMeasurements",
+                    "other_error": "otherError",
                 }.get(name, name): {
                     key: value
                     for key, value in {"status": step.status, "error": step.error}.items()
@@ -211,6 +216,23 @@ class VerificationDocument:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict())
+
+
+def _step_for_layer(layer: str) -> str:
+    """Maps a v3 rejection layer to the verification-document step it fails
+    (JS: stepForLayer): code provenance to the code step, policy appraisal to
+    the measurement-comparison step, envelope/quote to the enclave step."""
+    if layer == PROVENANCE_REJECTED:
+        return "verify_code"
+    if layer == POLICY_REJECTED:
+        return "compare_measurements"
+    return "verify_enclave"  # ENVELOPE_REJECTED, QUOTE_REJECTED
+
+
+def _measurement_from_v3(m: v3_measurement.Measurement) -> Measurement:
+    """Projects a v3 measurement onto the document's legacy measurement type;
+    the predicate URLs are shared between the two engines."""
+    return Measurement(type=PredicateType(m.type), registers=list(m.registers))
 
 
 def _attach_verification_document(exc: Exception, verification_document: VerificationDocument) -> None:
@@ -517,7 +539,7 @@ class _EnclaveURLHeaderTransport(httpx.BaseTransport):
 
     The header is recomputed for every request from the client's current
     enclave, so it stays correct after a re-verification swaps in a different
-    enclave (for example when attesting from a bundle behind a proxy).
+    enclave (for example when router discovery happens at verify time).
     """
 
     def __init__(self, inner: httpx.BaseTransport, client: "SecureClient"):
@@ -596,21 +618,19 @@ class SecureClient:
         if transport not in ("ehbp", "tls"):
             raise ValueError(f"Unknown transport mode: {transport!r}. Use 'ehbp' or 'tls'.")
 
-        # A pinned measurement and an attestation bundle are mutually exclusive
-        # verification methods: the bundle carries its own Sigstore code
-        # measurement, so honoring a pinned measurement would be ambiguous.
+        # A pinned measurement and an ATC service URL remain mutually
+        # exclusive, as they were when the URL served attestation bundles.
         if measurement is not None and attestation_bundle_url:
             raise ValueError(
-                "Cannot combine 'measurement' with 'attestation_bundle_url'; "
-                "the bundle provides its own code measurement."
+                "Cannot combine 'measurement' with 'attestation_bundle_url'."
             )
 
         if base_url is not None:
             _parse_http_url(base_url, "base_url")
 
-        # The attestation bundle is the entire trust root for verification.
-        # Fetching it over plaintext would let an attacker substitute the bundle
-        # (MITM), so the bundle URL must be https.
+        # The ATC service selects which enclave gets verified, so reaching it
+        # over plaintext would let an attacker steer discovery (MITM); the URL
+        # must be https.
         if attestation_bundle_url:
             _parse_http_url(
                 attestation_bundle_url,
@@ -619,8 +639,9 @@ class SecureClient:
             )
 
         # If enclave is empty, fetch a random one from the routers API. When
-        # attesting from a bundle, the enclave host comes from the verified
-        # bundle, so no router lookup is needed.
+        # an ATC service URL is configured, discovery is deferred to verify()
+        # so it can use that service (the v3 document carries all attestation
+        # collateral, so the ATC service now serves only router discovery).
         if (enclave == "" or enclave is None) and not attestation_bundle_url:
             enclave = get_router_address()
 
@@ -839,18 +860,27 @@ class SecureClient:
 
     def verify(self) -> GroundTruth:
         """
-        Fetches the latest verification information from GitHub and Sigstore
-        and stores the ground truth results in the client.
-
-        Also populates the verification document with per-step status.
+        Attests the enclave with the v3 single-request flow (Go:
+        SecureClient.verifyV3): fresh nonce → fetch the attestation document
+        (evidence + collateral in one request) → verify it offline against
+        the embedded roots → recover the endorsed channel keys. Stores the
+        ground truth and populates the verification document with per-step
+        status. The enclave fetch is the only network request.
         """
-        # When an attestation bundle URL is configured, attest from the bundle so
-        # the enclave does not need to be reached directly (proxy-friendly). Ask
-        # for an enclave/repo-specific bundle when either is set.
-        if self.attestation_bundle_url:
-            repo = self.repo if self.repo != DEFAULT_CONFIG_REPO else ""
-            return self.verify_from_bundle(
-                fetch_bundle_from(self.attestation_bundle_url, enclave=self.enclave, repo=repo)
+        # The v3 engine always authenticates code provenance from the trusted
+        # repo; there is no pinned-measurement seam (Go/JS parity).
+        if self.measurement is not None:
+            raise ValueError(
+                "Pinned 'measurement' verification is not supported by the v3 "
+                "attestation flow; provide 'repo' instead."
+            )
+
+        # v3 needs the enclave host before the document fetch. The constructor
+        # defers discovery when an ATC service URL is configured, so resolve a
+        # router through that service here.
+        if not self.enclave:
+            self.enclave = get_router_address(
+                atc_base_url=self.attestation_bundle_url or None
             )
 
         doc = VerificationDocument(
@@ -860,171 +890,80 @@ class SecureClient:
         )
         self._verification_document = doc
 
-        # Step 1: Verify enclave (fetch attestation, verify cryptographically, verify hardware)
+        # Fetch phase: the enclave round-trip is the only network request;
+        # all Sigstore collateral travels inside the document.
         try:
-            enclave_attestation = fetch_attestation(self.enclave)
-            verification = enclave_attestation.verify()
-
-            # For TDX, also verify hardware measurements
-            if verification.measurement.type in TDX_TYPES and self.measurement is None:
-                hw_measurements = fetch_latest_hardware_measurements()
-                doc.hardware_measurement = verify_tdx_hardware(hw_measurements, verification.measurement)
-
-            doc.enclave_measurement = verification
-            doc.tls_public_key = verification.public_key_fp
-            doc.hpke_public_key = verification.hpke_public_key or ""
-            doc.enclave_fingerprint = verification.measurement.fingerprint()
-            doc.steps["verify_enclave"] = VerificationStepState(status="success")
+            nonce = random_nonce()
+            doc_bytes = fetch_attestation(self.enclave, nonce)
+            doc.steps["fetch_digest"] = VerificationStepState(status="success")
         except Exception as e:
-            doc.steps["verify_enclave"] = VerificationStepState(status="failed", error=str(e))
+            doc.steps["fetch_digest"] = VerificationStepState(status="failed", error=str(e))
             _attach_verification_document(e, doc)
             raise
 
-        if self.measurement is not None:
-            # Pinned measurement mode — code steps not applicable
-            doc.steps["fetch_digest"] = VerificationStepState(status="skipped")
-            doc.steps["verify_code"] = VerificationStepState(status="skipped")
-
-            try:
-                expected_snp_measurement = self.measurement.get("snp_measurement")
-                if expected_snp_measurement is None:
-                    raise ValueError("snp_measurement not found in provided measurement")
-                if not verification.measurement.registers:
-                    raise ValueError("No measurement registers found in attestation")
-                actual_measurement = verification.measurement.registers[0]
-                if actual_measurement != expected_snp_measurement:
-                    raise ValueError(f"SNP measurement mismatch: expected {expected_snp_measurement}, got {actual_measurement}")
-                doc.steps["compare_measurements"] = VerificationStepState(status="success")
-                doc.code_measurement = Measurement(
-                    type=verification.measurement.type,
-                    registers=[expected_snp_measurement],
-                )
-                doc.code_fingerprint = doc.code_measurement.fingerprint()
-            except Exception as e:
-                doc.steps["compare_measurements"] = VerificationStepState(status="failed", error=str(e))
-                _attach_verification_document(e, doc)
-                raise
-
-            return self._finalize_verification(
-                doc, verification, "pinned_no_digest"
-            )
-        else:
-            # GitHub-based verification
-
-            # Step 2: Fetch release digest
-            try:
-                release = fetch_latest_release(self.repo)
-                digest = release.digest
-                doc.release_digest = release.digest
-                doc.steps["fetch_digest"] = VerificationStepState(status="success")
-            except Exception as e:
-                doc.steps["fetch_digest"] = VerificationStepState(status="failed", error=str(e))
-                _attach_verification_document(e, doc)
-                raise
-
-            # Step 3: Verify code via Sigstore
-            try:
-                sigstore_bundle = fetch_attestation_bundle(self.repo, digest)
-                code_measurements = verify_attestation(
-                    sigstore_bundle, digest, self.repo, release.tag
-                )
-                doc.release_tag = release.tag
-                doc.code_measurement = code_measurements
-                doc.code_fingerprint = code_measurements.fingerprint()
-                doc.steps["verify_code"] = VerificationStepState(status="success")
-            except Exception as e:
-                doc.steps["verify_code"] = VerificationStepState(status="failed", error=str(e))
-                _attach_verification_document(e, doc)
-                raise
-
-            # Step 4: Compare code and enclave measurements
-            try:
-                code_measurements.assert_equal(verification.measurement)
-                doc.steps["compare_measurements"] = VerificationStepState(status="success")
-            except Exception as e:
-                doc.steps["compare_measurements"] = VerificationStepState(status="failed", error=str(e))
-                _attach_verification_document(e, doc)
-                raise
-
-            return self._finalize_verification(doc, verification, digest)
-
-    def verify_from_bundle(self, bundle: Bundle) -> GroundTruth:
-        """
-        Verifies a pre-fetched attestation bundle entirely client-side and
-        stores the ground truth. The bundle supplies the enclave attestation
-        report, release digest, Sigstore bundle, AMD VCEK, and enclave TLS
-        certificate, so verification needs no direct connection to the enclave.
-        """
-        doc = VerificationDocument(
-            config_repo=self.repo or "",
-            enclave_host=bundle.domain,
-            selected_router_endpoint=bundle.domain,
-        )
-        self._verification_document = doc
-
-        # Step 1: Verify code measurement from the bundled Sigstore bundle
+        # Verify phase: offline, embedded production roots, current time. A
+        # rejection is attributed to the step matching its layer and raised in
+        # the SDK's error taxonomy; unexpected errors propagate untouched.
         try:
-            code_measurements = verify_attestation(
-                bundle.sigstore_bundle, bundle.digest, self.repo, bundle.release_tag
-            )
-            doc.release_digest = bundle.digest
-            doc.release_tag = bundle.release_tag
-            doc.code_measurement = code_measurements
-            doc.code_fingerprint = code_measurements.fingerprint()
-            doc.steps["fetch_digest"] = VerificationStepState(status="skipped")
+            verified = verify_document_v3(doc_bytes, nonce, self.repo)
             doc.steps["verify_code"] = VerificationStepState(status="success")
-        except Exception as e:
-            doc.steps["fetch_digest"] = VerificationStepState(status="skipped")
-            doc.steps["verify_code"] = VerificationStepState(status="failed", error=str(e))
-            _attach_verification_document(e, doc)
-            raise
-
-        # Step 2: Verify the enclave attestation report using the bundled VCEK
-        try:
-            vcek_der = base64.b64decode(bundle.vcek) if bundle.vcek else None
-            verification = bundle.enclave_attestation_report.verify(vcek_der=vcek_der)
-            # For TDX, also verify the firmware/early-boot hardware measurements
-            # (mrtd, rtmr0), matching the direct attestation path; the bundle's
-            # multi-platform code measurement does not cover them.
-            if verification.measurement.type in TDX_TYPES:
-                hw_measurements = fetch_latest_hardware_measurements()
-                doc.hardware_measurement = verify_tdx_hardware(hw_measurements, verification.measurement)
-            doc.enclave_measurement = verification
-            doc.tls_public_key = verification.public_key_fp
-            doc.hpke_public_key = verification.hpke_public_key or ""
-            doc.enclave_fingerprint = verification.measurement.fingerprint()
             doc.steps["verify_enclave"] = VerificationStepState(status="success")
-        except Exception as e:
-            doc.steps["verify_enclave"] = VerificationStepState(status="failed", error=str(e))
-            _attach_verification_document(e, doc)
-            raise
-
-        # Step 3: Compare code and enclave measurements
-        try:
-            code_measurements.assert_equal(verification.measurement)
             doc.steps["compare_measurements"] = VerificationStepState(status="success")
+        except VerificationError as e:
+            doc.steps[_step_for_layer(e.layer)] = VerificationStepState(status="failed", error=str(e))
+            wrapped = AttestationError(f"Attestation verification failed: {e}")
+            _attach_verification_document(wrapped, doc)
+            raise wrapped from e
         except Exception as e:
-            doc.steps["compare_measurements"] = VerificationStepState(status="failed", error=str(e))
+            doc.steps["other_error"] = VerificationStepState(status="failed", error=str(e))
             _attach_verification_document(e, doc)
             raise
 
-        # Step 4: Bind the enclave certificate to the verified attestation
+        # Binding phase: both endorsed channel keys are hard requirements (Go
+        # mirrors these as "binding:" errors). EHBP binds request bodies to
+        # the HPKE key; the "tls" transport pins the fingerprint on every
+        # connection it opens — no eager dial happens at verify time.
         try:
-            if not bundle.enclave_cert:
-                raise ValueError("attestation bundle is missing the enclave certificate")
-            verify_certificate(
-                bundle.enclave_cert,
-                bundle.domain,
-                bundle.enclave_attestation_report,
-                verification.hpke_public_key or "",
+            tls_fp = tls_public_key_fp(verified)
+            hpke_key = hpke_public_key(verified)
+        except Exception as e:
+            doc.steps["other_error"] = VerificationStepState(status="failed", error=f"binding: {e}")
+            wrapped = AttestationError(f"binding: {e}")
+            _attach_verification_document(wrapped, doc)
+            raise wrapped from e
+
+        # Fingerprints mirror the legacy flow for consumers that display or
+        # compare them. TDX fingerprints incorporate the platform registers,
+        # which in v3 come from the verified quote itself (their values were
+        # already appraised against the endorsed platform measurements).
+        enclave_m = verified.enclave_measurement
+        hw: Optional[HardwareMeasurement] = None
+        if enclave_m.type == v3_measurement.TDX_GUEST_V2 and len(enclave_m.registers) >= 2:
+            hw = HardwareMeasurement(id="", mrtd=enclave_m.registers[0], rtmr0=enclave_m.registers[1])
+        try:
+            code_fingerprint = v3_measurement.fingerprint(verified.code_measurement, hw, enclave_m.type)
+            enclave_fingerprint = v3_measurement.fingerprint(enclave_m, hw, enclave_m.type)
+            code_measurement = _measurement_from_v3(verified.code_measurement)
+            verification = Verification(
+                measurement=_measurement_from_v3(enclave_m),
+                public_key_fp=tls_fp,
+                hpke_public_key=hpke_key,
             )
         except Exception as e:
-            _attach_verification_document(e, doc)
-            raise
+            doc.steps["other_error"] = VerificationStepState(status="failed", error=f"measurements: {e}")
+            wrapped = AttestationError(f"measurements: failed to compute fingerprint: {e}")
+            _attach_verification_document(wrapped, doc)
+            raise wrapped from e
 
-        # Attestation came from the bundle; adopt its domain as the enclave host.
-        self.enclave = bundle.domain
-        return self._finalize_verification(doc, verification, bundle.digest)
+        doc.release_tag = verified.code_tag
+        doc.code_measurement = code_measurement
+        doc.code_fingerprint = code_fingerprint
+        doc.enclave_measurement = verification
+        doc.tls_public_key = tls_fp
+        doc.hpke_public_key = hpke_key
+        doc.hardware_measurement = hw
+        doc.enclave_fingerprint = enclave_fingerprint
+        return self._finalize_verification(doc, verification, verified.code_digest)
 
     def get_http_client(self) -> urllib.request.OpenerDirector:
         """
@@ -1086,8 +1025,8 @@ class SecureClient:
         to the enclave, and in "tls" mode the enclave's certificate is pinned.
         """
         # Build the client first so attestation runs and populates self.enclave.
-        # When attesting from a bundle the enclave host is only known after
-        # verification, so relative URLs must be resolved afterwards.
+        # When router discovery is deferred to verify() the enclave host is
+        # only known afterwards, so relative URLs must be resolved afterwards.
         client = self._secure_http_client()
 
         url = req.full_url
@@ -1134,7 +1073,7 @@ class SecureClient:
         )
         return self.make_request(req)
 
-def get_router_address(platform: Optional[str] = None) -> str:
+def get_router_address(platform: Optional[str] = None, atc_base_url: Optional[str] = None) -> str:
     """
     Fetches the list of available routers from the ATC API
     and returns a randomly selected address.
@@ -1142,8 +1081,11 @@ def get_router_address(platform: Optional[str] = None) -> str:
     Args:
         platform: Optional platform filter (e.g. "snp", "tdx").
                   If None, returns routers for any platform.
+        atc_base_url: Optional base URL of the ATC service to query;
+                      defaults to the production service.
     """
-    routers_url = "https://atc.tinfoil.sh/routers"
+    base = (atc_base_url or "https://atc.tinfoil.sh").rstrip("/")
+    routers_url = f"{base}/routers"
     if platform:
         routers_url += "?" + urlencode({"platform": platform})
 
