@@ -656,7 +656,9 @@ class SecureClient:
         matches the expected fingerprint.
         """
         def wrap_socket(*args, **kwargs) -> ssl.SSLSocket:
-            sock = ssl.create_default_context().wrap_socket(*args, **kwargs)
+            ctx = ssl.create_default_context()
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            sock = ctx.wrap_socket(*args, **kwargs)
             _verify_peer_fingerprint(
                 sock.getpeercert(binary_form=True), expected_fp
             )
@@ -686,11 +688,13 @@ class SecureClient:
     def _build_sync_ssl_context(self, expected_fp: str) -> ssl.SSLContext:
         wrap_socket = self._create_socket_wrapper(expected_fp)
         ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.wrap_socket = wrap_socket
         return ctx
 
     def _build_async_ssl_context(self, expected_fp: str) -> ssl.SSLContext:
         ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.wrap_bio = self._create_bio_wrapper(ctx.wrap_bio, expected_fp)
         return ctx
 

@@ -256,7 +256,10 @@ class TestHTTPXClientHostBinding:
                     messages=[{"role": "user", "content": "hi"}],
                 )
             assert isinstance(exc_info.value.__cause__, ValueError)
-            assert "evil.example.com" in str(exc_info.value.__cause__)
+            assert str(exc_info.value.__cause__) == (
+                "refusing to send request to host 'evil.example.com': this "
+                "secure client is bound to enclave 'enclave.test'"
+            )
         finally:
             http_client.close()
 
