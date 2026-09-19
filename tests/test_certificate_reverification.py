@@ -297,11 +297,15 @@ class TestTLSMinimumVersion:
         monkeypatch.setattr(ssl, "create_default_context", lambda: context)
         client = SecureClient(enclave="test.enclave.sh", repo="test/repo")
 
-        with pytest.raises(_PinMismatchError, match="No certificate found"):
+        raw_socket = object()
+        with pytest.raises(_PinMismatchError, match=r"^No certificate found$"):
             client._create_socket_wrapper("fingerprint")(
-                object(), server_hostname="test.enclave.sh",
+                raw_socket, server_hostname="test.enclave.sh",
             )
 
+        context.wrap_socket.assert_called_once_with(
+            raw_socket, server_hostname="test.enclave.sh",
+        )
         assert context.minimum_version == ssl.TLSVersion.TLSv1_2
         assert context.check_hostname is True
         assert context.verify_mode == ssl.CERT_REQUIRED
