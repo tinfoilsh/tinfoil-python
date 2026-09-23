@@ -1,97 +1,47 @@
-# Tinfoil Python Library
+# Tinfoil Python Client
 
 ![PyPI - Version](https://img.shields.io/pypi/v/tinfoil)
 [![SDK Test](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/test.yml/badge.svg)](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/test.yml)
 [![Documentation](https://img.shields.io/badge/docs-tinfoil.sh-blue)](https://docs.tinfoil.sh/sdk/python-sdk)
 
-A Python client for secure AI model inference through Tinfoil.
+A Python client for verifiably private AI inference with Tinfoil. It wraps the [OpenAI Python client](https://github.com/openai/openai-python) with the same API, and before sending any request it verifies the enclave's attestation and encrypts the request body to the attested key using [EHBP](https://docs.tinfoil.sh/resources/ehbp), so only the verified enclave can read it.
+
+For complete documentation, see the [Python SDK documentation](https://docs.tinfoil.sh/sdk/python-sdk).
 
 ## Installation
 
 ```bash
-# With uv
 uv add tinfoil
-
-# With pip
+# or
 pip install tinfoil
 ```
 
-## Usage
-
-The Tinfoil SDK automatically selects a router enclave and verifies it against the official GitHub repository. You just need to provide your API key:
+## Quick Start
 
 ```python
 import os
 from tinfoil import TinfoilAI
 
-client = TinfoilAI(
-    api_key=os.getenv("TINFOIL_API_KEY")
-)
+client = TinfoilAI(api_key=os.environ["TINFOIL_API_KEY"])
 
+# Enclave verification and encryption happen automatically.
 chat_completion = client.chat.completions.create(
-    model="llama3-3-70b",
-    messages=[
-        {
-            "role": "user",
-            "content": "Hi",
-        }
-    ],
+    model="llama3-3-70b",  # see https://docs.tinfoil.sh/models/catalog
+    messages=[{"role": "user", "content": "Hi"}],
 )
 print(chat_completion.choices[0].message.content)
 ```
 
-### Inspecting verification
+### Async and streaming
 
-The verified release, measurements, attested keys, verifier version, and local
-verification completion time are available from the client:
-
-```python
-document = client.get_verification_document()
-
-print(document.release_tag)  # None for pinned or bundled verification
-print(document.release_digest)
-print(document.code_fingerprint)
-print(document.enclave_fingerprint)
-print(document.verifier)
-print(document.verified_at)
-```
-
-`verified_at` is recorded from the local clock after every successful
-verification or re-verification. It is not an attested evidence timestamp or a
-freshness guarantee.
-
-### Audio Transcription with Whisper
-
-You can transcribe audio files using OpenAI's Whisper model:
+Use `AsyncTinfoilAI` and `await` each call; the API is otherwise identical.
 
 ```python
-import os
-from tinfoil import TinfoilAI
-
-client = TinfoilAI(
-    api_key=os.getenv("TINFOIL_API_KEY")
-)
-
-with open("audio.mp3", "rb") as audio_file:
-    transcription = client.audio.transcriptions.create(
-        file=audio_file,
-        model="whisper-large-v3-turbo",
-    )
-print(transcription.text)
-```
-
-## Async Usage
-
-Simply import `AsyncTinfoilAI` instead of `TinfoilAI` and use `await` with each API call:
-
-```python
-import os
 import asyncio
+import os
 from tinfoil import AsyncTinfoilAI
 
-client = AsyncTinfoilAI(
-    api_key=os.getenv("TINFOIL_API_KEY")
-)
+client = AsyncTinfoilAI(api_key=os.environ["TINFOIL_API_KEY"])
 
 async def main() -> None:
     stream = await client.chat.completions.create(
@@ -107,61 +57,41 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Functionality between the synchronous and asynchronous clients is otherwise identical.
-
-## Low-level HTTP Endpoints
-
-You can also perform arbitrary GET/POST requests that are verified:
+### Audio transcription
 
 ```python
-import os
-from tinfoil import NewSecureClient
-
-api_key = os.getenv("TINFOIL_API_KEY")
-tfclient = NewSecureClient()
-
-# GET example
-resp = tfclient.get(
-    "https://example.com/health",
-    headers={"Authorization": f"Bearer {api_key}"},
-    params={"query": "value"},
-    timeout=30,
-)
-print(resp.status_code, resp.text)
-
-# POST example
-payload = {"key": "value"}
-resp = tfclient.post(
-    "https://example.com/analyze",
-    headers={
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    },
-    json=payload,
-    timeout=30,
-)
-print(resp.status_code, resp.text)
+with open("audio.mp3", "rb") as audio_file:
+    transcription = client.audio.transcriptions.create(
+        file=audio_file,
+        model="whisper-large-v3-turbo",
+    )
+print(transcription.text)
 ```
+
+## Verification document
+
+```python
+document = client.get_verification_document()
+
+print(document.release_tag)  # None when verifying against a pinned measurement
+print(document.release_digest)
+print(document.code_fingerprint)
+print(document.enclave_fingerprint)
+print(document.verifier)
+print(document.verified_at)
+```
+
+`verified_at` is recorded from the local clock after successful verification. It is not an attested timestamp or a freshness guarantee.
 
 ## Prompt Cache Scoping
 
-The inference router partitions prompt-prefix caches using both the authenticated API identity and `user_cache_secret`. Cache reuse requires the same identity, secret, model, and matching prompt prefix. Changing the identity or secret selects a different cache namespace, so those requests do not share cache entries or cache-hit timing.
-
-`user_cache_secret` is sensitive application data used only for cache partitioning. It is not an API credential or encryption key. Do not log or expose it unnecessarily: a caller who can send requests with the same API identity and secret joins that cache namespace and can observe its cache-hit timing. The SDK adds it to eligible request bodies before they are protected for transport to the verified enclave.
-
-By default, the SDK generates a random secret and persists it at `~/.tinfoil/user_cache_secret`, requesting mode `0600` where supported. Tinfoil SDKs using the same home directory reuse this value. This default is suitable for a single-user application, but it does not separate end users who share one application process or home directory. You can control the scope explicitly:
+The router partitions prompt caches by API identity and a `user_cache_secret` that the SDK adds to eligible requests. By default it generates one and persists it at `~/.tinfoil/user_cache_secret`, which is suitable for single-user applications. Multi-user services should scope each request to its end user:
 
 ```python
-from tinfoil import TinfoilAI
-
-# Pin a stable, non-empty, opaque secret for this client.
+# Pin a stable, opaque secret for this client (or set TINFOIL_USER_CACHE_SECRET).
 client = TinfoilAI(api_key=api_key, user_cache_secret=secret)
 
-# Or provision it via the environment
-#   TINFOIL_USER_CACHE_SECRET=<secret>   use this value
-
-# Multi-user services should scope every request to its end user;
-# a non-empty string field set here wins over the client-level secret:
+# A per-request value wins over the client-level secret.
 chat_completion = client.chat.completions.create(
     model="llama3-3-70b",
     messages=[{"role": "user", "content": "Hi"}],
@@ -169,32 +99,49 @@ chat_completion = client.chat.completions.create(
 )
 ```
 
-`AsyncTinfoilAI` and `NewSecureClient` accept the same `user_cache_secret` parameter. Resolution order is a non-empty per-request string, a non-empty client value, a non-empty `TINFOIL_USER_CACHE_SECRET`, then the generated default. Empty client or environment values are treated as unset, and an empty per-request string is replaced with the resolved client value. The SDK leaves non-string values unchanged, and applications should not use them for cache scoping.
+`AsyncTinfoilAI` and `NewSecureClient` accept the same parameter. See [Prompt caching](https://docs.tinfoil.sh/sdk/prompt-caching) for resolution order and guidance on choosing a scope.
 
-Multi-user services must provide a stable, non-empty, opaque value for each user (or group whose members may share cache-hit timing) on every eligible request. Do not use a raw user identifier, API key, or encryption key. A single client, environment, or generated value groups all requests using it under the same API identity. If persistence is unavailable, the SDK uses an in-memory value and cache continuity ends when the process exits.
+## Advanced Functionality
 
-## Security
+`NewSecureClient` makes verified GET and POST requests to any path on the enclave. Requests to other origins are rejected.
 
-Please report security vulnerabilities by emailing [security@tinfoil.sh](mailto:security@tinfoil.sh).
+```python
+import os
+from tinfoil import NewSecureClient
 
-We aim to respond to (legitimate) security reports within 24 hours.
+api_key = os.environ["TINFOIL_API_KEY"]
+tfclient = NewSecureClient()
+
+resp = tfclient.get(
+    f"https://{tfclient.enclave}/health",
+    headers={"Authorization": f"Bearer {api_key}"},
+    timeout=30,
+)
+print(resp.status_code, resp.text)
+```
+
+## API Documentation
+
+This library is a drop-in replacement for the [official OpenAI Python client](https://github.com/openai/openai-python). All methods and types are identical; see the [OpenAI Python client documentation](https://github.com/openai/openai-python) for API usage.
 
 ## Development
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) before following these instructions.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 
 ```bash
-# Set up the development environment and install the package
 uv sync
-
-# Run all tests (requires the TINFOIL_API_KEY environment variable)
-export TINFOIL_API_KEY="..."
-uv run pytest
-
-# Run unit tests
 uv run pytest -m "not integration"
 
-# Run integration tests (requires the TINFOIL_API_KEY environment variable)
+# Integration tests require TINFOIL_API_KEY
 export TINFOIL_API_KEY="..."
 uv run pytest -m integration
 ```
+
+## Reporting Vulnerabilities
+
+Please report security vulnerabilities by either:
+
+- Emailing [security@tinfoil.sh](mailto:security@tinfoil.sh)
+- Opening an issue on GitHub on this repository
+
+We aim to respond to (legitimate) security reports within 24 hours.
