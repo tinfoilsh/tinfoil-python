@@ -1,5 +1,5 @@
 import json
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError
 
 import pytest
 import requests
@@ -10,7 +10,15 @@ from tinfoil.attestation.types import PredicateType
 
 
 @pytest.mark.parametrize("mode", ["direct", "bundle_get", "bundle_post"])
-def test_attestation_requests_report_installed_sdk(mode, monkeypatch):
+@pytest.mark.parametrize("installed_version", ["1.2.3", None])
+def test_attestation_requests_report_sdk_version(mode, installed_version, monkeypatch):
+    def package_version(package):
+        assert package == "tinfoil"
+        if installed_version is None:
+            raise PackageNotFoundError(package)
+        return installed_version
+
+    monkeypatch.setattr(_sdkinfo, "version", package_version)
     report = {"format": PredicateType.SEV_GUEST_V2.value, "body": "Zm9v"}
     bundle = {
         "domain": "enclave.example",
@@ -43,18 +51,7 @@ def test_attestation_requests_report_installed_sdk(mode, monkeypatch):
     assert request.url == expected_url
     assert request.method == ("POST" if mode == "bundle_post" else "GET")
     assert request.headers["Tinfoil-SDK"] == "tinfoil-python"
-    assert request.headers["Tinfoil-SDK-Version"] == version("tinfoil")
+    assert request.headers["Tinfoil-SDK-Version"] == (installed_version or "unknown")
     assert "Authorization" not in request.headers
     if mode == "bundle_post":
         assert json.loads(request.body) == {"enclaveUrl": "https://enclave.example"}
-
-
-def test_missing_package_metadata_reports_unknown_version(monkeypatch):
-    def missing_version(package):
-        raise PackageNotFoundError(package)
-
-    monkeypatch.setattr(_sdkinfo, "version", missing_version)
-    assert _sdkinfo.attestation_headers() == {
-        "Tinfoil-SDK": "tinfoil-python",
-        "Tinfoil-SDK-Version": "unknown",
-    }
