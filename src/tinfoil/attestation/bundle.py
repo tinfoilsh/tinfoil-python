@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import requests
 from cryptography import x509
 
+from .._sdkinfo import attestation_headers
 from .attestation import Document, REQUEST_TIMEOUT_SECONDS
 from .types import PredicateType
 
@@ -61,11 +62,11 @@ def fetch_bundle_from(
         if repo:
             body["repo"] = repo
         response = requests.post(
-            url, json=body, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False
+            url, json=body, headers=attestation_headers(), timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False
         )
     else:
         response = requests.get(
-            url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False
+            url, headers=attestation_headers(), timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False
         )
     response.raise_for_status()
 
