@@ -17,7 +17,6 @@ import cryptography.x509
 from cryptography.hazmat.primitives.serialization import PublicFormat, Encoding
 import hashlib
 from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError, version
 
 from ehbp import (
     AsyncEHBPTransport,
@@ -25,6 +24,7 @@ from ehbp import (
     KeyConfigMismatchError,
 )
 
+from ._sdkinfo import sdk_version
 from .attestation import (
     Bundle,
     fetch_attestation,
@@ -123,11 +123,7 @@ class SoftwareIdentity:
 
 
 def _verifier_identity() -> SoftwareIdentity:
-    try:
-        package_version = version("tinfoil")
-    except PackageNotFoundError:
-        package_version = "unknown"
-    return SoftwareIdentity(name="tinfoil", version=package_version)
+    return SoftwareIdentity(name="tinfoil", version=sdk_version())
 
 
 def _verified_at_now() -> str:

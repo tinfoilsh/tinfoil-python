@@ -9,6 +9,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from .._sdkinfo import attestation_headers
 from .types import (
     PredicateType,
     Measurement,
@@ -92,7 +93,7 @@ def connection_cert_fp(ssl_socket: ssl.SSLSocket) -> str:
 def fetch_attestation(host: str) -> Document:
     """Retrieves the attestation document from a given enclave hostname"""
     url = f"https://{host}{ATTESTATION_ENDPOINT}"
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response = requests.get(url, headers=attestation_headers(), timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
     
     doc_dict = response.json()
