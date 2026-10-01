@@ -285,6 +285,19 @@ class TestPersistence:
 
         assert resolve_user_cache_secret(None)
 
+    def test_fallback_warning_does_not_log_the_secret(self, monkeypatch, caplog):
+        monkeypatch.delenv(USER_CACHE_SECRET_ENV, raising=False)
+        monkeypatch.delenv("HOME", raising=False)
+        monkeypatch.delenv("USERPROFILE", raising=False)
+        monkeypatch.setattr(user_cache_secret_module, "_ephemeral_secret", None)
+
+        first = resolve_user_cache_secret(None)
+        assert first
+        assert resolve_user_cache_secret(None) == first
+        assert len(caplog.records) == 1
+        assert "using an in-memory secret" in caplog.text
+        assert first not in caplog.text
+
     def test_falls_back_when_home_not_a_directory(self, monkeypatch, tmp_path):
         monkeypatch.delenv(USER_CACHE_SECRET_ENV, raising=False)
         home_file = tmp_path / "not-a-dir"

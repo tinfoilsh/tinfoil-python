@@ -271,6 +271,46 @@ class TestReVerifyingTransportAsync:
         inner.aclose.assert_not_called()
 
 
+class TestTLSMinimumVersion:
+    @pytest.mark.parametrize("build_context", [
+        "_build_sync_ssl_context", "_build_async_ssl_context",
+    ])
+    def test_context_enforces_tls12_independently_of_defaults(self, monkeypatch, build_context):
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        monkeypatch.setattr(ssl, "create_default_context", lambda: context)
+        client = SecureClient(enclave="test.enclave.sh", repo="test/repo")
+
+        result = getattr(client, build_context)("fingerprint")
+
+        assert result.minimum_version == ssl.TLSVersion.TLSv1_2
+        assert result.maximum_version == ssl.TLSVersion.MAXIMUM_SUPPORTED
+        assert result.check_hostname is True
+        assert result.verify_mode == ssl.CERT_REQUIRED
+
+    def test_socket_wrapper_enforces_tls12_and_still_checks_peer(self, monkeypatch):
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        peer = MagicMock(spec=ssl.SSLSocket)
+        peer.getpeercert.return_value = None
+        context.wrap_socket = MagicMock(return_value=peer)
+        monkeypatch.setattr(ssl, "create_default_context", lambda: context)
+        client = SecureClient(enclave="test.enclave.sh", repo="test/repo")
+
+        raw_socket = object()
+        with pytest.raises(_PinMismatchError, match=r"^No certificate found$"):
+            client._create_socket_wrapper("fingerprint")(
+                raw_socket, server_hostname="test.enclave.sh",
+            )
+
+        context.wrap_socket.assert_called_once_with(
+            raw_socket, server_hostname="test.enclave.sh",
+        )
+        assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+        assert context.check_hostname is True
+        assert context.verify_mode == ssl.CERT_REQUIRED
+
+
 class TestSecureClientRebuildHooks:
     """Make sure the rebuild hooks actually re-run verify() with a fresh fingerprint."""
 
