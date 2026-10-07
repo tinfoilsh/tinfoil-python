@@ -22,7 +22,7 @@ dependencies = [
     "pyasn1>=0.4.0",
     "sigstore>=4.3.0",
     "platformdirs>=4.2.0",
-    "urllib3>=2.7.0",
+    "urllib3>=2.8.0",
 ]
 
 [dependency-groups]
@@ -43,6 +43,7 @@ asyncio_default_fixture_loop_scope = "function"
 exclude-newer = "4 days"
 constraint-dependencies = [
     "idna>=3.15", # GHSA-65pc-fj4g-8rjx
+    "pyjwt>=2.15.0", # GHSA-42vr-xj54-vc7v, GHSA-x33g-cr3x-6449 (via sigstore)
 ]
 
 [tool.uv.exclude-newer-package]
