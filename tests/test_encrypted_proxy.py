@@ -19,8 +19,10 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from ehbp import KeyConfigMismatchError
 
 import tinfoil as tinfoil_module
+import tinfoil.client as client_module
 from tinfoil import AsyncTinfoilAI, SecureClient, TinfoilAI
 from tinfoil.attestation import Bundle, Document, fetch_bundle_from
 from tinfoil.attestation.bundle import _decode_domains, _matches_hostname
@@ -28,11 +30,10 @@ from tinfoil.attestation.types import Measurement, PredicateType, Verification
 from tinfoil.client import (
     ENCLAVE_URL_HEADER,
     GroundTruth,
+    VerificationDocument,
     _AsyncEHBPReVerifyingTransport,
-    _AsyncEnclaveURLHeaderTransport,
     _AsyncHostBoundTransport,
     _EHBPReVerifyingTransport,
-    _EnclaveURLHeaderTransport,
     _HostBoundTransport,
     _enclave_url_header,
 )
@@ -88,90 +89,123 @@ class _AsyncRecordingTransport(httpx.AsyncBaseTransport):
         return httpx.Response(200, content=b"ok")
 
 
-class TestEnclaveURLHeaderTransport:
+class _KeyMismatchTransport(httpx.BaseTransport):
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        request.read()
+        raise KeyConfigMismatchError("rotated")
+
+
+class _AsyncKeyMismatchTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        raise KeyConfigMismatchError("rotated")
+
+
+class TestEHBPRouteGeneration:
     def _client(self, enclave: str, base_url: str):
         return SecureClient(enclave=enclave, repo="org/repo", transport="ehbp", base_url=base_url)
 
-    def test_sync_injects_header(self):
-        inner = _RecordingTransport()
-        sc = self._client("enclave.example.com", "https://proxy.example.com/")
-        transport = _EnclaveURLHeaderTransport(inner, sc)
-        request = httpx.Request("POST", "https://proxy.example.com/v1/chat/completions", content=b"payload")
-        resp = transport.handle_request(request)
-        assert resp.status_code == 200
-        assert inner.seen_header == "https://enclave.example.com"
+    def test_sync_retry_uses_endpoint_bound_to_rebuilt_transport(self):
+        sc = self._client("old.example.com", "https://proxy.example.com/")
+        recovered = _RecordingTransport()
 
-    def test_async_injects_header(self):
+        def rebuild():
+            sc.enclave = "new.example.com"
+            return recovered
+
+        sc._build_ehbp_sync_transport = MagicMock(side_effect=rebuild)
+        transport = _EHBPReVerifyingTransport(sc, _KeyMismatchTransport())
+        update_header = client_module._update_enclave_header
+
+        def rotate_global_state_again(request, base_url, enclave):
+            if enclave == "new.example.com":
+                # Simulate another request installing a later generation after
+                # this request selected its transport but before replay.
+                sc.enclave = "later.example.com"
+            update_header(request, base_url, enclave)
+
+        with patch.object(
+            client_module,
+            "_update_enclave_header",
+            side_effect=rotate_global_state_again,
+        ):
+            response = transport.handle_request(
+                httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
+            )
+
+        assert response.status_code == 200
+        assert recovered.seen_header == "https://new.example.com"
+        assert sc.enclave == "later.example.com"
+
+    def test_async_retry_uses_endpoint_bound_to_rebuilt_transport(self):
         async def run():
-            inner = _AsyncRecordingTransport()
-            sc = self._client("enclave.example.com", "https://proxy.example.com/")
-            transport = _AsyncEnclaveURLHeaderTransport(inner, sc)
-            request = httpx.Request("POST", "https://proxy.example.com/v1/chat/completions", content=b"payload")
-            resp = await transport.handle_async_request(request)
-            assert resp.status_code == 200
-            assert inner.seen_header == "https://enclave.example.com"
+            sc = self._client("old.example.com", "https://proxy.example.com/")
+            recovered = _AsyncRecordingTransport()
+
+            async def rebuild():
+                sc.enclave = "new.example.com"
+                return recovered
+
+            sc._build_ehbp_async_transport = rebuild
+            transport = _AsyncEHBPReVerifyingTransport(
+                sc, _AsyncKeyMismatchTransport()
+            )
+            update_header = client_module._update_enclave_header
+
+            def rotate_global_state_again(request, base_url, enclave):
+                if enclave == "new.example.com":
+                    sc.enclave = "later.example.com"
+                update_header(request, base_url, enclave)
+
+            with patch.object(
+                client_module,
+                "_update_enclave_header",
+                side_effect=rotate_global_state_again,
+            ):
+                response = await transport.handle_async_request(
+                    httpx.Request(
+                        "POST", "https://proxy.example.com/v1/x", content=b"p"
+                    )
+                )
+
+            assert response.status_code == 200
+            assert recovered.seen_header == "https://new.example.com"
+            assert sc.enclave == "later.example.com"
 
         asyncio.run(run())
 
-    def test_no_header_when_same_origin(self):
-        inner = _RecordingTransport()
-        sc = self._client("enclave.test", "https://enclave.test/v1/")
-        transport = _EnclaveURLHeaderTransport(inner, sc)
-        transport.handle_request(
-            httpx.Request("POST", "https://enclave.test/v1/chat/completions", content=b"payload")
-        )
-        assert inner.seen_header is None
-
-    def test_reflects_enclave_change_after_reverification(self):
-        inner = _RecordingTransport()
-        sc = self._client("old.example.com", "https://proxy.example.com/")
-        transport = _EnclaveURLHeaderTransport(inner, sc)
-        transport.handle_request(
-            httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
-        )
-        assert inner.seen_header == "https://old.example.com"
-        # A re-verification (e.g. bundle mode behind a proxy) may swap in a
-        # different enclave; the header must follow the current enclave.
-        sc.enclave = "new.example.com"
-        transport.handle_request(
-            httpx.Request("POST", "https://proxy.example.com/v1/x", content=b"p")
-        )
-        assert inner.seen_header == "https://new.example.com"
-
 
 class TestProxyTransportWiring:
-    """make_secure_http_client wraps the EHBP transport with the header
-    transport only when routing through a proxy of a different origin."""
+    """The EHBP generation owns both its sealing key and proxy route."""
 
     def _client(self, base_url: str | None):
         sc = SecureClient(enclave="enclave.test", repo="org/repo", transport="ehbp", base_url=base_url)
         sc.verify = MagicMock(return_value=_ground_truth(_valid_hpke_hex()))
         return sc
 
-    def test_sync_wraps_when_proxying(self):
+    def test_sync_binds_proxy_route_inside_ehbp_generation(self):
         sc = self._client("http://proxy.example.com/")
         client = sc.make_secure_http_client()
         try:
             # The user-cache-secret layer injects into the body before the
             # EHBP re-verifying transport seals it.
             assert isinstance(client._transport, _HostBoundTransport)
-            header = client._transport._inner
-            assert isinstance(header, _EnclaveURLHeaderTransport)
-            ucs = header._inner
+            ucs = client._transport._inner
             assert isinstance(ucs, _UserCacheSecretTransport)
             assert isinstance(ucs._inner, _EHBPReVerifyingTransport)
         finally:
             client.close()
 
-    def test_sync_wraps_even_when_same_origin(self):
-        # With base_url set the header transport is always installed; it decides
-        # per request whether to inject, since the enclave can change after a
-        # re-verification.
+    def test_sync_same_origin_uses_the_same_generation_model(self):
         sc = self._client("https://enclave.test/v1/")
         client = sc.make_secure_http_client()
         try:
             assert isinstance(client._transport, _HostBoundTransport)
-            assert isinstance(client._transport._inner, _EnclaveURLHeaderTransport)
+            assert isinstance(client._transport._inner, _UserCacheSecretTransport)
+            assert isinstance(
+                client._transport._inner._inner,
+                _EHBPReVerifyingTransport,
+            )
         finally:
             client.close()
 
@@ -187,14 +221,12 @@ class TestProxyTransportWiring:
         finally:
             client.close()
 
-    def test_async_wraps_when_proxying(self):
+    def test_async_binds_proxy_route_inside_ehbp_generation(self):
         sc = self._client("https://proxy.example.com/")
         client = sc.make_secure_async_http_client()
         try:
             assert isinstance(client._transport, _AsyncHostBoundTransport)
-            header = client._transport._inner
-            assert isinstance(header, _AsyncEnclaveURLHeaderTransport)
-            ucs = header._inner
+            ucs = client._transport._inner
             assert isinstance(ucs, _AsyncUserCacheSecretTransport)
             assert isinstance(ucs._inner, _AsyncEHBPReVerifyingTransport)
         finally:
@@ -426,6 +458,88 @@ class TestConstructorValidation:
     def test_https_attestation_bundle_url_is_accepted(self):
         sc = SecureClient(attestation_bundle_url="https://atc.example")
         assert sc.attestation_bundle_url == "https://atc.example"
+
+    def test_custom_proxy_preserves_automatic_selection(self):
+        sc = SecureClient(
+            base_url="https://proxy.example.com/v1/",
+            attestation_bundle_url="https://atc.example",
+        )
+        assert sc.enclave == ""
+        assert sc._configured_enclave == ""
+
+
+class TestBundleRecoveryRouting:
+    def test_proxy_recovery_can_rotate_complete_router_identity(self):
+        sc = SecureClient(
+            base_url="https://proxy.example.com/v1/",
+            attestation_bundle_url="https://atc.example",
+        )
+        sc.enclave = "old-router.example"
+        assert sc._bundle_request_enclave() == ""
+
+    def test_direct_recovery_refetches_current_domains_bundle(self):
+        sc = SecureClient(attestation_bundle_url="https://atc.example")
+        sc.enclave = "selected-router.example"
+        assert sc._bundle_request_enclave() == "selected-router.example"
+
+    def test_explicit_enclave_remains_pinned(self):
+        sc = SecureClient(
+            enclave="configured.example",
+            base_url="https://proxy.example.com/v1/",
+            attestation_bundle_url="https://atc.example",
+        )
+        sc.enclave = "configured.example"
+        assert sc._bundle_request_enclave() == "configured.example"
+
+    def test_configured_bundle_domain_mismatch_is_rejected_before_verification(self):
+        sc = SecureClient(
+            enclave="configured.example",
+            attestation_bundle_url="https://atc.example",
+        )
+        sc._verification_document = VerificationDocument(security_verified=True)
+
+        with pytest.raises(ValueError, match="does not match configured enclave") as exc_info:
+            sc.verify_from_bundle(
+                Bundle(
+                    domain="other.example",
+                    enclave_attestation_report=Document(
+                        format=PredicateType.SEV_GUEST_V2,
+                        body="Zm9v",
+                    ),
+                    digest="",
+                    sigstore_bundle=b"",
+                    vcek="",
+                    enclave_cert="",
+                )
+            )
+
+        document = sc.get_verification_document()
+        assert not document.security_verified
+        assert document.enclave_host == "other.example"
+        assert document.steps["verify_enclave"].status == "failed"
+        assert getattr(exc_info.value, "verification_document") == document
+
+    def test_retry_expectation_cannot_override_configured_enclave(self):
+        sc = SecureClient(
+            enclave="configured.example",
+            attestation_bundle_url="https://atc.example",
+        )
+
+        with pytest.raises(ValueError, match=r"configured\.example"):
+            sc.verify_from_bundle(
+                Bundle(
+                    domain="retry-selected.example",
+                    enclave_attestation_report=Document(
+                        format=PredicateType.SEV_GUEST_V2,
+                        body="Zm9v",
+                    ),
+                    digest="",
+                    sigstore_bundle=b"",
+                    vcek="",
+                    enclave_cert="",
+                ),
+                expected_enclave="retry-selected.example",
+            )
 
 
 class TestBundleModeRequestRouting:
