@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from ..bytesutil import decode_base64
+from ..bytesutil import decode_canonical_base64
 from ..embedded_roots import SGX_ROOT_CA_PEM
 from ..envelope import (
     COLLATERAL_INTEL_PCS_V1_FORMAT,
@@ -66,7 +66,7 @@ def tdx_authenticate(
         raise _quote_error(str(e)) from None
 
     try:
-        raw_quote = decode_base64(doc.cpu_evidence.report_base64)
+        raw_quote = decode_canonical_base64("report_base64", doc.cpu_evidence.report_base64)
     except ValueError as e:
         raise _quote_error(f"decoding TDX quote: {e}") from None
     try:
@@ -177,7 +177,7 @@ class PCSReplayGetter:
         if resp is None:
             raise ValueError(f"intel-pcs collateral has no captured response for {request_url}")
         try:
-            body = decode_base64(resp.body_base64)
+            body = decode_canonical_base64("body_base64", resp.body_base64)
         except ValueError as e:
             raise ValueError(
                 f"decoding captured PCS response body for {request_url}: {e}"

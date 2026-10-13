@@ -252,8 +252,8 @@ def test_collateral_role_and_id_rules():
     assert "unknown role" in str(e)
 
     dup_ids = [
-        {"id": "x", "role": env.ROLE_ENDORSEMENT, "format": "f", "data": None},
-        {"id": "x", "role": env.ROLE_ENDORSEMENT, "format": "g", "data": None},
+        {"id": "x", "role": env.ROLE_ENDORSEMENT, "format": "f", "data": {}},
+        {"id": "x", "role": env.ROLE_ENDORSEMENT, "format": "g", "data": {}},
     ]
     e = expect_envelope_reject(build_doc(collateral=dup_ids))
     assert "duplicate collateral entry id" in str(e)
@@ -286,10 +286,9 @@ def test_reference_values_collateral_not_found():
 def test_reference_values_collateral_strict_data_parse():
     entry = sig_entry("code", env.COLLATERAL_SIGSTORE_CODE_V1_FORMAT)
     entry["data"]["unknown"] = True
-    doc, _ = env.check(build_doc(collateral=[entry]), NONCE)
     with pytest.raises(VerificationError) as ei:
-        env.reference_values_collateral(doc, env.COLLATERAL_SIGSTORE_CODE_V1_FORMAT)
-    assert ei.value.layer == PROVENANCE_REJECTED
+        env.check(build_doc(collateral=[entry]), NONCE)
+    assert ei.value.layer == ENVELOPE_REJECTED
 
 
 def test_freshness_collateral_lookup_and_duplicate_rejection():

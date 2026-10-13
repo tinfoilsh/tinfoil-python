@@ -16,7 +16,7 @@ from cryptography import x509 as cx509
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from ..bytesutil import decode_base64
+from ..bytesutil import decode_canonical_base64
 from ..embedded_roots import GENOA_CERT_CHAIN_PEM, TURIN_CERT_CHAIN_PEM
 from ..envelope import (
     COLLATERAL_AMD_CRL_V1_FORMAT,
@@ -325,7 +325,7 @@ def _verify_signature(
     verifySignature + verify.SnpAttestation with the options authenticate.go
     sets)."""
     try:
-        report_bytes = decode_base64(report_base64)
+        report_bytes = decode_canonical_base64("report_base64", report_base64)
     except ValueError as e:
         raise _quote_error(str(e)) from None
     if len(report_bytes) != REPORT_SIZE:
@@ -418,7 +418,7 @@ def sev_authenticate(
         raise _quote_error("document carries no amd-vcek endorsement collateral for the cpu")
     data = parse_amd_vcek_collateral(entry.data)
     try:
-        vcek_der = decode_base64(data.vcek_der_base64)
+        vcek_der = decode_canonical_base64("vcek_der_base64", data.vcek_der_base64)
     except ValueError as e:
         raise _quote_error(f"decoding vcek_der_base64: {e}") from None
     # An empty VCEK would otherwise read as a fetch request.
@@ -434,7 +434,7 @@ def sev_authenticate(
         raise _quote_error("document carries no amd-crl endorsement collateral for the cpu")
     crl_data = parse_amd_crl_collateral(crl_entry.data)
     try:
-        crl_der = decode_base64(crl_data.crl_der_base64)
+        crl_der = decode_canonical_base64("crl_der_base64", crl_data.crl_der_base64)
     except ValueError as e:
         raise _quote_error(f"decoding crl_der_base64: {e}") from None
     if len(crl_der) == 0:
