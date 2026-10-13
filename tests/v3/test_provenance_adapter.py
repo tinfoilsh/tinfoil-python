@@ -14,7 +14,10 @@ import sigstore_builder as sb
 from docbuilder import build_doc
 
 REPO = "tinfoilsh/confidential-inference-proxy"
-PLAT_REPO = "tinfoilsh/platform-endorsements"
+PLAT_REPO = "tinfoilsh/cvmimage"
+PLAT_REPO_ID = "902195777"
+PLAT_OWNER_ID = "168487856"
+PLAT_TAG = "platform-v1.0.0"
 TAG = "v1.0.0"
 CODE_DIGEST = hashlib.sha256(b"code-artifact-v1").hexdigest()
 PLAT_DIGEST = hashlib.sha256(b"platform-endorsements-v1").hexdigest()
@@ -22,7 +25,7 @@ COMMIT = hashlib.sha1(b"code-commit-v1").hexdigest()
 ARTIFACT_FMT = "https://tinfoil.sh/predicate/platform-endorsements/v1"
 
 CODE_IDENTITY = f"https://github.com/{REPO}/.github/workflows/release.yml@refs/tags/{TAG}"
-PLAT_IDENTITY = f"https://github.com/{PLAT_REPO}/.github/workflows/build.yml@refs/tags/{TAG}"
+PLAT_IDENTITY = f"https://github.com/{PLAT_REPO}/.github/workflows/platform-release.yml@refs/tags/{PLAT_TAG}"
 
 
 def code_statement():
@@ -96,7 +99,8 @@ def code_collateral():
 
 def platform_collateral():
     bundle, troot = sb.build_bundle(
-        PLAT_IDENTITY, platform_statement(), source_ref="refs/tags/" + TAG, source_digest=COMMIT
+        PLAT_IDENTITY, platform_statement(), source_ref="refs/tags/" + PLAT_TAG, source_digest=COMMIT,
+        source_repo_id=PLAT_REPO_ID, source_owner_id=PLAT_OWNER_ID,
     )
     entry = {
         "id": "sigstore-platform",
@@ -104,7 +108,7 @@ def platform_collateral():
         "format": envelope.COLLATERAL_SIGSTORE_PLATFORM_V1_FORMAT,
         "data": {
             "repo": PLAT_REPO,
-            "tag": TAG,
+            "tag": PLAT_TAG,
             "digest": PLAT_DIGEST,
             "sigstore_bundle": bundle,
         },
