@@ -1,6 +1,6 @@
 """v3 document verification flow (Go: verifier/client/verify.go):
-envelope check → reference-values authentication (code + platform, each
-with its freshness proof) → CPU quote verification. Every rejection raises
+envelope check → reference-values authentication (code + platform, with
+freshness proofs unless explicitly ignored) → CPU quote verification. Every rejection raises
 VerificationError tagged with the failing layer."""
 
 from __future__ import annotations
@@ -79,7 +79,9 @@ def _crypto_material_data(v: VerifiedDocumentV3, id_: str, format_: str) -> str:
     raise ValueError(f"document endorses no {id_!r} crypto material")
 
 
-def verify_document_v3(doc_bytes: bytes, nonce: bytes, repo: str) -> VerifiedDocumentV3:
+def verify_document_v3(
+    doc_bytes: bytes, nonce: bytes, repo: str, *, ignore_freshness: bool = False
+) -> VerifiedDocumentV3:
     """Verify a v3 attestation document from its transmitted bytes against
     the embedded production roots at the current time (Go:
     client.VerifyDocumentV3; SDK_SURFACE_SPEC §2 three-argument form).
@@ -87,8 +89,13 @@ def verify_document_v3(doc_bytes: bytes, nonce: bytes, repo: str) -> VerifiedDoc
     repo is the code repository the caller trusts (pins the sigstore-code
     signing identity); the repo named inside the document is not trusted.
     Channel binding (TLS fingerprint / HPKE key) is the caller's
-    responsibility, using the returned endorsed crypto material."""
-    return _verify_document_v3(doc_bytes, nonce, repo)
+    responsibility, using the returned endorsed crypto material.
+
+    ignore_freshness permits archived documents without code/platform
+    freshness witnesses. Provenance, CPU signatures, key binding, machine
+    policy, and certificate/CRL validity checks still apply. The recorded
+    nonce can check an archive's binding; it does not establish recency."""
+    return _verify_document_v3(doc_bytes, nonce, repo, ignore_freshness=ignore_freshness)
 
 
 def _verify_document_v3(
@@ -96,6 +103,7 @@ def _verify_document_v3(
     nonce: bytes,
     repo: str,
     *,
+    ignore_freshness: bool = False,
     sigstore_root_json: Optional[bytes] = None,
     amd_root_pem: Optional[str] = None,
     intel_root_pem: Optional[str] = None,
@@ -106,13 +114,13 @@ def _verify_document_v3(
      1. Check the envelope: format, nonce equality, endorsed-section hash
         recomputation, REPORT_DATA recomputation (no authentication).
      2. Authenticate the reference values: the sigstore-code,
-        sigstore-platform, and sigstore-freshness entries against pinned
-        signing identities, at one appraisal time.
+        sigstore-platform, and, unless ignored, sigstore-freshness entries
+        against pinned signing identities, at one appraisal time.
      3. Verify the CPU quote: authenticate against the pinned vendor roots,
         assemble the complete policy from the reference values, validate in
         one call.
 
-    The keyword overrides are the conformance adapter's root/clock seams
+    The root/clock overrides are the conformance adapter's seams
     (CONFORMANCE_ADAPTER_SPEC §3) and are not part of the public surface;
     defaults are the embedded production roots and the current time."""
     doc, report_data = check(doc_bytes, nonce)
@@ -120,14 +128,14 @@ def _verify_document_v3(
     # One appraisal datetime pins both freshness proofs and the quote clock.
     appraisal = verification_time if verification_time is not None else datetime.now(timezone.utc)
     code, endorsements = _authenticate_reference_values(
-        doc, repo, appraisal, sigstore_root_json
+        doc, repo, appraisal, sigstore_root_json, ignore_freshness=ignore_freshness
     )
 
     authenticated = quote_authenticate(
         doc,
         amd_root_pem=amd_root_pem,
         intel_root_pem=intel_root_pem,
-        now=verification_time,
+        now=appraisal,
     )
     assemble_and_validate(
         endorsements.artifact, code.measurement, code.shape, report_data, authenticated
@@ -147,10 +155,12 @@ def _authenticate_reference_values(
     repo: str,
     appraisal: datetime,
     trust_root_json: Optional[bytes],
+    *,
+    ignore_freshness: bool = False,
 ) -> tuple[Code, PlatformEndorsements]:
     """Authenticate the document's required code and platform Sigstore
-    artifacts plus the matching freshness proof for each, both appraised at
-    one time (Go: client.authenticateReferenceValues)."""
+    artifacts plus, unless ignored, the matching freshness proof for each,
+    both appraised at one time (Go: client.authenticateReferenceValues)."""
     code_ref = reference_values_collateral(doc, COLLATERAL_SIGSTORE_CODE_V1_FORMAT)
     try:
         code = authenticate_code(
@@ -159,12 +169,6 @@ def _authenticate_reference_values(
         )
     except VerificationError as e:
         raise _wrap("verifying code measurement", e) from None
-    code_fresh = freshness_collateral(doc, FRESHNESS_COLLATERAL_ID_CODE)
-    try:
-        authenticate_freshness(code_fresh, code, appraisal, trust_root_json=trust_root_json)
-    except VerificationError as e:
-        raise _wrap("verifying code freshness", e) from None
-
     plat_ref = reference_values_collateral(doc, COLLATERAL_SIGSTORE_PLATFORM_V1_FORMAT)
     try:
         endorsements = authenticate_platform_endorsements(
@@ -173,6 +177,14 @@ def _authenticate_reference_values(
         )
     except VerificationError as e:
         raise _wrap("verifying platform endorsements", e) from None
+    if ignore_freshness:
+        return code, endorsements
+
+    code_fresh = freshness_collateral(doc, FRESHNESS_COLLATERAL_ID_CODE)
+    try:
+        authenticate_freshness(code_fresh, code, appraisal, trust_root_json=trust_root_json)
+    except VerificationError as e:
+        raise _wrap("verifying code freshness", e) from None
     plat_fresh = freshness_collateral(doc, FRESHNESS_COLLATERAL_ID_PLATFORM)
     try:
         authenticate_freshness(

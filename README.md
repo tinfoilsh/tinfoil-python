@@ -124,6 +124,37 @@ print(resp.status_code, resp.text)
 
 This library is a drop-in replacement for the [official OpenAI Python client](https://github.com/openai/openai-python). All methods and types are identical; see the [OpenAI Python client documentation](https://github.com/openai/openai-python) for API usage.
 
+## Offline v3 verification
+
+`verify_document_v3` verifies a complete v3 document using its embedded
+collateral, without fetching certificates or release metadata. For archived
+receipts, explicitly skip code and platform freshness witnesses:
+
+```python
+from tinfoil import verify_document_v3
+
+verified = verify_document_v3(
+    document_bytes,
+    recorded_nonce,
+    trusted_repository,
+    ignore_freshness=True,
+)
+```
+
+Freshness is required by default. Ignoring it preserves code/platform provenance,
+CPU signatures, certificate and CRL validity, machine policy, and key binding.
+The recorded nonce checks the archive's binding; it does not prove recency.
+Platform endorsements must come from the pinned `tinfoilsh/cvmimage`
+`platform-release.yml` workflow at a `platform-v...` tag, with the pinned
+repository and owner IDs. Retired platform publishers are rejected in both modes.
+
+For receipt verification, allowlist the workload repository before this call,
+compare `verified.code_tag` with the receipt's expected release, and select the
+required key by ID and format from `verified.crypto_material`. Verify the receipt
+signature with that key; document verification alone does not verify a receipt
+signature. The core verifier does not require TLS or HPKE keys. This API supports
+the existing code/platform collateral format, including its explicit v2 marker.
+
 ## v3 conformance
 
 The package implements CONFORMANCE_ADAPTER_SPEC v1.1 and SDK_SURFACE_SPEC
