@@ -29,8 +29,11 @@ IDENTITY = f"https://github.com/{REPO}/.github/workflows/release.yml@refs/tags/{
 DIGEST = hashlib.sha256(b"code-artifact-v1").hexdigest()
 COMMIT = hashlib.sha1(b"code-commit-v1").hexdigest()
 
-PLAT_REPO = "tinfoilsh/platform-endorsements"
-PLAT_IDENTITY = f"https://github.com/{PLAT_REPO}/.github/workflows/build.yml@refs/tags/{TAG}"
+PLAT_REPO = "tinfoilsh/cvmimage"
+PLAT_REPO_ID = "902195777"
+PLAT_OWNER_ID = "168487856"
+PLAT_TAG = "platform-v1.0.0"
+PLAT_IDENTITY = f"https://github.com/{PLAT_REPO}/.github/workflows/platform-release.yml@refs/tags/{PLAT_TAG}"
 PLAT_DIGEST = hashlib.sha256(b"platform-endorsements-v1").hexdigest()
 ARTIFACT_FMT = "https://tinfoil.sh/predicate/platform-endorsements/v1"
 
@@ -378,40 +381,43 @@ def plat_statement(artifact):
 
 
 def plat_bundle(artifact=None, identity=PLAT_IDENTITY, **kw):
-    kw.setdefault("source_ref", "refs/tags/" + TAG)
+    kw.setdefault("source_ref", "refs/tags/" + PLAT_TAG)
     kw.setdefault("source_digest", COMMIT)
+    kw.setdefault("source_repo_id", PLAT_REPO_ID)
+    kw.setdefault("source_owner_id", PLAT_OWNER_ID)
     return sb.build_bundle(identity, plat_statement(base_artifact() if artifact is None else artifact), **kw)
 
 
 def test_authenticate_platform_endorsements_happy():
     b, t = encode(*plat_bundle())
-    pe = authenticate_platform_endorsements(b, PLAT_REPO, TAG, PLAT_DIGEST, trust_root_json=t)
+    pe = authenticate_platform_endorsements(b, PLAT_REPO, PLAT_TAG, PLAT_DIGEST, trust_root_json=t)
     assert pe.repo == PLAT_REPO
-    assert pe.tag == TAG
+    assert pe.tag == PLAT_TAG
     assert pe.subject_name == "platform"
     assert "ab" * 64 in pe.artifact.machines
 
 
 def test_platform_wrong_workflow_identity_rejects():
-    ident = f"https://github.com/{PLAT_REPO}/.github/workflows/other.yml@refs/tags/{TAG}"
+    ident = f"https://github.com/{PLAT_REPO}/.github/workflows/other.yml@refs/tags/{PLAT_TAG}"
     b, t = encode(*plat_bundle(identity=ident))
     with pytest.raises(VerificationError) as ei:
-        authenticate_platform_endorsements(b, PLAT_REPO, TAG, PLAT_DIGEST, trust_root_json=t)
+        authenticate_platform_endorsements(b, PLAT_REPO, PLAT_TAG, PLAT_DIGEST, trust_root_json=t)
     assert ei.value.layer == PROVENANCE_REJECTED
 
 
-def test_platform_tag_without_v_digit_prefix_rejects():
-    ident = f"https://github.com/{PLAT_REPO}/.github/workflows/build.yml@refs/tags/release"
-    b, t = encode(*plat_bundle(identity=ident, source_ref="refs/tags/release"))
+@pytest.mark.parametrize("tag", ["release", "v1.0.0", "platform-vnext"])
+def test_platform_tag_without_platform_v_digit_prefix_rejects(tag):
+    ident = f"https://github.com/{PLAT_REPO}/.github/workflows/platform-release.yml@refs/tags/{tag}"
+    b, t = encode(*plat_bundle(identity=ident, source_ref="refs/tags/" + tag))
     with pytest.raises(VerificationError):
-        authenticate_platform_endorsements(b, PLAT_REPO, "release", PLAT_DIGEST, trust_root_json=t)
+        authenticate_platform_endorsements(b, PLAT_REPO, tag, PLAT_DIGEST, trust_root_json=t)
 
 
 def test_platform_repo_pin_rejects_other_repo():
     b, t = encode(*plat_bundle())
     with pytest.raises(VerificationError, match="does not equal"):
         authenticate_platform_endorsements(
-            b, "tinfoilsh/not-platform-endorsements", TAG, PLAT_DIGEST, trust_root_json=t
+            b, "tinfoilsh/not-platform-endorsements", PLAT_TAG, PLAT_DIGEST, trust_root_json=t
         )
 
 
@@ -423,9 +429,9 @@ def test_platform_wrong_predicate_type_rejects():
         "predicate": base_artifact(),
     }, separators=(",", ":")).encode()
     b, t = encode(*sb.build_bundle(PLAT_IDENTITY, stmt,
-                                   source_ref="refs/tags/" + TAG, source_digest=COMMIT))
+                                   source_ref="refs/tags/" + PLAT_TAG, source_digest=COMMIT))
     with pytest.raises(VerificationError, match="unexpected predicate type"):
-        authenticate_platform_endorsements(b, PLAT_REPO, TAG, PLAT_DIGEST, trust_root_json=t)
+        authenticate_platform_endorsements(b, PLAT_REPO, PLAT_TAG, PLAT_DIGEST, trust_root_json=t)
 
 
 def test_platform_artifact_unknown_member_rejects_as_provenance():
@@ -433,5 +439,21 @@ def test_platform_artifact_unknown_member_rejects_as_provenance():
     a["policies"]["sev-policy"]["sev_snp"]["extra_field"] = 1
     b, t = encode(*plat_bundle(artifact=a))
     with pytest.raises(VerificationError) as ei:
-        authenticate_platform_endorsements(b, PLAT_REPO, TAG, PLAT_DIGEST, trust_root_json=t)
+        authenticate_platform_endorsements(b, PLAT_REPO, PLAT_TAG, PLAT_DIGEST, trust_root_json=t)
     assert ei.value.layer == PROVENANCE_REJECTED
+
+
+@pytest.mark.parametrize("field", ["source_repo_id", "source_owner_id"])
+@pytest.mark.parametrize("value", [None, "", "1"])
+def test_platform_requires_pinned_numeric_identity(field, value):
+    b, t = encode(*plat_bundle(**{field: value}))
+    with pytest.raises(VerificationError, match="ID does not match"):
+        authenticate_platform_endorsements(b, PLAT_REPO, PLAT_TAG, PLAT_DIGEST, trust_root_json=t)
+
+
+def test_retired_platform_publisher_rejects():
+    repo = "tinfoilsh/platform-endorsements"
+    identity = f"https://github.com/{repo}/.github/workflows/build.yml@refs/tags/{TAG}"
+    b, t = encode(*plat_bundle(identity=identity, source_ref="refs/tags/" + TAG))
+    with pytest.raises(VerificationError):
+        authenticate_platform_endorsements(b, repo, TAG, PLAT_DIGEST, trust_root_json=t)

@@ -52,7 +52,9 @@ from .bundle_format import (
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 
 # platform_endorsements_repo publishes the platform-endorsements artifact.
-PLATFORM_ENDORSEMENTS_REPO = "tinfoilsh/platform-endorsements"
+PLATFORM_ENDORSEMENTS_REPO = "tinfoilsh/cvmimage"
+PLATFORM_ENDORSEMENTS_REPO_ID = "902195777"
+TINFOIL_ORGANIZATION_ID = "168487856"
 FRESHNESS_WITNESS_REPO = "tinfoilsh/freshness-witness"
 
 IN_TOTO_PAYLOAD_TYPE = "application/vnd.in-toto+json"
@@ -63,6 +65,8 @@ _OID_ISSUER_V2 = ObjectIdentifier("1.3.6.1.4.1.57264.1.8")  # DER string
 _OID_RUNNER_ENVIRONMENT = ObjectIdentifier("1.3.6.1.4.1.57264.1.11")  # DER string
 _OID_SOURCE_REPO_DIGEST = ObjectIdentifier("1.3.6.1.4.1.57264.1.13")  # DER string
 _OID_SOURCE_REPO_REF = ObjectIdentifier("1.3.6.1.4.1.57264.1.14")  # DER string
+_OID_SOURCE_REPO_ID = ObjectIdentifier("1.3.6.1.4.1.57264.1.15")
+_OID_SOURCE_OWNER_ID = ObjectIdentifier("1.3.6.1.4.1.57264.1.17")
 
 
 def _prov_error(message: str) -> VerificationError:
@@ -95,7 +99,7 @@ def github_workflow_identity_pattern(
 # at both ends so no other workflow path, ref type, or trailing SAN content
 # can match.
 PLATFORM_ENDORSEMENTS_IDENTITY = github_workflow_identity_pattern(
-    PLATFORM_ENDORSEMENTS_REPO, r"build\.yml", r"refs/tags/v[0-9][^@]*"
+    PLATFORM_ENDORSEMENTS_REPO, r"platform-release\.yml", r"refs/tags/platform-v[0-9][^@]*"
 )
 FRESHNESS_WITNESS_IDENTITY = github_workflow_identity_pattern(
     FRESHNESS_WITNESS_REPO, r"freshness\.yml", r"refs/heads/main"
@@ -641,6 +645,11 @@ def _authenticated_artifact(
 ) -> AuthenticatedArtifact:
     if result.cert is None:
         raise _prov_error(f"{label} bundle has no signing certificate")
+    if repo == PLATFORM_ENDORSEMENTS_REPO:
+        if _der_string_ext(result.cert, _OID_SOURCE_REPO_ID) != PLATFORM_ENDORSEMENTS_REPO_ID:
+            raise _prov_error(f"{label} source repository ID does not match the pinned repository")
+        if _der_string_ext(result.cert, _OID_SOURCE_OWNER_ID) != TINFOIL_ORGANIZATION_ID:
+            raise _prov_error(f"{label} source repository owner ID does not match the pinned organization")
     source_repository_ref = _der_string_ext(result.cert, _OID_SOURCE_REPO_REF)
     tag_ref_prefix = "refs/tags/"
     if not source_repository_ref.startswith(tag_ref_prefix):
