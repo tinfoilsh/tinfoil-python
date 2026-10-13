@@ -1,0 +1,61 @@
+name: v3 verification
+
+on:
+  pull_request:
+    branches: [main, feat/v3-verifier]
+  push:
+    branches: [main, feat/v3-verifier]
+
+permissions: {}
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check out the shared fixtures
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: tinfoilsh/tinfoil-conformance
+          ref: 781b08b1300ccdea49bf0cdb2bd6bd3acae6d2a3
+          path: .conformance
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run verifier tests
+        run: uv run pytest tests/v3 tests/test_client_v3_verify.py
+
+      - name: Require nonempty fixture groups
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          suites = [path for path in Path(".conformance/vectors/v3").iterdir() if path.is_dir()]
+          assert suites, "no conformance fixture groups"
+          for suite in suites:
+              assert list(suite.glob("*.json")), f"empty fixture group: {suite}"
+          PY
+
+      - name: Run shared conformance fixtures
+        run: |
+          uv run python .conformance/tools/run_adapter.py \
+            --adapter ".venv/bin/tinfoil-conformance" \
+            --report conformance-report.json
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+          results = json.loads(Path("conformance-report.json").read_text())["results"]
+          assert results and all(result["status"] == "PASS" for result in results.values()), \
+              "conformance cases failed or were skipped"
+          PY
