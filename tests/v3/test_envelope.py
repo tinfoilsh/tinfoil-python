@@ -230,7 +230,7 @@ def test_reference_values_collateral_lookup():
     e2 = _sigstore_entry(
         "c2",
         envelope.COLLATERAL_SIGSTORE_CODE_V1_FORMAT,
-        payload={"repo": "other/r", "tag": "", "digest": "", "sigstore_bundle": {}},
+        payload={"repo": "other/r", "tag": "", "digest": "aa" * 32, "sigstore_bundle": {}},
     )
     doc, _ = envelope.check(build_doc(collateral=[e1, e2]), NONCE)
     sc = envelope.reference_values_collateral(doc, envelope.COLLATERAL_SIGSTORE_CODE_V1_FORMAT)
@@ -244,10 +244,9 @@ def test_reference_values_collateral_lookup():
 
 def test_reference_values_collateral_bad_payload():
     entry = _sigstore_entry("c1", envelope.COLLATERAL_SIGSTORE_CODE_V1_FORMAT, payload={"nope": 1})
-    doc, _ = envelope.check(build_doc(collateral=[entry]), NONCE)
     with pytest.raises(VerificationError) as ei:
-        envelope.reference_values_collateral(doc, envelope.COLLATERAL_SIGSTORE_CODE_V1_FORMAT)
-    assert ei.value.layer == PROVENANCE_REJECTED
+        envelope.check(build_doc(collateral=[entry]), NONCE)
+    assert ei.value.layer == ENVELOPE_REJECTED
 
 
 def test_freshness_collateral_lookup():

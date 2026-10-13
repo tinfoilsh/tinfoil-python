@@ -41,6 +41,7 @@ from .strictjson import RAW, STR, array_of, field, map_of, struct_of
 
 # Format registry (v3).
 ATTESTATION_V3_FORMAT = "https://tinfoil.sh/predicate/attestation/v3"
+LEGACY_COLLATERAL_FORMAT = "https://tinfoil.sh/predicate/attestation-collaterals/v2"
 REPORT_DATA_V1_ALGORITHM = "https://tinfoil.sh/report-data/v1"
 
 CRYPTO_MATERIAL_V1_FORMAT = "https://tinfoil.sh/crypto-material/v1"
@@ -242,6 +243,7 @@ _COLLATERAL_ENTRY_SCHEMA = struct_of(
 _DOCUMENT_SCHEMA = struct_of(
     {
         "format": field("format", STR),
+        "collateral_format": field("collateral_format", STR),
         "challenge": field("challenge", _CHALLENGE_SCHEMA),
         "cpu_evidence": field("cpu_evidence", _CPU_EVIDENCE_SCHEMA),
         "crypto_material": field("crypto_material", STR),
@@ -402,6 +404,8 @@ def parse_document(doc_bytes: bytes) -> Document:
 
     if doc.format != ATTESTATION_V3_FORMAT:
         raise _envelope_error(f"unsupported document format {doc.format!r}")
+    if d["collateral_format"] not in ("", LEGACY_COLLATERAL_FORMAT):
+        raise _envelope_error(f"unsupported collateral format {d['collateral_format']!r}")
     if doc.challenge.report_data_algorithm != REPORT_DATA_V1_ALGORITHM:
         raise _envelope_error(
             f"unsupported report_data_algorithm {doc.challenge.report_data_algorithm!r}"
@@ -420,6 +424,7 @@ def parse_document(doc_bytes: bytes) -> Document:
     )
     if doc.cpu_evidence.format == "" or doc.cpu_evidence.report_base64 == "":
         raise _envelope_error("cpu_evidence is incomplete")
+    _decode_canonical_base64("cpu_evidence.report_base64", doc.cpu_evidence.report_base64)
     if doc.crypto_material == "":
         raise _envelope_error("crypto_material section is missing")
     if doc.device_evidence == "":
@@ -488,12 +493,43 @@ def parse_document(doc_bytes: bytes) -> Document:
             raise _envelope_error(
                 f"collateral entry {entry.id!r} has unknown role {entry.role!r}"
             )
+        _validate_collateral_data(entry)
 
     doc.crypto_material_bytes = crypto_bytes
     doc.device_evidence_bytes = device_bytes
     doc._crypto_material = cm
     doc._device_evidence = de
     return doc
+
+
+def _validate_collateral_data(entry: CollateralEntry) -> None:
+    if entry.data is None or not entry.data.lstrip().startswith(b"{"):
+        raise _envelope_error(f"collateral entry {entry.id!r} data is not a JSON object")
+    try:
+        if entry.role == ROLE_ENDORSEMENT:
+            if entry.format == COLLATERAL_AMD_VCEK_V1_FORMAT:
+                vcek = strictjson.unmarshal(entry.data, _AMD_VCEK_COLLATERAL_SCHEMA)
+                decode_canonical_base64("vcek_der_base64", vcek.vcek_der_base64)
+            elif entry.format == COLLATERAL_AMD_CRL_V1_FORMAT:
+                crl = strictjson.unmarshal(entry.data, _AMD_CRL_COLLATERAL_SCHEMA)
+                decode_canonical_base64("crl_der_base64", crl.crl_der_base64)
+            elif entry.format == COLLATERAL_INTEL_PCS_V1_FORMAT:
+                pcs = strictjson.unmarshal(entry.data, _INTEL_PCS_COLLATERAL_SCHEMA)
+                for response in pcs.responses or []:
+                    decode_canonical_base64("body_base64", response.body_base64)
+        elif entry.role == ROLE_REFERENCE_VALUES:
+            if entry.format in (COLLATERAL_SIGSTORE_CODE_V1_FORMAT, COLLATERAL_SIGSTORE_PLATFORM_V1_FORMAT):
+                data = strictjson.unmarshal(entry.data, _SIGSTORE_COLLATERAL_SCHEMA)
+                if not data["digest"]:
+                    raise ValueError("missing digest")
+            elif entry.format == COLLATERAL_SIGSTORE_FRESHNESS_V1_FORMAT:
+                data = strictjson.unmarshal(entry.data, _FRESHNESS_COLLATERAL_SCHEMA)
+            else:
+                return
+            if data["sigstore_bundle"] is None or data["sigstore_bundle"].strip() == b"null":
+                raise ValueError("missing sigstore_bundle")
+    except ValueError as e:
+        raise _envelope_error(f"parsing {entry.format} collateral entry {entry.id!r}: {e}") from None
 
 
 def check(doc_bytes: bytes, expected_nonce: bytes) -> tuple[Document, bytes]:
