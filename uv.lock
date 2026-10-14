@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.10"
 
 [options]
-exclude-newer = "2026-10-03T16:32:08.516084Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P4D"
 
 [options.exclude-newer-package]
@@ -355,7 +355,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -998,7 +998,7 @@ requires-dist = [
     { name = "pyopenssl", specifier = ">=25.0.0" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "sigstore", specifier = ">=4.3.0" },
-    { name = "tinfoil-ehbp", specifier = ">=0.3.0" },
+    { name = "tinfoil-ehbp", specifier = ">=0.4.1" },
     { name = "urllib3", specifier = ">=2.8.0" },
 ]
 
@@ -1010,16 +1010,16 @@ dev = [
 
 [[package]]
 name = "tinfoil-ehbp"
-version = "0.3.1"
+version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "pyhpke" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/59/fe/059da3785148a51f5c11297a2dde0874030348a88b4f451d481dba3d5d04/tinfoil_ehbp-0.3.1.tar.gz", hash = "sha256:1c773c62619a0b70697d0e25c3439f25bd6d95f8cf56116f6ecc251e28b08932", size = 17142, upload-time = "2026-07-23T22:54:05.18Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/28/a4/853643b9610e10e64a087a0315784205e8c8eb6d3248842dd71514841a4e/tinfoil_ehbp-0.4.1.tar.gz", hash = "sha256:cb76cd944daf94fa6ba1d3a4a99aa935dad9248a892e243fc160543c65f5a246", size = 21665, upload-time = "2026-10-14T09:21:50.248Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7c/10/b5a15c438e441e76fda2f2a3ce683cd41c0d095e91e23ef137f3773fa63f/tinfoil_ehbp-0.3.1-py3-none-any.whl", hash = "sha256:d06895441bfd3e61810f7d2b625309d4cf665be07b6f55113657c4f2b110ab27", size = 15511, upload-time = "2026-07-23T22:54:03.702Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/4a/d5363246ad349ba0d31f50a64393e679ed0535578b68fb1f9d9fdb4a5d2e/tinfoil_ehbp-0.4.1-py3-none-any.whl", hash = "sha256:215ddc47a1f336efec813af7df7a11f56dbad120859dd236dce8513a0b81e090", size = 18092, upload-time = "2026-10-14T09:21:49.114Z" },
 ]
 
 [[package]]
