@@ -80,10 +80,15 @@ def _crypto_material_data(v: VerifiedDocumentV3, id_: str, format_: str) -> str:
 
 
 def verify_document_v3(
-    doc_bytes: bytes, nonce: bytes, repo: str, *, ignore_freshness: bool = False
+    doc_bytes: bytes,
+    nonce: bytes,
+    repo: str,
+    *,
+    ignore_freshness: bool = False,
+    verification_time: Optional[datetime] = None,
 ) -> VerifiedDocumentV3:
     """Verify a v3 attestation document from its transmitted bytes against
-    the embedded production roots at the current time (Go:
+    the embedded production roots, defaulting to the current time (Go:
     client.VerifyDocumentV3; SDK_SURFACE_SPEC §2 three-argument form).
 
     repo is the code repository the caller trusts (pins the sigstore-code
@@ -94,8 +99,22 @@ def verify_document_v3(
     ignore_freshness permits archived documents without code/platform
     freshness witnesses. Provenance, CPU signatures, key binding, machine
     policy, and certificate/CRL validity checks still apply. The recorded
-    nonce can check an archive's binding; it does not establish recency."""
-    return _verify_document_v3(doc_bytes, nonce, repo, ignore_freshness=ignore_freshness)
+    nonce can check an archive's binding; it does not establish recency.
+
+    verification_time is an optional timezone-aware datetime for historical
+    appraisal of hardware collateral and, unless ignored, freshness witnesses.
+    The caller must establish this time independently; a receipt's claimed
+    execution time is not sufficient. This does not authenticate a timestamp,
+    restore retired publishers, or account for later revocations. Sigstore
+    signing certificates retain their authenticated signing-time checks."""
+    if verification_time is not None:
+        if verification_time.utcoffset() is None:
+            raise ValueError("verification_time must be timezone-aware")
+        verification_time = verification_time.astimezone(timezone.utc)
+    return _verify_document_v3(
+        doc_bytes, nonce, repo,
+        ignore_freshness=ignore_freshness, verification_time=verification_time,
+    )
 
 
 def _verify_document_v3(
@@ -120,9 +139,9 @@ def _verify_document_v3(
         assemble the complete policy from the reference values, validate in
         one call.
 
-    The root/clock overrides are the conformance adapter's seams
-    (CONFORMANCE_ADAPTER_SPEC §3) and are not part of the public surface;
-    defaults are the embedded production roots and the current time."""
+    Root overrides are conformance adapter seams (CONFORMANCE_ADAPTER_SPEC
+    §3), not part of the public surface. Defaults are the embedded production
+    roots and the current time."""
     doc, report_data = check(doc_bytes, nonce)
 
     # One appraisal datetime pins both freshness proofs and the quote clock.

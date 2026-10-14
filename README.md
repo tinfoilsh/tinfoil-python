@@ -148,6 +148,18 @@ Platform endorsements must come from the pinned `tinfoilsh/cvmimage`
 `platform-release.yml` workflow at a `platform-v...` tag, with the pinned
 repository and owner IDs. Retired platform publishers are rejected in both modes.
 
+For historical appraisal after the embedded collateral expires, also pass
+`verification_time=trusted_time`, a timezone-aware `datetime` established
+independently by the caller. Hardware certificates, CRLs, and Intel collateral
+must be valid at that time; freshness witnesses are also evaluated at that time
+unless ignored. Omitting it uses the current time. Sigstore signing certificates
+are still checked at their authenticated signing time.
+
+The SDK does not authenticate the supplied time or prove when a receipt existed.
+Do not use a receipt's claimed execution time without independent evidence.
+Historical appraisal uses the SDK's trusted roots and publisher policy and the
+supplied collateral; it does not discover later revocations or vulnerabilities.
+
 For receipt verification, allowlist the workload repository before this call,
 compare `verified.code_tag` with the receipt's expected release, and select the
 required key by ID and format from `verified.crypto_material`. Verify the receipt
