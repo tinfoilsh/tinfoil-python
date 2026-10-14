@@ -4,8 +4,8 @@ through a proxy whose origin differs from the verified enclave's.
 
 When a proxy is configured the request body stays sealed to the enclave's HPKE
 key while the X-Tinfoil-Enclave-Url header tells the proxy which enclave to
-forward to. Attestation can likewise be performed from a bundle fetched through
-the proxy, so the enclave never needs to be reached directly to verify it.
+forward to. Router discovery may go through a configured ATC service; the v3
+attestation document itself is fetched from the enclave (or via the proxy).
 """
 
 import asyncio
@@ -22,9 +22,8 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 import tinfoil as tinfoil_module
 from tinfoil import AsyncTinfoilAI, SecureClient, TinfoilAI
-from tinfoil.attestation import Bundle, Document, fetch_bundle_from
+from tinfoil.attestation import Bundle, fetch_bundle_from
 from tinfoil.attestation.bundle import _decode_domains, _matches_hostname
-from tinfoil.attestation.types import Measurement, PredicateType, Verification
 from tinfoil.client import (
     ENCLAVE_URL_HEADER,
     GroundTruth,
@@ -429,13 +428,13 @@ class TestConstructorValidation:
 
 
 class TestBundleModeRequestRouting:
-    """In bundle mode the enclave host is only known after verification, so
-    make_request must build the client (and run verification) before binding the
-    request to the enclave host."""
+    """With an ATC service URL, router discovery is deferred to verification,
+    so make_request must build the client (and run verification) before
+    binding the request to the enclave host."""
 
     def test_request_allowed_after_bundle_populates_enclave(self):
         sc = SecureClient(attestation_bundle_url="https://atc.example")
-        assert sc.enclave == ""  # unknown until the bundle is verified
+        assert sc.enclave == ""  # unknown until discovery runs at verify time
 
         captured = {}
         fake_client = MagicMock()
@@ -447,8 +446,8 @@ class TestBundleModeRequestRouting:
         fake_client.request.side_effect = fake_request
 
         def build_client():
-            # Building the secure client runs attestation, which in bundle mode
-            # is what populates self.enclave from the verified bundle.
+            # Building the secure client runs attestation, which is what
+            # resolves self.enclave via the configured ATC service.
             sc.enclave = "enclave-from-bundle.test"
             sc._low_level_http_client = fake_client
             return fake_client
@@ -460,55 +459,6 @@ class TestBundleModeRequestRouting:
         resp = sc.get("https://enclave-from-bundle.test/v1/models")
         assert resp.status_code == 200
         assert captured["url"] == "https://enclave-from-bundle.test/v1/models"
-
-
-class TestBundleVerifiesTdxHardware:
-    """The bundle path must verify TDX hardware measurements (mrtd/rtmr0) just
-    like the direct attestation path; otherwise a TDX enclave on tampered
-    firmware would pass verification."""
-
-    def _tdx_bundle(self) -> tuple:
-        report = Document(format=PredicateType.TDX_GUEST_V2, body="Zm9v")
-        bundle = Bundle(
-            domain="enclave.test",
-            enclave_attestation_report=report,
-            digest="d",
-            sigstore_bundle=b"{}",
-            vcek="",
-            enclave_cert="cert",
-        )
-        measurement = Measurement(
-            type=PredicateType.TDX_GUEST_V2,
-            registers=["mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"],
-        )
-        verification = Verification(measurement=measurement, public_key_fp="fp", hpke_public_key="hpke")
-        return report, bundle, measurement, verification
-
-    def test_tdx_bundle_verifies_hardware_measurements(self):
-        report, bundle, measurement, verification = self._tdx_bundle()
-        sc = SecureClient(repo="org/repo", attestation_bundle_url="https://atc.example")
-
-        with patch.object(report, "verify", return_value=verification), \
-             patch("tinfoil.client.verify_attestation", return_value=MagicMock(spec=Measurement)), \
-             patch("tinfoil.client.fetch_latest_hardware_measurements", return_value="hw") as fetch_hw, \
-             patch("tinfoil.client.verify_tdx_hardware", return_value="hwm") as verify_hw, \
-             patch("tinfoil.client.verify_certificate", return_value="hpke"):
-            sc.verify_from_bundle(bundle)
-
-        fetch_hw.assert_called_once()
-        verify_hw.assert_called_once_with("hw", measurement)
-
-    def test_tdx_bundle_fails_when_hardware_mismatch(self):
-        report, bundle, _, verification = self._tdx_bundle()
-        sc = SecureClient(repo="org/repo", attestation_bundle_url="https://atc.example")
-
-        with patch.object(report, "verify", return_value=verification), \
-             patch("tinfoil.client.verify_attestation", return_value=MagicMock(spec=Measurement)), \
-             patch("tinfoil.client.fetch_latest_hardware_measurements", return_value="hw"), \
-             patch("tinfoil.client.verify_tdx_hardware", side_effect=ValueError("hardware mismatch")), \
-             patch("tinfoil.client.verify_certificate", return_value="hpke"):
-            with pytest.raises(ValueError, match="hardware mismatch"):
-                sc.verify_from_bundle(bundle)
 
 
 class TestFetchBundleParsing:
@@ -627,22 +577,22 @@ ATTESTATION_BUNDLE_URL = "https://atc.tinfoil.sh"
 
 @pytest.mark.integration
 class TestAttestationBundleIntegration:
-    """Exercises the attestation-through-proxy path against the live ATC bundle
-    endpoint: the bundle is fetched and verified entirely client-side and the
-    enclave host is taken from the verified bundle."""
+    """Exercises the configured-ATC-service path against the live service: the
+    router is discovered through it at verify time and then attested with the
+    v3 single-request flow."""
 
-    def test_verify_from_bundle_directly(self):
+    def test_verify_with_deferred_discovery(self):
         sc = SecureClient(repo="tinfoilsh/confidential-model-router", attestation_bundle_url=ATTESTATION_BUNDLE_URL)
+        assert sc.enclave == ""  # discovery is deferred to verify()
         ground_truth = sc.verify()
-        assert sc.enclave, "enclave host should come from the verified bundle"
+        assert sc.enclave, "enclave host should come from ATC router discovery"
         assert ground_truth.hpke_public_key
         doc = sc.get_verification_document()
         assert doc is not None and doc.security_verified
         assert doc.enclave_host == sc.enclave
 
-    def test_verify_enclave_specific_bundle(self):
-        # Setting an explicit enclave makes the client POST to ATC for a bundle
-        # assembled for that enclave (rather than the default router bundle).
+    def test_verify_explicit_enclave_skips_discovery(self):
+        # An explicit enclave takes precedence over discovery through ATC.
         default = SecureClient(attestation_bundle_url=ATTESTATION_BUNDLE_URL)
         default.verify()
         enclave = default.enclave
@@ -656,7 +606,7 @@ class TestAttestationBundleIntegration:
     def test_bundle_chat_completion(self):
         api_key = _require_api_key()
         client = TinfoilAI(api_key=api_key, attestation_bundle_url=ATTESTATION_BUNDLE_URL)
-        assert client.enclave, "enclave host should come from the verified bundle"
+        assert client.enclave, "enclave host should come from ATC router discovery"
         response = client.chat.completions.create(
             model="llama3-3-70b",
             messages=[
@@ -670,7 +620,7 @@ class TestAttestationBundleIntegration:
     async def test_async_bundle_chat_completion(self):
         api_key = _require_api_key()
         client = AsyncTinfoilAI(api_key=api_key, attestation_bundle_url=ATTESTATION_BUNDLE_URL)
-        assert client.enclave, "enclave host should come from the verified bundle"
+        assert client.enclave, "enclave host should come from ATC router discovery"
         response = await client.chat.completions.create(
             model="llama3-3-70b",
             messages=[

@@ -36,13 +36,11 @@ def test_tdx_full_verification_flow():
     """
     Tests the complete TDX attestation verification flow using SecureClient.
     
-    SecureClient.verify() performs:
-    1. Fetch runtime attestation from enclave
-    2. Verify attestation (cryptographic + policy validation)
-    3. Fetch latest digest from GitHub
-    4. Fetch and verify sigstore attestation bundle
-    5. For TDX: verify hardware measurements (MRTD, RTMR0)
-    6. Compare code measurements with runtime measurements
+    SecureClient.verify() runs the v3 single-request flow:
+    1. Fetch the attestation document (evidence + collateral) from the enclave
+    2. Verify it offline against the embedded roots (envelope, code and
+       platform provenance with freshness, quote, policy)
+    3. Recover the endorsed channel keys (TLS fingerprint + HPKE key)
     """
     print(f"\nVerifying TDX enclave: {ENCLAVE}")
     print(f"Against repo: {REPO}")
