@@ -346,6 +346,23 @@ def test_tcb_status_not_up_to_date_rejects(module_chain):
     )
 
 
+@pytest.mark.parametrize("kind", ["tcb", "qe"])
+@pytest.mark.parametrize("issued_after_appraisal", [False, True])
+def test_collateral_issue_date(module_chain, kind, issued_after_appraisal):
+    issued_at = NOW + timedelta(seconds=1) if issued_after_appraisal else NOW
+    builder = build_tcb_info_response if kind == "tcb" else build_qe_identity_response
+    responses = default_responses(
+        module_chain, **{kind: builder(module_chain, issue_date=issued_at.isoformat())},
+    )
+    document = tdx_document(build_tdx_quote_v4(module_chain), responses)
+    if issued_after_appraisal:
+        reject(document, module_chain.root_ca.pem, "not yet valid")
+    else:
+        quote = authenticate(document, module_chain.root_ca.pem)
+        assert quote.identity == "55" * 16
+        assert quote.tcb_evaluation_data_number == 18
+
+
 def test_tdx_module_status_not_up_to_date_rejects(module_chain):
     chain = module_chain
     quote = build_tdx_quote_v4(chain)
@@ -449,12 +466,13 @@ def test_now_pins_crl_window(module_chain):
     # time and rejects at the current time.
     chain = module_chain
     quote = build_tdx_quote_v4(chain)
-    window_end = NOT_BEFORE + timedelta(days=31)
-    pck_crl = build_crl(chain.platform_ca, this_update=NOT_BEFORE, next_update=window_end)
+    window_start = NOW - timedelta(days=365)
+    window_end = window_start + timedelta(days=31)
+    pck_crl = build_crl(chain.platform_ca, this_update=window_start, next_update=window_end)
     responses = default_responses(chain, pck_crl=pck_crl)
     doc_bytes = tdx_document(quote, responses)
 
-    inside = NOT_BEFORE + timedelta(days=15)
+    inside = window_start + timedelta(days=15)
     q = authenticate(doc_bytes, chain.root_ca.pem, now=inside)
     assert q.identity == "55" * 16
 

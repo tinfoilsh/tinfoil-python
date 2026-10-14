@@ -468,6 +468,7 @@ def default_tcb_levels(status: str = "UpToDate") -> list[dict[str, Any]]:
 def build_tcb_info_response(
     chain: SynthChain,
     *,
+    issue_date: str = "2023-06-18T08:42:58Z",
     tcb_levels: Optional[list[dict[str, Any]]] = None,
     fmspc: str = SYNTH_FMSPC,
     next_update: str = "2030-07-18T08:42:58Z",
@@ -477,7 +478,7 @@ def build_tcb_info_response(
     tcb_info = {
         "id": "TDX",
         "version": 3,
-        "issueDate": "2023-06-18T08:42:58Z",
+        "issueDate": issue_date,
         "nextUpdate": next_update,
         "fmspc": fmspc,
         "pceId": "0000",
@@ -511,6 +512,7 @@ def build_tcb_info_response(
 def build_qe_identity_response(
     chain: SynthChain,
     *,
+    issue_date: str = "2023-06-08T07:24:59Z",
     mrsigner_hex: str = "DC" * 32,
     isv_prod_id: int = 2,
     isv_svn: int = 8,
@@ -520,7 +522,7 @@ def build_qe_identity_response(
     qe_identity = {
         "id": "TD_QE",
         "version": 2,
-        "issueDate": "2023-06-08T07:24:59Z",
+        "issueDate": issue_date,
         "nextUpdate": "2030-07-08T07:24:59Z",
         "tcbEvaluationDataNumber": tcb_evaluation_data_number,
         "miscselect": "00000000",

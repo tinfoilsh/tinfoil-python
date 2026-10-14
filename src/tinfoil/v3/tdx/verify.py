@@ -424,6 +424,10 @@ def _obtain_collateral(fmspc: str, ca: str, getter: HTTPSGetter) -> Collateral:
 def _check_collateral_expiration(collateral: Collateral, now: datetime) -> None:
     tcb_info = collateral.tdx_tcb_info.tcb_info  # type: ignore[union-attr]
     qe_identity = collateral.qe_identity.enclave_identity  # type: ignore[union-attr]
+    if now < tcb_info.issue_date:
+        raise ValueError("tcbInfo is not yet valid")
+    if now < qe_identity.issue_date:
+        raise ValueError("QeIdentity is not yet valid")
     if now > tcb_info.next_update:
         raise ValueError("tcbInfo has expired")
     if now > qe_identity.next_update:
