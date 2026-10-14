@@ -173,7 +173,8 @@ def test_public_offline_option_uses_full_verifier(signed_document, monkeypatch):
     verifier = client._verify_document_v3
 
     def with_test_roots(*args, **kwargs):
-        return verifier(*args, **kwargs, **roots, verification_time=APPRAISAL_TIME + MAX_FRESHNESS_AGE)
+        kwargs["verification_time"] = APPRAISAL_TIME + MAX_FRESHNESS_AGE
+        return verifier(*args, **kwargs, **roots)
 
     monkeypatch.setattr(client, "_verify_document_v3", with_test_roots)
     raw = json.dumps(doc).encode()
