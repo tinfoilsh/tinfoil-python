@@ -9,7 +9,6 @@ import socket
 
 import pytest
 
-import tinfoil
 from tinfoil.v3 import client, envelope as env
 from tinfoil.v3.errors import VerificationError
 from tinfoil.v3.provenance import MAX_FRESHNESS_AGE
@@ -80,21 +79,19 @@ def verify(doc, roots, *, now=APPRAISAL_TIME, nonce=NONCE, repo=provenance_cases
     )
 
 
-def test_default_and_offline_return_same_verified_facts(signed_document):
+def test_offline_returns_verified_facts(signed_document):
     doc, roots = signed_document
-    online = verify(doc, roots)
-    offline = verify(doc, roots, ignore_freshness=True)
-    assert offline == online
-    assert offline.code_tag == provenance_cases.TAG
-    assert offline.code_digest == provenance_cases.DIGEST
-    assert offline.enclave_measurement.registers == ["aa" * 48]
-    assert [(item.id, item.format, item.data) for item in offline.crypto_material] == [
+    verified = verify(doc, roots)
+    assert verified.code_tag == provenance_cases.TAG
+    assert verified.code_digest == provenance_cases.DIGEST
+    assert verified.enclave_measurement.registers == ["aa" * 48]
+    assert [(item.id, item.format, item.data) for item in verified.crypto_material] == [
         (SIGNING_KEY_ID, SPKI_FORMAT, SIGNING_KEY),
     ]
 
 
 @pytest.mark.parametrize("witness_state", ["expired", "missing", "invalid"])
-def test_offline_skips_witnesses_but_default_requires_them(signed_document, witness_state):
+def test_offline_requires_valid_freshness_witnesses(signed_document, witness_state):
     original, roots = signed_document
     doc = deepcopy(original)
     now = APPRAISAL_TIME
@@ -108,7 +105,6 @@ def test_offline_skips_witnesses_but_default_requires_them(signed_document, witn
                 item["data"]["sigstore_bundle"] = {}
     with pytest.raises(VerificationError):
         verify(doc, roots, now=now)
-    assert verify(doc, roots, now=now, ignore_freshness=True) == verify(original, roots)
 
 
 @pytest.mark.parametrize("identifier", ["code", "platform", "code-freshness", "platform-freshness"])
@@ -117,7 +113,7 @@ def test_offline_rejects_missing_bundle_members(signed_document, identifier):
     doc = deepcopy(original)
     del next(item for item in doc["collateral"] if item["id"] == identifier)["data"]["sigstore_bundle"]
     with pytest.raises(VerificationError, match="missing sigstore_bundle"):
-        verify(doc, roots, ignore_freshness=True)
+        verify(doc, roots)
 
 
 @pytest.mark.parametrize("identifier", ["code", "platform"])
@@ -129,14 +125,14 @@ def test_offline_authenticates_both_reference_artifacts(signed_document, identif
     signature[0] ^= 1
     bundle["dsseEnvelope"]["signatures"][0]["sig"] = sb.b64(signature)
     with pytest.raises(VerificationError):
-        verify(doc, roots, ignore_freshness=True)
+        verify(doc, roots)
 
 
 @pytest.mark.parametrize("change", ["nonce", "repository", "key", "report", "crl", "policy", "report_data_tail", "expired_crl"])
 def test_offline_preserves_other_checks(signed_document, change):
     original, roots = signed_document
     doc = deepcopy(original)
-    options = {"ignore_freshness": True}
+    options = {}
     if change == "nonce":
         options["nonce"] = bytes(env.NONCE_SIZE)
     elif change == "repository":
@@ -166,19 +162,3 @@ def test_offline_preserves_other_checks(signed_document, change):
         doc["cpu_evidence"]["report_base64"] = sb.b64(hardware["report"])
     with pytest.raises(VerificationError):
         verify(doc, roots, **options)
-
-
-def test_public_offline_option_uses_full_verifier(signed_document, monkeypatch):
-    doc, roots = signed_document
-    verifier = client._verify_document_v3
-
-    def with_test_roots(*args, **kwargs):
-        kwargs["verification_time"] = APPRAISAL_TIME + MAX_FRESHNESS_AGE
-        return verifier(*args, **kwargs, **roots)
-
-    monkeypatch.setattr(client, "_verify_document_v3", with_test_roots)
-    raw = json.dumps(doc).encode()
-    with pytest.raises(VerificationError, match="stale"):
-        tinfoil.verify_document_v3(raw, NONCE, provenance_cases.REPO)
-    verified = tinfoil.verify_document_v3(raw, NONCE, provenance_cases.REPO, ignore_freshness=True)
-    assert verified.crypto_material[0].data == SIGNING_KEY

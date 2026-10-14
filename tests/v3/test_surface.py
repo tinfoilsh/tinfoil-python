@@ -37,14 +37,12 @@ def test_verification_error_exposes_layer():
 
 def test_verify_document_v3_signature():
     # The public form keeps the spec's 3 positional arguments and exposes
-    # archive policy and appraisal time without the adapter-only root seams.
+    # appraisal time without the adapter-only root seams.
     sig = inspect.signature(tinfoil.verify_document_v3)
     params = list(sig.parameters)
-    assert params == ["doc_bytes", "nonce", "repo", "ignore_freshness", "verification_time"]
+    assert params == ["doc_bytes", "nonce", "repo", "verification_time"]
     for name in params[:3]:
         assert sig.parameters[name].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-    assert sig.parameters["ignore_freshness"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert sig.parameters["ignore_freshness"].default is False
     assert sig.parameters["verification_time"].kind is inspect.Parameter.KEYWORD_ONLY
     assert sig.parameters["verification_time"].default is None
 
