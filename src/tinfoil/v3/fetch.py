@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import httpx
 
+from .._sdkinfo import attestation_headers
 from .envelope import ATTESTATION_ENDPOINT, NONCE_SIZE, random_nonce
 
 __all__ = ["NONCE_SIZE", "fetch_attestation", "random_nonce"]
@@ -21,7 +22,9 @@ def fetch_attestation(host: str, nonce: bytes) -> bytes:
     url = f"https://{host}{ATTESTATION_ENDPOINT}?nonce={nonce.hex()}"
     # Go http.Get follows redirects (httpx does not by default), so this v3
     # fetch mirrors Go; the SDK's v2 clients pin follow_redirects=False.
-    resp = httpx.get(url, timeout=_FETCH_TIMEOUT_SECONDS, follow_redirects=True)
+    resp = httpx.get(
+        url, headers=attestation_headers(), timeout=_FETCH_TIMEOUT_SECONDS, follow_redirects=True
+    )
     if resp.status_code < 200 or resp.status_code >= 300:
         raise RuntimeError(f"fetching attestation from {host}: HTTP {resp.status_code}")
     return resp.content
