@@ -23,6 +23,7 @@ dependencies = [
     "sigstore>=4.3.0",
     "platformdirs>=4.2.0",
     "urllib3>=2.8.0",
+    "certifi>=2026.10.19",
 ]
 
 [dependency-groups]
@@ -49,3 +50,5 @@ constraint-dependencies = [
 [tool.uv.exclude-newer-package]
 # tinfoil-ehbp is maintained by tinfoil (first-party dependency)
 tinfoil-ehbp = false
+# certifi ships CA trust removals (e.g. the eMudhra distrust in 2026.10.19)
+certifi = false
