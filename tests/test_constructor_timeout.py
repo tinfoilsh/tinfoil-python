@@ -26,6 +26,7 @@ class FakeOpenAIClient:
         self.chat = object()
         self.embeddings = object()
         self.audio = object()
+        self.decisions = object()
 
 
 def test_tinfoilai_forwards_timeout_to_openai(monkeypatch):

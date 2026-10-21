@@ -250,13 +250,15 @@ class TestHTTPXClientHostBinding:
             foreign_client = client.with_options(
                 base_url="https://evil.example.com/v1"
             )
-            with pytest.raises(APIConnectionError) as exc_info:
+            # openai >= 3 propagates non-httpx transport exceptions directly,
+            # so the host-binding guard's ValueError reaches the caller unwrapped.
+            with pytest.raises(ValueError) as exc_info:
                 foreign_client.chat.completions.create(
                     model="gpt-oss-120b",
                     messages=[{"role": "user", "content": "hi"}],
                 )
-            assert isinstance(exc_info.value.__cause__, ValueError)
-            assert "evil.example.com" in str(exc_info.value.__cause__)
+            assert "evil.example.com" in str(exc_info.value)
+            assert "bound to enclave" in str(exc_info.value)
         finally:
             http_client.close()
 
