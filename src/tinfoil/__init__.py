@@ -1,8 +1,8 @@
 from typing import Optional
 from openai import OpenAI, AsyncOpenAI, NOT_GIVEN, NotGiven
-from openai.resources.chat import Chat as OpenAIChat
-from openai.resources.embeddings import Embeddings as OpenAIEmbeddings
-from openai.resources.audio import Audio as OpenAIAudio
+from openai.resources.chat import Chat as OpenAIChat, AsyncChat as OpenAIAsyncChat
+from openai.resources.embeddings import Embeddings as OpenAIEmbeddings, AsyncEmbeddings as OpenAIAsyncEmbeddings
+from openai.resources.audio import Audio as OpenAIAudio, AsyncAudio as OpenAIAsyncAudio
 from openai.resources.decisions import Decisions as OpenAIDecisions, AsyncDecisions as OpenAIAsyncDecisions
 import httpx
 
@@ -72,9 +72,9 @@ class AsyncTinfoilAI:
     """
     Exactly like TinfoilAI, but fully async using AsyncOpenAI and httpx.AsyncClient.
     """
-    chat: OpenAIChat
-    embeddings: OpenAIEmbeddings
-    audio: OpenAIAudio
+    chat: OpenAIAsyncChat
+    embeddings: OpenAIAsyncEmbeddings
+    audio: OpenAIAsyncAudio
     decisions: OpenAIAsyncDecisions
     api_key: str
     enclave: str
