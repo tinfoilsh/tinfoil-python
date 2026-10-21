@@ -12,6 +12,8 @@ import os
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import re
+
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -257,7 +259,10 @@ class TestHTTPXClientHostBinding:
                     model="gpt-oss-120b",
                     messages=[{"role": "user", "content": "hi"}],
                 )
-            assert "evil.example.com" in str(exc_info.value)
+            assert re.search(
+                r"refusing to send request to host 'evil\.example\.com'",
+                str(exc_info.value),
+            )
             assert "bound to enclave" in str(exc_info.value)
         finally:
             http_client.close()
