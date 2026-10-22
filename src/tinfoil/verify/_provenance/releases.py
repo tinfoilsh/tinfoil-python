@@ -90,15 +90,15 @@ class ReleaseVerifier:
 
     @classmethod
     def embedded(cls) -> ReleaseVerifier:
-        """A verifier for the embedded production trusted root."""
+        """Return a verifier for the embedded production trusted root."""
         return cls(resources.files(__package__).joinpath("trusted_root.json").read_bytes())
 
     def config_approval_verifier(self, keys: Sequence[PublicKeyTypes]) -> ConfigApprovalVerifier:
-        """A verifier for config approvals signed by one of ``keys``."""
+        """Return a verifier for config approvals signed by one of ``keys``."""
         return ConfigApprovalVerifier(self._trusted_root, keys)
 
     def artifact_approval_verifier(self, keys: Sequence[PublicKeyTypes]) -> ArtifactApprovalVerifier:
-        """A verifier for artifact freshness approvals signed by one of ``keys``."""
+        """Return a verifier for artifact freshness approvals signed by one of ``keys``."""
         return ArtifactApprovalVerifier(self._trusted_root, keys)
 
     def authenticate_code(self, bundle: bytes, reference: Reference, tag: str | None, digest: str) -> Code:

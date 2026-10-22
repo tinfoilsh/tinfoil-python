@@ -90,6 +90,7 @@ def test_rejection_code_reads_the_layer(err, code, exit_code):
         valid_input(ask_pem="-----BEGIN CERTIFICATE-----"),
         valid_input(verification_time_unix=1.5),
         valid_input(verification_time_unix=True),
+        valid_input(verification_time_unix=2**63),
         valid_input(sigstore_trusted_root_json_b64="%%%"),
     ],
 )

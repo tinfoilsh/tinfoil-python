@@ -161,7 +161,7 @@ class _Collateral:
     """The sigstore-platform entry with the reserved platform ID."""
 
     def unambiguous_config_platform(self) -> SigstoreRef | None:
-        """The platform reference config verification uses, or None when absent.
+        """Return the platform reference config verification uses, or None when absent.
 
         Raises ValueError when more than one entry could serve as it.
         """

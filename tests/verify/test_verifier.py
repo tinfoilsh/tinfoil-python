@@ -15,6 +15,7 @@ from tinfoil.verify import (
     VerificationError,
     Verifier,
     _quote,
+    _verifier,
     document,
 )
 from tinfoil.verify._provenance import public_signing_keys
@@ -111,7 +112,7 @@ def test_invalid_options_are_usage_errors(options, message):
 
 
 def test_verify_returns_the_proven_facts(stages):
-    verified = Verifier().verify(b"document", NONCE, "org/repo", at=AT)
+    verified = Verifier().verify_at(b"document", NONCE, "org/repo", AT)
 
     assert verified.config_repo == "org/repo"
     assert verified.code_digest == CODE_ARTIFACT.digest
@@ -129,7 +130,7 @@ def test_verify_returns_the_proven_facts(stages):
 
 def test_verify_appraises_every_stage_at_one_instant(stages):
     verifier = Verifier()
-    verifier.verify(b"document", NONCE, "org/repo", at=AT)
+    verifier.verify_at(b"document", NONCE, "org/repo", AT)
 
     assert stages.calls["parse"] == (b"document", NONCE)
     assert stages.calls["resolve"] == (stages.document, "org/repo", AT)
@@ -138,11 +139,21 @@ def test_verify_appraises_every_stage_at_one_instant(stages):
     assert "validate" in stages.calls
 
 
-def test_verify_reads_the_clock_once(stages):
+def test_verify_reads_the_clock_once(monkeypatch, stages):
+    class Clock(datetime):
+        reads = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.reads += 1
+            return super().now(tz)
+
+    monkeypatch.setattr(_verifier, "datetime", Clock)
     before = datetime.now(timezone.utc)
     verified = Verifier().verify(b"document", NONCE, "org/repo")
     after = datetime.now(timezone.utc)
 
+    assert Clock.reads == 1
     assert before <= verified.metadata.verified_at <= after
     assert verified.metadata.verified_at.tzinfo is timezone.utc
     assert stages.calls["resolve"][2] is verified.metadata.verified_at
@@ -151,15 +162,25 @@ def test_verify_reads_the_clock_once(stages):
 
 def test_verify_reports_the_instant_in_utc(stages):
     local = AT.astimezone(timezone(timedelta(hours=2)))
-    verified = Verifier().verify(b"document", NONCE, "org/repo", at=local)
+    verified = Verifier().verify_at(b"document", NONCE, "org/repo", local)
     assert verified.metadata.verified_at == AT
     assert verified.metadata.verified_at.tzinfo is timezone.utc
 
 
-def test_verify_requires_an_aware_instant(stages):
-    with pytest.raises(UsageError, match="verification time must be timezone-aware"):
-        Verifier().verify(b"document", NONCE, "org/repo", at=AT.replace(tzinfo=None))
+@pytest.mark.parametrize("instant", [AT.replace(tzinfo=None), AT.date(), AT.timestamp(), "2026-10-01T12:00:00Z", None])
+def test_verify_at_requires_an_aware_datetime(stages, instant):
+    with pytest.raises(UsageError, match="verification time must be a timezone-aware datetime"):
+        Verifier().verify_at(b"document", NONCE, "org/repo", instant)
     assert stages.calls == {}
+
+
+def test_verifiers_are_immutable():
+    verifier = Verifier()
+    with pytest.raises(AttributeError, match="immutable"):
+        verifier._pinned_registers = ENCLAVE  # type: ignore[misc]
+    with pytest.raises(AttributeError, match="immutable"):
+        del verifier._references
+    assert verifier.pinned_registers is None
 
 
 def test_config_verification_reports_the_runtime(stages):
@@ -169,7 +190,7 @@ def test_config_verification_reports_the_runtime(stages):
         quote="reference values", artifact=CODE_ARTIFACT, platform=platform, config=config
     )
 
-    verified = Verifier().verify(b"document", NONCE, None, at=AT)
+    verified = Verifier().verify_at(b"document", NONCE, None, AT)
 
     assert verified.config == config
     assert verified.runtime == CODE_ARTIFACT
@@ -192,7 +213,7 @@ def test_a_failing_stage_is_rejected_at_its_layer(stages, stage, layer):
     stages.errors[stage] = cause
 
     with pytest.raises(VerificationError) as caught:
-        Verifier().verify(b"document", NONCE, "org/repo", at=AT)
+        Verifier().verify_at(b"document", NONCE, "org/repo", AT)
 
     assert caught.value.layer is layer
     assert caught.value.__cause__ is cause
@@ -202,7 +223,7 @@ def test_a_failing_stage_is_rejected_at_its_layer(stages, stage, layer):
 def test_later_stages_do_not_run_after_a_rejection(stages):
     stages.errors["resolve"] = ValueError("boom")
     with pytest.raises(VerificationError):
-        Verifier().verify(b"document", NONCE, "org/repo", at=AT)
+        Verifier().verify_at(b"document", NONCE, "org/repo", AT)
     assert "authenticate" not in stages.calls
 
 
@@ -211,7 +232,7 @@ def test_invalid_input_to_parse_is_a_usage_error(stages):
     stages.errors["parse"] = cause
 
     with pytest.raises(UsageError) as caught:
-        Verifier().verify(b"document", NONCE[:31], "org/repo", at=AT)
+        Verifier().verify_at(b"document", NONCE[:31], "org/repo", AT)
 
     assert caught.value.__cause__ is cause
 
@@ -222,11 +243,11 @@ def test_invalid_input_to_parse_is_a_usage_error(stages):
 def test_classified_errors_pass_through(stages, err):
     stages.errors["resolve"] = err
     with pytest.raises(type(err)) as caught:
-        Verifier().verify(b"document", NONCE, "org/repo", at=AT)
+        Verifier().verify_at(b"document", NONCE, "org/repo", AT)
     assert caught.value is err
 
 
 def test_unimplemented_steps_are_never_a_verdict(stages):
     stages.errors["authenticate"] = NotImplementedError()
     with pytest.raises(NotImplementedError):
-        Verifier().verify(b"document", NONCE, "org/repo", at=AT)
+        Verifier().verify_at(b"document", NONCE, "org/repo", AT)

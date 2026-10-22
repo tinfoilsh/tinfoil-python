@@ -4,8 +4,9 @@ Each function here removes a guarantee verification relies on. An injected
 root means evidence or reference values no longer have to chain to AMD,
 Intel or Tinfoil's release workflows. Decoding without a nonce skips the
 challenge binding that stops a replayed document. Go compiles its
-equivalents only into its conformance build; Python has no build tags, so
-they live in this private module, which nothing in the SDK imports.
+equivalents only into its conformance build. Python has no build tags, so
+they live in this private module, which nothing in the SDK imports and the
+wheel excludes; only a source checkout has it.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ def verifier(
     intel_root_pem: bytes | None = None,
     **options: Any,
 ) -> Verifier:
-    """A Verifier that trusts the supplied roots in place of the embedded ones.
+    """Return a Verifier that trusts the supplied roots in place of the embedded ones.
 
     ``amd_root_pem`` is the ASK then ARK, PEM-encoded. A None root keeps the
     embedded anchor. ``options`` are the Verifier's keyword arguments.

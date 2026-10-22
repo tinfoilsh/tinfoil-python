@@ -4,6 +4,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tinfoil"]
+# Conformance-only seams that replace trust anchors; the source tree keeps them.
+exclude = ["src/tinfoil/verify/_dangerous_test_only.py"]
 sbom-files = ["sbom.cdx.json"]
 
 [project]

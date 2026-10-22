@@ -32,7 +32,11 @@ class ConfigReferenceValues:
     endorsements: _policy.Artifact
     runtime: _runtime.LaunchMeasurements
     config_hash: bytes
-    """SHA-256 of the exact config bytes, bound into the quote."""
+    """SHA-256 of the exact config bytes.
+
+    The quote must attest it as HOST_DATA (SEV-SNP) or MR_CONFIG_ID (TDX),
+    which the launch sets, not as REPORT_DATA.
+    """
 
 
 ReferenceValues = LegacyReferenceValues | ConfigReferenceValues

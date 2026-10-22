@@ -119,7 +119,7 @@ class Verification:
         return self.crypto_material_data(_formats.CRYPTO_MATERIAL_ID_HPKE, _formats.KEY_X25519_HPKE_V1)
 
     def crypto_material_data(self, item_id: str, item_format: str) -> str | None:
-        """The endorsed lowercase-hex data for exactly ``item_id`` and ``item_format``.
+        """Return the endorsed lowercase-hex data for exactly ``item_id`` and ``item_format``, or None.
 
         A lookup does not refresh evidence or enforce freshness_expires_at.
         """
@@ -127,7 +127,7 @@ class Verification:
 
 
 def crypto_material_data(items: Iterable[CryptoMaterialItem], item_id: str, item_format: str) -> str | None:
-    """Look up exactly ``item_id`` and ``item_format`` among endorsed key items.
+    """Return the data of the endorsed item with exactly ``item_id`` and ``item_format``, or None.
 
     For callers that keep their own record of a verification.
     """

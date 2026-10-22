@@ -33,7 +33,7 @@ nqzLE7k3kahjPxIM42bgZbze0GnT/EmGqe1w6So5AhmXci8By8Azt8gAhw==
 
 
 def public_signing_keys() -> tuple[PublicKeyTypes, ...]:
-    """Tinfoil's public config and artifact approval signing keys."""
+    """Return Tinfoil's public config and artifact approval signing keys."""
     return (serialization.load_pem_public_key(_PUBLIC_SIGNING_KEY_PEM),)
 
 

@@ -47,6 +47,15 @@ def test_documents_come_only_from_parse():
         Document()
 
 
+def test_documents_are_immutable():
+    parsed = document()
+    with pytest.raises(AttributeError, match="immutable"):
+        parsed._report_data = bytes(range(64))  # type: ignore[misc]
+    with pytest.raises(AttributeError, match="immutable"):
+        del parsed._evidence
+    assert parsed.expected_report_data == bytes(64)
+
+
 @pytest.mark.parametrize(
     ("evidence_format", "expected"),
     [

@@ -388,7 +388,7 @@ def _artifact_verification(
 
 
 def _freshness_expiration(max_age: timedelta, *issued: datetime | None) -> datetime | None:
-    """The earliest deadline among authenticated issue times, never derived from the local clock."""
+    """Return the earliest deadline among authenticated issue times, never derived from the local clock."""
     times = [at for at in issued if at is not None]
     return min(times) + max_age if times else None
 

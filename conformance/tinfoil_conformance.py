@@ -5,7 +5,7 @@ Output JSON on stdout and exits with the adapter code; ``capabilities``
 prints the SDK's self-description (tinfoil-conformance
 CONFORMANCE_ADAPTER_SPEC.md). Tests drive ``run`` in-process.
 
-The full-verify stage is one Verifier.verify call, so the shared fixtures
+The full-verify stage is one Verifier.verify_at call, so the shared fixtures
 appraise exactly the code production runs, and the layer of its
 VerificationError names the rejection. The block stages isolate one layer by
 calling into the modules the verifier composes. Synthetic roots and the
@@ -102,6 +102,10 @@ class Input:
         timestamp = data.get("verification_time_unix", 0)
         if not isinstance(timestamp, int) or isinstance(timestamp, bool):
             raise MalformedInput("verification_time_unix must be an integer")
+        try:
+            verification_time = datetime.fromtimestamp(timestamp, timezone.utc) if timestamp else None
+        except (OverflowError, OSError, ValueError) as err:
+            raise MalformedInput(f"verification_time_unix is out of range: {err}") from err
 
         return cls(
             document=_base64(_string(data, "document_b64"), "document_b64"),
@@ -111,7 +115,7 @@ class Input:
             amd_root_pem=f"{ask.strip()}\n{amd_root.strip()}\n".encode() if amd_root else None,
             intel_root_pem=intel_root.encode() if intel_root else None,
             sigstore_trusted_root=_base64(sigstore_root, "sigstore_trusted_root_json_b64") if sigstore_root else None,
-            verification_time=datetime.fromtimestamp(timestamp, timezone.utc) if timestamp else None,
+            verification_time=verification_time,
         )
 
 
@@ -207,7 +211,7 @@ def run(stage: str, request: Any) -> tuple[Output, int]:
 
 def _verify(inputs: Input, verifier: verify.Verifier, appraisal: datetime) -> tuple[Output, int]:
     try:
-        verified = verifier.verify(inputs.document, inputs.nonce, inputs.repo or None, at=appraisal)
+        verified = verifier.verify_at(inputs.document, inputs.nonce, inputs.repo or None, appraisal)
     except NotImplementedError:
         raise
     except Exception as err:
