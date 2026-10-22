@@ -4,16 +4,21 @@ import importlib
 
 import pytest
 
+import tinfoil.verify
+
 PUBLIC = {
     "tinfoil.verify": {
         "Error",
         "Layer",
+        "Reference",
         "SoftwareIdentity",
         "UsageError",
         "Verification",
         "VerificationError",
         "VerificationMetadata",
+        "Verifier",
         "crypto_material_data",
+        "parse_reference",
     },
     "tinfoil.verify.document": {
         "CPUEvidence",
@@ -53,3 +58,7 @@ def test_public_names(module_name):
     assert set(module.__all__) == PUBLIC[module_name]
     for name in module.__all__:
         assert hasattr(module, name), name
+
+
+def test_seams_are_not_exported():
+    assert not any("dangerous" in name.lower() for name in dir(tinfoil.verify) if not name.startswith("_"))
