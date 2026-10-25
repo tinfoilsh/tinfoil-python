@@ -124,6 +124,54 @@ print(resp.status_code, resp.text)
 
 This library is a drop-in replacement for the [official OpenAI Python client](https://github.com/openai/openai-python). All methods and types are identical; see the [OpenAI Python client documentation](https://github.com/openai/openai-python) for API usage.
 
+## Offline v3 verification
+
+`verify_document_v3` verifies a complete v3 document using its embedded
+collateral, without fetching certificates or release metadata. For archived
+receipts, supply a trusted historical appraisal time:
+
+```python
+from tinfoil import verify_document_v3
+
+verified = verify_document_v3(
+    document_bytes,
+    recorded_nonce,
+    trusted_repository,
+    verification_time=trusted_time,
+)
+```
+
+Code/platform provenance, freshness witnesses, CPU signatures, certificate and
+CRL validity, machine policy, and key binding are always verified.
+The recorded nonce checks the archive's binding; it does not prove recency.
+Platform endorsements must come from the pinned `tinfoilsh/cvmimage`
+`platform-release.yml` workflow at a `platform-v...` tag, with the pinned
+repository and owner IDs. Retired platform publishers are rejected.
+
+`verification_time` must be a timezone-aware `datetime` established independently
+by the caller. Hardware certificates, CRLs, Intel collateral, and freshness
+witnesses are evaluated at that time. Missing, invalid, or stale freshness
+witnesses are rejected. Omitting the time uses the current time. Sigstore signing
+certificates are still checked at their authenticated signing time.
+
+The SDK does not authenticate the supplied time or prove when a receipt existed.
+Do not use a receipt's claimed execution time without independent evidence.
+Historical appraisal uses the SDK's trusted roots and publisher policy and the
+supplied collateral; it does not discover later revocations or vulnerabilities.
+
+For receipt verification, allowlist the workload repository before this call,
+compare `verified.code_tag` with the receipt's expected release, and select the
+required key by ID and format from `verified.crypto_material`. Verify the receipt
+signature with that key; document verification alone does not verify a receipt
+signature. The core verifier does not require TLS or HPKE keys. This API supports
+the existing code/platform collateral format, including its explicit v2 marker.
+
+## v3 conformance
+
+The package implements CONFORMANCE_ADAPTER_SPEC v1.1 and SDK_SURFACE_SPEC
+v1.0 Tier-1 (Tier-2 product-client wiring is pending). The conformance
+adapter entry point is the `tinfoil-conformance` script.
+
 ## Development
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:

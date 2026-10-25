@@ -26,6 +26,9 @@ dependencies = [
     "certifi>=2026.10.19",
 ]
 
+[project.scripts]
+tinfoil-conformance = "tinfoil.conformance.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest",
