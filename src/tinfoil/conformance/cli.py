@@ -1591,14 +1591,15 @@ def _decode_sev_body_fields(report: bytes) -> dict[str, Any]:
         "report_id_ma_hex": report[0x160:0x160 + 32].hex(),
         "reported_tcb_hex": report[0x180:0x180 + 8].hex(),
         "chip_id_hex": report[0x1A0:0x1A0 + 64].hex(),
-        "committed_tcb_hex": report[0x1E8:0x1E8 + 8].hex(),
-        "current_build": report[0x1F0],
-        "current_minor": report[0x1F1],
-        "current_major": report[0x1F2],
-        "committed_build": report[0x1F4],
-        "committed_minor": report[0x1F5],
-        "committed_major": report[0x1F6],
-        "launch_tcb_hex": report[0x1F8:0x1F8 + 8].hex(),
+        # SEV-SNP ABI: COMMITTED_TCB 0x1E0, CURRENT_* 0x1E8.., COMMITTED_* 0x1EC.., LAUNCH_TCB 0x1F0.
+        "committed_tcb_hex": report[0x1E0:0x1E0 + 8].hex(),
+        "current_build": report[0x1E8],
+        "current_minor": report[0x1E9],
+        "current_major": report[0x1EA],
+        "committed_build": report[0x1EC],
+        "committed_minor": report[0x1ED],
+        "committed_major": report[0x1EE],
+        "launch_tcb_hex": report[0x1F0:0x1F0 + 8].hex(),
     }
 
 
