@@ -141,6 +141,7 @@ def _capabilities() -> dict[str, Any]:
             # x509CertificateChain layout; only the v0.3 single-certificate
             # form is accepted. SPEC §5.2.
             "legacy_bundle_format_supported": False,
+            "rekor_v2_supported": True,
             # sigstore-python hardcodes len(tlog_entries) == 1.
             "accepts_multi_tlog_entries": False,
             # tinfoil-python's OIDCIssuerV2Preferred policy reads the canonical
@@ -363,12 +364,21 @@ def _classify(message: str) -> Tuple[str, str]:
     ):
         return ("WORKFLOW_REF_PREFIX_MISMATCH", "5.3")
 
-    # CERT_EXPIRED catches both "outside cert validity" (Rust phrasing) and
-    # "certificate has expired" (sigstore-python's certvalidator phrasing).
+    # sigstore-python: no observer timestamp (no SET and no verified TSA token).
+    if (
+        "inclusion promise or signed timestamp" in low
+        or "not enough sources of verified time" in low
+    ):
+        return ("OBSERVER_TIMESTAMP_INSUFFICIENT", "5.2")
+
+    # CERT_EXPIRED catches "outside cert validity" (Rust phrasing),
+    # "certificate has expired" (certvalidator) and sigstore-python's chain
+    # build at the TSA time ("cert is not valid at validation time").
     if (
         ("outside" in low and "validity" in low)
         or "certificate has expired" in low
         or "certificate is expired" in low
+        or "not valid at validation time" in low
     ):
         return ("CERT_EXPIRED", "5.2")
 
@@ -405,7 +415,13 @@ def _classify(message: str) -> Tuple[str, str]:
     # root hash" (sigstore-python's phrasing) gets the right code.
     if "inclusion proof" in low and ("invalid" in low or "root hash" in low):
         return ("REKOR_INCLUSION_INVALID", "5.2")
-    if "rekor" in low or "checkpoint" in low:
+    # SET failure / Rekor v2 hashedrekord body not matching the envelope.
+    if (
+        "rekor" in low
+        or "checkpoint" in low
+        or "inclusion promise" in low
+        or "inconsistent with other materials" in low
+    ):
         return ("REKOR_INCLUSION_INVALID", "5.2")
 
     # sigstore-python hardcodes `len(tlog_entries) == 1`, emits
