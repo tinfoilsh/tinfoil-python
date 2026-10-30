@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import zlib
 from typing import Any, Tuple
 
 from ..attestation import verify_tdx_hardware
@@ -53,6 +54,8 @@ from ..attestation.cert_utils import parse_pem_chain
 from ..attestation.pck_extensions import extract_pck_extensions
 from ..attestation import intel_root_ca as _intel_root_mod
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 from datetime import datetime, timezone
 import contextlib
@@ -1059,6 +1062,17 @@ def _maybe_override_intel_root(pem: str | None):
         _intel_root_mod.INTEL_SGX_ROOT_CA_PEM = orig_pem
 
 
+def _check_crl_signed_by(crl: x509.CertificateRevocationList, issuer: x509.Certificate, what: str) -> None:
+    """Verify `crl` was signed by `issuer`; raises CollateralError otherwise."""
+    algo = crl.signature_hash_algorithm
+    if algo is None:
+        raise CollateralError(f"{what} has no signature hash algorithm")
+    try:
+        issuer.public_key().verify(crl.signature, crl.tbs_certlist_bytes, ec.ECDSA(algo))
+    except InvalidSignature:
+        raise CollateralError(f"{what} signature does not verify against {issuer.subject.rfc4514_string()}")
+
+
 def _evaluate_collateral(
     quote, pck_chain, collateral_in: dict, expiration_check_date_unix,
     policy: dict | None = None,
@@ -1094,12 +1108,20 @@ def _evaluate_collateral(
         root_crl_der = base64.b64decode(collateral_in.get("root_crl_der_b64") or "")
         pck_crl_obj = None
         root_crl_obj = None
+        # Injected CRLs bypass the lib's fetch path, which verifies CRL
+        # signatures from the response issuer chain; do it here instead.
         if pck_crl_der:
             crl = x509.load_der_x509_crl(pck_crl_der)
+            pck_crl_chain_pem = (collateral_in.get("pck_crl_issuer_chain_pem") or "").encode()
+            if pck_crl_chain_pem:
+                _coll._verify_crl_signature(crl, parse_pem_chain(pck_crl_chain_pem), "platform")
+            else:
+                _check_crl_signed_by(crl, pck_chain.intermediate_cert, "PCK CRL")
             pck_crl_obj = PckCrl(crl=crl, ca_type="platform",
                                  next_update=crl.next_update_utc or datetime.now(timezone.utc))
         if root_crl_der:
             crl = x509.load_der_x509_crl(root_crl_der)
+            _check_crl_signed_by(crl, _intel_root_mod.get_intel_root_ca(), "Root CA CRL")
             root_crl_obj = RootCrl(crl=crl,
                                    next_update=crl.next_update_utc or datetime.now(timezone.utc))
 
@@ -1218,6 +1240,9 @@ def _evaluate_collateral(
             return "INTERMEDIATE_REVOKED", "4.7.4", msg
         if "pck certificate" in msg_low and "revoked" in msg_low:
             return "PCK_REVOKED", "4.7.4", msg
+        # A root CRL that does not verify under the Intel root is untrusted root material.
+        if "root ca crl" in msg_low and "signature" in msg_low:
+            return "ROOT_CA_UNTRUSTED", "4.7.4", msg
         if "tcb info issuer chain" in msg_low and (
             "chain" in msg_low or "certificate" in msg_low or "root" in msg_low
         ):
@@ -1376,12 +1401,12 @@ def _cmd_verify_attestation_tdx_public(inp: dict[str, Any], policy: dict[str, An
     # pins are then enforced precisely by _enforce_extended_policy below.
     try:
         _tb = parse_tdx_quote(base64.b64decode(inp["quote_b64"])).td_quote_body
-        config_kwargs.setdefault("expected_td_attributes", _tb.td_attributes)
-        config_kwargs.setdefault("expected_xfam", _tb.xfam)
-        config_kwargs.setdefault("expected_minimum_tee_tcb_svn", _tb.tee_tcb_svn)
-        config_kwargs.setdefault("accepted_mr_seams", (_tb.mr_seam,))
-    except Exception:
-        pass
+    except Exception as e:
+        return ("QUOTE_FORMAT_UNSUPPORTED", "A.3", f"quote_b64 does not parse: {e}")
+    config_kwargs.setdefault("expected_td_attributes", _tb.td_attributes)
+    config_kwargs.setdefault("expected_xfam", _tb.xfam)
+    config_kwargs.setdefault("expected_minimum_tee_tcb_svn", _tb.tee_tcb_svn)
+    config_kwargs.setdefault("accepted_mr_seams", (_tb.mr_seam,))
 
     with (
         _maybe_override_intel_root(custom_root_pem),
@@ -1699,11 +1724,10 @@ def _enforce_sev_vcek_cross_checks(
     ]
     for name, oid, report_val in tcb_pairs:
         raw = ext_map.get(oid)
-        if raw is None:
-            continue
-        cert_val = _decode_int_ext_value(raw)
+        cert_val = _decode_int_ext_value(raw) if raw is not None else None
         if cert_val is None:
-            continue
+            return ("VCEK_TCB_MISMATCH", "3.4.3",
+                    f"VCEK is missing or has a malformed {name} extension ({oid.dotted_string})")
         if cert_val != report_val:
             return ("VCEK_TCB_MISMATCH", "3.4.3",
                     f"VCEK {name}={cert_val} != report.reported_tcb.{name}={report_val}")
@@ -1820,7 +1844,11 @@ def _run_verify_attestation_sev_inner(
         return ("REPORT_FORMAT_UNSUPPORTED", "3.1",
                 f"attestation_doc_b64 not valid base64: {e}")
     try:
-        report_bytes = _gzip.decompress(gz_bytes)
+        # Bounded: a report is 1184 bytes; refuse to inflate past 4 KiB.
+        _d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        report_bytes = _d.decompress(gz_bytes, 4096)
+        if _d.unconsumed_tail:
+            raise ValueError("decompressed report exceeds 4096 bytes")
     except Exception as e:
         return ("REPORT_FORMAT_UNSUPPORTED", "3.1",
                 f"gzip decompress failed: {e}")
@@ -2311,13 +2339,16 @@ def cmd_verify_ehbp_key_binding() -> int:
     except json.JSONDecodeError as e:
         sys.stderr.write(f"input is not valid JSON: {e}\n")
         return EXIT_BAD_INPUT
+    if not isinstance(inp, dict):
+        sys.stderr.write("input is not a JSON object\n")
+        return EXIT_BAD_INPUT
     if inp.get("schema_version") != "1":
         sys.stderr.write('input.schema_version != "1"\n')
         return EXIT_BAD_INPUT
 
     try:
         report_data = bytes.fromhex(inp.get("report_data_hex", ""))
-    except ValueError as e:
+    except (TypeError, ValueError) as e:
         sys.stderr.write(f"report_data_hex not valid hex: {e}\n")
         return EXIT_BAD_INPUT
 

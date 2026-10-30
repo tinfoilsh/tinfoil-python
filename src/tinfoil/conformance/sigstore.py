@@ -206,7 +206,7 @@ def verify_sigstore_bundle_with_policy(
 
 def _extract_multiplatform_measurement(predicate: dict) -> Measurement:
     snp = predicate.get("snp_measurement")
-    if not isinstance(snp, str):
+    if not isinstance(snp, str) or not snp:
         raise ValueError(
             "PREDICATE_MEASUREMENT_INVALID: SnpTdxMultiPlatformV1 "
             "missing snp_measurement"
@@ -214,12 +214,12 @@ def _extract_multiplatform_measurement(predicate: dict) -> Measurement:
     tdx = predicate.get("tdx_measurement") or {}
     rtmr1 = tdx.get("rtmr1")
     rtmr2 = tdx.get("rtmr2")
-    if not isinstance(rtmr1, str):
+    if not isinstance(rtmr1, str) or not rtmr1:
         raise ValueError(
             "PREDICATE_MEASUREMENT_INVALID: SnpTdxMultiPlatformV1 "
             "missing tdx_measurement.rtmr1"
         )
-    if not isinstance(rtmr2, str):
+    if not isinstance(rtmr2, str) or not rtmr2:
         raise ValueError(
             "PREDICATE_MEASUREMENT_INVALID: SnpTdxMultiPlatformV1 "
             "missing tdx_measurement.rtmr2"

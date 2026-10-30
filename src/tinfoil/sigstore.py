@@ -1,10 +1,14 @@
 from sigstore.verify import Verifier
-from sigstore.verify.policy import AllOf, OIDCIssuer, OIDCIssuerV2, GitHubWorkflowRepository, Certificate, _OIDC_GITHUB_WORKFLOW_REF_OID, _OIDC_ISSUER_V2_OID, ExtensionNotFound
+from sigstore.verify.policy import AllOf, OIDCIssuer, OIDCIssuerV2, GitHubWorkflowRepository, Certificate, _OIDC_GITHUB_WORKFLOW_REF_OID, ExtensionNotFound
+from cryptography.x509.oid import ObjectIdentifier
 from sigstore.models import Bundle
 from sigstore.errors import VerificationError
 from cryptography.x509 import PrecertificateSignedCertificateTimestamps
 import json
 import re
+
+# Fulcio OIDC issuer V2 extension; a fixed OID, so no reliance on sigstore-python's private constant.
+_OIDC_ISSUER_V2_OID = ObjectIdentifier("1.3.6.1.4.1.57264.1.8")
 
 from typing import List
 from .attestation import Measurement, PredicateType, HardwareMeasurement
