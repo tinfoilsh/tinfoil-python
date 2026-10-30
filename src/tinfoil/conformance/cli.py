@@ -1240,9 +1240,11 @@ def _evaluate_collateral(
             return "INTERMEDIATE_REVOKED", "4.7.4", msg
         if "pck certificate" in msg_low and "revoked" in msg_low:
             return "PCK_REVOKED", "4.7.4", msg
-        # A root CRL that does not verify under the Intel root is untrusted root material.
+        # CRLs whose signatures do not verify are untrusted collateral, not revocations.
         if "root ca crl" in msg_low and "signature" in msg_low:
             return "ROOT_CA_UNTRUSTED", "4.7.4", msg
+        if "pck crl" in msg_low and "signature" in msg_low:
+            return "PCK_CHAIN_INVALID", "4.7.4", msg
         if "tcb info issuer chain" in msg_low and (
             "chain" in msg_low or "certificate" in msg_low or "root" in msg_low
         ):
@@ -1847,8 +1849,8 @@ def _run_verify_attestation_sev_inner(
         # Bounded: a report is 1184 bytes; refuse to inflate past 4 KiB.
         _d = zlib.decompressobj(16 + zlib.MAX_WBITS)
         report_bytes = _d.decompress(gz_bytes, 4096)
-        if _d.unconsumed_tail:
-            raise ValueError("decompressed report exceeds 4096 bytes")
+        if not _d.eof or _d.unconsumed_tail:
+            raise ValueError("gzip stream is truncated or inflates past 4096 bytes")
     except Exception as e:
         return ("REPORT_FORMAT_UNSUPPORTED", "3.1",
                 f"gzip decompress failed: {e}")
