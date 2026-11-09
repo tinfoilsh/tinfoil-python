@@ -35,7 +35,8 @@ def fixtures_root() -> Path | None:
 
 def load_fixtures() -> list[tuple[str, dict[str, Any]]]:
     """Every fixture under the root. A JSON file outside ``_assets`` that is not
-    a fixture is an error rather than a silent omission."""
+    a fixture, or a root with no fixtures at all, is an error rather than a
+    silent omission."""
     root = fixtures_root()
     if root is None:
         return []
@@ -48,6 +49,8 @@ def load_fixtures() -> list[tuple[str, dict[str, Any]]]:
         if not isinstance(data, dict) or "stage" not in data or "input" not in data or "expected" not in data:
             raise pytest.UsageError(f"not a conformance fixture (no stage/input/expected): {path}")
         fixtures.append((str(path.relative_to(root)), data))
+    if not fixtures:
+        raise pytest.UsageError(f"no conformance fixtures under {root}")
     return fixtures
 
 
