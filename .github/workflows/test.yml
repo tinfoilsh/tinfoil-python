@@ -62,8 +62,11 @@ jobs:
 
       - name: Run integration tests
         # One interpreter is enough for the live checks; they exercise the
-        # service, not the interpreter.
-        if: matrix.python-version == '3.11'
+        # service, not the interpreter. Pull requests from forks have no
+        # access to the API key, so they skip the live checks.
+        if: >-
+          matrix.python-version == '3.11' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         env:
           TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
         run: uv run pytest -m "integration"
