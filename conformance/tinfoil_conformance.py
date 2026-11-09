@@ -25,7 +25,7 @@ import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, BinaryIO, TextIO
 
 # Exit codes are the cross-SDK contract.
@@ -142,7 +142,7 @@ class Input:
         if not isinstance(timestamp, int) or isinstance(timestamp, bool) or timestamp < 0:
             raise MalformedInput("verification_time_unix must be a non-negative integer")
         try:
-            verification_time = datetime.fromtimestamp(timestamp, timezone.utc) if timestamp else None
+            verification_time = datetime.fromtimestamp(timestamp, UTC) if timestamp else None
         except (OverflowError, OSError, ValueError) as err:
             raise MalformedInput(f"verification_time_unix is out of range: {err}") from err
 
@@ -243,7 +243,7 @@ def run(stage: str, raw: Any) -> Result:
     """
     try:
         return _run_stage(stage, raw)
-    except Exception:  # noqa: BLE001 - the exit code is the report
+    except Exception:  # the exit code is the report
         return Result({"stage": stage, "accepted": False}, EXIT_INTERNAL)
 
 
@@ -287,6 +287,6 @@ def _write(stream: TextIO, value: Any) -> None:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:], sys.stdin.buffer, sys.stdout, sys.stderr))
-    except Exception as err:  # noqa: BLE001 - the exit code is the report
+    except Exception as err:  # the exit code is the report
         sys.stderr.write(f"internal error: {err}\n")
         sys.exit(EXIT_INTERNAL)
