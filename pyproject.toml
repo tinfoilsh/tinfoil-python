@@ -39,6 +39,7 @@ markers = [
 ]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["conformance"]
 
 [tool.uv]
 exclude-newer = "4 days"
