@@ -11,7 +11,7 @@ name = "tinfoil"
 version = "0.15.0"
 description = "Python client for Tinfoil"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "openai>=3.26.0",
     "httpx>=0.28",
@@ -28,8 +28,10 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "mypy>=2.4.1",
     "pytest",
     "pytest-asyncio>=0.26.0",
+    "ruff>=0.17.4",
 ]
 
 [tool.pytest.ini_options]
@@ -40,6 +42,55 @@ markers = [
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["conformance"]
+
+# Lint and type checks cover the code written for the v3 rewrite. The modules
+# that the rewrite replaces are excluded until they are removed, so that the
+# checks never force churn in code that is on its way out.
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [
+    "*.md",
+    "example.py",
+    "src/tinfoil/__init__.py",
+    "src/tinfoil/_sdkinfo.py",
+    "src/tinfoil/attestation",
+    "src/tinfoil/client.py",
+    "src/tinfoil/github.py",
+    "src/tinfoil/sigstore.py",
+    "src/tinfoil/user_cache_secret.py",
+    "tests/*.py",
+]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "C4",       # comprehensions
+    "SIM",      # simplify
+    "PIE",      # misc
+    "PT",       # pytest style
+    "RUF",      # ruff's own
+    "ASYNC",    # blocking calls in async code
+    "S",        # bandit
+]
+ignore = [
+    "S101",     # assert is the test idiom and the contract check idiom
+    "S603",     # subprocess without shell, with an argument list, is the intended use
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+mypy_path = ["conformance"]
+files = ["conformance", "tests/conformance"]
 
 [tool.uv]
 exclude-newer = "4 days"
