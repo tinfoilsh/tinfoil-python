@@ -61,6 +61,12 @@ def test_capabilities_shape() -> None:
         {**_WELL_FORMED, "document_b64": "e30"},  # missing padding
         {**_WELL_FORMED, "nonce_hex": "AB"},  # upper case
         {**_WELL_FORMED, "nonce_hex": "abc"},  # odd length
+        {**_WELL_FORMED, "nonce_hex": " abcd"},  # whitespace
+        {**_WELL_FORMED, "nonce_hex": "0xabcd"},  # prefix
+        {**_WELL_FORMED, "repo": None},  # null is not an absent member
+        {**_WELL_FORMED, "verification_time_unix": None},
+        {**_WELL_FORMED, "signing_keys_pem": None},
+        {**_WELL_FORMED, "extra": 1},  # unknown member
         {**_WELL_FORMED, "amd_root_ca_pem": "x"},  # without ask_pem
         {**_WELL_FORMED, "ask_pem": "x"},  # without amd_root_ca_pem
         {**_WELL_FORMED, "verification_time_unix": "1"},
@@ -126,6 +132,11 @@ def test_input_decodes_every_member() -> None:
     assert decoded.timestamp_input == b"\x01"
 
 
+def test_zero_verification_time_selects_the_current_time() -> None:
+    decoded = adapter.Input.from_json({"schema_version": "1", "verification_time_unix": 0})
+    assert decoded.verification_time is None
+
+
 def test_absent_members_select_defaults() -> None:
     decoded = adapter.Input.from_json({"schema_version": "1"})
     assert decoded.document is None
@@ -144,8 +155,14 @@ def test_vector(fixture: dict[str, Any]) -> None:
     stage = fixture["stage"]
     expected = fixture["expected"]
     result = adapter.run(stage, fixture["input"])
+    expects_malformed = expected.get("code") == adapter.MALFORMED_INPUT
     if stage not in adapter.STAGES_SUPPORTED:
-        assert result.exit_code == adapter.EXIT_UNSUPPORTED
+        # Input decoding runs before the stage dispatch, so a fixture whose
+        # verdict is MALFORMED_INPUT may already be reported as such; any
+        # other input must come back as a clean unsupported.
+        if expects_malformed and result.exit_code == adapter.EXIT_MALFORMED:
+            return
+        assert result.exit_code == adapter.EXIT_UNSUPPORTED, result.output
         assert result.output == {"stage": stage, "accepted": False}
         return
     assert result.output["stage"] == stage
@@ -157,7 +174,8 @@ def test_vector(fixture: dict[str, Any]) -> None:
             if key in expected:
                 assert facts.get(key) == expected[key], key
     else:
-        assert result.exit_code in (adapter.EXIT_REJECTED, adapter.EXIT_MALFORMED), result.output
+        want_exit = adapter.EXIT_MALFORMED if expects_malformed else adapter.EXIT_REJECTED
+        assert result.exit_code == want_exit, result.output
         assert result.output["accepted"] is False
         if expected.get("code"):
             assert result.output["rejection"]["code"] == expected["code"]

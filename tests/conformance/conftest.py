@@ -19,15 +19,25 @@ _SIBLING = _REPO_ROOT.parent / "tinfoil-conformance" / "vectors" / "v3"
 
 
 def fixtures_root() -> Path | None:
+    """The vectors directory, or None when nothing is configured and no sibling exists.
+
+    A configured path that is not a directory is an error, so that a
+    misconfigured run cannot pass as skipped.
+    """
     configured = os.environ.get("TINFOIL_CONFORMANCE_FIXTURES")
     if configured:
-        return Path(configured)
+        root = Path(configured)
+        if not root.is_dir():
+            raise pytest.UsageError(f"TINFOIL_CONFORMANCE_FIXTURES is not a directory: {configured}")
+        return root
     return _SIBLING if _SIBLING.is_dir() else None
 
 
 def load_fixtures() -> list[tuple[str, dict[str, Any]]]:
+    """Every fixture under the root. A JSON file outside ``_assets`` that is not
+    a fixture is an error rather than a silent omission."""
     root = fixtures_root()
-    if root is None or not root.is_dir():
+    if root is None:
         return []
     fixtures = []
     for path in sorted(root.rglob("*.json")):
@@ -35,8 +45,8 @@ def load_fixtures() -> list[tuple[str, dict[str, Any]]]:
             continue
         with path.open("rb") as handle:
             data = json.load(handle)
-        if not isinstance(data, dict) or "stage" not in data or "input" not in data:
-            continue
+        if not isinstance(data, dict) or "stage" not in data or "input" not in data or "expected" not in data:
+            raise pytest.UsageError(f"not a conformance fixture (no stage/input/expected): {path}")
         fixtures.append((str(path.relative_to(root)), data))
     return fixtures
 

@@ -8,10 +8,12 @@ Test tooling, not part of the published package. Run from a source checkout:
 The exit code is the verdict that the suite reads; stdout is diagnostic. The
 contract is tinfoil-conformance ``docs/CONFORMANCE_ADAPTER_SPEC.md`` v1.2.0.
 
-Every stage decodes its Input first, so malformed input is reported as such
+Every v3 stage decodes its Input first, so malformed input is reported as such
 (exit 30) before anything else. A stage that this adapter does not implement
 yet exits 20 (unsupported), never with a verdict. Stages are wired in as the
-verifier modules that they drive land.
+verifier modules that they drive land. ``live-verify`` and ``capture`` take
+their own arguments, not an Input, and exit 20 without reading stdin until
+they are implemented.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -64,6 +67,27 @@ QUOTE_REJECTED = "QUOTE_REJECTED"
 POLICY_REJECTED = "POLICY_REJECTED"
 MALFORMED_INPUT = "MALFORMED_INPUT"
 
+# Every member the Input schema defines; anything else is malformed.
+_INPUT_MEMBERS = frozenset(
+    {
+        "schema_version",
+        "document_b64",
+        "nonce_hex",
+        "repo",
+        "amd_root_ca_pem",
+        "ask_pem",
+        "intel_sgx_root_pem",
+        "sigstore_trusted_root_json_b64",
+        "verification_time_unix",
+        "bundle_json_b64",
+        "signing_keys_pem",
+        "artifact_digest_hex",
+        "timestamp_response_b64",
+        "timestamp_input_b64",
+    }
+)
+_LOWER_HEX = re.compile(r"^[0-9a-f]*$")
+
 
 class MalformedInput(ValueError):
     """The adapter input itself did not parse."""
@@ -103,6 +127,9 @@ class Input:
             raise MalformedInput("input is not a JSON object")
         if data.get("schema_version") != SCHEMA_VERSION:
             raise MalformedInput(f"schema_version must be {SCHEMA_VERSION!r}")
+        unknown = sorted(set(data) - _INPUT_MEMBERS)
+        if unknown:
+            raise MalformedInput(f"unknown input members: {', '.join(map(str, unknown))}")
 
         amd_root, ask = _string(data, "amd_root_ca_pem"), _string(data, "ask_pem")
         if bool(amd_root) != bool(ask):
@@ -110,9 +137,8 @@ class Input:
         intel_root = _string(data, "intel_sgx_root_pem")
         sigstore_root = _string(data, "sigstore_trusted_root_json_b64")
 
+        # Absent or 0 selects the current time, as the Input schema says.
         timestamp = data.get("verification_time_unix", 0)
-        if timestamp is None:
-            timestamp = 0
         if not isinstance(timestamp, int) or isinstance(timestamp, bool) or timestamp < 0:
             raise MalformedInput("verification_time_unix must be a non-negative integer")
         try:
@@ -121,8 +147,6 @@ class Input:
             raise MalformedInput(f"verification_time_unix is out of range: {err}") from err
 
         keys = data.get("signing_keys_pem", [])
-        if keys is None:
-            keys = []
         if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
             raise MalformedInput("signing_keys_pem must be an array of strings")
 
@@ -149,9 +173,8 @@ class Input:
 
 
 def _string(data: Mapping[str, Any], name: str) -> str:
+    """An optional string member; absent reads as empty, ``null`` is malformed."""
     value = data.get(name, "")
-    if value is None:
-        return ""
     if not isinstance(value, str):
         raise MalformedInput(f"{name} must be a string")
     return value
@@ -169,13 +192,10 @@ def _base64(value: str, name: str) -> bytes:
 
 
 def _hex(value: str, name: str) -> bytes:
-    """Lowercase hex of even length."""
-    if value != value.lower() or len(value) % 2:
+    """Lowercase hex digits only, of even length; no whitespace or prefix."""
+    if not _LOWER_HEX.fullmatch(value) or len(value) % 2:
         raise MalformedInput(f"{name} must be lowercase hex of even length")
-    try:
-        return bytes.fromhex(value)
-    except ValueError as err:
-        raise MalformedInput(f"{name} is not valid hex: {err}") from err
+    return bytes.fromhex(value)
 
 
 def _lower_hex(value: str, name: str) -> str:
