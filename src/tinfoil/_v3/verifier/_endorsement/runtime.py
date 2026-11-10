@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from tinfoil._v3.verifier import _semver
+from tinfoil._v3.verifier._document.collateral.runtime import RUNTIME_REPO, RuntimeReference
 from tinfoil._v3.verifier._document.collateral.runtime import Runtime as RuntimeCollateral
-from tinfoil._v3.verifier._document.collateral.runtime import RuntimeReference
+from tinfoil._v3.verifier._endorsement._common import ProvenanceError, authenticated_artifact
 from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact
-from tinfoil._v3.verifier._runtime import Manifest
-from tinfoil._v3.verifier._sigstore.bundle import Subject
+from tinfoil._v3.verifier._runtime import Manifest, ManifestError, parse_manifest
+from tinfoil._v3.verifier._sigstore.bundle import IN_TOTO_STATEMENT_V1, Subject
+from tinfoil._v3.verifier._sigstore.certificate import (
+    GITHUB_OIDC_ISSUER,
+    RUNNER_ENVIRONMENT_GITHUB_HOSTED,
+    SigningIdentity,
+    workflow_identity_pattern,
+)
 
 if TYPE_CHECKING:
     from tinfoil._v3.verifier._endorsement.provenance import ProvenanceClient
@@ -35,13 +43,13 @@ class RuntimeArtifact:
 
 def runtime_subject_name(tag: str) -> str:
     """``tinfoil-inference-<tag>-manifest.json``."""
-    raise NotImplementedError
+    return RUNTIME_SUBJECT_PREFIX + tag + RUNTIME_SUBJECT_SUFFIX
 
 
 def runtime_identity(release_tag: str) -> re.Pattern[str]:
     """The SAN pattern of the runtime release workflow: ``release.yml`` of the runtime repository at
     ``refs/tags/<release_tag>``."""
-    raise NotImplementedError
+    return workflow_identity_pattern(RUNTIME_REPO, r"release\.yml", "refs/tags/" + re.escape(release_tag))
 
 
 def authenticate_runtime(
@@ -58,10 +66,50 @@ def authenticate_runtime(
     pinned runtime repository and organization, its ref is the release tag
     and its commit is well formed.
     """
-    raise NotImplementedError
+    if material.reference != expected:
+        raise RuntimeProvenanceError("runtime collateral does not match the endorsed config's runtime pin")
+    try:
+        manifest = parse_manifest(material.manifest, expected)
+    except ManifestError as err:
+        raise RuntimeProvenanceError(str(err)) from err
+    subject = runtime_subject_name(expected.tag)
+    release_tag = _semver.canonical(expected.tag)
+    identity = SigningIdentity(
+        san=runtime_identity(release_tag),
+        issuer=GITHUB_OIDC_ISSUER,
+        runner_environment=RUNNER_ENVIRONMENT_GITHUB_HOSTED,
+    )
+    try:
+        verified, statement = client.verify_bundle_with_identity(material.bundle, identity, expected.digest, subject)
+    except ProvenanceError as err:
+        raise RuntimeProvenanceError(f"verifying runtime provenance: {err}") from err
+    if statement.type != IN_TOTO_STATEMENT_V1 or statement.predicate_type != SLSA_PROVENANCE_V1:
+        raise RuntimeProvenanceError("runtime provenance must use SLSA v1")
+    try:
+        artifact = authenticated_artifact(verified, statement, expected.repo, release_tag, expected.digest, "runtime")
+    except ProvenanceError as err:
+        raise RuntimeProvenanceError(str(err)) from err
+    return RuntimeArtifact(artifact=replace(artifact, subject_name=subject), manifest=manifest)
 
 
 def enforce_artifact_subject(subjects: Sequence[Subject], name: str, digest: str) -> None:
     """Require exactly one subject named ``name`` whose ``sha256`` digest equals ``digest`` (case-insensitively);
     with an empty ``name``, require the first subject's digest to match instead."""
-    raise NotImplementedError
+    if name == "":
+        if not subjects:
+            raise RuntimeProvenanceError("in-toto statement has no subject")
+        got = subjects[0].digest.get("sha256", "")
+        if got.lower() != digest.lower():
+            raise RuntimeProvenanceError(
+                f"subject[0] digest {got!r} does not match expected artifact digest {digest!r}"
+            )
+        return
+    matches = 0
+    for subject in subjects:
+        if subject.name != name:
+            continue
+        if subject.digest.get("sha256", "").lower() != digest.lower():
+            raise RuntimeProvenanceError("runtime provenance subject digest does not match")
+        matches += 1
+    if matches != 1:
+        raise RuntimeProvenanceError("runtime provenance requires exactly one matching manifest subject")
