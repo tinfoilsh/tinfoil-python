@@ -29,9 +29,14 @@ from datetime import UTC, datetime
 from typing import Any, BinaryIO, TextIO
 
 from tinfoil._v3.verifier._document import document
-from tinfoil._v3.verifier._endorsement.time import DEFAULT_FUTURE_SKEW, DEFAULT_MAX_AGE
+from tinfoil._v3.verifier._document.collateral.collateral import NotFoundError
+from tinfoil._v3.verifier._endorsement import approval, provenance, reference
+from tinfoil._v3.verifier._endorsement import time as approval_time
+from tinfoil._v3.verifier._policy import ARTIFACT_FORMAT
+from tinfoil._v3.verifier._sigstore import bundle as sigstore_bundle
 from tinfoil._v3.verifier._sigstore import timestamp as sigstore_timestamp
 from tinfoil._v3.verifier._sigstore import trusted_root as sigstore_trusted_root
+from tinfoil._v3.verifier._x509 import certificate as x509_certificate
 
 # Exit codes are the cross-SDK contract.
 EXIT_ACCEPTED = 0
@@ -64,7 +69,13 @@ ALL_STAGES = (
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
 )
-STAGES_SUPPORTED: tuple[str, ...] = (STAGE_CHECK_ENVELOPE, STAGE_VERIFY_TIMESTAMP)
+STAGES_SUPPORTED: tuple[str, ...] = (
+    STAGE_CHECK_ENVELOPE,
+    STAGE_AUTHENTICATE_PROVENANCE,
+    STAGE_ASSEMBLE_POLICY,
+    STAGE_AUTHENTICATE_APPROVAL,
+    STAGE_VERIFY_TIMESTAMP,
+)
 
 ENVELOPE_REJECTED = "ENVELOPE_REJECTED"
 PROVENANCE_REJECTED = "PROVENANCE_REJECTED"
@@ -223,7 +234,7 @@ def capabilities() -> dict[str, Any]:
         "v3": {
             "supported": bool(STAGES_SUPPORTED),
             "stages_supported": list(STAGES_SUPPORTED),
-            "synthetic_roots": {"amd": False, "intel": False, "sigstore": False},
+            "synthetic_roots": {"amd": False, "intel": False, "sigstore": True},
             "freshness_enforced": True,
             "live_verify": False,
             "channel_binding": "tls-spki",
@@ -263,10 +274,120 @@ def _run_stage(stage: str, raw: Any) -> Result:
         return _malformed(stage)
     if stage == STAGE_CHECK_ENVELOPE:
         return _check_envelope(decoded)
+    if stage == STAGE_AUTHENTICATE_PROVENANCE:
+        return _authenticate_provenance(decoded)
+    if stage == STAGE_ASSEMBLE_POLICY:
+        return _assemble_policy(decoded)
+    if stage == STAGE_AUTHENTICATE_APPROVAL:
+        return _authenticate_approval(decoded)
     if stage == STAGE_VERIFY_TIMESTAMP:
         return _verify_timestamp(decoded)
     # Further stage handlers are added here as the modules that they drive land.
     return _unsupported(stage)
+
+
+def _trusted_root(decoded: Input) -> sigstore_trusted_root.TrustedRoot:
+    """The injected Sigstore trusted root, or the embedded one. Raises TrustedRootError."""
+    if decoded.sigstore_trusted_root is None:
+        return sigstore_trusted_root.embedded_trusted_root()
+    return sigstore_trusted_root.parse_trusted_root(decoded.sigstore_trusted_root)
+
+
+def _decode_document(decoded: Input) -> document.Document:
+    """The document decoded without the challenge bindings, which the block stages do not check.
+
+    Raises MalformedInput for a document that is absent or does not
+    decode: the stage never reaches the layer that it isolates.
+    """
+    try:
+        return document.decode_unbound(decoded.document or b"")
+    except document.DocumentError as err:
+        raise MalformedInput(str(err)) from err
+
+
+def _authenticate_provenance(decoded: Input) -> Result:
+    """The code bundle against the pinned repository: identity, digest and predicate.
+
+    An injected trusted root that does not parse or a document that does
+    not decode is malformed input. A document without a code entry, an
+    invalid repository reference and every verification failure are
+    provenance rejections.
+    """
+    stage = STAGE_AUTHENTICATE_PROVENANCE
+    try:
+        client = provenance.ProvenanceClient(_trusted_root(decoded))
+        parsed = _decode_document(decoded)
+    except (sigstore_trusted_root.TrustedRootError, MalformedInput):
+        return _malformed(stage)
+    try:
+        code_ref = parsed.sigstore_code()
+        pin = reference.parse_reference(decoded.repo)
+        code = client.authenticate_code(code_ref.bundle, pin, code_ref.tag, code_ref.digest)
+    except (NotFoundError, ValueError):
+        return _rejected(stage, PROVENANCE_REJECTED)
+    outputs = {
+        "code_digest": code.artifact.digest,
+        # The release's own predicate: SNP launch, then TDX RTMR1 and RTMR2.
+        "code_measurement": {
+            "type": provenance.MULTI_PLATFORM_PREDICATE_TYPE,
+            "registers": [_register(code.sevsnp.launch), _register(code.tdx.rtmr1), _register(code.tdx.rtmr2)],
+        },
+    }
+    return Result({"stage": stage, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
+
+
+def _register(register: bytes | None) -> str:
+    """A register as lowercase hex, "" when the release leaves it unconstrained."""
+    return "" if register is None else register.hex()
+
+
+def _assemble_policy(decoded: Input) -> Result:
+    """The platform-endorsements bundle: identity, digest and a fail-closed parse of the policy artifact."""
+    stage = STAGE_ASSEMBLE_POLICY
+    try:
+        client = provenance.ProvenanceClient(_trusted_root(decoded))
+        parsed = _decode_document(decoded)
+    except (sigstore_trusted_root.TrustedRootError, MalformedInput):
+        return _malformed(stage)
+    try:
+        platform_ref = parsed.sigstore_platform()
+        client.authenticate_platform_endorsements(
+            platform_ref.bundle, platform_ref.repo, platform_ref.tag, platform_ref.digest, ARTIFACT_FORMAT
+        )
+    except (NotFoundError, ValueError):
+        return _rejected(stage, PROVENANCE_REJECTED)
+    return Result({"stage": stage, "accepted": True}, EXIT_ACCEPTED)
+
+
+def _authenticate_approval(decoded: Input) -> Result:
+    """A key-signed approval bundle under the keys that the input pins.
+
+    An injected trusted root that does not parse, an empty key set, a PEM
+    block that is not a public key and a key set that the verifier cannot
+    use (a repeated or unsupported key) are malformed input. A trusted
+    root without transparency logs, a bundle that does not parse and every
+    verification failure are provenance rejections.
+    """
+    stage = STAGE_AUTHENTICATE_APPROVAL
+    try:
+        root = _trusted_root(decoded)
+        if not decoded.signing_keys_pem:
+            raise MalformedInput("at least one signing key is required")
+        keys = [x509_certificate.load_public_key_pem(pem) for pem in decoded.signing_keys_pem]
+    except (sigstore_trusted_root.TrustedRootError, x509_certificate.X509Error, MalformedInput):
+        return _malformed(stage)
+    if not root.tlogs:
+        return _rejected(stage, PROVENANCE_REJECTED)
+    try:
+        verifier = approval.ApprovalVerifier(root, keys)
+    except approval.ApprovalError:
+        return _malformed(stage)
+    try:
+        bundle = sigstore_bundle.parse_bundle_bytes(decoded.bundle_json or b"")
+        hint = verifier.verify(bundle, bytes.fromhex(decoded.artifact_digest))
+    except (sigstore_bundle.BundleError, approval.ApprovalError):
+        return _rejected(stage, PROVENANCE_REJECTED)
+    return Result({"stage": stage, "accepted": True, "outputs": {"signing_key_hint": hint}}, EXIT_ACCEPTED)
 
 
 def _check_envelope(decoded: Input) -> Result:
@@ -286,27 +407,21 @@ def _verify_timestamp(decoded: Input) -> Result:
 
     The response, the input and a non-zero verification time are required;
     an injected trusted root that does not parse is malformed input. Every
-    verification failure, including a genTime outside the window, is a
+    verification failure, including a genTime outside the default approval
+    window (the maximum age and future skew of the time policy), is a
     provenance rejection.
     """
     if decoded.timestamp_response is None or decoded.timestamp_input is None or decoded.verification_time is None:
         return _malformed(STAGE_VERIFY_TIMESTAMP)
     try:
-        root = (
-            sigstore_trusted_root.parse_trusted_root(decoded.sigstore_trusted_root)
-            if decoded.sigstore_trusted_root is not None
-            else sigstore_trusted_root.embedded_trusted_root()
-        )
-    except sigstore_trusted_root.TrustedRootError:
+        root = _trusted_root(decoded)
+        policy = approval_time.new_time_policy(decoded.verification_time)
+    except (sigstore_trusted_root.TrustedRootError, approval_time.TimePolicyError):
         return _malformed(STAGE_VERIFY_TIMESTAMP)
     try:
         gen_time = sigstore_timestamp.verify_timestamp(root, decoded.timestamp_response, decoded.timestamp_input)
-    except sigstore_timestamp.TimestampError:
-        return _rejected(STAGE_VERIFY_TIMESTAMP, PROVENANCE_REJECTED)
-    # The appraisal window of the stage: genTime may trail the clock by the
-    # verifier's maximum approval age and lead it by its future skew.
-    now = decoded.verification_time
-    if not now - DEFAULT_MAX_AGE <= gen_time <= now + DEFAULT_FUTURE_SKEW:
+        policy.verify(gen_time)
+    except (sigstore_timestamp.TimestampError, approval_time.TimePolicyError):
         return _rejected(STAGE_VERIFY_TIMESTAMP, PROVENANCE_REJECTED)
     outputs = {"timestamp": gen_time.strftime("%Y-%m-%dT%H:%M:%SZ")}
     return Result({"stage": STAGE_VERIFY_TIMESTAMP, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)

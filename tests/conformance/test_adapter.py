@@ -7,6 +7,8 @@ nothing else. The CLI is exercised once end to end as a subprocess.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import json
 import subprocess
@@ -211,3 +213,279 @@ def test_main_without_arguments_is_usage_error() -> None:
     code = adapter.main([], io.BytesIO(b""), io.StringIO(), stderr)
     assert code == adapter.EXIT_MALFORMED
     assert "usage" in stderr.getvalue()
+
+
+# --- the provenance, policy and approval stages over a synthetic Sigstore world ----------------
+
+
+def _world_inputs() -> tuple[Any, dict[str, Any]]:
+    from tests.v3.sigstore_world import World
+
+    world = World()
+    return world, {"schema_version": "1", "sigstore_trusted_root_json_b64": _b64(world.trusted_root_json())}
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+def _document_with(entries: list[dict[str, Any]]) -> str:
+    from tests.v3 import document_builder
+
+    _, raw = document_builder.build(document_builder.test_nonce(), collateral_entries=entries)
+    return _b64(raw)
+
+
+def _code_entry(world: Any, repo: str, tag: str) -> tuple[dict[str, Any], str, dict[str, str]]:
+    from tests.v3.sigstore_world import FulcioIdentity, statement
+
+    digest = "3b" * 32
+    registers = {"snp": "aa" * 48, "rtmr1": "bb" * 48, "rtmr2": "cc" * 48}
+    predicate = {
+        "snp_measurement": registers["snp"],
+        "tdx_measurement": {"rtmr1": registers["rtmr1"], "rtmr2": registers["rtmr2"]},
+        "vm_shape": {"cpus": 8, "memory_mb": 32768, "gpus": 1, "disks": 2},
+    }
+    payload = statement(
+        [{"name": "cip", "digest": {"sha256": digest}}],
+        "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1",
+        predicate,
+    )
+    identity = FulcioIdentity(
+        san=f"https://github.com/{repo}/.github/workflows/release.yml@refs/tags/{tag}",
+        source_repository_ref=f"refs/tags/{tag}",
+    )
+    entry = {
+        "id": "sigstore-code",
+        "role": "reference-values",
+        "format": "https://tinfoil.sh/collateral/sigstore-code/v1",
+        "subjects": [],
+        "data": {"repo": repo, "tag": tag, "digest": digest, "sigstore_bundle": world.fulcio_bundle(payload, identity)},
+    }
+    return entry, digest, registers
+
+
+def test_authenticate_provenance_stage() -> None:
+    world, base = _world_inputs()
+    repo = "tinfoilsh/confidential-inference-proxy"
+    entry, digest, registers = _code_entry(world, repo, "v1.0.0")
+    accepted = {**base, "document_b64": _document_with([entry]), "repo": repo}
+    result = adapter.run(adapter.STAGE_AUTHENTICATE_PROVENANCE, accepted)
+    assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
+    assert result.output["outputs"] == {
+        "code_digest": digest,
+        "code_measurement": {
+            "type": "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1",
+            "registers": [registers["snp"], registers["rtmr1"], registers["rtmr2"]],
+        },
+    }
+    # The pins in the reference take precedence over the document's hints.
+    assert adapter.run(adapter.STAGE_AUTHENTICATE_PROVENANCE, {**accepted, "repo": repo + "@v1.0.0"}).exit_code == 0
+    for name, raw, want in [
+        ("no document", {**base, "repo": repo}, adapter.EXIT_MALFORMED),
+        ("undecodable document", {**accepted, "document_b64": _b64(b"{")}, adapter.EXIT_MALFORMED),
+        ("unparseable root", {**accepted, "sigstore_trusted_root_json_b64": _b64(b"{}")}, adapter.EXIT_MALFORMED),
+        ("no code entry", {**accepted, "document_b64": _document_with([])}, adapter.EXIT_REJECTED),
+        ("bad reference", {**accepted, "repo": "no-slash"}, adapter.EXIT_REJECTED),
+        ("other repository", {**accepted, "repo": "tinfoilsh/other"}, adapter.EXIT_REJECTED),
+        ("other tag", {**accepted, "repo": repo + "@v2.0.0"}, adapter.EXIT_REJECTED),
+        ("other digest", {**accepted, "repo": repo + "@sha256:" + "ff" * 32}, adapter.EXIT_REJECTED),
+        (
+            "unknown root",
+            {**accepted, "sigstore_trusted_root_json_b64": _world_inputs()[1]["sigstore_trusted_root_json_b64"]},
+            adapter.EXIT_REJECTED,
+        ),
+    ]:
+        result = adapter.run(adapter.STAGE_AUTHENTICATE_PROVENANCE, raw)
+        assert result.exit_code == want, (name, result.output)
+        code = "MALFORMED_INPUT" if want == adapter.EXIT_MALFORMED else "PROVENANCE_REJECTED"
+        assert result.output == {
+            "stage": adapter.STAGE_AUTHENTICATE_PROVENANCE,
+            "accepted": False,
+            "rejection": {"code": code},
+        }
+
+
+def test_assemble_policy_stage() -> None:
+    from pathlib import Path
+
+    from tests.v3.sigstore_world import FulcioIdentity, statement
+
+    world, base = _world_inputs()
+    artifact = (Path(__file__).resolve().parents[1] / "v3" / "testdata" / "platform-endorsements.json").read_bytes()
+    digest = hashlib.sha256(artifact).hexdigest()
+    payload = (
+        b'{"_type":"https://in-toto.io/Statement/v1","subject":[{"name":"platform-endorsements.json","digest":{"sha256":"'
+        + digest.encode()
+        + b'"}}],"predicateType":"https://tinfoil.sh/predicate/platform-endorsements/v1","predicate":'
+        + artifact
+        + b"}"
+    )
+    identity = FulcioIdentity(
+        san="https://github.com/tinfoilsh/cvmimage/.github/workflows/platform-release.yml@refs/tags/platform-v1.0.0",
+        source_repository_ref="refs/tags/platform-v1.0.0",
+        source_repository_identifier="902195777",
+        source_repository_owner_identifier="168487856",
+    )
+
+    def entry(bundle: dict[str, Any], repo: str = "tinfoilsh/cvmimage") -> dict[str, Any]:
+        return {
+            "id": "sigstore-platform",
+            "role": "reference-values",
+            "format": "https://tinfoil.sh/collateral/sigstore-platform/v1",
+            "subjects": [],
+            "data": {"repo": repo, "tag": "platform-v1.0.0", "digest": digest, "sigstore_bundle": bundle},
+        }
+
+    accepted = {**base, "document_b64": _document_with([entry(world.fulcio_bundle(payload, identity))]), "repo": "x/y"}
+    result = adapter.run(adapter.STAGE_ASSEMBLE_POLICY, accepted)
+    assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
+    assert result.output == {"stage": adapter.STAGE_ASSEMBLE_POLICY, "accepted": True}
+    other_workflow = FulcioIdentity(**{**identity.__dict__, "san": identity.san.replace("platform-release", "release")})
+    for name, raw, want in [
+        ("no document", base, adapter.EXIT_MALFORMED),
+        ("undecodable document", {**accepted, "document_b64": _b64(b"nope")}, adapter.EXIT_MALFORMED),
+        ("no platform entry", {**accepted, "document_b64": _document_with([])}, adapter.EXIT_REJECTED),
+        (
+            "wrong repo",
+            {**accepted, "document_b64": _document_with([entry(world.fulcio_bundle(payload, identity), "o/r")])},
+            adapter.EXIT_REJECTED,
+        ),
+        (
+            "other workflow",
+            {**accepted, "document_b64": _document_with([entry(world.fulcio_bundle(payload, other_workflow))])},
+            adapter.EXIT_REJECTED,
+        ),
+        (
+            "v2 statement",
+            {
+                **accepted,
+                "document_b64": _document_with(
+                    [entry(world.fulcio_bundle(payload.replace(b"endorsements/v1", b"endorsements/v2", 1), identity))]
+                ),
+            },
+            adapter.EXIT_REJECTED,
+        ),
+    ]:
+        result = adapter.run(adapter.STAGE_ASSEMBLE_POLICY, raw)
+        assert result.exit_code == want, (name, result.output)
+    assert statement is not None
+
+
+def test_authenticate_approval_stage() -> None:
+    from tests.v3 import pki
+    from tests.v3.sigstore_world import statement
+
+    world, base = _world_inputs()
+    digest = "ab" * 32
+    payload = statement(
+        [{"name": "artifact", "digest": {"sha256": digest}}], "https://tinfoil.sh/predicate/test/v1", {}
+    )
+    bundle = json.dumps(world.keyed_bundle(payload)).encode()
+    accepted = {
+        **base,
+        "bundle_json_b64": _b64(bundle),
+        "signing_keys_pem": [world.public_key_pem],
+        "artifact_digest_hex": digest,
+    }
+    result = adapter.run(adapter.STAGE_AUTHENTICATE_APPROVAL, accepted)
+    assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
+    assert result.output["outputs"] == {"signing_key_hint": world.hint}
+    # Document members are not read by this stage, even undecodable ones.
+    assert (
+        adapter.run(
+            adapter.STAGE_AUTHENTICATE_APPROVAL, {**accepted, "document_b64": "%%%", "nonce_hex": "zz"}
+        ).exit_code
+        == adapter.EXIT_MALFORMED
+    )
+    assert (
+        adapter.run(
+            adapter.STAGE_AUTHENTICATE_APPROVAL, {**accepted, "document_b64": "e30=", "nonce_hex": "zz"}
+        ).exit_code
+        == adapter.EXIT_MALFORMED
+    )
+    assert (
+        adapter.run(
+            adapter.STAGE_AUTHENTICATE_APPROVAL, {**accepted, "document_b64": "e30=", "nonce_hex": "ab"}
+        ).exit_code
+        == adapter.EXIT_ACCEPTED
+    )
+    other = _world_inputs()[0]
+    for name, raw, want in [
+        (
+            "malformed key",
+            {**accepted, "signing_keys_pem": ["-----BEGIN PUBLIC KEY-----\nbm90IGEga2V5\n-----END PUBLIC KEY-----\n"]},
+            adapter.EXIT_MALFORMED,
+        ),
+        ("no keys", {**accepted, "signing_keys_pem": []}, adapter.EXIT_MALFORMED),
+        ("repeated key", {**accepted, "signing_keys_pem": [world.public_key_pem] * 2}, adapter.EXIT_MALFORMED),
+        ("unsupported key", {**accepted, "signing_keys_pem": [pki.public_pem(pki.p384())]}, adapter.EXIT_MALFORMED),
+        ("unparseable root", {**accepted, "sigstore_trusted_root_json_b64": _b64(b"[]")}, adapter.EXIT_MALFORMED),
+        (
+            "root without logs",
+            {**accepted, "sigstore_trusted_root_json_b64": _b64(world.trusted_root_json(tlogs=False))},
+            adapter.EXIT_REJECTED,
+        ),
+        (
+            "no bundle",
+            {**base, "signing_keys_pem": [world.public_key_pem], "artifact_digest_hex": digest},
+            adapter.EXIT_REJECTED,
+        ),
+        ("unparseable bundle", {**accepted, "bundle_json_b64": _b64(b"{")}, adapter.EXIT_REJECTED),
+        ("wrong digest", {**accepted, "artifact_digest_hex": "cd" * 32}, adapter.EXIT_REJECTED),
+        ("no digest", {**accepted, "artifact_digest_hex": ""}, adapter.EXIT_REJECTED),
+        ("unpinned key", {**accepted, "signing_keys_pem": [other.public_key_pem]}, adapter.EXIT_REJECTED),
+        (
+            "unknown log",
+            {**accepted, "sigstore_trusted_root_json_b64": _b64(other.trusted_root_json())},
+            adapter.EXIT_REJECTED,
+        ),
+    ]:
+        result = adapter.run(adapter.STAGE_AUTHENTICATE_APPROVAL, raw)
+        assert result.exit_code == want, (name, result.output)
+        code = "MALFORMED_INPUT" if want == adapter.EXIT_MALFORMED else "PROVENANCE_REJECTED"
+        assert result.output["rejection"] == {"code": code}, name
+
+
+def test_verify_timestamp_stage_uses_the_approval_window() -> None:
+    from datetime import timedelta
+
+    world, base = _world_inputs()
+    data = b"tinfoil-approval-core"
+    gen_time = world.now - timedelta(hours=1)
+
+    def raw(now: Any) -> dict[str, Any]:
+        return {
+            **base,
+            "timestamp_response_b64": _b64(world.timestamp(data, gen_time)),
+            "timestamp_input_b64": _b64(data),
+            "verification_time_unix": int(now.timestamp()),
+        }
+
+    result = adapter.run(adapter.STAGE_VERIFY_TIMESTAMP, raw(world.now))
+    assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
+    assert result.output["outputs"] == {"timestamp": gen_time.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    assert (
+        adapter.run(adapter.STAGE_VERIFY_TIMESTAMP, raw(gen_time + timedelta(days=7))).exit_code
+        == adapter.EXIT_ACCEPTED
+    )
+    assert (
+        adapter.run(adapter.STAGE_VERIFY_TIMESTAMP, raw(gen_time + timedelta(days=7, seconds=1))).exit_code
+        == adapter.EXIT_REJECTED
+    )
+    assert (
+        adapter.run(adapter.STAGE_VERIFY_TIMESTAMP, raw(gen_time - timedelta(minutes=5))).exit_code
+        == adapter.EXIT_ACCEPTED
+    )
+    assert (
+        adapter.run(adapter.STAGE_VERIFY_TIMESTAMP, raw(gen_time - timedelta(minutes=5, seconds=1))).exit_code
+        == adapter.EXIT_REJECTED
+    )
+    assert (
+        adapter.run(adapter.STAGE_VERIFY_TIMESTAMP, {**raw(world.now), "timestamp_input_b64": _b64(b"other")}).exit_code
+        == adapter.EXIT_REJECTED
+    )
+    assert (
+        adapter.run(adapter.STAGE_VERIFY_TIMESTAMP, {**raw(world.now), "verification_time_unix": 0}).exit_code
+        == adapter.EXIT_MALFORMED
+    )
