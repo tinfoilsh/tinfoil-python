@@ -6,13 +6,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from tinfoil._v3.verifier._measurement import Expected
-from tinfoil._v3.verifier._policy import Artifact
-from tinfoil._v3.verifier._quote.resolve import ResolvedValues
+from tinfoil._v3.verifier._measurement import Expected, ExpectedSEVSNP, ExpectedTDX, parse_register
+from tinfoil._v3.verifier._policy import PLATFORM_SEV_SNP, PLATFORM_TDX, Artifact
+from tinfoil._v3.verifier._quote.resolve import (
+    MR_CONFIG_ID_SIZE,
+    ResolvedValues,
+    apply_pins,
+    assembly_error,
+    resolve_policy,
+)
 from tinfoil._v3.verifier._runtime import Measurements
 
 if TYPE_CHECKING:
     from tinfoil._v3.verifier._quote.quote import Authenticated
+
+_CONFIG_HASH_SIZE = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,4 +42,45 @@ def resolve_config(refs: ConfigReferenceValues, quote: Authenticated, pins: Expe
     the config hash becomes MR_CONFIG_ID and the code is the manifest's
     five registers. Then the pins apply.
     """
-    raise NotImplementedError
+    if refs.runtime is None:
+        raise assembly_error("complete runtime endorsements are required")
+    if len(refs.hash) != _CONFIG_HASH_SIZE:
+        raise assembly_error(f"config hash must be {_CONFIG_HASH_SIZE} bytes, got {len(refs.hash)}")
+    policy_name, policy = resolve_policy(refs.endorsements, quote)
+    host_data = ""
+    config_id = bytes(MR_CONFIG_ID_SIZE)
+    code: Expected
+    if quote.platform == PLATFORM_SEV_SNP:
+        if policy.sev_snp is None or policy.sev_snp.host_data != "":
+            raise assembly_error("config runtime cannot be combined with platform host_data")
+        host_data = refs.hash.hex()
+        try:
+            launch = parse_register(refs.runtime.snp_launch.measurement)
+        except ValueError as err:
+            raise assembly_error(f"runtime SNP launch measurement: {err}") from err
+        code = ExpectedSEVSNP(launch=launch)
+    elif quote.platform == PLATFORM_TDX:
+        if policy.tdx is None or len(policy.tdx.platform_measurements) != 0:
+            raise assembly_error("config runtime cannot be combined with platform_measurements")
+        config_id = refs.hash + bytes(MR_CONFIG_ID_SIZE - len(refs.hash))
+        registers: list[bytes] = []
+        for index, value in enumerate(refs.runtime.tdx_launch.registers()):
+            try:
+                registers.append(parse_register(value))
+            except ValueError as err:
+                raise assembly_error(f"runtime TDX register {index}: {err}") from err
+        code = ExpectedTDX(
+            mrtd=registers[0], rtmr0=registers[1], rtmr1=registers[2], rtmr2=registers[3], rtmr3=registers[4]
+        )
+    else:
+        raise assembly_error(f"unsupported platform {quote.platform!r}")
+    expected = apply_pins(code, quote.platform, pins)
+    return ResolvedValues(
+        policy=policy,
+        policy_name=policy_name,
+        code=code,
+        expected=expected,
+        platform_measurement_name=None,
+        host_data=host_data,
+        config_id=config_id,
+    )
