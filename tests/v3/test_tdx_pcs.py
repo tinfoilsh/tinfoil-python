@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from cryptography import x509
 
 from tests.v3 import pki
 from tests.v3 import tdx_builders as tb
@@ -24,6 +25,8 @@ from tinfoil._v3.verifier._quote.tdx.pcs import (
     qe_identity_url,
     tcb_info_url,
 )
+from tinfoil._v3.verifier._x509 import der
+from tinfoil._v3.verifier._x509.certificate import parse_certificate
 
 TCB_URL = "https://api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc=90c06f000000"
 QE_URL = "https://api.trustedservices.intel.com/tdx/certification/v4/qe/identity"
@@ -256,6 +259,39 @@ def test_root_crl_comes_from_the_qe_identity_issuer_root() -> None:
     assert crl_distribution_points(collateral.qe_identity_issuer_root) == (other_url,)
     with pytest.raises(PCSReplayError, match="could not fetch root CRL"):
         PCSReplay(scenario.responses(), tb.NOW).collateral(tb.FMSPC, "platform")
+
+
+def _context(tag: int, content: bytes, *, constructed: bool = True) -> bytes:
+    return bytes([0x80 | (0x20 if constructed else 0) | tag]) + der.encode_length(len(content)) + content
+
+
+def root_with_distribution_points(general_names: bytes) -> x509.Certificate:
+    """A self-signed root whose one distribution point's fullName holds ``general_names`` (raw GeneralName
+    elements), built from the DER directly so that name forms the library cannot represent are reachable."""
+    value = tb.sequence(tb.sequence(_context(0, _context(0, general_names))))
+    extra: list[tuple[x509.ExtensionType, bool]] = [
+        (x509.UnrecognizedExtension(x509.ObjectIdentifier("2.5.29.31"), value), False)
+    ]
+    issued = pki.certificate(tb.ROOT_CN, pki.p256(), ca=True, key_usage=pki.CA_USAGE, serial=1, extra=extra)
+    return parse_certificate(issued.der)
+
+
+def test_crl_distribution_points_skip_name_forms_other_than_uri() -> None:
+    """An x400Address or an ediPartyName beside the URI is skipped and the URI alone is returned; a malformed
+    extension is a PCSReplayError, never a library exception."""
+    uri = _context(6, INTEL_SGX_ROOT_CA_CRL_URL.encode(), constructed=False)
+    x400 = _context(3, tb.sequence())
+    edi_party = _context(5, _context(1, b"\x0c\x01x"))
+    for names in (x400 + uri, edi_party + uri, uri + x400 + edi_party):
+        assert crl_distribution_points(root_with_distribution_points(names)) == (INTEL_SGX_ROOT_CA_CRL_URL,)
+    assert crl_distribution_points(root_with_distribution_points(x400 + edi_party)) == ()
+    for names in (
+        _context(6, "https://certificates.trustedservices.intel.com/é".encode(), constructed=False),
+        _context(6, uri),
+        _context(9, b"x", constructed=False),
+    ):
+        with pytest.raises(PCSReplayError, match="CRL distribution points"):
+            crl_distribution_points(root_with_distribution_points(names))
 
 
 def test_root_crl_falls_through_to_the_next_distribution_point() -> None:

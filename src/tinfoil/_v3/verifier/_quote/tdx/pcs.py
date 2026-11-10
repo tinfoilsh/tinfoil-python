@@ -8,9 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from cryptography import x509
-from cryptography.x509.oid import ExtensionOID
-
 from tinfoil._v3.verifier._document.collateral.tdx import PCSResponse
 from tinfoil._v3.verifier._quote.tdx.lib.collateral import (
     CollateralError,
@@ -24,7 +21,7 @@ from tinfoil._v3.verifier._quote.tdx.lib.collateral import (
     parse_tcb_info_response,
     top_level_member,
 )
-from tinfoil._v3.verifier._x509.certificate import Certificate
+from tinfoil._v3.verifier._x509.certificate import Certificate, X509Error, crl_distribution_point_uris
 from tinfoil._v3.verifier._x509.crl import CRLError, RevocationList, parse_revocation_list
 
 INTEL_PCS_TDX_BASE_URL = "https://api.trustedservices.intel.com/tdx/certification/v4"
@@ -241,21 +238,17 @@ def _parse_crl(body: bytes) -> RevocationList:
 
 
 def crl_distribution_points(certificate: Certificate) -> tuple[str, ...]:
-    """The URI distribution points of the certificate's CRL distribution points extension, in order."""
+    """The URI distribution points of the certificate's CRL distribution points extension, in order.
+
+    The certificate is the QE Identity issuer root as the document carried
+    it, read before it is verified, so the extension is walked from the
+    DER directly: a name form other than a URI is skipped, and a malformed
+    extension is a PCSReplayError rather than a library exception.
+    """
     try:
-        extension = certificate.extensions.get_extension_for_oid(ExtensionOID.CRL_DISTRIBUTION_POINTS)
-    except x509.ExtensionNotFound:
-        return ()
-    except ValueError as err:
+        return crl_distribution_point_uris(certificate)
+    except X509Error as err:
         raise PCSReplayError(f"CRL distribution points: {err}") from err
-    value = extension.value
-    assert isinstance(value, x509.CRLDistributionPoints)
-    out: list[str] = []
-    for point in value:
-        for name in point.full_name or ():
-            if isinstance(name, x509.UniformResourceIdentifier):
-                out.append(name.value)
-    return tuple(out)
 
 
 def check_issue_dates(collateral: TdxCollateral, now: datetime) -> None:

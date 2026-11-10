@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 
 from tests.v3 import pki
 from tests.v3 import tdx_builders as tb
@@ -334,6 +335,19 @@ def test_missing_root_crl_rejects() -> None:
 
 def test_root_without_distribution_points_rejects() -> None:
     rejects(BASE.with_(intel=tb.intel_pki(root_crl_url=None)), "empty url found")
+
+
+def test_header_root_with_exotic_distribution_point_names_rejects() -> None:
+    """The QE Identity issuer root arrives with the document and its distribution points are read before it is
+    verified: a root naming an x400Address or an ediPartyName beside the URI is rejected as an authentication
+    error, the same way as any root other than the pinned one, rather than failing the read."""
+    from tests.v3.test_tdx_pcs import _context, root_with_distribution_points
+
+    uri = _context(6, tb.INTEL_SGX_ROOT_CA_CRL_URL.encode(), constructed=False)
+    for names in (_context(3, tb.sequence()) + uri, _context(5, _context(1, b"\x0c\x01x")) + uri):
+        root_pem = root_with_distribution_points(names).public_bytes(serialization.Encoding.PEM)
+        header = tb.issuer_chain_header(BASE.intel.pem(BASE.intel.tcb_signing), root_pem)
+        rejects(BASE.with_(qe_identity_header=header), "unable to validate signing certificate")
 
 
 # --- collateral validity -----------------------------------------------------------------------
