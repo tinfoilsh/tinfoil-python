@@ -66,8 +66,9 @@ class ResolvedReferences:
 def resolve_embedded(refs: EmbeddedReferences) -> ResolvedReferences:
     """Check the caller-trusted values and reduce them to an immutable policy.
 
-    At least one component is required. Config bytes must be within the
-    size bounds and carry a runtime pin; a config reference must have a
+    At least one component is required. A config must be an
+    ``EmbeddedConfig`` or an ``EmbeddedConfigReference``. Config bytes must
+    be within the size bounds and carry a runtime pin; a config reference must have a
     well-formed name when it has one, a lowercase SHA-256 digest and a valid
     runtime pin, and a manifest supplied beside it must be the one the
     config pins. A manifest must decode; a platform artifact must parse
@@ -75,6 +76,11 @@ def resolve_embedded(refs: EmbeddedReferences) -> ResolvedReferences:
     """
     if refs.config is None and refs.runtime is None and refs.platform is None:
         raise UsageError("embedded references must contain at least one component")
+    if refs.config is not None and not isinstance(refs.config, EmbeddedConfig | EmbeddedConfigReference):
+        raise UsageError(
+            "embedded config must be an EmbeddedConfig or EmbeddedConfigReference value, "
+            f"not {type(refs.config).__name__}"
+        )
     reference: EmbeddedConfigReference | None = None
     if isinstance(refs.config, EmbeddedConfig):
         data = refs.config.data

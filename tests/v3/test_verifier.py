@@ -536,6 +536,9 @@ def test_embedded_trust_rejects_invalid_or_unused_inputs() -> None:
     with pytest.raises(UsageError, match="no endorsed artifact"):
         Verifier(embedded_references=inputs, freshness_signing_keys=keys)
     raw, nonce, _ = vf.embedded_document(FORMAT_V2)
+    for config in (b"config bytes", "sha256:" + "cd" * 32, {"data": b"config bytes"}):
+        with pytest.raises(UsageError, match="embedded config must be an EmbeddedConfig or EmbeddedConfigReference"):
+            Verifier(embedded_references=EmbeddedReferences(config=config))  # type: ignore[arg-type]
     configured: list[dict[str, Any]] = [
         {"embedded_references": inputs},
         {"config_signing_keys": keys},
