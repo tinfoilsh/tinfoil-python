@@ -15,10 +15,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 
 from tests.v3 import pki
-from tests.v3.vectors import vector, vector_params
-from tinfoil._v3.verifier import _json
+from tests.v3.vectors import document_bundles, vector, vector_params
+from tinfoil._v3.verifier._sigstore import _wire, keyed
 from tinfoil._v3.verifier._sigstore import bundle as bm
-from tinfoil._v3.verifier._sigstore import keyed
 from tinfoil._v3.verifier._sigstore.trusted_root import KeyedAuthority, TrustedRoot, ValidFor, parse_trusted_root
 from tinfoil._v3.verifier._x509 import der
 from tinfoil._v3.verifier._x509.certificate import load_public_key_pem, public_key_spki
@@ -179,15 +178,7 @@ def test_verify_checkpoint_accepts_a_v1_tree_head_origin_only_for_the_log_host()
     """A checkpoint body ``<host> - <tree id>`` is a Rekor v1 tree head; it is verified by the same rules."""
     fixture = vector("provenance", "provenance-happy")
     root = fixture_root(fixture)
-    document = _json.strict_parse(base64.b64decode(fixture["input"]["document_b64"]))
-    assert isinstance(document, _json.JsonObject)
-    collateral = document["collateral"]
-    assert isinstance(collateral, tuple)
-    code = next(c for c in collateral if isinstance(c, _json.JsonObject) and c["id"] == "sigstore-code")
-    assert isinstance(code, _json.JsonObject)
-    data = code["data"]
-    assert isinstance(data, _json.JsonObject)
-    bundle = bm.parse_bundle(data["sigstore_bundle"])
+    bundle, _ = document_bundles(fixture["input"]["document_b64"])["sigstore-code"]
     (entry,) = bundle.tlog_entries
     assert entry.inclusion_proof is not None
     log = root.tlog(entry.log_id)
@@ -271,9 +262,35 @@ def test_hashedrekord_body_is_the_canonical_record() -> None:
         )
     )
     assert body == bundle.tlog_entries[0].canonicalized_body
-    assert (
-        json.loads(body)["spec"]["hashedRekordV002"]["signature"]["verifier"]["keyDetails"] == "PKIX_ECDSA_P256_SHA_256"
+    record = json.loads(body)["spec"]["hashedRekordV002"]
+    assert record["signature"]["verifier"]["keyDetails"] == "PKIX_ECDSA_P256_SHA_256"
+    assert record["data"]["algorithm"] == "SHA2_256"
+
+
+def test_hashedrekord_body_labels_the_digest_by_the_signer_key_type() -> None:
+    """The log derives the data algorithm from the verifier's key details: a P-384 signer logs a SHA-384 digest."""
+    signer = pki.p384()
+    pae = bm.pre_auth_encoding(bm.IN_TOTO_PAYLOAD_TYPE, b'{"_type":"x"}')
+    signature = signer.sign(pae, ec.ECDSA(hashes.SHA384()))
+    expected = keyed.HashedRekordBody(
+        digest=hashlib.sha384(pae).digest(),
+        signature=signature,
+        verifier=public_key_spki(signer.public_key()),
+        verifier_kind="publicKey",
+        key_details=_wire.KEY_DETAILS_P384,
     )
+    record = json.loads(keyed.hashedrekord_body(expected))["spec"]["hashedRekordV002"]
+    assert record["data"]["algorithm"] == "SHA2_384"
+    assert base64.b64decode(record["data"]["digest"]) == hashlib.sha384(pae).digest()
+    assert record["signature"]["verifier"]["keyDetails"] == "PKIX_ECDSA_P384_SHA_384"
+    assert base64.b64decode(record["signature"]["verifier"]["publicKey"]["rawBytes"]) == expected.verifier
+    # The digest must be the size of the hash that the key type implies, and only P-256 and P-384 are logged.
+    with pytest.raises(keyed.KeyedBundleError, match="digest length 32 is not 48 bytes for SHA2_384"):
+        keyed.hashedrekord_body(dataclasses.replace(expected, digest=hashlib.sha256(pae).digest()))
+    with pytest.raises(keyed.KeyedBundleError, match="digest length 48 is not 32 bytes for SHA2_256"):
+        keyed.hashedrekord_body(dataclasses.replace(expected, key_details=_wire.KEY_DETAILS_P256))
+    with pytest.raises(keyed.KeyedBundleError, match="do not support key type"):
+        keyed.hashedrekord_body(dataclasses.replace(expected, key_details=_wire.KEY_DETAILS_ED25519))
 
 
 # --- inclusion promises ------------------------------------------------------
@@ -281,11 +298,8 @@ def test_hashedrekord_body_is_the_canonical_record() -> None:
 
 def provenance_entry() -> tuple[TrustedRoot, bm.TlogEntry]:
     fixture = vector("provenance", "provenance-happy")
-    root = fixture_root(fixture)
-    document = json.loads(base64.b64decode(fixture["input"]["document_b64"]))
-    code = next(c for c in document["collateral"] if c["id"] == "sigstore-code")
-    bundle = bm.parse_bundle(_json.strict_parse(json.dumps(code["data"]["sigstore_bundle"]).encode()))
-    return root, bundle.tlog_entries[0]
+    bundle, _ = document_bundles(fixture["input"]["document_b64"])["sigstore-code"]
+    return fixture_root(fixture), bundle.tlog_entries[0]
 
 
 def test_promised_log_time_verifies_the_signed_entry_timestamp() -> None:

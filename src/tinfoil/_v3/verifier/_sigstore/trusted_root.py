@@ -5,7 +5,8 @@ The records here hold exactly the members that verification reads. The
 wire document passes two gates: ``sigstore_models`` validates its shape
 (required members, unknown members rejected at every depth, member types)
 and the strict JSON parser supplies the values, so that every byte string
-has one accepted base64 form and every time one accepted RFC 3339 form.
+has one accepted base64 form, and every time is normalized to an aware UTC
+instant from any of the RFC 3339 spellings that the decoder accepts.
 """
 
 from __future__ import annotations

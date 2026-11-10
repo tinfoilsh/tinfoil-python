@@ -127,7 +127,10 @@ class SignedCertificateTimestamp:
     """One SCT from the leaf's embedded list."""
 
     log_id: bytes
+    milliseconds: int
+    """The log's timestamp as it was signed: milliseconds since the epoch, kept exact for the signed input."""
     timestamp: datetime
+    """``milliseconds`` as an aware time, for the log's validity window."""
     signature_algorithm: tuple[int, int]
     """The TLS HashAlgorithm and SignatureAlgorithm codes."""
     signature: bytes
@@ -232,7 +235,12 @@ def _parse_sct(reader: _TlsReader) -> SignedCertificateTimestamp:
     except (OverflowError, OSError, ValueError) as err:
         raise CertificateBundleError("SCT timestamp is not a representable time") from err
     return SignedCertificateTimestamp(
-        log_id=log_id, timestamp=timestamp, signature_algorithm=algorithm, signature=signature, extensions=extensions
+        log_id=log_id,
+        milliseconds=milliseconds,
+        timestamp=timestamp,
+        signature_algorithm=algorithm,
+        signature=signature,
+        extensions=extensions,
     )
 
 
@@ -312,11 +320,10 @@ def _sct_verifies(sct: SignedCertificateTimestamp, log: KeyedAuthority, tbs: byt
     if not isinstance(key, ec.EllipticCurvePublicKey) or sct.signature_algorithm[1] != SCT_SIGNATURE_ECDSA:
         return False
     issuer_key_hash = hashlib.sha256(public_key_spki(certificate_public_key(issuer))).digest()
-    milliseconds = int(sct.timestamp.timestamp() * 1000)
     signed = b"".join(
         (
             bytes([SCT_VERSION_V1, SCT_SIGNATURE_TYPE_CERTIFICATE_TIMESTAMP]),
-            milliseconds.to_bytes(8, "big"),
+            sct.milliseconds.to_bytes(8, "big"),
             SCT_ENTRY_TYPE_PRECERT.to_bytes(2, "big"),
             issuer_key_hash,
             len(tbs).to_bytes(3, "big"),

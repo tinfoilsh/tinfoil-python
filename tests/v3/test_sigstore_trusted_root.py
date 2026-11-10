@@ -14,6 +14,7 @@ from sigstore_models.trustroot.v1 import TrustedRoot as WireTrustedRoot
 
 from tests.v3 import pki
 from tests.v3.vectors import vector
+from tinfoil._v3.verifier import _json
 from tinfoil._v3.verifier._sigstore import _wire
 from tinfoil._v3.verifier._sigstore.trusted_root import (
     TRUSTED_ROOT_MEDIA_TYPE,
@@ -159,9 +160,35 @@ def test_rfc3339_forms() -> None:
         "2025-01-01t00:00:00z",
         "2025-13-01T00:00:00Z",
         "2025-01-01T00:00:00+24:00",
+        "２025-01-01T00:00:00Z",  # a full-width digit: only ASCII digits spell a time
+        "2025-01-01T00:00:00.１Z",
+        "2025-01-01T00:00:00+0１:00",
+        # A local time whose UTC equivalent leaves the representable years.
+        "0001-01-01T00:00:00+00:01",
+        "9999-12-31T23:59:59-00:01",
     ):
         with pytest.raises(_wire.WireError):
             _wire.rfc3339(bad, "t")
+    with pytest.raises(_wire.WireError, match="not a valid calendar time"):
+        _wire.rfc3339("0001-01-01T00:00:00+00:01", "t")
+
+
+def test_uint64_forms() -> None:
+    obj = _json.JsonObject({"n": "9223372036854775807", "z": "0"})
+    assert _wire.uint64(obj, "n") == (1 << 63) - 1
+    assert _wire.uint64(obj, "z") == 0
+    assert _wire.uint64(obj, "absent") is None
+    for bad in ("", "-1", "01", "1.0", " 1", "1e3", "１"):
+        with pytest.raises(_wire.WireError, match="not a non-negative decimal string"):
+            _wire.uint64(_json.JsonObject({"n": bad}), "n")
+    with pytest.raises(_wire.WireError, match="overflows int64"):
+        _wire.uint64(_json.JsonObject({"n": "9223372036854775808"}), "n")
+    # Longer than the int64 digit count: rejected by length, never converted (a 5000-digit string would
+    # otherwise exceed the interpreter's conversion limit).
+    with pytest.raises(_wire.WireError, match="overflows int64"):
+        _wire.uint64(_json.JsonObject({"n": "1" * 5000}), "n")
+    with pytest.raises(_wire.WireError, match="overflows int64"):
+        _wire.uint64(_json.JsonObject({"n": "1" + "0" * 19}), "n")
 
 
 def test_window_must_not_end_before_it_starts() -> None:

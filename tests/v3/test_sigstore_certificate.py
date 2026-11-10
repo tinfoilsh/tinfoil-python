@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID
 
 from tests.v3 import pki
-from tests.v3.vectors import vector, vector_params
+from tests.v3.vectors import document_bundles, document_collateral, vector, vector_params
 from tinfoil._v3.verifier import _json
 from tinfoil._v3.verifier._sigstore import bundle as bm
 from tinfoil._v3.verifier._sigstore import certificate as sc
@@ -63,26 +63,19 @@ def repo_identity(repo: str) -> sc.SigningIdentity:
     )
 
 
-def document_bundles(document_b64: str) -> dict[str, tuple[bm.Bundle, dict[str, Any]]]:
-    """Every Sigstore bundle in a document by collateral id, with the entry's data."""
-    document = json.loads(base64.b64decode(document_b64))
-    out: dict[str, tuple[bm.Bundle, dict[str, Any]]] = {}
-    for entry in document["collateral"]:
-        data = entry.get("data") or {}
-        if "sigstore_bundle" in data:
-            out[entry["id"]] = (bm.parse_bundle(_json.strict_parse(json.dumps(data["sigstore_bundle"]).encode())), data)
-    return out
-
-
 def code_bundle(fixture: dict[str, Any]) -> tuple[bm.Bundle, bytes] | None:
-    document = json.loads(base64.b64decode(fixture["input"]["document_b64"]))
-    for entry in document["collateral"]:
-        if entry.get("format") == CODE_FORMAT and "sigstore_bundle" in (entry.get("data") or {}):
-            try:
-                parsed = bm.parse_bundle(_json.strict_parse(json.dumps(entry["data"]["sigstore_bundle"]).encode()))
-            except bm.BundleError:
-                return None
-            return parsed, bytes.fromhex(entry["data"]["digest"])
+    """The vector's code-provenance bundle with its artifact digest; None when there is none or it does not decode."""
+    for entry in document_collateral(fixture["input"]["document_b64"]):
+        data = entry.get("data")
+        if _json.string(entry, "format") != CODE_FORMAT or not isinstance(data, _json.JsonObject):
+            continue
+        if "sigstore_bundle" not in data:
+            continue
+        try:
+            parsed = bm.parse_bundle(data["sigstore_bundle"])
+        except bm.BundleError:
+            return None
+        return parsed, bytes.fromhex(_json.string(data, "digest"))
     return None
 
 
@@ -115,16 +108,19 @@ def test_production_bundles_verify_under_the_embedded_root() -> None:
     root = embedded_trusted_root()
     bundles = document_bundles(fixture["input"]["document_b64"])
     code, data = bundles["code"]
-    verified = sc.verify_fulcio_bundle(root, code, repo_identity(data["repo"]), bytes.fromhex(data["digest"]))
+    repo, digest = _json.string(data, "repo"), _json.string(data, "digest")
+    verified = sc.verify_fulcio_bundle(root, code, repo_identity(repo), bytes.fromhex(digest))
     assert verified.signed_at == datetime.fromtimestamp(code.tlog_entries[0].integrated_time, UTC)
     assert verified.logged_at == verified.signed_at
-    assert verified.extensions.source_repository_ref == f"refs/tags/{data['tag']}"
-    assert verified.extensions.source_repository_uri == f"https://github.com/{data['repo']}"
+    assert verified.extensions.source_repository_ref == f"refs/tags/{_json.string(data, 'tag')}"
+    assert verified.extensions.source_repository_uri == f"https://github.com/{repo}"
     assert re.fullmatch(r"[0-9a-f]{40}", verified.extensions.source_repository_digest)
     assert verified.extensions.runner_environment == sc.RUNNER_ENVIRONMENT_GITHUB_HOSTED
     assert verified.payload == code.envelope.payload
     platform, data = bundles["platform"]
-    sc.verify_fulcio_bundle(root, platform, repo_identity(data["repo"]), bytes.fromhex(data["digest"]))
+    sc.verify_fulcio_bundle(
+        root, platform, repo_identity(_json.string(data, "repo")), bytes.fromhex(_json.string(data, "digest"))
+    )
     witness = sc.SigningIdentity(
         sc.workflow_identity_pattern("tinfoilsh/freshness-witness", r"freshness\.yml", r"refs/heads/main"),
         sc.GITHUB_OIDC_ISSUER,
@@ -139,7 +135,8 @@ def test_production_bundles_verify_under_the_embedded_root() -> None:
 def production_code() -> tuple[TrustedRoot, bm.Bundle, sc.SigningIdentity, bytes]:
     fixture = vector("real-frozen", "real-sev-inference-tinfoil")
     code, data = document_bundles(fixture["input"]["document_b64"])["code"]
-    return embedded_trusted_root(), code, repo_identity(data["repo"]), bytes.fromhex(data["digest"])
+    identity = repo_identity(_json.string(data, "repo"))
+    return embedded_trusted_root(), code, identity, bytes.fromhex(_json.string(data, "digest"))
 
 
 def test_production_leaf_extensions_and_scts() -> None:
@@ -297,16 +294,23 @@ def test_signed_certificate_timestamps_rejects_malformed_lists() -> None:
     with pytest.raises(sc.CertificateBundleError, match="trailing bytes"):
         sc.signed_certificate_timestamps(leaf_with_sct_list(b"\x00\x00\x00"))
 
-    def sct_bytes(version: int) -> bytes:
-        body = bytes([version]) + bytes(32) + (1700000000000).to_bytes(8, "big")
+    def sct_bytes(version: int, milliseconds: int = 1700000000000) -> bytes:
+        body = bytes([version]) + bytes(32) + milliseconds.to_bytes(8, "big")
         body += b"\x00\x00" + bytes([4, 3]) + b"\x00\x02\x30\x00"
         return len(body).to_bytes(2, "big") + body
 
     good = sct_bytes(0)
     (parsed,) = sc.signed_certificate_timestamps(leaf_with_sct_list(len(good).to_bytes(2, "big") + good))
+    assert parsed.milliseconds == 1700000000000
     assert parsed.timestamp == datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC)
     assert parsed.signature_algorithm == (4, 3)
     assert parsed.signature == b"\x30\x00"
+    # The signed milliseconds survive exactly even where a float round trip through the datetime loses one.
+    odd = sct_bytes(0, 34870843104269)
+    (parsed,) = sc.signed_certificate_timestamps(leaf_with_sct_list(len(odd).to_bytes(2, "big") + odd))
+    assert parsed.milliseconds == 34870843104269
+    assert parsed.timestamp.replace(microsecond=0) == datetime(3075, 1, 5, 17, 18, 24, tzinfo=UTC)
+    assert int(parsed.timestamp.timestamp() * 1000) == 34870843104268
     with pytest.raises(sc.CertificateBundleError, match="unsupported SCT version"):
         sc.signed_certificate_timestamps(leaf_with_sct_list(len(good).to_bytes(2, "big") + sct_bytes(1)))
     with pytest.raises(sc.CertificateBundleError, match="truncated"):

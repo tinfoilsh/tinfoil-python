@@ -18,9 +18,14 @@ from pydantic import ValidationError
 from tinfoil._v3.verifier import _json
 from tinfoil._v3.verifier._x509.certificate import PublicKey
 
-_RFC3339 = re.compile(r"\A(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})\Z")
+# ASCII digit classes throughout: ``\d`` would also match other scripts' digits.
+_RFC3339 = re.compile(
+    r"\A([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?(Z|[+-][0-9]{2}:[0-9]{2})\Z"
+)
 _DECIMAL = re.compile(r"\A(?:0|[1-9][0-9]*)\Z")
 _MAX_INT64 = (1 << 63) - 1
+_MAX_INT64_DIGITS = len(str(_MAX_INT64))
+"""A decimal string with more digits than this overflows before it is converted, whatever its value."""
 
 KEY_DETAILS_P256 = "PKIX_ECDSA_P256_SHA_256"
 KEY_DETAILS_P384 = "PKIX_ECDSA_P384_SHA_384"
@@ -68,17 +73,19 @@ def uint64(obj: _json.JsonObject, key: str) -> int | None:
         return None
     if not isinstance(value, str) or not _DECIMAL.match(value):
         raise WireError(f"member {key!r} is not a non-negative decimal string")
-    number = int(value)
-    if number > _MAX_INT64:
+    # The digit count is bounded before the conversion, so an over-long
+    # string is rejected without being converted at all.
+    if len(value) > _MAX_INT64_DIGITS or int(value) > _MAX_INT64:
         raise WireError(f"member {key!r} overflows int64")
-    return number
+    return int(value)
 
 
 def rfc3339(text: str, what: str) -> datetime:
     """Parse an RFC 3339 time with a ``Z`` or numeric offset into an aware UTC datetime.
 
     Up to nine fractional digits are accepted; digits beyond the sixth are
-    truncated to the microsecond.
+    truncated to the microsecond. A time whose UTC equivalent falls outside
+    the representable years is rejected like an invalid calendar time.
     """
     match = _RFC3339.match(text)
     if match is None:
@@ -106,9 +113,9 @@ def rfc3339(text: str, what: str) -> datetime:
             microsecond,
             tzinfo=timezone(offset),
         )
-    except ValueError as err:
+        return local.astimezone(UTC)
+    except (ValueError, OverflowError) as err:
         raise WireError(f"{what} is not a valid calendar time") from err
-    return local.astimezone(UTC)
 
 
 def key_details_of(key: PublicKey) -> str | None:

@@ -360,13 +360,16 @@ def parse_statement(payload: bytes) -> Statement:
         if statement_type != IN_TOTO_STATEMENT_V1:
             raise BundleError(f"unsupported in-toto statement type {statement_type!r}")
         subjects = _subjects(_json.array(statement, "subject") or ())
+        predicate_type = _json.string(statement, "predicateType")
+        if not predicate_type:
+            raise BundleError("in-toto statement has no predicateType")
         predicate = statement.get("predicate")
         if not isinstance(predicate, _json.JsonObject):
             raise BundleError("statement predicate must be an object")
         return Statement(
             type=statement_type,
             subjects=subjects,
-            predicate_type=_json.string(statement, "predicateType"),
+            predicate_type=predicate_type,
             predicate=_member_span(payload.decode("utf-8"), "predicate"),
         )
     except _json.JsonError as err:
@@ -393,6 +396,8 @@ def _subjects(items: tuple[_json.JsonValue, ...]) -> tuple[Subject, ...]:
 def _digest(value: _json.JsonValue, algorithm: str, *, index: int) -> str:
     if not isinstance(value, str):
         raise BundleError(f"in-toto statement subject {index} digest {algorithm!r} is not a string")
+    if not value:
+        raise BundleError(f"in-toto statement subject {index} digest {algorithm!r} is empty")
     if len(value) % 2 or not all(ch in "0123456789abcdefABCDEF" for ch in value):
         raise BundleError(f"in-toto statement subject {index} digest {algorithm!r} is not hex")
     return value.lower()

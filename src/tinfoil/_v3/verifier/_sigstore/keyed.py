@@ -44,7 +44,14 @@ CHECKPOINT_ORIGIN_SEPARATOR = "\n\n"
 MAX_INCLUSION_PROOF_HASHES = 64
 MAX_NOTE_SIGNATURES = 100
 HASH_ALGORITHM_SHA2_256 = "SHA2_256"
+HASH_ALGORITHM_SHA2_384 = "SHA2_384"
 DIGEST_SIZE = 32
+
+_HASH_ALGORITHM_OF_KEY = {
+    _wire.KEY_DETAILS_P256: (HASH_ALGORITHM_SHA2_256, 32),
+    _wire.KEY_DETAILS_P384: (HASH_ALGORITHM_SHA2_384, 48),
+}
+"""The hash that each signing key type implies, as the log labels it, with its digest size."""
 
 _SIGNATURE_PREFIX = "— "
 _NOTE_NAME = re.compile(r"\A[^\s+]+\Z")
@@ -267,7 +274,18 @@ def _verify_entry(root: TrustedRoot, entry: TlogEntry, expected: HashedRekordBod
 
 
 def hashedrekord_body(expected: HashedRekordBody) -> bytes:
-    """The canonical hashedrekord 0.0.2 entry body for ``expected``, as the log serializes it."""
+    """The canonical hashedrekord 0.0.2 entry body for ``expected``, as the log serializes it.
+
+    The body's data algorithm is not chosen by the submitter: the log
+    derives it from the verifier's key details (SHA2_256 for P-256,
+    SHA2_384 for P-384) and requires the digest to be that hash's size, so
+    the reconstruction does the same.
+    """
+    if expected.key_details not in _HASH_ALGORITHM_OF_KEY:
+        raise KeyedBundleError(f"hashedrekord entries do not support key type {expected.key_details!r}")
+    algorithm, size = _HASH_ALGORITHM_OF_KEY[expected.key_details]
+    if len(expected.digest) != size:
+        raise KeyedBundleError(f"digest length {len(expected.digest)} is not {size} bytes for {algorithm}")
     verifier = _json.JsonObject(
         {
             expected.verifier_kind: _json.JsonObject({"rawBytes": _base64(expected.verifier)}),
@@ -282,9 +300,7 @@ def hashedrekord_body(expected: HashedRekordBody) -> bytes:
                 {
                     "hashedRekordV002": _json.JsonObject(
                         {
-                            "data": _json.JsonObject(
-                                {"algorithm": HASH_ALGORITHM_SHA2_256, "digest": _base64(expected.digest)}
-                            ),
+                            "data": _json.JsonObject({"algorithm": algorithm, "digest": _base64(expected.digest)}),
                             "signature": _json.JsonObject(
                                 {"content": _base64(expected.signature), "verifier": verifier}
                             ),

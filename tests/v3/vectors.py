@@ -1,7 +1,8 @@
 """Access to the conformance vectors for module-level tests.
 
 The vectors are located as the adapter tests locate them; a test that
-needs a group skips when the checkout is absent.
+needs a group skips when the checkout is absent. A fixture that the checkout
+should hold but does not is a failure, never a skip.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from typing import Any
 import pytest
 
 from tests.conformance.conftest import fixtures_root
+from tinfoil._v3.verifier import _json
+from tinfoil._v3.verifier._sigstore import bundle as bm
 
 
 def vector_group(name: str) -> list[dict[str, Any]]:
@@ -40,12 +43,38 @@ def vector_params(name: str) -> list[Any]:
 
 
 def vector(name: str, fixture_id: str) -> dict[str, Any]:
-    """One fixture by id; skips the calling test when the vectors are absent."""
-    for fixture in vector_group(name):
+    """One fixture by id; skips the calling test when the vectors are absent and fails when the id is unknown."""
+    fixtures = vector_group(name)
+    if not fixtures:
+        pytest.skip("conformance vectors not found")
+    for fixture in fixtures:
         if fixture["id"] == fixture_id:
             return fixture
-    pytest.skip("conformance vectors not found")
+    pytest.fail(f"vector group {name!r} has no fixture {fixture_id!r}")
 
 
 def b64(value: str) -> bytes:
     return base64.b64decode(value, validate=True)
+
+
+def document_collateral(document_b64: str) -> tuple[_json.JsonObject, ...]:
+    """The collateral entries of a fixture document, parsed by the strict parser from the input's base64 form."""
+    document = _json.strict_parse(b64(document_b64))
+    assert isinstance(document, _json.JsonObject)
+    entries = document.get("collateral")
+    assert isinstance(entries, tuple)
+    out: list[_json.JsonObject] = []
+    for entry in entries:
+        assert isinstance(entry, _json.JsonObject)
+        out.append(entry)
+    return tuple(out)
+
+
+def document_bundles(document_b64: str) -> dict[str, tuple[bm.Bundle, _json.JsonObject]]:
+    """Every Sigstore bundle in a fixture document by collateral id, with the entry's data record."""
+    out: dict[str, tuple[bm.Bundle, _json.JsonObject]] = {}
+    for entry in document_collateral(document_b64):
+        data = entry.get("data")
+        if isinstance(data, _json.JsonObject) and "sigstore_bundle" in data:
+            out[_json.string(entry, "id")] = (bm.parse_bundle(data["sigstore_bundle"]), data)
+    return out
