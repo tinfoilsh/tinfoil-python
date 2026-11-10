@@ -3,7 +3,13 @@ import secrets
 
 import pytest
 
-from tinfoil._v3.verifier._canonical import EncodingError, decode_base64, decode_lower_hex, is_lower_hex
+from tinfoil._v3.verifier._canonical import (
+    EncodingError,
+    base64_length,
+    decode_base64,
+    decode_lower_hex,
+    is_lower_hex,
+)
 
 
 @pytest.mark.parametrize(
@@ -94,3 +100,11 @@ def test_decode_base64_round_trip() -> None:
     for n in range(65):
         value = secrets.token_bytes(n)
         assert decode_base64("field", base64.b64encode(value).decode()) == value
+
+
+def test_base64_length_matches_the_encoder() -> None:
+    """The canonical encoding of ``n`` bytes is exactly ``base64_length(n)`` characters, and a value of that length
+    decodes to at most two bytes beyond ``n``."""
+    for n in range(65):
+        assert base64_length(n) == len(base64.b64encode(bytes(n)))
+        assert n <= len(base64.b64decode("A" * base64_length(n))) <= n + 2
