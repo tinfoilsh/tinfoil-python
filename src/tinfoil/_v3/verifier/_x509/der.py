@@ -71,22 +71,33 @@ def decode(data: bytes) -> Element:
     """
     if not data:
         raise DerError("empty input")
-    element, rest = decode_prefix(data)
-    if rest:
+    element, end = decode_at(data, 0)
+    if end != len(data):
         raise DerError("trailing bytes after the element")
     return element
 
 
 def decode_prefix(data: bytes) -> tuple[Element, bytes]:
     """Decode the element at the start of ``data`` and return it with the bytes that follow."""
-    if len(data) < 2:
+    element, end = decode_at(data, 0)
+    return element, data[end:]
+
+
+def decode_at(data: bytes, offset: int) -> tuple[Element, int]:
+    """Decode the element that starts at ``offset`` in ``data`` and return it with the offset just past it.
+
+    Only the element's own bytes are copied, never the bytes that follow
+    it, so a walk over a long list of siblings stays linear in the size of
+    the list.
+    """
+    if len(data) - offset < 2:
         raise DerError("truncated element header")
-    identifier = data[0]
+    identifier = data[offset]
     tag = identifier & 0x1F
     if tag == 0x1F:
         raise DerError("long-form tag numbers are not supported")
-    first = data[1]
-    header = 2
+    first = data[offset + 1]
+    header = offset + 2
     if first < 0x80:
         length = first
     elif first == 0x80:
@@ -95,15 +106,15 @@ def decode_prefix(data: bytes) -> tuple[Element, bytes]:
         count = first & 0x7F
         if count > _MAX_LENGTH_OCTETS:
             raise DerError("length octets exceed the supported range")
-        if len(data) < 2 + count:
+        if len(data) < header + count:
             raise DerError("truncated length")
-        octets = data[2 : 2 + count]
+        octets = data[header : header + count]
         length = int.from_bytes(octets, "big")
         # Minimal form: no leading zero octet, and the long form only when
         # the value does not fit the short form.
         if octets[0] == 0 or length < 0x80:
             raise DerError("length is not in minimal form")
-        header = 2 + count
+        header += count
     end = header + length
     if end > len(data):
         raise DerError("element extends past the end of its container")
@@ -115,8 +126,10 @@ def decode_prefix(data: bytes) -> tuple[Element, bytes]:
                 raise DerError("SEQUENCE and SET must be constructed")
         elif constructed:
             raise DerError("constructed encoding of a primitive type")
-    element = Element(tag_class=tag_class, constructed=constructed, tag=tag, content=data[header:end], raw=data[:end])
-    return element, data[end:]
+    element = Element(
+        tag_class=tag_class, constructed=constructed, tag=tag, content=data[header:end], raw=data[offset:end]
+    )
+    return element, end
 
 
 def children(element: Element) -> tuple[Element, ...]:
@@ -124,9 +137,10 @@ def children(element: Element) -> tuple[Element, ...]:
     if not element.constructed:
         raise DerError("primitive element has no children")
     out: list[Element] = []
-    rest = element.content
-    while rest:
-        child, rest = decode_prefix(rest)
+    content = element.content
+    offset = 0
+    while offset < len(content):
+        child, offset = decode_at(content, offset)
         out.append(child)
     return tuple(out)
 

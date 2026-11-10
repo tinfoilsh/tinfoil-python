@@ -45,6 +45,8 @@ class RevocationList:
     raw: bytes
     crl: x509.CertificateRevocationList
     """The library object; the properties below read from it."""
+    revoked_serials: frozenset[int]
+    """Every listed serial number, collected once at parse time."""
 
     @property
     def issuer(self) -> x509.Name:
@@ -61,10 +63,6 @@ class RevocationList:
         if value is None:
             raise CRLError("revocation list has no nextUpdate")
         return value
-
-    @property
-    def revoked_serials(self) -> frozenset[int]:
-        return frozenset(entry.serial_number for entry in self.crl)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +94,7 @@ def parse_revocation_list(der_bytes: bytes) -> RevocationList:
         raise CRLError(f"revocation list: {err}") from err
     if crl.public_bytes(serialization.Encoding.DER) != der_bytes:
         raise CRLError("revocation list: does not re-encode to its input")
-    parsed = RevocationList(raw=der_bytes, crl=crl)
+    parsed = RevocationList(raw=der_bytes, crl=crl, revoked_serials=frozenset(entry.serial_number for entry in crl))
     if parsed.this_update > parsed.next_update:
         raise CRLError("revocation list: thisUpdate is after nextUpdate")
     return parsed

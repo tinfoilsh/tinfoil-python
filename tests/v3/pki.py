@@ -16,6 +16,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from tests.v3 import der_tree
+
 PrivateKey: TypeAlias = ec.EllipticCurvePrivateKey | rsa.RSAPrivateKey | ed25519.Ed25519PrivateKey
 
 NOT_BEFORE = datetime(2024, 1, 1, tzinfo=UTC)
@@ -168,10 +170,15 @@ def crl(
     entry_extensions: list[tuple[x509.ExtensionType, bool]] | None = None,
     pss: bool = False,
 ) -> bytes:
-    """A CRL signed by ``issuer``; ``next_update`` None omits the member (the builder requires it, so the member is
-    removed from the DER afterwards)."""
+    """A CRL signed by ``issuer``.
+
+    ``next_update`` None omits the member: the builder requires one, so the
+    element is cut from the TBSCertList afterwards, which leaves the
+    signature covering the original TBS; such a CRL is for parse-time
+    probes only.
+    """
     builder = x509.CertificateRevocationListBuilder().issuer_name(x509.load_der_x509_certificate(issuer.der).subject)
-    builder = builder.last_update(this_update).next_update(next_update or NOT_AFTER)
+    builder = builder.last_update(this_update).next_update(NOT_AFTER if next_update is None else next_update)
     for serial in revoked or []:
         entry = x509.RevokedCertificateBuilder().serial_number(serial).revocation_date(this_update)
         for extension, critical in entry_extensions or []:
@@ -192,7 +199,15 @@ def crl(
         signed = builder.sign(key, hashes.SHA384())
     else:
         signed = builder.sign(key, hashes.SHA256())
-    return signed.public_bytes(serialization.Encoding.DER)
+    encoded = signed.public_bytes(serialization.Encoding.DER)
+    if next_update is None:
+        encoded = der_tree.mutate(encoded, _drop_next_update)
+    return encoded
+
+
+def _drop_next_update(tree: der_tree.Node) -> None:
+    """Remove nextUpdate, the fifth TBSCertList field after version, signature, issuer and thisUpdate."""
+    der_tree.children(der_tree.children(tree)[0]).pop(4)
 
 
 def load(der: bytes) -> x509.Certificate:

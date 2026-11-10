@@ -7,6 +7,7 @@ times without ``Z``, fractions where none are allowed, and implicit tags.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -63,6 +64,25 @@ def test_children_consume_the_content_exactly() -> None:
         der.children(der.decode(element(0x30, b"\x02\x02\x01")))
     with pytest.raises(der.DerError, match="no children"):
         der.children(der.decode(b"\x02\x01\x01"))
+
+
+def test_children_walk_a_long_sibling_list_without_copying_the_tail() -> None:
+    """Each sibling copies only its own bytes, so 20,000 of them take milliseconds, not a quadratic copy."""
+    count = 20_000
+    seq = der.decode(element(0x30, b"\x05\x00" * count))
+    started = time.perf_counter()
+    siblings = der.children(seq)
+    elapsed = time.perf_counter() - started
+    assert len(siblings) == count
+    assert all(s.raw == b"\x05\x00" for s in siblings)
+    assert elapsed < 1.0
+    # decode_at reports the end of the element, never copying what follows.
+    e, end = der.decode_at(b"\x02\x01\x07\x04\x01\xff", 0)
+    assert (e.raw, end) == (b"\x02\x01\x07", 3)
+    e, end = der.decode_at(b"\x02\x01\x07\x04\x01\xff", 3)
+    assert (e.raw, end) == (b"\x04\x01\xff", 6)
+    with pytest.raises(der.DerError, match="truncated element header"):
+        der.decode_at(b"\x02\x01\x07\x04", 3)
 
 
 def test_implicitly_tagged_primitives_are_left_to_their_schema() -> None:

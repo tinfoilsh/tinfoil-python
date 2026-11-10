@@ -47,6 +47,8 @@ OID_SHA384 = "2.16.840.1.101.3.4.2.2"
 
 MAX_CHAIN_LENGTH = 6
 """The most certificates a verified path may hold, counting the leaf and the root."""
+MIN_RSA_KEY_BITS = 2048
+"""The smallest RSA modulus accepted, in bits; a smaller key is rejected wherever a key is loaded."""
 
 _UNDERSTOOD_CRITICAL = frozenset(
     {OID_BASIC_CONSTRAINTS, OID_KEY_USAGE, OID_EXT_KEY_USAGE, OID_SUBJECT_ALT_NAME, OID_SCT_LIST}
@@ -448,7 +450,9 @@ def verify_chain(
     certificates, no certificate may carry an
     unsupported critical extension, and when ``extended_key_usage`` is
     given every certificate on the path that lists extendedKeyUsage must
-    include it or anyExtendedKeyUsage. Returns the path from the leaf to the matched root.
+    include it or anyExtendedKeyUsage. When the usage is code signing, the
+    leaf's keyUsage, when present, must also allow digitalSignature.
+    Returns the path from the leaf to the matched root.
     """
     _require_aware(at)
     if not roots:
@@ -511,6 +515,8 @@ def _check_path(path: tuple[Certificate, ...], at: datetime, extended_key_usage:
             if usages is not None and extended_key_usage not in usages and OID_EKU_ANY not in usages:
                 raise X509Error(f"{_describe(certificate)} does not allow extended key usage {extended_key_usage}")
         if index == 0:
+            if extended_key_usage == OID_EKU_CODE_SIGNING and not can_sign_data(certificate):
+                raise X509Error(f"{_describe(certificate)} does not allow digitalSignature")
             continue
         if not can_issue_certificates(certificate):
             raise X509Error(f"{_describe(certificate)} is not a certificate authority")
@@ -665,7 +671,11 @@ def _accepted_key(key: object) -> PublicKey:
     if isinstance(key, ec.EllipticCurvePublicKey):
         _curve_parameters(key)
         return key
-    if isinstance(key, rsa.RSAPublicKey | ed25519.Ed25519PublicKey):
+    if isinstance(key, rsa.RSAPublicKey):
+        if key.key_size < MIN_RSA_KEY_BITS:
+            raise X509Error(f"RSA public key of {key.key_size} bits is smaller than {MIN_RSA_KEY_BITS} bits")
+        return key
+    if isinstance(key, ed25519.Ed25519PublicKey):
         return key
     raise X509Error(f"unsupported public key type {type(key).__name__}")
 

@@ -229,6 +229,21 @@ def test_library_claims_about_keys() -> None:
         c.load_public_key_der(pki.spki(ec.generate_private_key(ec.SECP521R1())))
 
 
+def test_rsa_keys_below_2048_bits_reject() -> None:
+    small = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    assert isinstance(serialization.load_der_public_key(pki.spki(small)), rsa.RSAPublicKey)
+    with pytest.raises(c.X509Error, match="1024 bits is smaller than 2048"):
+        c.load_public_key_der(pki.spki(small))
+    with pytest.raises(c.X509Error, match="1024 bits is smaller than 2048"):
+        c.load_public_key_pem(pki.public_pem(small))
+    # A certificate carrying such a key rejects at parse, before any chain is built.
+    with pytest.raises(c.X509Error, match="1024 bits is smaller than 2048"):
+        c.parse_certificate(pki.certificate("weak", small).der)
+    accepted = c.load_public_key_der(pki.spki(pki.rsa_key()))
+    assert isinstance(accepted, rsa.RSAPublicKey)
+    assert accepted.key_size == c.MIN_RSA_KEY_BITS
+
+
 # --- accessors ---------------------------------------------------------------
 
 
@@ -445,12 +460,21 @@ def test_verify_chain_path_length_and_depth() -> None:
         c.verify_chain(
             c.parse_certificate(leaf.der), [c.parse_certificate(mid.der)], [c.parse_certificate(root.der)], pki.AT
         )
-    # A path longer than MAX_CHAIN_LENGTH never verifies.
+    # A path of exactly MAX_CHAIN_LENGTH certificates, leaf and root included, verifies; one more never does.
     issued = [pki.certificate("root", pki.p256(), ca=True, key_usage=pki.CA_USAGE)]
-    for index in range(c.MAX_CHAIN_LENGTH):
+    for index in range(c.MAX_CHAIN_LENGTH - 2):
         issued.append(pki.certificate(f"mid{index}", pki.p256(), issued[-1], ca=True, key_usage=pki.CA_USAGE))
+    leaf = pki.certificate("leaf", pki.p256(), issued[-1])
+    path = c.verify_chain(
+        c.parse_certificate(leaf.der),
+        [c.parse_certificate(i.der) for i in issued[1:]],
+        [c.parse_certificate(issued[0].der)],
+        pki.AT,
+    )
+    assert len(path) == c.MAX_CHAIN_LENGTH
+    issued.append(pki.certificate("mid-extra", pki.p256(), issued[-1], ca=True, key_usage=pki.CA_USAGE))
     long_leaf = pki.certificate("leaf", pki.p256(), issued[-1])
-    with pytest.raises(c.X509Error, match="no verified path"):
+    with pytest.raises(c.X509Error, match=f"path longer than {c.MAX_CHAIN_LENGTH}"):
         c.verify_chain(
             c.parse_certificate(long_leaf.der),
             [c.parse_certificate(i.der) for i in issued[1:]],
@@ -485,6 +509,22 @@ def test_verify_chain_extended_key_usage_rule() -> None:
             pki.AT,
             extended_key_usage=c.OID_EKU_TIME_STAMPING,
         )
+
+
+def test_code_signing_requires_the_leaf_to_allow_digital_signature() -> None:
+    root = pki.certificate("root", pki.p256(), ca=True, key_usage=pki.CA_USAGE)
+    # A keyUsage without digitalSignature: the leaf may not sign code, whatever its extendedKeyUsage says.
+    leaf = pki.certificate("leaf", pki.p256(), root, key_usage=pki.CA_USAGE, eku=[ExtendedKeyUsageOID.CODE_SIGNING])
+    parsed_leaf, parsed_root = c.parse_certificate(leaf.der), c.parse_certificate(root.der)
+    with pytest.raises(c.X509Error, match="does not allow digitalSignature"):
+        c.verify_chain(parsed_leaf, [], [parsed_root], pki.AT, extended_key_usage=c.OID_EKU_CODE_SIGNING)
+    # The rule is tied to the code-signing usage; without a requested usage the chain itself is sound.
+    assert len(c.verify_chain(parsed_leaf, [], [parsed_root], pki.AT)) == 2
+    # Without a keyUsage extension there is nothing to contradict.
+    no_usage = c.parse_certificate(
+        pki.certificate("leaf", pki.p256(), root, eku=[ExtendedKeyUsageOID.CODE_SIGNING]).der
+    )
+    assert len(c.verify_chain(no_usage, [], [parsed_root], pki.AT, extended_key_usage=c.OID_EKU_CODE_SIGNING)) == 2
 
 
 def test_verify_chain_rejects_unsupported_critical_extensions() -> None:
@@ -539,12 +579,9 @@ def test_crl_library_claims() -> None:
     """cryptography loads what the pre-checks reject: no nextUpdate, critical CRL extensions, trailing bytes aside."""
     root, _, _ = pki.chain()
     base = pki.crl(root, revoked=[1])
-
-    def drop_next_update(tree: Node) -> None:
-        der_tree.children(der_tree.children(tree)[0]).pop(4)
-
-    without_next = der_tree.mutate(base, drop_next_update)
+    without_next = pki.crl(root, revoked=[1], next_update=None)
     assert x509.load_der_x509_crl(without_next).next_update_utc is None
+    assert len(der_tree.children(der_tree.children(der_tree.parse(without_next)[0])[0])) == 5  # no nextUpdate field
     with pytest.raises(crl_module.CRLError, match="nextUpdate is required"):
         crl_module.parse_revocation_list(without_next)
     delta = pki.crl(root, extensions=[(x509.DeltaCRLIndicator(5), True)])
@@ -561,13 +598,19 @@ def test_crl_parse_rejections() -> None:
     with pytest.raises(crl_module.CRLError, match="trailing bytes"):
         crl_module.parse_revocation_list(base + b"\x00")
 
+    # A v1 CRL (no version field) carrying extensions, which only v2 may: the CRL number is otherwise accepted.
+    numbered = pki.crl(root, revoked=[1], extensions=[(x509.CRLNumber(1), False)])
+    assert crl_module.parse_revocation_list(numbered).revoked_serials == frozenset({1})
+
     def drop_version(tree: Node) -> None:
         tbs_list = der_tree.children(der_tree.children(tree)[0])
+        assert tbs_list[-1][0] == 0xA0  # the extensions stay
         tbs_list.pop(0)
-        tbs_list.pop(-1)  # the extensions, which v1 may not carry
 
+    v1_with_extensions = der_tree.mutate(numbered, drop_version)
+    assert x509.load_der_x509_crl(v1_with_extensions).extensions.get_extension_for_class(x509.CRLNumber)
     with pytest.raises(crl_module.CRLError, match="version is required"):
-        crl_module.parse_revocation_list(der_tree.mutate(base, drop_version))
+        crl_module.parse_revocation_list(v1_with_extensions)
     # Scope-changing extensions reject even when not marked critical.
     idp = pki.crl(
         root, extensions=[(x509.IssuingDistributionPoint(None, None, True, False, None, False, False), False)]
