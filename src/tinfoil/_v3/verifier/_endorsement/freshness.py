@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from tinfoil._v3.verifier import _json
+from tinfoil._v3.verifier._endorsement._common import ProvenanceError, freshness_witness_identity
 from tinfoil._v3.verifier._endorsement.reference import (
     AuthenticatedArtifact,
     ReferenceError,
@@ -90,8 +91,6 @@ def authenticate_freshness(
     witness predicate whose one subject and endorsement match
     ``expected``; the log time lies within the window.
     """
-    from tinfoil._v3.verifier._endorsement.provenance import ProvenanceError, freshness_witness_identity
-
     if max_age is not None and max_age < timedelta(0):
         raise FreshnessError("freshness maximum age must not be negative")
     try:

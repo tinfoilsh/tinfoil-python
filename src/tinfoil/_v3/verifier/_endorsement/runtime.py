@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from tinfoil._v3.verifier import _semver
 from tinfoil._v3.verifier._document.collateral.runtime import RUNTIME_REPO, RuntimeReference
 from tinfoil._v3.verifier._document.collateral.runtime import Runtime as RuntimeCollateral
+from tinfoil._v3.verifier._endorsement._common import ProvenanceError, authenticated_artifact
 from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact
 from tinfoil._v3.verifier._runtime import Manifest, ManifestError, parse_manifest
 from tinfoil._v3.verifier._sigstore.bundle import IN_TOTO_STATEMENT_V1, Subject
@@ -65,8 +66,6 @@ def authenticate_runtime(
     pinned runtime repository and organization, its ref is the release tag
     and its commit is well formed.
     """
-    from tinfoil._v3.verifier._endorsement.provenance import ProvenanceError, authenticated_artifact
-
     if material.reference != expected:
         raise RuntimeProvenanceError("runtime collateral does not match the endorsed config's runtime pin")
     try:
