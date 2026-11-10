@@ -173,6 +173,19 @@ def test_verify_v3_at_requires_an_aware_instant() -> None:
         v.verify_v3_at(raw, nonce[:-1], "", NOW)
 
 
+def test_repo_must_be_a_string_before_any_layer_runs() -> None:
+    """A non-string repository reference is a UsageError from both entry points, raised before the envelope is
+    opened, rather than a provenance-layer verification error or a TypeError."""
+    v = Verifier()
+    for repo in (None, 123, b"org/repo"):
+        with pytest.raises(UsageError, match="repository reference must be a string"):
+            v.check_repo_verifiability(repo)  # type: ignore[arg-type]
+        with pytest.raises(UsageError, match="repository reference must be a string"):
+            v.verify_v3_at(b"not a document", bytes(NONCE_SIZE), repo, NOW)  # type: ignore[arg-type]
+        with pytest.raises(UsageError, match="repository reference must be a string"):
+            v.verify_v3(b"not a document", bytes(NONCE_SIZE), repo)  # type: ignore[arg-type]
+
+
 def test_errors_name_their_layer() -> None:
     assert str(VerificationError(LAYER_QUOTE, "report signature is invalid")) == (
         "verification error: quote: report signature is invalid"

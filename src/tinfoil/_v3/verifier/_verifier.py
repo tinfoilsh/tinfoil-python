@@ -177,6 +177,8 @@ class Verifier:
         components, such as lowercase slugs, and v2 collateral does not, so
         that check waits for the document.
         """
+        if not isinstance(repo, str):
+            raise UsageError("repository reference must be a string")
         reference_pins(self._trust, repo)
 
     def verify_v3(self, doc: bytes, nonce: bytes, repo: str) -> Verification:
@@ -219,6 +221,8 @@ class Verifier:
             raise UsageError("document must be bytes")
         if not isinstance(nonce, bytes | bytearray | memoryview):
             raise UsageError("nonce must be bytes")
+        if not isinstance(repo, str):
+            raise UsageError("repository reference must be a string")
         return _verify_v3(trust, bytes(doc), bytes(nonce), repo, verification_time)
 
 
