@@ -74,7 +74,10 @@ def test_tampered_device_evidence() -> None:
 
 
 def test_report_data_mismatch() -> None:
-    """Only challenge.report_data changes: both section hashes still match, so the REPORT_DATA recomputation is what must reject."""
+    """Only challenge.report_data changes.
+
+    Both section hashes still match, so the REPORT_DATA recomputation is what must reject.
+    """
     nonce = builder.test_nonce()
     raw, _ = builder.build(nonce)
     raw["challenge"]["report_data"] = (bytes([0x11]) * 64).hex()
@@ -135,7 +138,11 @@ def test_rejects_duplicate_item_ids() -> None:
         doc_bytes,
         lambda s: s.replace(
             b'"items":[{"id":"tls"',
-            b'"items":[{"id":"tls","format":"' + doc.KEY_SPKI_FP_SHA256_V1_FORMAT.encode() + b'","data":"' + filler.encode() + b'"},{"id":"tls"',
+            b'"items":[{"id":"tls","format":"'
+            + doc.KEY_SPKI_FP_SHA256_V1_FORMAT.encode()
+            + b'","data":"'
+            + filler.encode()
+            + b'"},{"id":"tls"',
             1,
         ),
     )
@@ -145,10 +152,15 @@ def test_rejects_duplicate_item_ids() -> None:
 
 
 def test_rejects_malformed_key_material() -> None:
-    """Known key formats must carry exactly 32 bytes of lowercase hex; a truncated TLS fingerprint rejects at parse time."""
+    """Known key formats must carry exactly 32 bytes of lowercase hex.
+
+    A truncated TLS fingerprint rejects at parse time.
+    """
     nonce = builder.test_nonce()
     _, doc_bytes = builder.build(nonce)
-    short = builder.mutate_crypto_section(doc_bytes, lambda s: s.replace(builder.TLS_KEY.hex().encode(), (bytes([0xAA]) * 8).hex().encode(), 1))
+    short = builder.mutate_crypto_section(
+        doc_bytes, lambda s: s.replace(builder.TLS_KEY.hex().encode(), (bytes([0xAA]) * 8).hex().encode(), 1)
+    )
     assert short != doc_bytes
     with pytest.raises(doc.DocumentError, match="must be 32 bytes"):
         doc.parse(short, nonce)
@@ -163,7 +175,10 @@ def test_rejects_uppercase_hex() -> None:
 
 
 def test_rejects_non_canonical_base64() -> None:
-    """A newline inside the crypto_material base64 leaves the decoded bytes, and so the endorsed hash, unchanged; accepting it would mean two distinct documents with identical endorsed content."""
+    """A newline inside the crypto_material base64 leaves the decoded bytes, and so the endorsed hash, unchanged.
+
+    Accepting it would mean two distinct documents with identical endorsed content.
+    """
     nonce = builder.test_nonce()
     raw, _ = builder.build(nonce)
     encoded = raw["crypto_material"]
@@ -188,7 +203,7 @@ def test_rejects_non_canonical_report_base64(variant: Any) -> None:
     assert encoded.endswith("AQE=")
     # Each variant decodes to the same report bytes as the original.
     raw["cpu_evidence"]["report_base64"] = variant(encoded)
-    with pytest.raises(doc.DocumentError, match="cpu_evidence.report_base64"):
+    with pytest.raises(doc.DocumentError, match=r"cpu_evidence\.report_base64"):
         doc.parse(builder.encode(raw), nonce)
 
 
@@ -197,7 +212,9 @@ def test_rejects_odd_length_unknown_format_data() -> None:
     _, doc_bytes = builder.build(nonce)
 
     def insert(item: bytes) -> bytes:
-        return builder.mutate_crypto_section(doc_bytes, lambda s: s.replace(b'"items":[', b'"items":[' + item + b",", 1))
+        return builder.mutate_crypto_section(
+            doc_bytes, lambda s: s.replace(b'"items":[', b'"items":[' + item + b",", 1)
+        )
 
     # "abc" matches the lowercase-hex character class but is not decodable.
     with pytest.raises(doc.DocumentError, match="crypto_material item 'x' data is not lowercase hex"):
@@ -212,20 +229,33 @@ def test_incomplete_crypto_item_and_missing_items() -> None:
     with pytest.raises(doc.DocumentError, match="crypto_material item is incomplete"):
         doc.parse(doc_bytes, nonce)
     _, doc_bytes = builder.build(nonce)
-    missing = builder.mutate_crypto_section(doc_bytes, lambda s: json.dumps({"format": doc.CRYPTO_MATERIAL_V1_FORMAT}).encode())
-    with pytest.raises(doc.DocumentError, match="crypto_material.items is missing"):
+    missing = builder.mutate_crypto_section(
+        doc_bytes, lambda s: json.dumps({"format": doc.CRYPTO_MATERIAL_V1_FORMAT}).encode()
+    )
+    with pytest.raises(doc.DocumentError, match=r"crypto_material\.items is missing"):
         doc.parse(missing, nonce)
-    wrong_format = builder.mutate_crypto_section(doc_bytes, lambda s: s.replace(doc.CRYPTO_MATERIAL_V1_FORMAT.encode(), b"https://tinfoil.sh/crypto-material/v2", 1))
+    wrong_format = builder.mutate_crypto_section(
+        doc_bytes,
+        lambda s: s.replace(doc.CRYPTO_MATERIAL_V1_FORMAT.encode(), b"https://tinfoil.sh/crypto-material/v2", 1),
+    )
     with pytest.raises(doc.DocumentError, match="unsupported crypto_material section format"):
         doc.parse(wrong_format, nonce)
-    unknown_member = builder.mutate_crypto_section(doc_bytes, lambda s: s.replace(b'{"format"', b'{"extra":1,"format"', 1))
+    unknown_member = builder.mutate_crypto_section(
+        doc_bytes, lambda s: s.replace(b'{"format"', b'{"extra":1,"format"', 1)
+    )
     with pytest.raises(doc.DocumentError, match="parsing crypto_material"):
         doc.parse(unknown_member, nonce)
 
 
 def test_device_evidence_items() -> None:
     nonce = builder.test_nonce()
-    item = {"id": "gpu0", "kind": "gpu", "vendor": "nvidia", "format": doc.NVIDIA_GPU_EVIDENCE_V1_FORMAT, "evidence": {"nonce": "original"}}
+    item = {
+        "id": "gpu0",
+        "kind": "gpu",
+        "vendor": "nvidia",
+        "format": doc.NVIDIA_GPU_EVIDENCE_V1_FORMAT,
+        "evidence": {"nonce": "original"},
+    }
     _, doc_bytes = builder.build(nonce, device_items=[item])
     parsed = doc.parse(doc_bytes, nonce)
     items = parsed.device_evidence_items()
@@ -243,8 +273,10 @@ def test_device_evidence_items() -> None:
     with pytest.raises(doc.DocumentError, match="device_evidence item has no id"):
         doc.parse(doc_bytes, nonce)
     _, doc_bytes = builder.build(nonce)
-    missing = builder.mutate_section(doc_bytes, "device_evidence", lambda s: json.dumps({"format": doc.DEVICE_EVIDENCE_V1_FORMAT}).encode())
-    with pytest.raises(doc.DocumentError, match="device_evidence.items is missing"):
+    missing = builder.mutate_section(
+        doc_bytes, "device_evidence", lambda s: json.dumps({"format": doc.DEVICE_EVIDENCE_V1_FORMAT}).encode()
+    )
+    with pytest.raises(doc.DocumentError, match=r"device_evidence\.items is missing"):
         doc.parse(missing, nonce)
 
 
@@ -287,7 +319,12 @@ def test_rejects_duplicate_collateral_ids() -> None:
     nonce = builder.test_nonce()
     raw, _ = builder.build(nonce)
     raw["collateral"].append(
-        {"id": raw["collateral"][0]["id"], "role": entry.ROLE_REFERENCE_VALUES, "format": collateral.SIGSTORE_CODE_V1_FORMAT, "data": {}}
+        {
+            "id": raw["collateral"][0]["id"],
+            "role": entry.ROLE_REFERENCE_VALUES,
+            "format": collateral.SIGSTORE_CODE_V1_FORMAT,
+            "data": {},
+        }
     )
     with pytest.raises(doc.DocumentError, match="duplicate collateral entry id 'cpu-endorsement'"):
         doc.parse(builder.encode(raw), nonce)
@@ -328,13 +365,19 @@ def test_freshness_selects_artifact_id() -> None:
         }
 
     _, doc_bytes = builder.build(
-        nonce, collateral_entries=[witness(collateral.FRESHNESS_ID_CODE, "code"), witness(collateral.FRESHNESS_ID_PLATFORM, "platform")]
+        nonce,
+        collateral_entries=[
+            witness(collateral.FRESHNESS_ID_CODE, "code"),
+            witness(collateral.FRESHNESS_ID_PLATFORM, "platform"),
+        ],
     )
     parsed = doc.parse(doc_bytes, nonce)
     code = parsed.freshness(collateral.FRESHNESS_ID_CODE)
-    assert isinstance(code.bundle, JsonObject) and code.bundle["mediaType"] == "code"
+    assert isinstance(code.bundle, JsonObject)
+    assert code.bundle["mediaType"] == "code"
     platform = parsed.freshness(collateral.FRESHNESS_ID_PLATFORM)
-    assert isinstance(platform.bundle, JsonObject) and platform.bundle["mediaType"] == "platform"
+    assert isinstance(platform.bundle, JsonObject)
+    assert platform.bundle["mediaType"] == "platform"
     for witness_id in ("", "missing-freshness"):
         with pytest.raises(NotFoundError):
             parsed.freshness(witness_id)
@@ -344,14 +387,18 @@ def test_sigstore_references() -> None:
     nonce = builder.test_nonce()
     _, doc_bytes = builder.build(
         nonce,
-        collateral_entries=[ref_entry(collateral.SIGSTORE_CODE_V1_FORMAT, "org/code"), ref_entry(collateral.SIGSTORE_PLATFORM_V1_FORMAT, "org/platform")],
+        collateral_entries=[
+            ref_entry(collateral.SIGSTORE_CODE_V1_FORMAT, "org/code"),
+            ref_entry(collateral.SIGSTORE_PLATFORM_V1_FORMAT, "org/platform"),
+        ],
     )
     parsed = doc.parse(doc_bytes, nonce)
     code = parsed.sigstore_code()
     assert code.repo == "org/code"
     assert code.tag == "v1"
     assert code.digest == "ab" * 32
-    assert isinstance(code.bundle, JsonObject) and code.bundle["mediaType"] == "org/code"
+    assert isinstance(code.bundle, JsonObject)
+    assert code.bundle["mediaType"] == "org/code"
     assert parsed.sigstore_platform().repo == "org/platform"
 
     _, empty_bytes = builder.build(nonce, collateral_entries=[])
@@ -377,28 +424,42 @@ def test_sigstore_references() -> None:
 def test_cpu_endorsements_select_the_evidence_platform() -> None:
     nonce = builder.test_nonce()
     entries = [
-        builder.cpu_entry("vcek", collateral.AMD_VCEK_V1_FORMAT, json.dumps({"vcek_der_base64": builder.b64(b"vcek der"), "cert_chain_pem": "chain"})),
+        builder.cpu_entry(
+            "vcek",
+            collateral.AMD_VCEK_V1_FORMAT,
+            json.dumps({"vcek_der_base64": builder.b64(b"vcek der"), "cert_chain_pem": "chain"}),
+        ),
         builder.cpu_entry("crl", collateral.AMD_CRL_V1_FORMAT, json.dumps({"crl_der_base64": builder.b64(b"crl der")})),
         builder.cpu_entry(
             "pcs",
             collateral.INTEL_PCS_V1_FORMAT,
-            json.dumps({"responses": [{"url": "https://pcs.example", "headers": {}, "body_base64": builder.b64(b"body")}]}),
+            json.dumps(
+                {"responses": [{"url": "https://pcs.example", "headers": {}, "body_base64": builder.b64(b"body")}]}
+            ),
         ),
     ]
     sev = doc.parse(*builder.build(nonce, collateral_entries=entries)[1:], nonce).cpu_endorsements()
-    assert sev.amd_vcek is not None and sev.amd_vcek.vcek_der == b"vcek der" and sev.amd_vcek.cert_chain_pem == "chain"
-    assert sev.amd_crl is not None and sev.amd_crl.crl_der == b"crl der"
+    assert sev.amd_vcek is not None
+    assert sev.amd_vcek.vcek_der == b"vcek der"
+    assert sev.amd_vcek.cert_chain_pem == "chain"
+    assert sev.amd_crl is not None
+    assert sev.amd_crl.crl_der == b"crl der"
     assert sev.intel_pcs is None
 
-    tdx = doc.parse(builder.build(nonce, collateral_entries=entries, evidence_format=doc.TDX_QUOTE_V1_FORMAT)[1], nonce).cpu_endorsements()
-    assert tdx.amd_vcek is None and tdx.amd_crl is None
+    tdx = doc.parse(
+        builder.build(nonce, collateral_entries=entries, evidence_format=doc.TDX_QUOTE_V1_FORMAT)[1], nonce
+    ).cpu_endorsements()
+    assert tdx.amd_vcek is None
+    assert tdx.amd_crl is None
     assert tdx.intel_pcs is not None
     assert len(tdx.intel_pcs.responses) == 1
     assert tdx.intel_pcs.responses[0].url == "https://pcs.example"
     assert dict(tdx.intel_pcs.responses[0].headers) == {}
     assert tdx.intel_pcs.responses[0].body == b"body"
 
-    unknown = doc.parse(builder.build(nonce, collateral_entries=entries, evidence_format="https://example.com/format/unknown")[1], nonce)
+    unknown = doc.parse(
+        builder.build(nonce, collateral_entries=entries, evidence_format="https://example.com/format/unknown")[1], nonce
+    )
     assert unknown.cpu_endorsements() == collateral.CPUEndorsements()
 
     for evidence_format in (doc.SEVSNP_REPORT_V1_FORMAT, doc.TDX_QUOTE_V1_FORMAT):
@@ -434,7 +495,11 @@ def test_rejects_incompatible_collateral_format() -> None:
         "format": collateral.SIGSTORE_FRESHNESS_V1_FORMAT,
         "data": {"sigstore_bundle": {}},
     }
-    artifact_witness = {**sigstore_witness, "id": collateral.FRESHNESS_ID_PLATFORM, "format": collateral.ARTIFACT_FRESHNESS_V1_FORMAT}
+    artifact_witness = {
+        **sigstore_witness,
+        "id": collateral.FRESHNESS_ID_PLATFORM,
+        "format": collateral.ARTIFACT_FRESHNESS_V1_FORMAT,
+    }
     cases: list[tuple[str | None, list[dict[str, Any]], str]] = [
         ("unknown", [], "unsupported collateral format"),
         (collateral.FORMAT_V3, [legacy], "legacy code collateral"),
@@ -448,7 +513,10 @@ def test_rejects_incompatible_collateral_format() -> None:
         with pytest.raises(doc.DocumentError, match=message):
             doc.parse(doc_bytes, nonce)
     # The same entries parse under the format that they belong to.
-    doc.parse(builder.build(nonce, collateral_format=collateral.FORMAT_V3, collateral_entries=[config, artifact_witness])[1], nonce)
+    doc.parse(
+        builder.build(nonce, collateral_format=collateral.FORMAT_V3, collateral_entries=[config, artifact_witness])[1],
+        nonce,
+    )
     doc.parse(builder.build(nonce, collateral_entries=[legacy, sigstore_witness])[1], nonce)
 
 
@@ -474,7 +542,10 @@ def test_random_nonce() -> None:
 
 
 def test_round_trip_preserves_endorsed_bytes() -> None:
-    """The document carries the exact endorsed bytes that were hashed at build time, recoverable with a plain base64 decode."""
+    """The document carries the exact endorsed bytes that were hashed at build time.
+
+    They are recoverable with a plain base64 decode.
+    """
     nonce = builder.test_nonce()
     raw, _ = builder.build(nonce)
     cm_hash = hashlib.sha256(base64.b64decode(raw["crypto_material"])).hexdigest()
@@ -484,7 +555,10 @@ def test_round_trip_preserves_endorsed_bytes() -> None:
 
 
 def test_attested_key_envelope_vectors() -> None:
-    """Public-only vectors shared across SDKs: parsing must accept and preserve key formats that the SDK does not interpret."""
+    """Public-only vectors shared across SDKs.
+
+    Parsing must accept and preserve key formats that the SDK does not interpret.
+    """
     vectors = json.loads((Path(__file__).parent / "testdata" / "attested-keys-vectors.json").read_text())
     assert len(vectors) == 3
     for vector in vectors:

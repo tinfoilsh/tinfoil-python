@@ -5,7 +5,15 @@ from __future__ import annotations
 import pytest
 
 from tinfoil._v3.verifier import _json
-from tinfoil._v3.verifier._json import JsonError, JsonNumber, JsonObject, JsonValue, canonicalize, serialize, strict_parse
+from tinfoil._v3.verifier._json import (
+    JsonError,
+    JsonNumber,
+    JsonObject,
+    JsonValue,
+    canonicalize,
+    serialize,
+    strict_parse,
+)
 
 
 def parse(text: str) -> JsonValue:
@@ -109,10 +117,13 @@ def test_nesting_depth_is_bounded_and_reported_as_a_json_error() -> None:
     for text in ("[" * (_json.MAX_DEPTH + 1) + "]" * (_json.MAX_DEPTH + 1), "[" * 100_000 + "]" * 100_000):
         with pytest.raises(JsonError, match="depth"):
             parse(text)
+    # Exactly MAX_DEPTH parses on an interpreter whose recursion limit allows it and raises the
+    # parser's depth error on one that does not, so the exception is optional and pytest.raises
+    # cannot express the case.
     try:
         parse("[" * _json.MAX_DEPTH + "]" * _json.MAX_DEPTH)
     except JsonError as err:
-        assert "depth" in str(err), "an interpreter below the limit still reports a depth error"
+        assert "depth" in str(err), "an interpreter below the limit still reports a depth error"  # noqa: PT017
 
 
 def test_serialization_rejects_values_deeper_than_the_limit() -> None:
@@ -126,15 +137,19 @@ def test_serialization_rejects_values_deeper_than_the_limit() -> None:
 def test_converts_arrays_nested_anywhere_to_tuples() -> None:
     value = parse_object('{"a":[[1,[2]],{"b":[[]]}],"c":[]}')
     a = value["a"]
-    assert isinstance(a, tuple) and isinstance(a[0], tuple)
+    assert isinstance(a, tuple)
+    assert isinstance(a[0], tuple)
     inner = a[0]
-    assert isinstance(inner, tuple) and inner[1] == (JsonNumber("2"),)
+    assert isinstance(inner, tuple)
+    assert inner[1] == (JsonNumber("2"),)
     b = a[1]
-    assert isinstance(b, JsonObject) and b["b"] == ((),)
+    assert isinstance(b, JsonObject)
+    assert b["b"] == ((),)
     assert value["c"] == ()
     deep = parse("[" * 500 + "]" * 500)
     for _ in range(500):
-        assert isinstance(deep, tuple) and len(deep) <= 1
+        assert isinstance(deep, tuple)
+        assert len(deep) <= 1
         deep = deep[0] if deep else ()
 
 
@@ -524,7 +539,8 @@ def test_boolean_helper() -> None:
 def test_number_helper() -> None:
     obj = parse_object('{"p":1,"n":null,"s":"1","b":false}')
     p = _json.number(obj, "p")
-    assert p is not None and p.raw == "1"
+    assert p is not None
+    assert p.raw == "1"
     assert _json.number(obj, "n") is None
     assert _json.number(obj, "absent") is None
     for key in ("s", "b"):
@@ -535,7 +551,8 @@ def test_number_helper() -> None:
 def test_array_helper() -> None:
     obj = parse_object('{"a":[1],"e":[],"n":null,"o":{},"s":"x"}')
     a = _json.array(obj, "a")
-    assert a is not None and len(a) == 1
+    assert a is not None
+    assert len(a) == 1
     assert _json.array(obj, "e") == ()
     assert _json.array(obj, "n") is None
     assert _json.array(obj, "absent") is None
@@ -549,7 +566,8 @@ def test_raw_helper() -> None:
     assert serialize(_json.raw(obj, "r")) == b'{"z":[1,2]}'
     assert _json.raw(obj, "n") is None
     assert _json.raw(obj, "absent") is None
-    assert "n" in obj and "absent" not in obj
+    assert "n" in obj
+    assert "absent" not in obj
 
 
 def test_struct_helpers() -> None:
@@ -560,7 +578,8 @@ def test_struct_helpers() -> None:
     assert _json.opt_struct(obj, "n", ("a",)) is None
     assert _json.opt_struct(obj, "absent", ("a",)) is None
     s = _json.opt_struct(obj, "s", ("a",))
-    assert s is not None and list(s) == ["a"]
+    assert s is not None
+    assert list(s) == ["a"]
     with pytest.raises(JsonError, match="unknown object member name"):
         _json.struct(obj, "bad", ("a",))
     with pytest.raises(JsonError):
