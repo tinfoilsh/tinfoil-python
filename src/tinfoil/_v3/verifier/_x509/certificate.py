@@ -34,7 +34,7 @@ warnings.filterwarnings(
 )
 
 Certificate: TypeAlias = x509.Certificate
-PublicKey: TypeAlias = ec.EllipticCurvePublicKey | rsa.RSAPublicKey | ed25519.Ed25519PublicKey
+AnyPublicKey: TypeAlias = ec.EllipticCurvePublicKey | rsa.RSAPublicKey | ed25519.Ed25519PublicKey
 """The key types that the verifier accepts for signatures: ECDSA (P-256, P-384), RSA and Ed25519."""
 
 OID_SUBJECT_ALT_NAME = "2.5.29.17"
@@ -138,7 +138,7 @@ def parse_certificates_pem(pem: str | bytes) -> tuple[Certificate, ...]:
     return tuple(parse_certificate(block) for block in blocks)
 
 
-def load_public_key_pem(pem: str | bytes) -> PublicKey:
+def load_public_key_pem(pem: str | bytes) -> AnyPublicKey:
     """Load a PEM PUBLIC KEY of an accepted type."""
     blocks = _with_context("public key", lambda: der.pem_blocks(_text(pem), "PUBLIC KEY"))
     if len(blocks) != 1:
@@ -146,7 +146,7 @@ def load_public_key_pem(pem: str | bytes) -> PublicKey:
     return load_public_key_der(blocks[0])
 
 
-def load_public_key_der(spki: bytes) -> PublicKey:
+def load_public_key_der(spki: bytes) -> AnyPublicKey:
     """Load a DER SubjectPublicKeyInfo of an accepted type; it must re-encode to the same bytes."""
     _with_context("public key", lambda: der.validate_tree(der.decode(spki)))
     try:
@@ -172,7 +172,7 @@ def extension(certificate: Certificate, oid: str) -> Extension | None:
     return None
 
 
-def public_key_spki(key: PublicKey) -> bytes:
+def public_key_spki(key: AnyPublicKey) -> bytes:
     """The DER SubjectPublicKeyInfo of a key."""
     return key.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
 
@@ -182,7 +182,7 @@ def spki_fingerprint(spki: bytes) -> bytes:
     return hashlib.sha256(spki).digest()
 
 
-def certificate_public_key(certificate: Certificate) -> PublicKey:
+def certificate_public_key(certificate: Certificate) -> AnyPublicKey:
     """The certificate's key as one of the accepted types."""
     return _public_key(certificate)
 
@@ -459,7 +459,7 @@ def _hash_algorithm_oid(element: der.Element) -> str:
     return der.object_identifier(parts[0])
 
 
-def verify_signature(algorithm: SignatureAlgorithm, key: PublicKey, signature: bytes, data: bytes) -> None:
+def verify_signature(algorithm: SignatureAlgorithm, key: AnyPublicKey, signature: bytes, data: bytes) -> None:
     """Verify ``signature`` over ``data`` under ``key`` with ``algorithm``.
 
     The key type must suit the algorithm: an ECDSA signature's hash must
@@ -731,7 +731,7 @@ def _tbs(certificate: Certificate) -> _Tbs:
     return _with_context("certificate", lambda: _parse_tbs(parts[0], parts[1]))
 
 
-def _public_key(certificate: Certificate) -> PublicKey:
+def _public_key(certificate: Certificate) -> AnyPublicKey:
     try:
         key = certificate.public_key()
     except (ValueError, UnsupportedAlgorithm) as err:
@@ -739,7 +739,7 @@ def _public_key(certificate: Certificate) -> PublicKey:
     return _accepted_key(key)
 
 
-def _accepted_key(key: object) -> PublicKey:
+def _accepted_key(key: object) -> AnyPublicKey:
     if isinstance(key, ec.EllipticCurvePublicKey):
         _curve_parameters(key)
         return key

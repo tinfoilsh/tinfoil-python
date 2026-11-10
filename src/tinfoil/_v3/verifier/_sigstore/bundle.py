@@ -26,7 +26,7 @@ from sigstore_models.bundle.v1 import Bundle as WireBundle
 
 from tinfoil._v3.verifier import _canonical, _json
 from tinfoil._v3.verifier._sigstore import _wire
-from tinfoil._v3.verifier._x509.certificate import PublicKey, X509Error, certificate_public_key, parse_certificate
+from tinfoil._v3.verifier._x509.certificate import AnyPublicKey, X509Error, certificate_public_key, parse_certificate
 from tinfoil._v3.verifier._x509.certificate import public_key_spki as _public_key_spki
 
 BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
@@ -330,7 +330,7 @@ def _tlog_entry(record: _json.JsonObject) -> TlogEntry:
     )
 
 
-def key_hint_of(key: PublicKey) -> str:
+def key_hint_of(key: AnyPublicKey) -> str:
     """Standard base64 of SHA-256 over the DER SubjectPublicKeyInfo of an ECDSA P-256 key."""
     if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256R1):
         raise BundleError("approval requires an ECDSA P-256 key")

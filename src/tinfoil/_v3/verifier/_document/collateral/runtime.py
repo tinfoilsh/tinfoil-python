@@ -27,6 +27,8 @@ class RuntimeReference:
     digest: str
 
     def validate(self) -> None:
+        """Check that the reference is well formed. Raises ValueError when the repository is not the runtime
+        repository, the tag is not a full semantic version, or the digest is not a lowercase SHA-256."""
         if self.repo != RUNTIME_REPO:
             raise RuntimeCollateralError(f"runtime repository must be {RUNTIME_REPO}")
         if not _semver.is_valid(self.tag) or _semver.canonical(self.tag) + _semver.build(self.tag) != self.tag:

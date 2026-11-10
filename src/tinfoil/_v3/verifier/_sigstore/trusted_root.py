@@ -21,8 +21,8 @@ from tinfoil._v3.verifier import _canonical, _json
 from tinfoil._v3.verifier._sigstore import _wire
 from tinfoil._v3.verifier._trust import SIGSTORE_TRUSTED_ROOT_JSON
 from tinfoil._v3.verifier._x509.certificate import (
+    AnyPublicKey,
     Certificate,
-    PublicKey,
     X509Error,
     load_public_key_der,
     parse_certificate,
@@ -66,7 +66,7 @@ class KeyedAuthority:
     base_url: str
     log_id: bytes
     """The 32-byte key id that bundles name the log by."""
-    public_key: PublicKey
+    public_key: AnyPublicKey
     key_details: str
     hash_algorithm: str
     valid_for: ValidFor

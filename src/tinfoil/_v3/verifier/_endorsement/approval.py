@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from tinfoil._v3.verifier import _json, _semver
 from tinfoil._v3.verifier._canonical import EncodingError, decode_base64, decode_lower_hex
@@ -55,8 +56,8 @@ from tinfoil._v3.verifier._x509.certificate import (
     OID_ECDSA_SHA256,
     OID_EKU_CODE_SIGNING,
     OID_SUBJECT_ALT_NAME,
+    AnyPublicKey,
     Certificate,
-    PublicKey,
     X509Error,
     basic_constraints,
     can_issue_certificates,
@@ -473,16 +474,23 @@ def _core(
 # --- Signing keys -----------------------------------------------------------
 
 
-def public_signing_keys() -> tuple[PublicKey, ...]:
-    """The embedded keys that authenticate registry issuers, legacy public configs and artifact approvals."""
-    return tuple(load_public_key_pem(pem) for pem in PUBLIC_SIGNING_KEYS_PEM)
+def public_signing_keys() -> tuple[ec.EllipticCurvePublicKey, ...]:
+    """The embedded keys that authenticate registry issuers, legacy public configs and artifact approvals: ECDSA
+    P-256 keys, the one type that key hints are computed over."""
+    keys = []
+    for pem in PUBLIC_SIGNING_KEYS_PEM:
+        key = load_public_key_pem(pem)
+        if not isinstance(key, ec.EllipticCurvePublicKey):
+            raise X509Error("public signing key is not an ECDSA key")
+        keys.append(key)
+    return tuple(keys)
 
 
 # --- Registry certificates --------------------------------------------------
 
 
 def verify_signing_certificate(
-    certificate_der: bytes, issuer_der: bytes, roots: Sequence[PublicKey], at: datetime
+    certificate_der: bytes, issuer_der: bytes, roots: Sequence[AnyPublicKey], at: datetime
 ) -> tuple[Certificate, Certificate]:
     """Authenticate a registry signing certificate at ``at`` and return it with its issuer.
 
@@ -595,7 +603,7 @@ class ApprovalVerifier:
 
     __slots__ = ("_keys", "_root")
 
-    def __init__(self, root: TrustedRoot, keys: Sequence[PublicKey]) -> None:
+    def __init__(self, root: TrustedRoot, keys: Sequence[AnyPublicKey]) -> None:
         """Requires a root with at least one transparency log and at least one key; duplicate keys reject."""
         if not root.tlogs:
             raise ApprovalError("Rekor trust is required")
@@ -691,7 +699,9 @@ class ConfigVerifier:
 
     __slots__ = ("_approvals", "_root_keys")
 
-    def __init__(self, root: TrustedRoot, keys: Sequence[PublicKey], *, root_keys: Sequence[PublicKey] = ()) -> None:
+    def __init__(
+        self, root: TrustedRoot, keys: Sequence[AnyPublicKey], *, root_keys: Sequence[AnyPublicKey] = ()
+    ) -> None:
         """``root_keys`` non-empty makes this a registry verifier: certified endorsements chain to those keys and
         key-signed ones are attributed to the public registry."""
         self._approvals = ApprovalVerifier(root, keys)
@@ -847,7 +857,7 @@ class FreshnessVerifier:
 
     __slots__ = ("_approvals",)
 
-    def __init__(self, root: TrustedRoot, keys: Sequence[PublicKey]) -> None:
+    def __init__(self, root: TrustedRoot, keys: Sequence[AnyPublicKey]) -> None:
         self._approvals = ApprovalVerifier(root, keys)
 
     def verify(self, bundle: _json.JsonValue, policy: FreshnessPolicy) -> FreshnessVerified:

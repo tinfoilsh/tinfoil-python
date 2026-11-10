@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from pydantic import ValidationError
 
 from tinfoil._v3.verifier import _json
-from tinfoil._v3.verifier._x509.certificate import PublicKey
+from tinfoil._v3.verifier._x509.certificate import AnyPublicKey
 
 # ASCII digit classes throughout: ``\d`` would also match other scripts' digits.
 _RFC3339 = re.compile(
@@ -118,7 +118,7 @@ def rfc3339(text: str, what: str) -> datetime:
         raise WireError(f"{what} is not a valid calendar time") from err
 
 
-def key_details_of(key: PublicKey) -> str | None:
+def key_details_of(key: AnyPublicKey) -> str | None:
     """The protobuf key-details name of a key, or None for a key type that no log may use."""
     if isinstance(key, ec.EllipticCurvePublicKey):
         if isinstance(key.curve, ec.SECP256R1):

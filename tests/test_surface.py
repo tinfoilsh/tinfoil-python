@@ -49,9 +49,11 @@ EXPECTED_ALL = (
     "Expected",
     "ExpectedSEVSNP",
     "ExpectedTDX",
+    "Layer",
     "Measurement",
     "PublicKey",
     "Reference",
+    "ReferenceSource",
     "Register",
     "RuntimeReference",
     "SoftwareIdentity",
@@ -64,6 +66,7 @@ EXPECTED_ALL = (
     "cert_pubkey_fp",
     "connection_cert_fp",
     "crypto_material_data",
+    "load_public_key",
     "parse_expected_sevsnp",
     "parse_expected_tdx",
     "parse_reference",
@@ -76,10 +79,13 @@ EXPECTED_ALL = (
 PRIVATE_NAMES = ("Overrides", "_build", "ResolvedReferences", "resolve_embedded", "TrustPolicy")
 
 # Exported aliases of builtin types, which carry no module of their own.
-BUILTIN_ALIASES = ("Register",)
+BUILTIN_ALIASES = ("Layer", "Register")
 
-# Exported type aliases that are neither classes nor functions: a callable signature and a union of key types.
-TYPE_ALIASES = ("ConfigAuthorizer", "PublicKey")
+# Exported type aliases that are neither classes nor functions: a callable signature and a Literal.
+TYPE_ALIASES = ("ConfigAuthorizer", "ReferenceSource")
+
+# The exported key type is a class of the cryptography library, not of this package.
+FOREIGN_CLASSES = ("PublicKey",)
 
 
 @pytest.fixture(scope="module")
@@ -110,6 +116,9 @@ def test_classes_and_functions_come_from_the_package(surface: ModuleType) -> Non
         value = getattr(surface, name)
         if name in BUILTIN_ALIASES:
             assert value.__module__ == "builtins", name
+        elif name in FOREIGN_CLASSES:
+            assert inspect.isclass(value), name
+            assert value.__module__.startswith("cryptography."), name
         elif name in TYPE_ALIASES:
             assert not inspect.isclass(value), name
             assert not inspect.isfunction(value), name
@@ -150,6 +159,7 @@ from {module} import (
     NONCE_SIZE,
     PUBLIC_REGISTRY_ID,
     REGISTER_SIZE,
+    SOURCE_EMBEDDED,
     ConfigAuthorizer,
     ConfigEndorsement,
     EmbeddedConfig,
@@ -158,9 +168,11 @@ from {module} import (
     Expected,
     ExpectedSEVSNP,
     ExpectedTDX,
+    Layer,
     Measurement,
     PublicKey,
     Reference,
+    ReferenceSource,
     Register,
     RuntimeReference,
     SEVSNP,
@@ -171,12 +183,20 @@ from {module} import (
     Verifier,
     VerifyError,
     crypto_material_data,
+    load_public_key,
     parse_expected_tdx,
     parse_reference,
     parse_register,
     pin_tls_key,
     random_nonce,
 )
+
+PEM = """\
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXpD92epoTkV8GlS2ypQYAlvSllIy
+Z8MUPsliFK+r0GnUBcgHcZUn17zcl3kTdJLObY7I8GMq3ID/KUO/Sa9p8Q==
+-----END PUBLIC KEY-----
+"""
 
 
 def describe(measurement: Measurement) -> str:
@@ -194,8 +214,16 @@ def pins(expected: Expected) -> list[Register | None]:
 
 
 def authorize(endorsement: ConfigEndorsement) -> None:
-    if endorsement.config is None:
+    bundle: bytes | None = endorsement.bundle
+    if endorsement.config is None or bundle is None:
         raise ValueError("no config")
+
+
+def source_of(verified: Verification) -> ReferenceSource | None:
+    source: ReferenceSource | None = verified.config.source if verified.config is not None else None
+    if verified.runtime is not None and verified.runtime.source == SOURCE_EMBEDDED:
+        return SOURCE_EMBEDDED
+    return source
 
 
 def report(verified: Verification) -> str:
@@ -211,7 +239,8 @@ def report(verified: Verification) -> str:
     return "".join(
         (verified.code_digest, verified.code_tag, verified.config_repo, describe(verified.enclave_measurement),
          fp or "", key or "", data or "", str(expires), name, runtime_tag, verified_at.isoformat(),
-         str(len(registers)), str(check is not None), verified.to_json(), str(verified.to_dict()))
+         str(len(registers)), str(check is not None), verified.to_json(), verified.to_json(indent=2),
+         str(verified.to_dict()), str(source_of(verified)))
     )
 
 
@@ -247,14 +276,26 @@ def main() -> None:
         Verifier(config_signing_keys=keys)
     except UsageError as err:
         assert err.message
+        assert isinstance(err, ValueError)
     else:
         fail("an empty key list built a verifier")
+    key: PublicKey = load_public_key(PEM)
+    keyed = Verifier(config_signing_keys=[load_public_key(PEM)], freshness_signing_keys=[key])
+    assert repr(keyed).startswith("Verifier(")
+    keyed.check_repo_verifiability(None)
     try:
-        verifier.verify_v3_at(b"", nonce, "org/repo", datetime.now(UTC))
+        parse_reference("not a reference")
+    except UsageError as err:
+        assert err.message
+    else:
+        fail("a malformed reference parsed")
+    try:
+        verifier.verify_v3_at(b"", nonce, None, datetime.now(UTC))
     except VerificationError as err:
-        layer: str = err.layer
+        layer: Layer = err.layer
         assert layer == LAYER_ENVELOPE
         assert isinstance(err, VerifyError)
+        assert str(err) == f"{{layer}}: {{err.message}}"
         print(layer)
     else:
         fail("an empty document verified")

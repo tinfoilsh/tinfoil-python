@@ -35,7 +35,7 @@ from tinfoil._v3.verifier._sigstore.bundle import (
 )
 from tinfoil._v3.verifier._sigstore.trusted_root import KeyedAuthority, TrustedRoot
 from tinfoil._v3.verifier._x509 import der
-from tinfoil._v3.verifier._x509.certificate import PublicKey, public_key_spki
+from tinfoil._v3.verifier._x509.certificate import AnyPublicKey, public_key_spki
 
 MAX_LOG_RECEIPTS = 8
 HASHEDREKORD_KIND = "hashedrekord"
@@ -101,7 +101,7 @@ class HashedRekordBody:
     """The signer's key algorithm as the log names it; ``digest`` uses the hash that it implies."""
 
 
-def key_hint(key: PublicKey) -> str:
+def key_hint(key: AnyPublicKey) -> str:
     """The hint of a signing key: requires ECDSA P-256 with a point on the curve."""
     try:
         return key_hint_of(key)
@@ -109,7 +109,7 @@ def key_hint(key: PublicKey) -> str:
         raise KeyedBundleError(str(err)) from err
 
 
-def pinned_keys(keys: Sequence[PublicKey]) -> tuple[PinnedKey, ...]:
+def pinned_keys(keys: Sequence[AnyPublicKey]) -> tuple[PinnedKey, ...]:
     """Pin a key set: at least one key, each ECDSA P-256, no two with the same hint."""
     if not keys:
         raise KeyedBundleError("at least one independently trusted signing key is required")
@@ -517,7 +517,7 @@ def verify_inclusion_promise(root: TrustedRoot, entry: TlogEntry) -> datetime:
     return at
 
 
-def verify_signature(key: PublicKey, signature: bytes, data: bytes) -> None:
+def verify_signature(key: AnyPublicKey, signature: bytes, data: bytes) -> None:
     """Verify a signature with the hash that the key type implies (SHA-256 for P-256, SHA-384 for P-384, none for
     Ed25519).
 

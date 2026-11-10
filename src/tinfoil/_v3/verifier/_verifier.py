@@ -21,6 +21,7 @@ from tinfoil._sdkinfo import SDK_NAME, sdk_version
 from tinfoil._v3.verifier._config import (
     ConfigAuthorizer,
     EndorsementResult,
+    PublicKey,
     ReferencesError,
     TrustPolicy,
     config_references,
@@ -61,7 +62,7 @@ from tinfoil._v3.verifier._verification import (
     Verification,
     VerificationMetadata,
 )
-from tinfoil._v3.verifier._x509.certificate import PublicKey, X509Error
+from tinfoil._v3.verifier._x509.certificate import X509Error
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -114,25 +115,54 @@ class Verifier:
         config_authorizer: ConfigAuthorizer | None = None,
         embedded_references: EmbeddedReferences | None = None,
     ) -> None:
-        """Build a verifier. Defaults use embedded production trust, Tinfoil's public config and artifact signing
-        keys, and a seven-day freshness bound. Invalid or conflicting options are a UsageError.
+        """Build a verifier. The defaults use the embedded production trust roots, Tinfoil's public config and
+        artifact signing keys, and a seven-day freshness bound. An invalid option or a conflicting combination is a
+        UsageError.
 
-        ``pinned_registers`` adds register checks: each set register must
-        match the enclave; it fills a register the release leaves open and
-        must equal one the release fixes; pins for one platform reject
-        every enclave on the other. ``freshness_max_age`` bounds how old an
-        authenticated witness may be; None keeps the seven-day default,
-        every non-negative age including zero is honoured, and a negative
-        age is invalid. ``config_signing_keys``
-        replaces public config trust with the supplied keys, which use no
-        registry ids and authorize no artifact freshness.
-        ``freshness_signing_keys`` pins the platform and runtime approval
-        keys. ``config_registry_ids`` accepts exactly these registries,
-        replacing public-only trust. ``config_authorizer`` replaces config
-        endorsement verification with caller policy. ``embedded_references``
-        replaces endorsement and renewal checks for the components they
-        supply. An explicit key set, registry list, authorizer or embedded
-        reference requires v3 collateral.
+        ``pinned_registers``: register checks on top of the release's. Each
+        set register must match the enclave: it fills a register that the
+        release leaves open and must equal one that the release fixes. Pins
+        for one platform reject every enclave on the other. None adds no
+        checks.
+
+        ``freshness_max_age``: how old an authenticated witness or approval
+        may be at the verification instant. None keeps the seven-day
+        default. Any non-negative ``timedelta`` is honored as given: zero
+        means zero, so every witness is stale, and a negative age is a
+        UsageError.
+
+        ``config_signing_keys``: ECDSA P-256 keys (``load_public_key``)
+        that replace the public config trust. Configs must be key-signed by
+        one of them; registry ids do not apply and these keys authorize no
+        artifact freshness. An empty sequence is a UsageError.
+
+        ``freshness_signing_keys``: ECDSA P-256 keys that replace the public
+        keys for the platform and runtime freshness approvals. An empty
+        sequence is a UsageError.
+
+        ``config_registry_ids``: the registries whose certified approvals
+        are accepted, in place of the public registry alone. An empty
+        sequence or a malformed id is a UsageError.
+
+        ``config_authorizer``: caller policy that replaces config
+        endorsement verification; it decides on the config bytes and the
+        verifier still authenticates the runtime, the platform and the
+        hardware. ``verify_v3`` then requires an empty ``repo``.
+
+        ``embedded_references``: caller-trusted config, runtime manifest
+        or platform artifact that replace endorsement and renewal checks
+        for the components supplied; the others keep their checks.
+
+        Conflicts, each a UsageError: an embedded config with
+        ``config_signing_keys``; ``config_authorizer`` with an embedded
+        config or ``config_signing_keys``; ``config_registry_ids`` with an
+        embedded config, ``config_authorizer`` or ``config_signing_keys``;
+        ``freshness_signing_keys`` when both the runtime and the platform
+        are embedded, so that no endorsed artifact remains to verify.
+
+        Any explicit key set, registry list, authorizer or embedded
+        reference requires ``attestation-collaterals/v3`` collateral; a v2
+        document is then rejected at the provenance layer.
         """
         self._trust = _trust_policy(
             overrides=None,
@@ -161,7 +191,13 @@ class Verifier:
         authorizer, instead of a repository pin authenticating it."""
         return self._trust.embedded.config is not None or self._trust.config_authorizer is not None
 
-    def check_repo_verifiability(self, repo: str) -> None:
+    def __repr__(self) -> str:
+        return (
+            f"Verifier(pinned_registers={self.pinned_registers!r}, freshness_max_age={self.freshness_max_age!r}, "
+            f"caller_authorizes_config={self.caller_authorizes_config!r})"
+        )
+
+    def check_repo_verifiability(self, repo: str | None) -> None:
         """Check that this verifier can verify an enclave against the repository pin ``repo``, without a document or
         network I/O, so that a caller can reject a pin before fetching a document.
 
@@ -170,25 +206,25 @@ class Verifier:
         is set and this verifier has a config authorizer, which cannot
         authenticate a repository pin; or when this verifier has an embedded
         config whose name or digest ``repo`` does not match. An empty
-        ``repo`` accepts configs authorized by the configured registry
-        trust. ``verify_v3`` rejects every such ``repo``, whatever the
-        document. It can still reject a ``repo`` that passes: v3 collateral
-        also requires the repo and revision to be valid config identity
-        components, such as lowercase slugs, and v2 collateral does not, so
-        that check waits for the document.
+        ``repo``, or None, which means the same, accepts configs authorized
+        by the configured registry trust. ``verify_v3`` rejects every such
+        ``repo``, whatever the document. It can still reject a ``repo``
+        that passes: v3 collateral also requires the repo and revision to be
+        valid config identity components, such as lowercase slugs, and v2
+        collateral does not, so that check waits for the document.
         """
-        if not isinstance(repo, str):
-            raise UsageError("repository reference must be a string")
-        reference_pins(self._trust, repo)
+        reference_pins(self._trust, _repo(repo))
 
-    def verify_v3(self, doc: bytes, nonce: bytes, repo: str) -> Verification:
-        """Appraise a nonce-bound v3 attestation document using its collateral version, at the current time.
+    def verify_v3(self, doc: bytes, nonce: bytes, repo: str | None) -> Verification:
+        """Appraise a nonce-bound v3 attestation document, with whichever collateral format (v2 or v3) the document
+        carries, at the current time.
 
         ``repo`` pins the expected repository or registry project as
-        ``org/project[@revision][@sha256:digest]``; an empty ``repo``
-        accepts authorized registry ids. An embedded config instead
-        authorizes its exact caller-supplied bytes. A config authorizer
-        requires an empty ``repo`` and owns config authorization.
+        ``org/project[@revision][@sha256:digest]``; an empty ``repo``, or
+        None, which means the same, accepts authorized registry ids. An
+        embedded config instead authorizes its exact caller-supplied bytes.
+        A config authorizer requires an empty ``repo`` and owns config
+        authorization.
 
         The caller owns both expectations that cannot come from the
         document: the nonce it generated, and any additional workload
@@ -200,7 +236,7 @@ class Verifier:
         # The only clock read.
         return self.verify_v3_at(doc, nonce, repo, datetime.now(UTC))
 
-    def verify_v3_at(self, doc: bytes, nonce: bytes, repo: str, verification_time: datetime) -> Verification:
+    def verify_v3_at(self, doc: bytes, nonce: bytes, repo: str | None, verification_time: datetime) -> Verification:
         """``verify_v3`` for an archived document. ``verification_time`` replaces the current time in every
         time-bound check: the freshness witnesses and approvals, and the vendor certificate and CRL validity windows
         of the CPU evidence. ``metadata.verified_at`` reports it, and a naive or missing time is a UsageError.
@@ -221,9 +257,16 @@ class Verifier:
             raise UsageError("document must be bytes")
         if not isinstance(nonce, bytes | bytearray | memoryview):
             raise UsageError("nonce must be bytes")
-        if not isinstance(repo, str):
-            raise UsageError("repository reference must be a string")
-        return _verify_v3(trust, bytes(doc), bytes(nonce), repo, verification_time)
+        return _verify_v3(trust, bytes(doc), bytes(nonce), _repo(repo), verification_time)
+
+
+def _repo(repo: str | None) -> str:
+    """The repository pin as a string: None means no pin, like ``""``; anything but a string is a UsageError."""
+    if repo is None:
+        return ""
+    if not isinstance(repo, str):
+        raise UsageError("repository reference must be a string or None")
+    return repo
 
 
 def _build(
@@ -456,8 +499,14 @@ def _authenticate_freshness(
 
 
 def parse_reference(ref: str) -> Reference:
-    """Validate ``owner/name[@tag][@sha256:digest]`` and return its parts."""
-    return _parse_reference(ref)
+    """Validate ``owner/name[@tag][@sha256:digest]`` and return its parts. A string that is not a reference, or a
+    value that is not a string, is a UsageError."""
+    if not isinstance(ref, str):
+        raise UsageError(f"release reference must be a string, not {type(ref).__name__}")
+    try:
+        return _parse_reference(ref)
+    except ReleaseReferenceError as err:
+        raise UsageError(str(err)) from err
 
 
 __all__ = ["Overrides", "Reference", "Verifier", "parse_reference"]

@@ -48,6 +48,19 @@ def pin_tls_key(fp: str) -> Callable[[ssl.SSLSocket | ssl.SSLObject], None]:
     the form ``Verification.tls_public_key_fp`` reports. It adds to the certificate checks that the TLS context
     performs; it does not replace them. A mismatch is a VerificationError of the policy layer.
 
+    Call the returned check on the ``ssl.SSLSocket`` or ``ssl.SSLObject``
+    immediately after ``do_handshake()`` returns and before the first byte
+    is written, so that nothing reaches a peer that holds the wrong key.
+    The SDK's HTTP clients do this in their transport; a caller that opens
+    its own connection does it like this::
+
+        check = pin_tls_key(verified.tls_public_key_fp)
+        context = ssl.create_default_context()
+        with socket.create_connection((host, 443)) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as tls:
+                check(tls)  # do_handshake() ran inside wrap_socket()
+                tls.sendall(request)
+
     ``fp`` must be a SHA-256 digest as lowercase hex; anything else, such as the None that
     ``Verification.tls_public_key_fp`` reports when the document endorses no TLS key, is a UsageError here rather
     than a mismatch on every connection."""
