@@ -121,6 +121,9 @@ ignore = [
     "S",
     "RUF001", "RUF002", "RUF003",  # tests probe non-ASCII digits and letters on purpose
 ]
+# The client's `timeout` is the per-operation timeout that httpx.AsyncClient takes, passed through to it; waits
+# are bounded by task cancellation, not by a parameter.
+"src/tinfoil/_v3/_*.py" = ["ASYNC109"]
 
 [tool.mypy]
 python_version = "3.11"
