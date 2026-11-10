@@ -13,6 +13,7 @@ import json
 import socket
 import ssl
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,6 +49,16 @@ TLS_FP = "ab" * 32
 HPKE_KEY = "cd" * 32
 DOCUMENT = b'{"document": "bytes"}'
 REQUEST = {"host": HOST, "repo": REPO}
+# Strings that are not a bare host with an optional port.
+NOT_A_HOST = [
+    "https://enclave.example",
+    "enclave.example/path",
+    "user@enclave.example",
+    "enclave.example:port",
+    "enclave.example?x=1",
+    "enclave.example#f",
+    ":443",
+]
 
 
 def verification(*items: CryptoMaterialItem) -> Verification:
@@ -188,6 +199,23 @@ def test_live_verify_rejects_a_malformed_request_before_any_connection(
         "accepted": False,
         "rejection": {"code": adapter.MALFORMED_INPUT},
     }
+    assert fetched == []
+    assert dialed == []
+    assert double.calls == []
+
+
+@pytest.mark.parametrize("host", NOT_A_HOST)
+def test_live_verify_classifies_an_invalid_host_as_malformed_before_any_connection(
+    host: str, double: type[VerifierDouble], fetched: list[tuple[str, bytes]], dialed: list[str]
+) -> None:
+    result = adapter.run(adapter.STAGE_LIVE_VERIFY, {"host": host, "repo": REPO})
+    assert result.exit_code == adapter.EXIT_MALFORMED
+    assert result.output == {
+        "stage": adapter.STAGE_LIVE_VERIFY,
+        "accepted": False,
+        "rejection": {"code": adapter.MALFORMED_INPUT},
+    }
+    assert "host" in result.diagnostic
     assert fetched == []
     assert dialed == []
     assert double.calls == []
@@ -410,6 +438,18 @@ def test_capture_rejects_bad_flags_before_any_connection(
     assert double.calls == []
 
 
+@pytest.mark.parametrize("host", NOT_A_HOST)
+def test_capture_classifies_an_invalid_host_as_malformed_before_any_connection(
+    host: str, double: type[VerifierDouble], fetched: list[tuple[str, bytes]]
+) -> None:
+    code, stdout, stderr = _capture(["--host", host, "--repo", REPO])
+    assert code == adapter.EXIT_MALFORMED
+    assert stdout == ""
+    assert "host" in stderr
+    assert fetched == []
+    assert double.calls == []
+
+
 # --- the document fetch ---------------------------------------------------------------------------------------------
 
 
@@ -433,7 +473,7 @@ def test_fetch_document_requests_the_well_known_document_for_the_nonce() -> None
     assert request.headers["Tinfoil-SDK-Version"] != ""
 
 
-@pytest.mark.parametrize("status", [301, 302, 307, 404, 500])
+@pytest.mark.parametrize("status", [100, 101, 103, 301, 302, 307, 404, 500])
 def test_fetch_document_rejects_a_status_outside_2xx_without_following(status: int) -> None:
     seen: list[httpx.Request] = []
     with pytest.raises(adapter.FetchError, match=str(status)):
@@ -448,19 +488,44 @@ def test_fetch_document_bounds_the_body(monkeypatch: pytest.MonkeyPatch) -> None
         adapter._fetch_document(HOST, NONCE, transport=_serving(200, b"x" * 17, []))
 
 
-@pytest.mark.parametrize(
-    "host",
-    [
-        "",
-        "https://enclave.example",
-        "enclave.example/path",
-        "user@enclave.example",
-        "enclave.example:port",
-        "enclave.example?x=1",
-        "enclave.example#f",
-        ":443",
-    ],
-)
+class _Trickle(httpx.SyncByteStream):
+    """A response body that arrives one chunk per ``pause`` seconds, counting the chunks that were read."""
+
+    def __init__(self, chunks: list[bytes], pause: float) -> None:
+        self.chunks = chunks
+        self.pause = pause
+        self.read = 0
+
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self.chunks:
+            time.sleep(self.pause)
+            self.read += 1
+            yield chunk
+
+
+def _trickling(stream: _Trickle) -> httpx.MockTransport:
+    return httpx.MockTransport(lambda request: httpx.Response(200, stream=stream))
+
+
+def test_fetch_document_bounds_the_whole_fetch_not_each_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A peer that keeps every read under the per-operation timeout still runs out of the overall deadline."""
+    monkeypatch.setattr(adapter, "FETCH_TIMEOUT", 0.1)
+    # Each chunk is well inside the 0.1 s per-read timeout; the body as a whole is not.
+    stream = _Trickle([b"x"] * 20, pause=0.03)
+    started = time.monotonic()
+    with pytest.raises(adapter.FetchError, match=r"within 0\.1s"):
+        adapter._fetch_document(HOST, NONCE, transport=_trickling(stream))
+    assert time.monotonic() - started < 1.0, "the deadline is enforced as it passes, not after the body"
+    assert stream.read < len(stream.chunks)
+
+
+def test_fetch_document_assembles_a_body_that_trickles_in_before_the_deadline() -> None:
+    stream = _Trickle([b"ab", b"cd", b"ef"], pause=0.005)
+    assert adapter._fetch_document(HOST, NONCE, transport=_trickling(stream)) == b"abcdef"
+    assert stream.read == 3
+
+
+@pytest.mark.parametrize("host", ["", *NOT_A_HOST])
 def test_fetch_document_rejects_anything_but_a_host(host: str) -> None:
     with pytest.raises(ValueError, match="host"):
         adapter._fetch_document(host, NONCE, transport=_serving(200, DOCUMENT, []))

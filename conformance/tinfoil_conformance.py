@@ -38,6 +38,7 @@ import re
 import socket
 import ssl
 import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -119,7 +120,8 @@ TDX_MEASUREMENT_TYPE = "https://tinfoil.sh/predicate/tdx-guest/v2"
 # The integration lane's wire facts.
 ATTESTATION_ENDPOINT = "/.well-known/tinfoil-attestation"
 CHANNEL_BINDING = "tls-spki"
-# Bounds on the document fetch: the whole request, and the body that it may carry.
+# Bounds on the document fetch: the whole fetch from the request to the last body byte (and each socket
+# operation within it), and the body that it may carry.
 FETCH_TIMEOUT = 30.0
 MAX_DOCUMENT_BYTES = 32 << 20
 # The TLS handshake that checks the channel binding.
@@ -628,7 +630,8 @@ def _verify_timestamp(decoded: Input) -> Result:
 
 
 class FetchError(RuntimeError):
-    """The enclave did not serve a document: a failed request, a status outside 2xx, or an oversized body."""
+    """The enclave did not serve a document: a failed request, a status outside 2xx, an oversized body, or a
+    response that did not complete within FETCH_TIMEOUT."""
 
 
 def _live_verify(raw: Any) -> Result:
@@ -636,18 +639,24 @@ def _live_verify(raw: Any) -> Result:
     ``Verifier`` with the embedded roots at the current time, then the TLS key on the wire against the endorsed
     one.
 
-    The request is ``{"host": ..., "repo": ...}``, both non-empty strings;
-    anything else is malformed input. A document that cannot be fetched, or
-    an enclave that cannot be dialed for the channel binding, gives no
-    verdict. The verifier's errors map as in the full-verify stage. A
-    document that endorses no usable channel keys is an envelope rejection,
-    and a live TLS key other than the endorsed one is a policy rejection.
+    The request is ``{"host": ..., "repo": ...}``, both non-empty strings
+    and the host a bare host with an optional port; anything else is
+    malformed input, found before any connection. A document that cannot
+    be fetched, or an enclave that cannot be dialed for the channel
+    binding, gives no verdict. The verifier's errors map as in the
+    full-verify stage. A document that endorses no usable channel keys is
+    an envelope rejection, and a live TLS key other than the endorsed one
+    is a policy rejection.
     """
     stage = STAGE_LIVE_VERIFY
     request = _live_request(raw)
     if request is None:
         return _malformed(stage)
     host, repo = request
+    try:
+        _authority(host)
+    except ValueError as err:
+        return _malformed(stage, str(err))
     verifier = Verifier()
     nonce = random_nonce()
     try:
@@ -689,11 +698,12 @@ def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
     """Fetch a live enclave's document and, only if the full-verify stage accepts it under the embedded roots at
     the capture time, freeze it as a fixture pinned to that time.
 
-    ``--host`` and ``--repo`` are required; ``--id`` names the fixture,
-    ``--out`` is the file to write (stdout by default) and ``--nonce`` fixes
-    the challenge as lowercase hex (fresh and random by default). A document
-    that the verifier does not accept is never written; the exit code is
-    the stage's.
+    ``--host`` (a bare host with an optional port) and ``--repo`` are
+    required; ``--id`` names the fixture, ``--out`` is the file to write
+    (stdout by default) and ``--nonce`` fixes the challenge as lowercase hex
+    (fresh and random by default). Invalid flags are found before any
+    connection. A document that the verifier does not accept is never
+    written; the exit code is the stage's.
     """
     options = _capture_options(args)
     if options is None:
@@ -711,6 +721,11 @@ def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
         stderr.write(f"nonce: must be {NONCE_SIZE} bytes, got {len(nonce)}\n")
         return EXIT_MALFORMED
     host = options["host"]
+    try:
+        _authority(host)
+    except ValueError as err:
+        stderr.write(f"host: {err}\n")
+        return EXIT_MALFORMED
     try:
         document_bytes = _fetch_document(host, nonce)
     except (FetchError, httpx.HTTPError, OSError, ValueError) as err:
@@ -803,19 +818,34 @@ def _attestation_url(host: str, nonce: bytes) -> str:
 
 def _fetch_document(host: str, nonce: bytes, *, transport: httpx.BaseTransport | None = None) -> bytes:
     """The raw document that ``host`` serves for ``nonce``: one GET with the SDK identity headers, no redirects,
-    bounded in time and size. Parses nothing. Raises FetchError for a response that is not a document, ValueError
-    for a host or nonce that cannot form the URL, and httpx's errors for a request that fails."""
+    bounded in time and size. Parses nothing. Raises FetchError for a response that is not a document or that
+    does not complete within FETCH_TIMEOUT, ValueError for a host or nonce that cannot form the URL, and httpx's
+    errors for a request that fails.
+
+    FETCH_TIMEOUT bounds the fetch twice: the client applies it to each
+    socket operation, which catches a silent peer, and a deadline taken
+    before the request applies it to the whole exchange, which catches a
+    peer that keeps the connection alive by trickling bytes.
+    """
     url = _attestation_url(host, nonce)
+    deadline = time.monotonic() + FETCH_TIMEOUT
+
+    def check_deadline() -> None:
+        if time.monotonic() > deadline:
+            raise FetchError(f"HTTP GET {url}: no complete document within {FETCH_TIMEOUT}s")
+
     with (
         httpx.Client(
             transport=transport, timeout=FETCH_TIMEOUT, follow_redirects=False, headers=attestation_headers()
         ) as client,
         client.stream("GET", url) as response,
     ):
-        if response.status_code > 299:
+        check_deadline()
+        if not 200 <= response.status_code < 300:
             raise FetchError(f"HTTP GET {url}: {response.status_code} {response.reason_phrase}")
         body = bytearray()
         for chunk in response.iter_bytes():
+            check_deadline()
             body += chunk
             if len(body) > MAX_DOCUMENT_BYTES:
                 raise FetchError(f"attestation document exceeds {MAX_DOCUMENT_BYTES} bytes")
