@@ -131,7 +131,7 @@ class Verification:
 
     def to_dict(self) -> dict[str, Any]:
         """A plain, JSON-ready copy: registers as lowercase hex, times as ISO 8601 in UTC, facts that were not
-        established left out."""
+        established (None times and empty strings) left out of the config, runtime and platform records."""
         out: dict[str, Any] = {
             "code_digest": self.code_digest,
             "code_tag": self.code_tag,
@@ -143,7 +143,7 @@ class Verification:
             ],
         }
         if self.config is not None:
-            out["config"] = _without_none(
+            out["config"] = _established(
                 {
                     "source": self.config.source,
                     "name": self.config.name,
@@ -157,7 +157,7 @@ class Verification:
             )
         for name, artifact in (("runtime", self.runtime), ("platform", self.platform)):
             if artifact is not None:
-                out[name] = _without_none(
+                out[name] = _established(
                     {
                         "source": artifact.source,
                         "repo": artifact.repo,
@@ -211,8 +211,9 @@ def _time(at: datetime | None) -> str | None:
     return at.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _without_none(record: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in record.items() if value is not None}
+def _established(record: dict[str, Any]) -> dict[str, Any]:
+    """``record`` without the facts that were not established: a None time or an empty string."""
+    return {key: value for key, value in record.items() if value is not None and value != ""}
 
 
 __all__ = [

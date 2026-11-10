@@ -124,8 +124,6 @@ def test_to_dict_lays_out_registers_as_hex_and_times_in_utc() -> None:
             "repo": "tinfoilsh/cvmimage",
             "tag": "v0.15.0",
             "digest": "12" * 32,
-            "name": "",
-            "commit": "",
         },
         "platform": {
             "source": "endorsement",
@@ -157,4 +155,15 @@ def test_to_dict_leaves_out_what_was_not_established() -> None:
         "enclave_measurement",
         "crypto_material",
         "metadata",
+    }
+    # A caller-authorized config and an embedded runtime establish only a source and whatever the caller supplied:
+    # the placeholders for the facts that an endorsement would have established are not emitted.
+    got = record(
+        config=ConfigVerification(source=SOURCE_EMBEDDED, digest="cd" * 32),
+        runtime=ArtifactVerification(source=SOURCE_EMBEDDED),
+    ).to_dict()
+    assert got["config"] == {"source": "embedded", "digest": "cd" * 32}
+    assert got["runtime"] == {"source": "embedded"}
+    assert json.loads(record(runtime=ArtifactVerification(source=SOURCE_EMBEDDED)).to_json())["runtime"] == {
+        "source": "embedded"
     }
