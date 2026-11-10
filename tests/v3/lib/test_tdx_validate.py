@@ -18,8 +18,6 @@ from tinfoil._v3.verifier._quote.tdx.lib.validate import (
     PolicyOptions,
     TdQuoteBodyOptions,
     TdxValidationError,
-    validate_mr_signer_seam,
-    validate_seam_attributes,
     validate_td_attributes,
     validate_xfam,
 )
@@ -51,14 +49,14 @@ class TestValidateXfam:
     def test_missing_fixed1_bits_rejected(self):
         """XFAM missing required FIXED1 bits is rejected."""
         xfam = struct.pack("<Q", 0x0)
-        with pytest.raises(TdxValidationError, match=r"FIXED1.*unset"):
+        with pytest.raises(TdxValidationError, match=r"(?i)fixed1.*unset"):
             validate_xfam(xfam)
 
     def test_unauthorized_bits_rejected(self):
         """XFAM with bits outside FIXED0 mask is rejected."""
         # Set all bits - many are not allowed
         xfam = struct.pack("<Q", 0xFFFFFFFFFFFFFFFF)
-        with pytest.raises(TdxValidationError, match=r"FIXED0.*set"):
+        with pytest.raises(TdxValidationError, match=r"(?i)fixed0.*set"):
             validate_xfam(xfam)
 
     def test_wrong_size_rejected(self):
@@ -95,69 +93,22 @@ class TestValidateTdAttributes:
         """The known-good TD_ATTRIBUTES value passes validation."""
         validate_td_attributes(EXPECTED_TD_ATTRIBUTES)
 
-    def test_debug_bit_rejected_unconditionally(self):
-        """DEBUG bit is rejected unconditionally, even though it's in FIXED0."""
-        td_attrs = struct.pack("<Q", TD_ATTRIBUTES_DEBUG_BIT)
-        with pytest.raises(TdxValidationError, match="DEBUG bit must not be set"):
-            validate_td_attributes(td_attrs)
+    def test_debug_bit_is_a_fixed0_bit(self):
+        """The DEBUG bit is among the supported bits; whether a debug TD is acceptable is the policy's exact
+        TD_ATTRIBUTES match to decide."""
+        validate_td_attributes(struct.pack("<Q", TD_ATTRIBUTES_DEBUG_BIT))
 
     def test_unauthorized_bits_rejected(self):
         """TD_ATTRIBUTES with bits outside FIXED0 mask is rejected."""
         # Bit 10 is not in FIXED0
         td_attrs = struct.pack("<Q", 1 << 10)
-        with pytest.raises(TdxValidationError, match=r"FIXED0.*set"):
+        with pytest.raises(TdxValidationError, match=r"(?i)fixed0.*set"):
             validate_td_attributes(td_attrs)
 
     def test_wrong_size_rejected(self):
         """TD_ATTRIBUTES with wrong size is rejected."""
         with pytest.raises(TdxValidationError, match="size is"):
             validate_td_attributes(b"\x00" * 4)
-
-
-class TestValidateSeamAttributes:
-    """Test SEAMATTRIBUTES validation."""
-
-    def test_zero_accepted(self):
-        """Zero SEAMATTRIBUTES passes."""
-        validate_seam_attributes(b"\x00" * 8)
-
-    def test_non_zero_rejected(self):
-        """Non-zero SEAMATTRIBUTES is rejected."""
-        with pytest.raises(TdxValidationError, match="must be zero"):
-            validate_seam_attributes(b"\x01" + b"\x00" * 7)
-
-    def test_all_ones_rejected(self):
-        """All-ones SEAMATTRIBUTES is rejected."""
-        with pytest.raises(TdxValidationError, match="must be zero"):
-            validate_seam_attributes(b"\xff" * 8)
-
-    def test_wrong_size_rejected(self):
-        """SEAMATTRIBUTES with wrong size is rejected."""
-        with pytest.raises(TdxValidationError, match="size is"):
-            validate_seam_attributes(b"\x00" * 4)
-
-
-class TestValidateMrSignerSeam:
-    """Test MRSIGNERSEAM validation."""
-
-    def test_zero_accepted(self):
-        """Zero MRSIGNERSEAM passes."""
-        validate_mr_signer_seam(b"\x00" * 48)
-
-    def test_non_zero_rejected(self):
-        """Non-zero MRSIGNERSEAM is rejected."""
-        with pytest.raises(TdxValidationError, match="must be zero"):
-            validate_mr_signer_seam(b"\x01" + b"\x00" * 47)
-
-    def test_all_ones_rejected(self):
-        """All-ones MRSIGNERSEAM is rejected."""
-        with pytest.raises(TdxValidationError, match="must be zero"):
-            validate_mr_signer_seam(b"\xff" * 48)
-
-    def test_wrong_size_rejected(self):
-        """MRSIGNERSEAM with wrong size is rejected."""
-        with pytest.raises(TdxValidationError, match="size is"):
-            validate_mr_signer_seam(b"\x00" * 32)
 
 
 class TestPolicyOptions:

@@ -1,24 +1,22 @@
-"""The PCK certificate chain that a TDX quote carries and the signatures that bind the quote to it.
+"""The PCK certificate chain that a TDX quote carries, the profile each certificate must meet, and the signatures
+that bind the quote to the chain.
 
-Verification flow:
-1. Extract PCK certificate chain from quote
-2. Verify PCK chain against Intel SGX Root CA
-3. Verify quote signature (ECDSA P-256 over Header || TdQuoteBody)
-4. Verify QE report signature using PCK leaf certificate
-5. Verify QE report data binding (attestation key hash)
-
-Intel PCK certificates have no SAN extension, so chain verification is done
-step by step here rather than through a TLS-oriented policy builder.
+A quote carries three concatenated PEM certificates: the PCK leaf, the
+Intel SGX PCK Platform CA and the Intel SGX Root CA. Every certificate is
+version 3, ECDSA with SHA-256 over P-256, and named by its role. The leaf
+chains to the trusted root that the caller supplies; the root inside the
+quote is checked for self-consistency and used to validate the root CRL.
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
 from cryptography import x509
-from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import Prehashed, encode_dss_signature
@@ -33,417 +31,316 @@ from tinfoil._v3.verifier._quote.tdx.lib.abi import (
     SIGNATURE_SIZE,
     QuoteV4,
 )
-from tinfoil._v3.verifier._trust import INTEL_SGX_ROOT_CA_PEM
+from tinfoil._v3.verifier._x509 import der
+from tinfoil._v3.verifier._x509.certificate import (
+    OID_ECDSA_SHA256,
+    Certificate,
+    X509Error,
+    basic_constraints,
+    can_issue_certificates,
+    can_sign_data,
+    issuer_name,
+    parse_certificate,
+    signature_algorithm,
+    subject_name,
+    verify_certificate_signature,
+    verify_chain,
+)
+from tinfoil._v3.verifier._x509.crl import CRLError, RevocationList, VerifiedRevocationList, verify_revocation_list
+
+ROOT_CERT_PHRASE = "Intel SGX Root CA"
+INTERMEDIATE_CERT_PHRASE = "Intel SGX PCK Platform CA"
+PCK_CERT_PHRASE = "Intel SGX PCK Certificate"
+PROCESSOR_ISSUER = "Intel SGX PCK Processor CA"
+PLATFORM_ISSUER = "Intel SGX PCK Platform CA"
+PROCESSOR_ISSUER_ID = "processor"
+PLATFORM_ISSUER_ID = "platform"
+
+# Chain building applies the TLS server-authentication purpose: a certificate
+# on the path that lists extended key usages must include it or
+# anyExtendedKeyUsage. Intel's certificates list none.
+OID_EKU_SERVER_AUTH = "1.3.6.1.5.5.7.3.1"
+
+_PEM_END = "-----END CERTIFICATE-----"
 
 
-def get_intel_root_ca() -> x509.Certificate:
-    """The embedded Intel SGX Provisioning Certification Root CA, the trust anchor of every TDX chain."""
-    return x509.load_pem_x509_certificate(INTEL_SGX_ROOT_CA_PEM)
+class TdxVerificationError(ValueError):
+    """A quote whose chain, certificate profile or signatures do not check out."""
 
 
-class CertificateChainError(Exception):
-    """Raised when certificate chain verification fails."""
-
-
-def parse_pem_chain(pem_data: bytes) -> list[x509.Certificate]:
-    """
-    Parse concatenated PEM certificates.
-
-    Handles:
-    - Concatenated PEM certificates
-    - Leading/trailing whitespace and null bytes
-    - Trailing null bytes between certificates (common in TDX quotes)
-
-    Args:
-        pem_data: PEM-encoded certificate chain (bytes)
-
-    Returns:
-        List of parsed certificates in order
-
-    Raises:
-        CertificateChainError: If parsing fails
-    """
-    try:
-        return x509.load_pem_x509_certificates(pem_data)
-    except Exception as e:
-        raise CertificateChainError(f"Failed to parse PEM certificate chain: {e}") from e
-
-
-def certs_to_pem(certs: list[x509.Certificate]) -> str:
-    """
-    Convert list of certificates to concatenated PEM string.
-
-    Args:
-        certs: List of certificates
-
-    Returns:
-        Concatenated PEM string
-    """
-    pem_parts = []
-    for cert in certs:
-        pem_parts.append(cert.public_bytes(serialization.Encoding.PEM).decode("ascii"))
-    return "".join(pem_parts)
-
-
-def verify_intel_chain(
-    certs: list[x509.Certificate],
-    chain_name: str = "Certificate chain",
-) -> None:
-    """
-    Verify a certificate chain against Intel SGX Root CA.
-
-    Performs manual chain verification without requiring TLS extensions (SAN).
-    Intel PCK certificates don't have SAN extension, so we can't use
-    PolicyBuilder.build_client_verifier().
-
-    Verification steps:
-    1. Verify root cert matches embedded Intel SGX Root CA (by public key)
-    2. Verify each certificate's validity period
-    3. Verify issuer certificates have BasicConstraints CA=True
-    4. Verify each certificate was issued by the next cert in chain
-
-    Args:
-        certs: Certificate chain [leaf, intermediate(s)..., root]
-        chain_name: Human-readable name for error messages
-
-    Raises:
-        CertificateChainError: If chain verification fails
-    """
-    if len(certs) < 2:
-        raise CertificateChainError(f"{chain_name} must contain at least 2 certificates (leaf and root)")
-
-    intel_root = get_intel_root_ca()
-
-    # Step 1: Verify root certificate matches Intel SGX Root CA by public key
-    chain_root = certs[-1]
-    chain_root_pubkey = chain_root.public_key().public_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    intel_root_pubkey = intel_root.public_key().public_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-
-    if chain_root_pubkey != intel_root_pubkey:
-        raise CertificateChainError(f"{chain_name} root certificate does not match Intel SGX Root CA")
-
-    # Step 2: Verify each certificate's validity period
-    now = datetime.now(UTC)
-    for cert in certs:
-        if now < cert.not_valid_before_utc:
-            raise CertificateChainError(
-                f"{chain_name}: certificate not yet valid (not before {cert.not_valid_before_utc})"
-            )
-        if now > cert.not_valid_after_utc:
-            raise CertificateChainError(f"{chain_name}: certificate expired (not after {cert.not_valid_after_utc})")
-
-    # Step 3: Verify issuer certificates are CAs (BasicConstraints)
-    # A path builder would check this implicitly; the step-by-step chain check does it explicitly.
-    for cert in certs[1:]:
-        try:
-            bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)
-            if not bc.value.ca:
-                raise CertificateChainError(f"{chain_name}: intermediate/root certificate is not a CA")
-        except x509.ExtensionNotFound:
-            raise CertificateChainError(
-                f"{chain_name}: intermediate/root certificate missing BasicConstraints extension"
-            ) from None
-
-    # Step 4: Verify certificate chain signatures using verify_directly_issued_by
-    # Each cert[i] should be signed by cert[i+1]
-    for i in range(len(certs) - 1):
-        cert = certs[i]
-        issuer = certs[i + 1]
-        try:
-            cert.verify_directly_issued_by(issuer)
-        except Exception as e:
-            raise CertificateChainError(f"{chain_name}: certificate chain signature verification failed: {e}") from e
-
-    # Step 5: Verify the chain's root is signed by the trusted Intel root
-    try:
-        chain_root.verify_directly_issued_by(intel_root)
-    except Exception as e:
-        raise CertificateChainError(
-            f"{chain_name}: root certificate verification against Intel SGX Root CA failed: {e}"
-        ) from e
-
-
-class TdxVerificationError(Exception):
-    """Raised when TDX quote verification fails."""
-
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class PCKCertificateChain:
-    """
-    PCK Certificate Chain extracted from the quote.
+    """The three certificates of a quote: the PCK leaf, the issuing CA and the root."""
 
-    Contains three certificates:
-    - PCK leaf certificate (signs the QE report)
-    - Intermediate CA certificate
-    - Root CA certificate (should match Intel SGX Root CA)
-    """
+    pck_cert: Certificate
+    intermediate_cert: Certificate
+    root_cert: Certificate
 
-    pck_cert: x509.Certificate  # PCK Leaf certificate
-    intermediate_cert: x509.Certificate  # Intermediate CA certificate
-    root_cert: x509.Certificate  # Root CA certificate
+
+# --- PEM chains ---------------------------------------------------------------
+
+
+def pem_certificates(data: bytes, count: int, what: str, *, allow_trailing_nul: bool = False) -> list[Certificate]:
+    """Parse exactly ``count`` concatenated PEM certificates.
+
+    Nothing may follow the last END line except, when ``allow_trailing_nul``
+    is set, one NUL byte: the quote's chain is read from a fixed buffer
+    that may end with one. Text outside the blocks and blank lines after
+    the last block are errors.
+    """
+    if allow_trailing_nul and data.endswith(b"\x00"):
+        data = data[:-1]
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError as err:
+        raise TdxVerificationError(f"{what} is not ASCII PEM") from err
+    try:
+        blocks = der.pem_blocks(text, "CERTIFICATE")
+    except der.DerError as err:
+        raise TdxVerificationError(f"could not parse PEM formatted certificates in {what}: {err}") from err
+    if len(blocks) != count:
+        raise TdxVerificationError(f"{what} should contain {count} PEM certificates, found {len(blocks)}")
+    if _after_last_block(text):
+        raise TdxVerificationError(f"unexpected trailing bytes were found in {what}")
+    certs = []
+    for index, block in enumerate(blocks):
+        try:
+            certs.append(parse_certificate(block))
+        except X509Error as err:
+            raise TdxVerificationError(f"could not interpret certificate {index} DER bytes in {what}: {err}") from err
+    return certs
+
+
+def _after_last_block(text: str) -> str:
+    """The text after the line terminator that ends the last END line."""
+    index = text.rfind(_PEM_END)
+    tail = text[index + len(_PEM_END) :]
+    newline = tail.find("\n")
+    return "" if newline < 0 else tail[newline + 1 :]
 
 
 def extract_pck_cert_chain(quote: QuoteV4) -> PCKCertificateChain:
-    """
-    Extract the PCK certificate chain from the quote.
-
-    The certificate chain is embedded in the quote's certification data
-    as concatenated PEM certificates: PCK Leaf || Intermediate CA || Root CA.
-
-    Args:
-        quote: Parsed TDX QuoteV4
-
-    Returns:
-        PCKCertificateChain with three certificates
-
-    Raises:
-        TdxVerificationError: If certificate chain is missing or malformed
-    """
-    pck_chain_data = quote.signed_data.certification_data.get_pck_chain()
-    cert_pem = pck_chain_data.cert_data
-    if not cert_pem:
+    """The PCK chain of a quote: leaf, intermediate and root, in that order."""
+    chain = quote.signed_data.certification_data.get_pck_chain().cert_data
+    if not chain:
         raise TdxVerificationError("PCK certificate chain is empty")
+    certs = pem_certificates(chain, PCK_CERT_CHAIN_COUNT, "PCK certificate chain", allow_trailing_nul=True)
+    return PCKCertificateChain(pck_cert=certs[0], intermediate_cert=certs[1], root_cert=certs[2])
 
-    # Parse concatenated PEM certificates
+
+# --- certificate profile -----------------------------------------------------------
+
+
+def common_name(name: x509.Name) -> str:
+    """The last string-valued commonName attribute of a name, or "" without one."""
+    value = ""
+    for attribute in name.get_attributes_for_oid(x509.NameOID.COMMON_NAME):
+        if isinstance(attribute.value, str):
+            value = attribute.value
+    return value
+
+
+def extract_ca_from_pck_cert(pck_cert: Certificate) -> str:
+    """Which Intel CA issued the PCK certificate, by the issuer's commonName: "platform" or "processor"."""
+    issuer = common_name(pck_cert.issuer)
+    if issuer == PLATFORM_ISSUER:
+        return PLATFORM_ISSUER_ID
+    if issuer == PROCESSOR_ISSUER:
+        return PROCESSOR_ISSUER_ID
+    raise TdxVerificationError("could not find CA from PCK certificate")
+
+
+def validate_certificate(cert: Certificate, parent: Certificate, phrase: str) -> None:
+    """Check one certificate of the Intel profile against its parent.
+
+    Version 3, signed with ECDSA and SHA-256, a P-256 public key, a
+    subject commonName of ``phrase``, an issuer name equal to the parent's
+    subject name, and a signature that the parent, a certificate authority,
+    made.
+    """
+    if cert.version != x509.Version.v3:
+        raise TdxVerificationError(f"certificate's version found {cert.version.value + 1}. Expected 3")
+    outer = der.children(der.decode(cert.public_bytes(serialization.Encoding.DER)))
     try:
-        certs = parse_pem_chain(cert_pem)
-    except CertificateChainError as e:
-        raise TdxVerificationError(f"Failed to parse PCK certificate chain: {e}") from e
-
-    if len(certs) != PCK_CERT_CHAIN_COUNT:
+        algorithm = signature_algorithm(outer[1])
+    except (X509Error, der.DerError) as err:
+        raise TdxVerificationError(f"certificate's signature algorithm: {err}") from err
+    if algorithm.oid != OID_ECDSA_SHA256:
+        raise TdxVerificationError(f"certificate's signature algorithm found {algorithm.oid}. Expected ECDSA-SHA256")
+    key = cert.public_key()
+    if not isinstance(key, ec.EllipticCurvePublicKey):
+        raise TdxVerificationError("certificate public key is not of type ecdsa public key")
+    if not isinstance(key.curve, ec.SECP256R1):
+        raise TdxVerificationError(f"certificate's public key curve is {key.curve.name!r}. Expected P-256")
+    subject = common_name(cert.subject)
+    if subject != phrase:
+        raise TdxVerificationError(f"{subject!r} is not expected in certificate's subject name. Expected {phrase!r}")
+    if issuer_name(cert) != subject_name(parent):
         raise TdxVerificationError(
-            f"PCK certificate chain should contain {PCK_CERT_CHAIN_COUNT} certificates, got {len(certs)}"
+            f"certificate's issuer name ({cert.issuer.rfc4514_string()!r}) does not match with parent certificate's "
+            f"subject name ({parent.subject.rfc4514_string()!r})"
         )
-
-    return PCKCertificateChain(
-        pck_cert=certs[0],
-        intermediate_cert=certs[1],
-        root_cert=certs[2],
-    )
-
-
-def verify_pck_chain(chain: PCKCertificateChain) -> None:
-    """
-    Verify the PCK certificate chain against Intel SGX Root CA.
-
-    Verification steps:
-    1. Verify root cert matches embedded Intel SGX Root CA
-    2. Verify certificate chain (validity + signatures) using cryptography library
-
-    Args:
-        chain: PCK certificate chain from quote
-
-    Raises:
-        TdxVerificationError: If chain verification fails
-    """
-    certs = [chain.pck_cert, chain.intermediate_cert, chain.root_cert]
+    if not can_issue_certificates(parent):
+        raise TdxVerificationError("parent certificate is not a certificate authority that may sign certificates")
     try:
-        verify_intel_chain(certs, "PCK certificate chain")
-    except CertificateChainError as e:
-        raise TdxVerificationError(str(e)) from e
+        verify_certificate_signature(cert, parent)
+    except X509Error as err:
+        raise TdxVerificationError(
+            f"certificate signature verification using parent certificate failed: {err}"
+        ) from err
+
+
+def validate_crl(crl: RevocationList, trusted: Certificate, now: datetime) -> VerifiedRevocationList:
+    """Check that ``trusted``, a certificate authority, issued and signed the CRL, and that it is current at ``now``."""
+    constraints = basic_constraints(trusted)
+    if constraints is None or not constraints[0]:
+        raise TdxVerificationError("CRL issuing certificate is not a certificate authority")
+    if crl.issuer.public_bytes() != subject_name(trusted):
+        raise TdxVerificationError(
+            f"CRL issuer's name {crl.issuer.rfc4514_string()!r} does not match with expected name "
+            f"{trusted.subject.rfc4514_string()!r}"
+        )
+    try:
+        return verify_revocation_list(crl, trusted, now)
+    except CRLError as err:
+        raise TdxVerificationError(f"CRL signature verification failed using trusted certificate: {err}") from err
+
+
+def verify_pck_certificate_chain(
+    chain: PCKCertificateChain,
+    trusted_roots: Sequence[Certificate],
+    root_crl: RevocationList,
+    pck_crl: RevocationList,
+    now: datetime,
+) -> None:
+    """Verify the quote's chain: each certificate's profile, that the leaf's key may sign data, the path from the
+    leaf to a trusted root at ``now``, both CRLs, and that neither the intermediate nor the leaf is revoked."""
+    root, intermediate, pck = chain.root_cert, chain.intermediate_cert, chain.pck_cert
+    try:
+        validate_certificate(root, root, ROOT_CERT_PHRASE)
+    except TdxVerificationError as err:
+        raise TdxVerificationError(f"unable to validate root cert: {err}") from err
+    try:
+        validate_certificate(intermediate, root, INTERMEDIATE_CERT_PHRASE)
+    except TdxVerificationError as err:
+        raise TdxVerificationError(f"unable to validate Intermediate CA certificate: {err}") from err
+    try:
+        validate_certificate(pck, intermediate, PCK_CERT_PHRASE)
+    except TdxVerificationError as err:
+        raise TdxVerificationError(f"unable to validate PCK leaf certificate: {err}") from err
+    # The leaf's key authenticates the QE report, so a keyUsage extension on
+    # it must allow digitalSignature.
+    if not can_sign_data(pck):
+        raise TdxVerificationError("PCK leaf certificate's key usage does not allow digital signatures")
+    try:
+        verify_chain(pck, [intermediate], trusted_roots, now, extended_key_usage=OID_EKU_SERVER_AUTH)
+    except X509Error as err:
+        raise TdxVerificationError(f"error verifying PCK Certificate: {err}") from err
+
+    try:
+        verified_root_crl = validate_crl(root_crl, root, now)
+    except TdxVerificationError as err:
+        raise TdxVerificationError(
+            f"root CA CRL verification failed using root certificate in PCK Certificate chain: {err}"
+        ) from err
+    try:
+        verified_pck_crl = validate_crl(pck_crl, intermediate, now)
+    except TdxVerificationError as err:
+        raise TdxVerificationError(
+            f"PCK CRL verification failed using intermediate certificate in PCK Certificate chain: {err}"
+        ) from err
+    if pck_crl.issuer.public_bytes() != issuer_name(pck):
+        raise TdxVerificationError(
+            f"issuer's name ({pck_crl.issuer.rfc4514_string()!r}) in PCK CRL does not match with PCK Leaf "
+            f"Certificate's issuer name ({pck.issuer.rfc4514_string()!r})"
+        )
+    if intermediate.serial_number in verified_root_crl.crl.revoked_serials:
+        raise TdxVerificationError("intermediate certificate in PCK certificate chain was revoked")
+    if pck.serial_number in verified_pck_crl.crl.revoked_serials:
+        raise TdxVerificationError("PCK Leaf certificate in PCK certificate chain was revoked")
+
+    if now > root.not_valid_after_utc:
+        raise TdxVerificationError("root CA certificate in PCK certificate chain has expired")
+    if now > intermediate.not_valid_after_utc:
+        raise TdxVerificationError("intermediate CA certificate in PCK certificate chain has expired")
+    if now > pck.not_valid_after_utc:
+        raise TdxVerificationError("PCK leaf certificate in PCK certificate chain has expired")
+
+
+# --- quote signatures ---------------------------------------------------------
 
 
 def verify_quote_signature(quote: QuoteV4, raw_quote: bytes) -> None:
-    """
-    Verify the quote signature using the attestation key.
-
-    The signature covers SHA256(Header || TdQuoteBody).
-
-    Args:
-        quote: Parsed QuoteV4
-        raw_quote: Original raw quote bytes
-
-    Raises:
-        TdxVerificationError: If signature verification fails
-    """
-    # Get attestation key (64 bytes = raw P-256 point)
-    attestation_key_bytes = quote.signed_data.attestation_key
-    public_key = _bytes_to_p256_pubkey(attestation_key_bytes)
-
-    # Get signature (64 bytes = R || S)
-    signature_bytes = quote.signed_data.signature
-    signature_der = _signature_to_der(signature_bytes)
-
-    # Message = Header || TdQuoteBody (bytes 0x00 to 0x278)
-    message = raw_quote[QUOTE_HEADER_START:QUOTE_BODY_END]
-    message_hash = hashlib.sha256(message).digest()
-
-    # Verify ECDSA signature over pre-hashed message
-    # Use Prehashed to avoid double-hashing (we already computed SHA256)
+    """Verify the ECDSA P-256 signature over SHA-256(header || TD quote body) with the quote's attestation key."""
+    public_key = bytes_to_p256_public_key(quote.signed_data.attestation_key)
+    signature_der = signature_to_der(quote.signed_data.signature)
+    message_hash = hashlib.sha256(raw_quote[QUOTE_HEADER_START:QUOTE_BODY_END]).digest()
     try:
         public_key.verify(signature_der, message_hash, ec.ECDSA(Prehashed(hashes.SHA256())))
     except InvalidSignature:
-        raise TdxVerificationError("Quote signature verification failed: signature does not match") from None
+        raise TdxVerificationError(
+            "unable to verify message digest using quote's signature and ecdsa attestation key"
+        ) from None
 
 
-def verify_qe_report_signature(quote: QuoteV4, pck_cert: x509.Certificate) -> None:
-    """
-    Verify the QE report signature using the PCK leaf certificate.
-
-    Caller must ensure quote.signed_data.certification_data.qe_report_data
-    is not None before calling this function.
-
-    Args:
-        quote: Parsed QuoteV4
-        pck_cert: PCK leaf certificate from the chain
-
-    Raises:
-        TdxVerificationError: If signature verification fails
-    """
+def verify_qe_report_signature(quote: QuoteV4, pck_cert: Certificate) -> None:
+    """Verify the QE report's ECDSA signature with the PCK leaf certificate's key."""
     qe_report_data = quote.signed_data.certification_data.qe_report_data
-
-    # Get QE report and signature
-    qe_report = qe_report_data.qe_report  # 384 bytes
-    qe_signature = qe_report_data.qe_report_signature  # 64 bytes
-
-    # Convert signature to DER format
-    signature_der = _signature_to_der(qe_signature)
-
-    # Verify using PCK certificate's public key
+    signature_der = signature_to_der(qe_report_data.qe_report_signature)
+    key = pck_cert.public_key()
+    if not isinstance(key, ec.EllipticCurvePublicKey):
+        raise TdxVerificationError("PCK certificate public key is not of type ecdsa public key")
     try:
-        pck_public_key = pck_cert.public_key()
-        if not isinstance(pck_public_key, ec.EllipticCurvePublicKey):
-            raise TypeError(f"{type(pck_public_key).__name__} is not an EC public key")
-        pck_public_key.verify(signature_der, qe_report, ec.ECDSA(hashes.SHA256()))
+        key.verify(signature_der, qe_report_data.qe_report, ec.ECDSA(hashes.SHA256()))
     except InvalidSignature:
-        raise TdxVerificationError("QE report signature verification failed using PCK certificate") from None
-    except (TypeError, AttributeError, ValueError, UnsupportedAlgorithm) as e:
-        raise TdxVerificationError(f"PCK certificate has unexpected key type: {e}") from e
+        raise TdxVerificationError("QE report's signature verification using PCK Leaf Certificate failed") from None
 
 
 def verify_qe_report_data_binding(quote: QuoteV4) -> None:
-    """
-    Verify that the QE report data binds to the attestation key.
+    """Check that the QE report's REPORT_DATA is SHA-256(attestation key || QE auth data), zero-padded to 64 bytes.
 
-    This is a CRITICAL security check. The QE report's report_data field
-    must contain SHA256(attestation_key || qe_auth_data) padded to 64 bytes.
-    Without this check, an attacker could substitute a different attestation key.
-
-    Caller must ensure quote.signed_data.certification_data.qe_report_data
-    is not None before calling this function.
-
-    Args:
-        quote: Parsed QuoteV4
-
-    Raises:
-        TdxVerificationError: If binding verification fails
+    This binds the attestation key that signed the quote to the QE report
+    that the PCK certificate signed.
     """
     qe_report_data = quote.signed_data.certification_data.qe_report_data
-
-    # Get components
-    attestation_key = quote.signed_data.attestation_key  # 64 bytes
-    qe_auth_data = qe_report_data.qe_auth_data  # Variable
-    qe_report_data_field = qe_report_data.qe_report_parsed.report_data  # 64 bytes
-
-    # Compute expected: SHA256(attestation_key || qe_auth_data) || zeros
-    data_to_hash = attestation_key + qe_auth_data
-    expected_hash = hashlib.sha256(data_to_hash).digest()
-    expected_report_data = expected_hash + b"\x00" * SHA256_HASH_SIZE
-
-    # Both values are public attestation data; no timing side-channel concern.
-    if qe_report_data_field != expected_report_data:
+    digest = hashlib.sha256(quote.signed_data.attestation_key + qe_report_data.qe_auth_data).digest()
+    expected = digest + b"\x00" * SHA256_HASH_SIZE
+    if qe_report_data.qe_report_parsed.report_data != expected:
         raise TdxVerificationError(
-            "QE report data binding verification failed: "
-            "SHA256(attestation_key || auth_data) does not match QE report data. "
-            "The attestation key may have been tampered with."
+            "QE Report Data does not match with value of SHA 256 calculated over the concatenation of ECDSA "
+            "Attestation Key and QE Authenticated Data"
         )
 
 
-def _bytes_to_p256_pubkey(key_bytes: bytes) -> ec.EllipticCurvePublicKey:
-    """
-    Convert raw 64-byte P-256 public key to cryptography public key object.
-
-    The raw format is X || Y (32 bytes each).
-
-    Args:
-        key_bytes: 64 bytes representing X || Y coordinates
-
-    Returns:
-        EllipticCurvePublicKey object
-
-    Raises:
-        TdxVerificationError: If key format is invalid
-    """
-    if len(key_bytes) != ATTESTATION_KEY_SIZE:
-        raise TdxVerificationError(f"Attestation key is {len(key_bytes)} bytes, expected {ATTESTATION_KEY_SIZE}")
-
-    # Convert to uncompressed point format (0x04 || X || Y)
-    uncompressed = b"\x04" + key_bytes
-
+def verify_quote_signatures(quote: QuoteV4, raw_quote: bytes, pck_cert: Certificate) -> None:
+    """The three signature checks in order: the quote signature, the QE report signature, the report data binding."""
+    verify_quote_signature(quote, raw_quote)
     try:
-        return ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), uncompressed)
-    except (ValueError, TypeError) as e:
-        raise TdxVerificationError(f"Invalid attestation key: {e}") from e
+        verify_qe_report_signature(quote, pck_cert)
+    except TdxVerificationError as err:
+        raise TdxVerificationError(f"error verifying QE report signature: {err}") from err
+    try:
+        verify_qe_report_data_binding(quote)
+    except TdxVerificationError as err:
+        raise TdxVerificationError(f"error verifying QE report data: {err}") from err
 
 
-def _signature_to_der(sig_bytes: bytes) -> bytes:
-    """
-    Convert raw R||S signature to DER format.
+def bytes_to_p256_public_key(key_bytes: bytes) -> ec.EllipticCurvePublicKey:
+    """A raw ``X || Y`` P-256 public key (64 bytes); a point off the curve is an error."""
+    if len(key_bytes) != ATTESTATION_KEY_SIZE:
+        raise TdxVerificationError(
+            f"public key is of unexpected size {len(key_bytes)}, expected {ATTESTATION_KEY_SIZE}"
+        )
+    try:
+        return ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), b"\x04" + key_bytes)
+    except ValueError as err:
+        raise TdxVerificationError(f"attestation key in the quote is invalid: {err}") from err
 
-    TDX signatures are 64 bytes: R (32 bytes) || S (32 bytes).
-    DER format is required by cryptography library.
 
-    Args:
-        sig_bytes: 64-byte raw signature
-
-    Returns:
-        DER-encoded signature
-
-    Raises:
-        TdxVerificationError: If signature format is invalid
-    """
+def signature_to_der(sig_bytes: bytes) -> bytes:
+    """A raw ``r || s`` P-256 signature (64 bytes) as a DER ECDSA-Sig-Value."""
     if len(sig_bytes) != SIGNATURE_SIZE:
-        raise TdxVerificationError(f"Signature is {len(sig_bytes)} bytes, expected {SIGNATURE_SIZE}")
-
+        raise TdxVerificationError(f"signature size is {len(sig_bytes)} bytes. Expected {SIGNATURE_SIZE} bytes")
     r = int.from_bytes(sig_bytes[0:ECDSA_P256_COMPONENT_SIZE], byteorder="big")
     s = int.from_bytes(sig_bytes[ECDSA_P256_COMPONENT_SIZE:SIGNATURE_SIZE], byteorder="big")
-
     return encode_dss_signature(r, s)
-
-
-def verify_tdx_quote(quote: QuoteV4, raw_quote: bytes) -> PCKCertificateChain:
-    """
-    Perform full cryptographic verification of a TDX quote.
-
-    This is the main entry point for TDX verification. It performs all
-    security-critical checks in order:
-
-    1. Extract and verify PCK certificate chain
-    2. Verify quote signature using attestation key
-    3. Verify QE report signature using PCK certificate
-    4. Verify QE report data binding (critical security check)
-
-    Args:
-        quote: Parsed QuoteV4 structure
-        raw_quote: Original raw quote bytes (needed for signature verification)
-
-    Returns:
-        PCKCertificateChain on success (for further use in TCB checks)
-
-    Raises:
-        TdxVerificationError: If any verification step fails
-    """
-    # Step 1: Extract and verify PCK certificate chain
-    chain = extract_pck_cert_chain(quote)
-    verify_pck_chain(chain)
-
-    # Step 2: Verify quote signature
-    verify_quote_signature(quote, raw_quote)
-
-    # Step 3 & 4 require QE report data
-    if quote.signed_data.certification_data.qe_report_data is None:
-        raise TdxVerificationError("QE report data is missing")
-
-    # Step 3: Verify QE report signature
-    verify_qe_report_signature(quote, chain.pck_cert)
-
-    # Step 4: Verify QE report data binding (CRITICAL)
-    verify_qe_report_data_binding(quote)
-
-    return chain

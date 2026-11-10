@@ -1,1546 +1,687 @@
-"""Unit tests for TDX collateral parsing and TCB validation."""
+"""Intel PCS collateral: response parsing, the signed member bytes, issuer-chain headers, response verification,
+expiration, and the appraisal of a quote body and QE report."""
 
 from __future__ import annotations
 
-import re
-from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+import json
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
 
 import pytest
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-from cryptography.x509.oid import NameOID
 
+from tests.v3 import pki
+from tests.v3 import tdx_builders as tb
+from tinfoil._v3.verifier._quote.tdx.lib.abi import parse_quote
 from tinfoil._v3.verifier._quote.tdx.lib.collateral import (
     CollateralError,
     EnclaveIdentity,
-    PckCrl,
     Tcb,
     TcbComponent,
     TcbInfo,
     TcbLevel,
     TcbStatus,
     TdxCollateral,
+    TdxModule,
     TdxModuleIdentity,
-    _determine_pck_ca_type,
-    _parse_datetime,
-    _parse_hex_bytes,
-    _parse_issuer_chain_header,
-    _verify_collateral_signature,
-    check_collateral_freshness,
-    get_matching_qe_tcb_level,
+    apply_mask,
+    check_collateral_expiration,
+    check_qe_tcb_status,
+    decode_hex,
     get_matching_tcb_level,
-    get_tdx_module_identity,
     is_cpu_svn_higher_or_equal,
     is_tdx_tcb_svn_higher_or_equal,
+    parse_issuer_chain_header,
     parse_qe_identity_response,
+    parse_rfc3339,
     parse_tcb_info_response,
-    validate_certificate_revocation,
-    validate_qe_identity,
-    validate_tcb_status,
-    validate_tdx_module_identity,
+    top_level_member,
+    verify_qe_identity,
+    verify_qe_report,
+    verify_response,
+    verify_tcb_info,
+    verify_td_quote_body,
 )
 from tinfoil._v3.verifier._quote.tdx.lib.pck import PckCertTCB, PckExtensions
+from tinfoil._v3.verifier._quote.tdx.pcs import PCSReplay
+from tinfoil._v3.verifier._x509.crl import parse_revocation_list
 
-# =============================================================================
-# Sample Data - Synthetic Intel PCS Responses
-# =============================================================================
-
-SAMPLE_TCB_INFO_JSON = """
-{
-  "tcbInfo": {
-    "id": "TDX",
-    "version": 3,
-    "issueDate": "2025-12-17T06:24:56Z",
-    "nextUpdate": "2026-01-16T06:24:56Z",
-    "fmspc": "90c06f000000",
-    "pceId": "0000",
-    "tcbType": 0,
-    "tcbEvaluationDataNumber": 19,
-    "tdxModule": {
-      "mrsigner": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-      "attributes": "0000000000000000",
-      "attributesMask": "FFFFFFFFFFFFFFFF"
-    },
-    "tdxModuleIdentities": [
-      {
-        "id": "TDX_03",
-        "mrsigner": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-        "attributes": "0000000000000000",
-        "attributesMask": "FFFFFFFFFFFFFFFF",
-        "tcbLevels": [
-          {
-            "tcb": { "isvsvn": 3 },
-            "tcbDate": "2024-11-13T00:00:00Z",
-            "tcbStatus": "UpToDate"
-          }
-        ]
-      }
-    ],
-    "tcbLevels": [
-      {
-        "tcb": {
-          "sgxtcbcomponents": [
-            {"svn": 3}, {"svn": 3}, {"svn": 2}, {"svn": 2},
-            {"svn": 2}, {"svn": 1}, {"svn": 0}, {"svn": 0},
-            {"svn": 0}, {"svn": 0}, {"svn": 0}, {"svn": 0},
-            {"svn": 0}, {"svn": 0}, {"svn": 0}, {"svn": 0}
-          ],
-          "pcesvn": 13,
-          "tdxtcbcomponents": [
-            {"svn": 5, "category": "TDX Module", "type": "TDX Module"},
-            {"svn": 0}, {"svn": 3}, {"svn": 0},
-            {"svn": 0}, {"svn": 0}, {"svn": 0}, {"svn": 0},
-            {"svn": 0}, {"svn": 0}, {"svn": 0}, {"svn": 0},
-            {"svn": 0}, {"svn": 0}, {"svn": 0}, {"svn": 0}
-          ]
-        },
-        "tcbDate": "2024-11-13T00:00:00Z",
-        "tcbStatus": "UpToDate"
-      },
-      {
-        "tcb": {
-          "sgxtcbcomponents": [
-            {"svn": 2}, {"svn": 2}, {"svn": 2}, {"svn": 2},
-            {"svn": 2}, {"svn": 1}, {"svn": 0}, {"svn": 0},
-            {"svn": 0}, {"svn": 0}, {"svn": 0}, {"svn": 0},
-            {"svn": 0}, {"svn": 0}, {"svn": 0}, {"svn": 0}
-          ],
-          "pcesvn": 11,
-          "tdxtcbcomponents": [
-            {"svn": 4}, {"svn": 0}, {"svn": 2}, {"svn": 0},
-            {"svn": 0}, {"svn": 0}, {"svn": 0}, {"svn": 0},
-            {"svn": 0}, {"svn": 0}, {"svn": 0}, {"svn": 0},
-            {"svn": 0}, {"svn": 0}, {"svn": 0}, {"svn": 0}
-          ]
-        },
-        "tcbDate": "2024-03-13T00:00:00Z",
-        "tcbStatus": "OutOfDate"
-      }
-    ]
-  },
-  "signature": "abcd1234"
-}
-"""
-
-SAMPLE_QE_IDENTITY_JSON = """
-{
-  "enclaveIdentity": {
-    "id": "TD_QE",
-    "version": 2,
-    "issueDate": "2025-12-17T18:48:11Z",
-    "nextUpdate": "2026-01-16T18:48:11Z",
-    "tcbEvaluationDataNumber": 19,
-    "miscselect": "00000000",
-    "miscselectMask": "FFFFFFFF",
-    "attributes": "11000000000000000000000000000000",
-    "attributesMask": "FBFFFFFFFFFFFFFF0000000000000000",
-    "mrsigner": "DC9E2A7C6F948F17474E34A7FC43ED030F7C1563F1BABDDF6340C82E0E54A8C5",
-    "isvprodid": 2,
-    "tcbLevels": [
-      {
-        "tcb": { "isvsvn": 4 },
-        "tcbDate": "2024-11-13T00:00:00Z",
-        "tcbStatus": "UpToDate"
-      },
-      {
-        "tcb": { "isvsvn": 3 },
-        "tcbDate": "2024-03-13T00:00:00Z",
-        "tcbStatus": "OutOfDate"
-      }
-    ]
-  },
-  "signature": "0665a932"
-}
-"""
-
-SAMPLE_TCB_INFO_RESPONSE = SAMPLE_TCB_INFO_JSON.encode()
-SAMPLE_QE_IDENTITY_RESPONSE = SAMPLE_QE_IDENTITY_JSON.encode()
-
-# Stale TCB Info (next_update in the past)
-SAMPLE_STALE_TCB_INFO_JSON = """
-{
-  "tcbInfo": {
-    "id": "TDX",
-    "version": 3,
-    "issueDate": "2024-01-17T06:24:56Z",
-    "nextUpdate": "2024-02-16T06:24:56Z",
-    "fmspc": "90c06f000000",
-    "pceId": "0000",
-    "tcbType": 0,
-    "tcbEvaluationDataNumber": 19,
-    "tdxModuleIdentities": [],
-    "tcbLevels": []
-  },
-  "signature": "stale1234"
-}
-"""
-SAMPLE_STALE_TCB_INFO_RESPONSE = SAMPLE_STALE_TCB_INFO_JSON.encode()
+SCENARIO = tb.Scenario()
+ROOTS = (pki.load(SCENARIO.intel.root.der),)
+PLATFORM_TCB: dict[str, Any] = tb.tcb_level(list(tb.CPU_SVN_COMPONENTS), tb.PCE_SVN, tb.TDX_COMPONENTS)["tcb"]
 
 
-# =============================================================================
-# Helper Functions
-# =============================================================================
+def level(tcb: dict[str, Any] | None = None, **members: Any) -> dict[str, Any]:
+    """A TCB Info level whose ``tcb`` is complete, with ``tcb`` members and level members replaced as given."""
+    return {"tcb": {**PLATFORM_TCB, **(tcb or {})}, **members}
 
 
-def _signed_object(body: str, key: str) -> str:
-    """The text of the top-level object member ``key`` of a sample response, as the signature would cover it."""
-    match = re.search(rf'"{key}":\s*(\{{.*\}})\s*,\s*"signature"', body, re.DOTALL)
-    assert match is not None
-    return match.group(1)
+def tcb_info_body(**changes: Any) -> bytes:
+    return tb.signed_response("tcbInfo", tb.tcb_info_object(**changes), SCENARIO.intel.tcb_signing.key)  # type: ignore[arg-type]
 
 
-def create_sample_pck_extensions() -> PckExtensions:
-    """Create sample PCK extensions for testing."""
-    return PckExtensions(
-        ppid="00" * 16,
-        tcb=PckCertTCB(
-            pce_svn=13,
-            cpu_svn=bytes([3, 3, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-            tcb_components=[3, 3, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        ),
-        pceid="0000",
-        fmspc="90c06f000000",
+def qe_identity_body(**changes: Any) -> bytes:
+    return tb.signed_response("enclaveIdentity", tb.qe_identity_object(**changes), SCENARIO.intel.tcb_signing.key)  # type: ignore[arg-type]
+
+
+def edited(body: bytes, **members: Any) -> bytes:
+    """The body with top-level members of its signed object replaced (the signature is left stale)."""
+    data = json.loads(body)
+    key = "tcbInfo" if "tcbInfo" in data else "enclaveIdentity"
+    for name, value in members.items():
+        if value is None:
+            data[key].pop(name, None)
+        else:
+            data[key][name] = value
+    return json.dumps(data, separators=(",", ":")).encode()
+
+
+def collateral(scenario: tb.Scenario = SCENARIO) -> TdxCollateral:
+    return PCSReplay(scenario.responses(), tb.NOW).collateral(tb.FMSPC, "platform")
+
+
+# --- scalar helpers --------------------------------------------------------------------
+
+
+class TestDecodeHex:
+    def test_either_case(self) -> None:
+        assert decode_hex("00AbCd") == bytes.fromhex("00abcd")
+        assert decode_hex("") == b""
+
+    @pytest.mark.parametrize("value", ["abc", "ab cd", "zz", "0x00", " ab"])
+    def test_rejects(self, value: str) -> None:
+        with pytest.raises(ValueError, match="hex"):
+            decode_hex(value)
+
+
+class TestParseRfc3339:
+    def test_zulu(self) -> None:
+        assert parse_rfc3339("2025-12-17T06:24:56Z") == datetime(2025, 12, 17, 6, 24, 56, tzinfo=UTC)
+
+    def test_offset(self) -> None:
+        parsed = parse_rfc3339("2025-12-17T06:24:56+02:00")
+        assert parsed == datetime(2025, 12, 17, 4, 24, 56, tzinfo=UTC)
+        assert parsed.tzinfo == timezone(timedelta(hours=2))
+        assert parse_rfc3339("2025-12-17T06:24:56-02:30") == datetime(2025, 12, 17, 8, 54, 56, tzinfo=UTC)
+
+    def test_fraction_truncates_to_microseconds(self) -> None:
+        assert parse_rfc3339("2025-12-17T06:24:56.1234567Z").microsecond == 123456
+        assert parse_rfc3339("2025-12-17T06:24:56.5Z").microsecond == 500000
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "2025-12-17T06:24:56",
+            "2025-12-17 06:24:56Z",
+            "2025-12-17t06:24:56Z",
+            "2025-12-17T06:24:56z",
+            "2025-12-17T6:24:56Z",
+            "2025-12-17T06:24:56,5Z",
+            "2025-12-17T06:24:56+0200",
+            "2025-12-17T06:24:56+24:00",
+            "2025-12-17T06:24:56+02:60",
+            "2025-13-17T06:24:56Z",
+            "2025-12-17T06:24:60Z",
+            "20251217T062456Z",
+            "",
+        ],
     )
+    def test_rejects(self, value: str) -> None:
+        with pytest.raises(ValueError, match=r"RFC 3339|calendar|offset"):
+            parse_rfc3339(value)
 
 
-# =============================================================================
-# Parsing Tests
-# =============================================================================
+def test_apply_mask() -> None:
+    assert apply_mask(b"\xf0\x0f", b"\xff\xff\xff") == b"\xf0\x0f"
+    assert apply_mask(b"", b"\xff") == b""
+
+
+# --- response parsing ---------------------------------------------------------------------
 
 
 class TestParseTcbInfoResponse:
-    """Test TCB Info parsing."""
+    def test_parses_every_member(self) -> None:
+        parsed = parse_tcb_info_response(tcb_info_body())
+        info = parsed.tcb_info
+        assert info.id == "TDX"
+        assert info.version == 3
+        assert info.issue_date == tb.NOW - timedelta(days=1)
+        assert info.next_update == tb.NOW + timedelta(days=365)
+        assert (info.fmspc, info.pce_id, info.tcb_type) == (tb.FMSPC, tb.PCEID, 0)
+        assert info.tcb_evaluation_data_number == 18
+        assert info.tdx_module == TdxModule(mrsigner=bytes(48), attributes=bytes(8), attributes_mask=bytes([0xFF]) * 8)
+        assert [m.id for m in info.tdx_module_identities] == ["TDX_03"]
+        assert info.tdx_module_identities[0].tcb_levels[0].tcb.isv_svn == 0
+        level = info.tcb_levels[0]
+        assert [c.svn for c in level.tcb.sgx_tcb_components] == list(tb.CPU_SVN_COMPONENTS)
+        assert level.tcb.pce_svn == tb.PCE_SVN
+        assert [c.svn for c in level.tcb.tdx_tcb_components] == tb.TDX_COMPONENTS
+        assert level.tcb_status == TcbStatus.UP_TO_DATE
+        assert level.tcb_date == "2023-02-15T00:00:00Z"
+        assert len(parsed.signature) == 128
 
-    def test_parse_valid_response(self):
-        """Test parsing a valid TCB Info response."""
-        result = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-
-        assert result.tcb_info.id == "TDX"
-        assert result.tcb_info.version == 3
-        assert result.tcb_info.fmspc == "90c06f000000"
-        assert len(result.tcb_info.tcb_levels) == 2
-        assert result.signature == "abcd1234"
-
-    def test_parse_tcb_levels(self):
-        """Test that TCB levels are parsed correctly."""
-        result = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-
-        first_level = result.tcb_info.tcb_levels[0]
-        assert first_level.tcb_status == TcbStatus.UP_TO_DATE
-        assert first_level.tcb.pce_svn == 13
-        assert len(first_level.tcb.sgx_tcb_components) == 16
-        assert first_level.tcb.sgx_tcb_components[0].svn == 3
-
-    def test_parse_tdx_module_identities(self):
-        """Test that TDX module identities are parsed."""
-        result = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-
-        assert len(result.tcb_info.tdx_module_identities) == 1
-        identity = result.tcb_info.tdx_module_identities[0]
-        assert identity.id == "TDX_03"
-
-    def test_reject_wrong_id(self):
-        """Test that non-TDX ID is rejected."""
-        bad_json = SAMPLE_TCB_INFO_JSON.replace('"id": "TDX"', '"id": "SGX"')
-        with pytest.raises(CollateralError, match="must be 'TDX'"):
-            parse_tcb_info_response(bad_json.encode())
-
-    def test_reject_wrong_version(self):
-        """Test that wrong version is rejected."""
-        bad_json = SAMPLE_TCB_INFO_JSON.replace('"version": 3', '"version": 2')
-        with pytest.raises(CollateralError, match="must be 3"):
-            parse_tcb_info_response(bad_json.encode())
-
-    def test_reject_duplicate_tcb_info_member(self):
-        """A second top-level "tcbInfo" member is rejected rather than overriding the signed one.
-
-        The signature covers the first object, so a forged duplicate must
-        never supply the values that appraisal reads.
-        """
-        forged = SAMPLE_TCB_INFO_JSON.replace('"tcbEvaluationDataNumber": 19', '"tcbEvaluationDataNumber": 99')
-        genuine_object = _signed_object(SAMPLE_TCB_INFO_JSON, "tcbInfo")
-        forged_object = _signed_object(forged, "tcbInfo")
-        body = f'{{"tcbInfo": {genuine_object}, "tcbInfo": {forged_object}, "signature": "abcd1234"}}'
-        with pytest.raises(CollateralError, match="duplicate"):
-            parse_tcb_info_response(body.encode())
-
-    def test_reject_duplicate_member_inside_tcb_info(self):
-        """A duplicate member nested inside tcbInfo is rejected too."""
-        body = SAMPLE_TCB_INFO_JSON.replace(
-            '"fmspc": "90c06f000000",', '"fmspc": "90c06f000000", "fmspc": "ffffffffffff",'
+    def test_absent_members_keep_zero_values(self) -> None:
+        body = edited(
+            tcb_info_body(),
+            id=None,
+            version=None,
+            fmspc=None,
+            tcbType=None,
+            tcbEvaluationDataNumber=None,
+            issueDate=None,
+            nextUpdate=None,
+            tdxModule=None,
+            tdxModuleIdentities=None,
+            tcbLevels=None,
         )
+        info = parse_tcb_info_response(body).tcb_info
+        assert info == TcbInfo(pce_id=tb.PCEID)
+        assert parse_tcb_info_response(b'{"signature":"ab"}').tcb_info == TcbInfo()
+        assert parse_tcb_info_response(b"{}").signature == ""
+
+    def test_null_members(self) -> None:
+        """Null reads as absent for plain members and is an error for hex and status members."""
+        info = parse_tcb_info_response(
+            edited(tcb_info_body(), fmspc=None).replace(b'"pceId"', b'"fmspc":null,"pceId"')
+        ).tcb_info
+        assert info.fmspc == ""
+        with pytest.raises(CollateralError, match="'mrsigner' is not a hex string"):
+            parse_tcb_info_response(edited(tcb_info_body(), tdxModule={"mrsigner": None}))
+        with pytest.raises(CollateralError, match="'tcbStatus' is not a status string"):
+            parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[level(tcbStatus=None)]))
+
+    def test_level_without_status(self) -> None:
+        info = parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[level(tcb={"pcesvn": 1})])).tcb_info
+        assert info.tcb_levels[0] == TcbLevel(
+            tcb=Tcb(components(list(tb.CPU_SVN_COMPONENTS)), 1, components(tb.TDX_COMPONENTS))
+        )
+
+    @pytest.mark.parametrize("member", ["sgxtcbcomponents", "pcesvn", "tdxtcbcomponents"])
+    def test_platform_level_requires_the_compared_tcb_members(self, member: str) -> None:
+        """A level without a member that the appraisal compares would be reached by every quote."""
+        tcb = dict(PLATFORM_TCB)
+        del tcb[member]
+        with pytest.raises(CollateralError, match=f"TCB has no '{member}'"):
+            parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[{"tcb": tcb, "tcbStatus": "UpToDate"}]))
+        with pytest.raises(CollateralError, match=f"TCB has no '{member}'"):
+            parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[level(tcb={member: None})]))
+
+    def test_platform_level_requires_a_tcb(self) -> None:
+        for levels in ([{"tcbStatus": "UpToDate"}], [{"tcb": None, "tcbStatus": "UpToDate"}]):
+            with pytest.raises(CollateralError, match="TCB level has no 'tcb'"):
+                parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=levels))
+
+    def test_module_identity_level_requires_an_isvsvn(self) -> None:
+        def identities(levels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{"id": "TDX_03", "tcbLevels": levels}]
+
+        with pytest.raises(CollateralError, match="TCB has no 'isvsvn'"):
+            parse_tcb_info_response(edited(tcb_info_body(), tdxModuleIdentities=identities([{"tcb": {}}])))
+        with pytest.raises(CollateralError, match="TCB has no 'isvsvn'"):
+            parse_tcb_info_response(
+                edited(tcb_info_body(), tdxModuleIdentities=identities([{"tcb": {"isvsvn": None}}]))
+            )
+        with pytest.raises(CollateralError, match="TCB level has no 'tcb'"):
+            parse_tcb_info_response(edited(tcb_info_body(), tdxModuleIdentities=identities([{}])))
+
+    @pytest.mark.parametrize(
+        ("members", "match"),
+        [
+            ({"id": 3}, "'id' is not a string"),
+            ({"version": "3"}, "'version' is not a number"),
+            ({"version": 256}, "overflows uint8"),
+            ({"version": 3.0}, "not an integer"),
+            ({"version": -1}, "negative"),
+            ({"tcbType": "x"}, "'tcbType' is not a number"),
+            ({"issueDate": 12}, "'issueDate' is not a timestamp string"),
+            ({"issueDate": "2025-12-17"}, "'issueDate'"),
+            ({"tcbEvaluationDataNumber": "18"}, "'tcbEvaluationDataNumber' is not a number"),
+            ({"tcbEvaluationDataNumber": 1e3}, "not an integer"),
+            ({"tcbEvaluationDataNumber": -5}, "'tcbEvaluationDataNumber': JSON number -5 is negative"),
+            ({"tcbEvaluationDataNumber": 2**64}, "overflows uint64"),
+            ({"tdxModule": {"mrsigner": "zz"}}, "'mrsigner': invalid hex byte"),
+            ({"tdxModule": {"attributes": "abc"}}, "odd length"),
+            ({"tdxModule": "x"}, "tdxModule is not a JSON object"),
+            ({"tdxModuleIdentities": {}}, "'tdxModuleIdentities' is not an array"),
+            ({"tcbLevels": [level(tcbStatus="Fine")]}, "unexpected tcb status found: 'Fine'"),
+            ({"tcbLevels": [level(tcbStatus=1)]}, "'tcbStatus' is not a status string"),
+            ({"tcbLevels": [level(tcb={"pcesvn": 65536})]}, "overflows uint16"),
+            ({"tcbLevels": [level(tcb={"sgxtcbcomponents": [{"svn": 256}]})]}, "overflows uint8"),
+            ({"tcbLevels": [level(tcb={"sgxtcbcomponents": [{"svn": "1"}]})]}, "'svn' is not a number"),
+            ({"tcbLevels": [level(tcb={"isvsvn": -1})]}, "negative"),
+            ({"tcbLevels": [level(advisoryIDs=[1])]}, "not an array of strings"),
+            ({"tcbLevels": [level(tcbDate=1)]}, "'tcbDate' is not a string"),
+            ({"tcbLevels": [1]}, "TCB level is not a JSON object"),
+        ],
+    )
+    def test_wrong_types_reject(self, members: dict[str, Any], match: str) -> None:
+        with pytest.raises(CollateralError, match=match):
+            parse_tcb_info_response(edited(tcb_info_body(), **members))
+
+    def test_evaluation_number_is_optional_but_never_negative(self) -> None:
+        assert (
+            parse_tcb_info_response(
+                edited(tcb_info_body(), tcbEvaluationDataNumber=0)
+            ).tcb_info.tcb_evaluation_data_number
+            == 0
+        )
+        assert (
+            parse_tcb_info_response(
+                edited(tcb_info_body(), tcbEvaluationDataNumber=None)
+            ).tcb_info.tcb_evaluation_data_number
+            is None
+        )
+        with pytest.raises(CollateralError, match="negative"):
+            parse_tcb_info_response(edited(tcb_info_body(), tcbEvaluationDataNumber=-1))
+
+    def test_member_names_match_exactly(self) -> None:
+        body = tcb_info_body().replace(b'"tcbLevels"', b'"TcbLevels"')
+        assert parse_tcb_info_response(body).tcb_info.tcb_levels == ()
+
+    def test_unknown_members_are_ignored(self) -> None:
+        body = edited(tcb_info_body(), extra={"a": [1, {"b": None}]})
+        assert parse_tcb_info_response(body).tcb_info.fmspc == tb.FMSPC
+
+    def test_duplicates_reject_at_any_depth(self) -> None:
         with pytest.raises(CollateralError, match="duplicate"):
-            parse_tcb_info_response(body.encode())
+            parse_tcb_info_response(tcb_info_body().replace(b'"fmspc"', b'"fmspc":"x","fmspc"'))
+        with pytest.raises(CollateralError, match="duplicate"):
+            parse_tcb_info_response(b'{"tcbInfo":{},"tcbInfo":{},"signature":""}')
 
-    def test_reject_missing_tcb_status(self):
-        """A TCB level without a status is rejected instead of defaulting to up to date."""
-        body = SAMPLE_TCB_INFO_JSON.replace('"tcbStatus": "UpToDate"', '"tcbStatus_": "UpToDate"', 1)
-        with pytest.raises(CollateralError, match="missing 'tcbStatus'"):
-            parse_tcb_info_response(body.encode())
-
-    def test_reject_missing_required_member(self):
-        """A missing fmspc is an error, not an empty string."""
-        body = SAMPLE_TCB_INFO_JSON.replace('"fmspc": "90c06f000000",', "")
-        with pytest.raises(CollateralError, match="missing 'fmspc'"):
-            parse_tcb_info_response(body.encode())
-
-    def test_reject_wrong_member_type(self):
-        """A version that is not an integer is an error."""
-        body = SAMPLE_TCB_INFO_JSON.replace('"version": 3', '"version": "3"')
-        with pytest.raises(CollateralError, match="not a number"):
-            parse_tcb_info_response(body.encode())
-
-    def test_reject_negative_svn(self):
-        """A negative SVN would satisfy every "at least" comparison, so it is rejected at parse time."""
-        body = SAMPLE_TCB_INFO_JSON.replace('{"svn": 3}, {"svn": 3}', '{"svn": -3}, {"svn": 3}', 1)
-        with pytest.raises(CollateralError, match="non-negative integer"):
-            parse_tcb_info_response(body.encode())
+    @pytest.mark.parametrize("body", [b"", b"null", b"[]", b'"x"', b"{", b'{"tcbInfo": 1}', b'{"signature": 1}'])
+    def test_malformed_bodies_reject(self, body: bytes) -> None:
+        with pytest.raises(CollateralError):
+            parse_tcb_info_response(body)
 
 
 class TestParseQeIdentityResponse:
-    """Test QE Identity parsing."""
+    def test_parses_every_member(self) -> None:
+        identity = parse_qe_identity_response(qe_identity_body()).enclave_identity
+        assert (identity.id, identity.version) == ("TD_QE", 2)
+        assert identity.tcb_evaluation_data_number == 18
+        assert (identity.miscselect, identity.miscselect_mask) == (bytes(4), bytes([0xFF]) * 4)
+        assert identity.attributes == tb.QE_ATTRIBUTES
+        assert identity.attributes_mask == bytes.fromhex("fbffffffffffffff0000000000000000")
+        assert identity.mrsigner == tb.QE_MRSIGNER
+        assert identity.isv_prod_id == 2
+        assert identity.tcb_levels[0].tcb.isv_svn == 8
+        assert identity.tcb_levels[0].tcb_status == TcbStatus.UP_TO_DATE
 
-    def test_parse_valid_response(self):
-        """Test parsing a valid QE Identity response."""
-        result = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
+    def test_absent_members_keep_zero_values(self) -> None:
+        assert parse_qe_identity_response(b'{"enclaveIdentity":{}}').enclave_identity == EnclaveIdentity()
 
-        assert result.enclave_identity.id == "TD_QE"
-        assert result.enclave_identity.version == 2
-        assert result.enclave_identity.isv_prod_id == 2
-        assert len(result.enclave_identity.tcb_levels) == 2
-
-    def test_parse_mrsigner(self):
-        """Test MRSIGNER is parsed correctly."""
-        result = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        expected = bytes.fromhex("DC9E2A7C6F948F17474E34A7FC43ED030F7C1563F1BABDDF6340C82E0E54A8C5")
-        assert result.enclave_identity.mrsigner == expected
-
-    def test_reject_wrong_id(self):
-        """Test that non-TD_QE ID is rejected."""
-        bad_json = SAMPLE_QE_IDENTITY_JSON.replace('"id": "TD_QE"', '"id": "QE"')
-        with pytest.raises(CollateralError, match="must be 'TD_QE'"):
-            parse_qe_identity_response(bad_json.encode())
-
-    def test_reject_duplicate_enclave_identity_member(self):
-        """A second top-level "enclaveIdentity" member is rejected rather than overriding the signed one."""
-        genuine_object = _signed_object(SAMPLE_QE_IDENTITY_JSON, "enclaveIdentity")
-        forged = SAMPLE_QE_IDENTITY_JSON.replace('"isvprodid": 2', '"isvprodid": 3')
-        forged_object = _signed_object(forged, "enclaveIdentity")
-        body = f'{{"enclaveIdentity": {genuine_object}, "enclaveIdentity": {forged_object}, "signature": "0665a932"}}'
-        with pytest.raises(CollateralError, match="duplicate"):
-            parse_qe_identity_response(body.encode())
-
-    def test_reject_missing_required_member(self):
-        """A missing mrsigner is an error, not an all-zero value."""
-        body = re.sub(r'"mrsigner": "[0-9A-F]+",\n', "", SAMPLE_QE_IDENTITY_JSON)
-        with pytest.raises(CollateralError, match="missing 'mrsigner'"):
-            parse_qe_identity_response(body.encode())
+    @pytest.mark.parametrize(
+        ("members", "match"),
+        [
+            ({"isvprodid": 65536}, "overflows uint16"),
+            ({"mrsigner": "DCDC "}, "'mrsigner'"),
+            ({"tcbEvaluationDataNumber": -1}, "'tcbEvaluationDataNumber': JSON number -1 is negative"),
+            ({"tcbLevels": [{"tcb": {"isvsvn": 4294967296}}]}, "overflows uint32"),
+            ({"tcbLevels": [{"tcb": {"isvsvn": None}}]}, "TCB has no 'isvsvn'"),
+            ({"tcbLevels": [{"tcb": {}, "tcbStatus": "UpToDate"}]}, "TCB has no 'isvsvn'"),
+            ({"tcbLevels": [{"tcbStatus": "UpToDate"}]}, "TCB level has no 'tcb'"),
+        ],
+    )
+    def test_wrong_types_reject(self, members: dict[str, Any], match: str) -> None:
+        with pytest.raises(CollateralError, match=match):
+            parse_qe_identity_response(edited(qe_identity_body(), **members))
 
 
-# =============================================================================
-# TCB Comparison Tests
-# =============================================================================
+class TestTopLevelMember:
+    def test_signed_bytes_are_the_members_exact_text(self) -> None:
+        genuine = '{"id": "TDX", "version": 3}'
+        for body in (
+            f'{{"tcbInfo":{genuine},"signature":"ab"}}',
+            f'{{ "tcbInfo" : {genuine} ,\n  "signature": "ab" }}',
+            f'{{"signature": "ab",\n\t"tcbInfo":\n{genuine}\n}}',
+            f'{{"other": {{"tcbInfo": 1}}, "tcbInfo":{genuine}, "signature":"ab"}}',
+        ):
+            assert top_level_member(body.encode(), "tcbInfo") == genuine.encode()
+
+    def test_nested_copy_does_not_stand_in(self) -> None:
+        forged = '{"id": "TDX", "version": 4}'
+        body = f'{{"a":{{"tcbInfo":{{"x":1}}}},"tcbInfo":{forged},"signature":"ab"}}'
+        assert top_level_member(body.encode(), "tcbInfo") == forged.encode()
+
+    @pytest.mark.parametrize(
+        ("body", "match"),
+        [
+            (b"", "is empty"),
+            (b'{"other": 1}', "field is missing"),
+            (b'{"tcbInfo": {"a": 1}, "tcbInfo": {"a": 2}}', "duplicate top-level member"),
+            (b'{"tcbInfo": [1]}', "is not an object"),
+            (b'{"tcbInfo": "x"}', "is not an object"),
+            (b'["tcbInfo"]', "not a JSON object"),
+            (b'{"tcbInfo": {}', "unterminated"),
+            (b'{"tcbInfo": {} "x": 1}', "unexpected character"),
+            (b'{"tcbInfo"}', "has no value"),
+            (b"{1: 2}", "member name is not a string"),
+            (b"\xff", "could not convert"),
+        ],
+    )
+    def test_rejects(self, body: bytes, match: str) -> None:
+        with pytest.raises(CollateralError, match=match):
+            top_level_member(body, "tcbInfo")
 
 
-class TestIsCpuSvnHigherOrEqual:
-    """Test CPU SVN comparison."""
+class TestParseIssuerChainHeader:
+    def test_decodes_two_certificates(self) -> None:
+        intel = SCENARIO.intel
+        header = tb.issuer_chain_header(intel.pem(intel.tcb_signing), intel.pem(intel.root))
+        signing, root = parse_issuer_chain_header(header, "Tcb-Info-Issuer-Chain")
+        assert (signing.serial_number, root.serial_number) == (3, 1)
+        assert "+" not in header
 
-    def test_equal_values(self):
-        """Test equal SVN values pass."""
-        cpu_svn = bytes([3, 3, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        components = [
-            TcbComponent(svn=3),
-            TcbComponent(svn=3),
-            TcbComponent(svn=2),
-            TcbComponent(svn=2),
-            TcbComponent(svn=2),
-            TcbComponent(svn=1),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-        ]
+    def test_plus_decodes_to_a_space(self) -> None:
+        intel = SCENARIO.intel
+        pem = intel.pem(intel.tcb_signing) + intel.pem(intel.root)
+        assert b"+" in pem
+        with pytest.raises(CollateralError, match="could not parse PEM"):
+            parse_issuer_chain_header(pem.decode(), "Tcb-Info-Issuer-Chain")
 
-        assert is_cpu_svn_higher_or_equal(cpu_svn, components) is True
+    @pytest.mark.parametrize(
+        ("value", "match"),
+        [
+            ("", "certificates missing"),
+            ("%zz", "invalid URL escape"),
+            ("%2", "invalid URL escape"),
+            ("not%20a%20pem", "could not parse PEM"),
+        ],
+    )
+    def test_rejects(self, value: str, match: str) -> None:
+        with pytest.raises(CollateralError, match=match):
+            parse_issuer_chain_header(value, "Tcb-Info-Issuer-Chain")
 
-    def test_higher_values(self):
-        """Test higher SVN values pass."""
-        cpu_svn = bytes([4, 4, 3, 3, 3, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
-        components = [
-            TcbComponent(svn=3),
-            TcbComponent(svn=3),
-            TcbComponent(svn=2),
-            TcbComponent(svn=2),
-            TcbComponent(svn=2),
-            TcbComponent(svn=1),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-        ]
-
-        assert is_cpu_svn_higher_or_equal(cpu_svn, components) is True
-
-    def test_lower_first_component(self):
-        """Test lower first component fails."""
-        cpu_svn = bytes([2, 3, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        components = [
-            TcbComponent(svn=3),
-            TcbComponent(svn=3),
-            TcbComponent(svn=2),
-            TcbComponent(svn=2),
-            TcbComponent(svn=2),
-            TcbComponent(svn=1),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-        ]
-
-        assert is_cpu_svn_higher_or_equal(cpu_svn, components) is False
-
-    def test_wrong_length(self):
-        """Test wrong length fails."""
-        cpu_svn = bytes([3, 3, 2])  # Only 3 bytes
-        components = [TcbComponent(svn=3)] * 16
-
-        assert is_cpu_svn_higher_or_equal(cpu_svn, components) is False
+    def test_requires_exactly_two(self) -> None:
+        intel = SCENARIO.intel
+        with pytest.raises(CollateralError, match="should contain 2 PEM certificates, found 1"):
+            parse_issuer_chain_header(tb.issuer_chain_header(intel.pem(intel.root)), "X")
+        with pytest.raises(CollateralError, match="unexpected trailing bytes"):
+            parse_issuer_chain_header(
+                tb.issuer_chain_header(intel.pem(intel.tcb_signing), intel.pem(intel.root), b"\n"), "X"
+            )
 
 
-class TestIsTdxTcbSvnHigherOrEqual:
-    """Test TDX TCB SVN comparison."""
+# --- response verification -------------------------------------------------------------------
 
-    def test_equal_values(self):
-        """Test equal SVN values pass."""
-        tee_tcb_svn = bytes([5, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        components = [
-            TcbComponent(svn=5),
-            TcbComponent(svn=0),
-            TcbComponent(svn=3),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-        ]
 
-        assert is_tdx_tcb_svn_higher_or_equal(tee_tcb_svn, components) is True
+class TestVerifyResponse:
+    def test_verifies(self) -> None:
+        c = collateral()
+        verify_tcb_info(c, ROOTS, tb.NOW)
+        verify_qe_identity(c, ROOTS, tb.NOW)
 
-    def test_skip_first_two_when_module_version_set(self):
-        """Test that first 2 bytes are skipped when tee_tcb_svn[1] > 0."""
-        # tee_tcb_svn[1] = 1, so first 2 bytes should be skipped
-        tee_tcb_svn = bytes([0, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        # Components have higher values in first 2 positions, but should be skipped
-        components = [
-            TcbComponent(svn=99),
-            TcbComponent(svn=99),
-            TcbComponent(svn=3),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-        ]
+    def test_id_version_and_levels(self) -> None:
+        for body, match in (
+            (edited(tcb_info_body(), id="SGX"), "tcbInfo ID 'SGX'"),
+            (edited(tcb_info_body(), version=2), "tcbInfo version 2"),
+            (edited(tcb_info_body(), tcbLevels=[]), "empty TcbLevels"),
+        ):
+            with pytest.raises(CollateralError, match=match):
+                verify_tcb_info(collateral(SCENARIO.with_(tcb_info=json.loads(body)["tcbInfo"])), ROOTS, tb.NOW)
+        for body, match in (
+            (edited(qe_identity_body(), id="QE"), "QeIdentity ID 'QE'"),
+            (edited(qe_identity_body(), version=3), "QeIdentity version 3"),
+            (edited(qe_identity_body(), tcbLevels=[]), "empty TcbLevels"),
+        ):
+            with pytest.raises(CollateralError, match=match):
+                verify_qe_identity(
+                    collateral(SCENARIO.with_(qe_identity=json.loads(body)["enclaveIdentity"])), ROOTS, tb.NOW
+                )
 
-        assert is_tdx_tcb_svn_higher_or_equal(tee_tcb_svn, components) is True
+    def test_signature_and_chain(self) -> None:
+        c = collateral()
+        intel = SCENARIO.intel
+        root, signing = c.tcb_info_issuer_root, c.tcb_info_issuer_intermediate
+        args = (c.tcb_info_body, c.tcb_info.signature, c.root_crl.crl, ROOTS, tb.NOW)
+        verify_response("Intel SGX TCB Signing", root, signing, *args)
+        with pytest.raises(CollateralError, match="unable to validate root certificate"):
+            verify_response("Intel SGX TCB Signing", signing, signing, *args)
+        with pytest.raises(CollateralError, match="unable to validate signing certificate"):
+            verify_response("Intel SGX PCK Certificate", root, signing, *args)
+        with pytest.raises(CollateralError, match="unable to verify signing certificate"):
+            verify_response(
+                "Intel SGX TCB Signing", root, signing, *args[:3], (pki.load(tb.intel_pki().root.der),), tb.NOW
+            )
+        with pytest.raises(CollateralError, match="unable to verify signing certificate"):
+            verify_response("Intel SGX TCB Signing", root, signing, *args[:4], tb.NOW + timedelta(days=400))
+        with pytest.raises(CollateralError, match="unable to decode signature string"):
+            verify_response("Intel SGX TCB Signing", root, signing, c.tcb_info_body, "xy", *args[2:])
+        with pytest.raises(CollateralError, match="unable to convert signature to DER"):
+            verify_response("Intel SGX TCB Signing", root, signing, c.tcb_info_body, "ab" * 63, *args[2:])
+        with pytest.raises(CollateralError, match="could not verify response body"):
+            verify_response("Intel SGX TCB Signing", root, signing, c.tcb_info_body + b" ", *args[1:])
+        other_crl = parse_revocation_list(
+            pki.crl(intel.platform_ca, this_update=tb.NOW - timedelta(days=1), next_update=tb.NOW + timedelta(days=1))
+        )
+        with pytest.raises(CollateralError, match="root CA CRL verification failed"):
+            verify_response(
+                "Intel SGX TCB Signing", root, signing, c.tcb_info_body, c.tcb_info.signature, other_crl, ROOTS, tb.NOW
+            )
+        revoked = parse_revocation_list(
+            pki.crl(
+                intel.root, this_update=tb.NOW - timedelta(days=1), next_update=tb.NOW + timedelta(days=1), revoked=[3]
+            )
+        )
+        with pytest.raises(CollateralError, match="signing certificate was revoked"):
+            verify_response(
+                "Intel SGX TCB Signing", root, signing, c.tcb_info_body, c.tcb_info.signature, revoked, ROOTS, tb.NOW
+            )
 
-    def test_lower_value_fails(self):
-        """Test lower SVN value fails."""
-        tee_tcb_svn = bytes([5, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        components = [
-            TcbComponent(svn=5),
-            TcbComponent(svn=0),
-            TcbComponent(svn=3),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-            TcbComponent(svn=0),
-        ]
 
-        assert is_tdx_tcb_svn_higher_or_equal(tee_tcb_svn, components) is False
+class TestCheckCollateralExpiration:
+    def test_current(self) -> None:
+        check_collateral_expiration(collateral(), tb.NOW)
+        check_collateral_expiration(collateral(), tb.NOW + timedelta(days=30))
+
+    def test_in_order(self) -> None:
+        c = collateral()
+        later = tb.NOW + timedelta(days=366)
+        with pytest.raises(CollateralError, match="tcbInfo has expired"):
+            check_collateral_expiration(c, later)
+        c2 = collateral(SCENARIO.with_(tcb_info=tb.tcb_info_object(next_update=later + timedelta(days=1))))
+        with pytest.raises(CollateralError, match="QeIdentity has expired"):
+            check_collateral_expiration(c2, later)
+        c3 = collateral(
+            SCENARIO.with_(
+                tcb_info=tb.tcb_info_object(next_update=later + timedelta(days=1)),
+                qe_identity=tb.qe_identity_object(next_update=later + timedelta(days=1)),
+            )
+        )
+        with pytest.raises(CollateralError, match="tcbInfo signing certificate has expired"):
+            check_collateral_expiration(c3, later)
+        with pytest.raises(CollateralError, match="root CA CRL has expired"):
+            check_collateral_expiration(c, tb.NOW + timedelta(days=31))
+        c4 = collateral(SCENARIO.with_(root_crl_window=(timedelta(0), timedelta(days=60))))
+        with pytest.raises(CollateralError, match="PCK CRL has expired"):
+            check_collateral_expiration(c4, tb.NOW + timedelta(days=31))
+
+    def test_missing_next_update_is_expired(self) -> None:
+        body = edited(tcb_info_body(), nextUpdate=None)
+        c = collateral(SCENARIO.with_(tcb_info=json.loads(body)["tcbInfo"]))
+        with pytest.raises(CollateralError, match="tcbInfo has expired"):
+            check_collateral_expiration(c, tb.NOW)
+
+
+# --- appraisal -------------------------------------------------------------------------------------
+
+
+def components(values: list[int]) -> tuple[TcbComponent, ...]:
+    return tuple(TcbComponent(svn=v) for v in values)
+
+
+class TestSvnComparisons:
+    def test_cpu_svn(self) -> None:
+        assert is_cpu_svn_higher_or_equal(bytes([3] * 16), components([3] * 16))
+        assert is_cpu_svn_higher_or_equal(bytes([4] * 16), components([3] * 16))
+        assert not is_cpu_svn_higher_or_equal(bytes([3] * 15 + [2]), components([3] * 16))
+        assert not is_cpu_svn_higher_or_equal(bytes(15), components([0] * 16))
+        assert not is_cpu_svn_higher_or_equal(b"", components([0] * 16))
+        assert is_cpu_svn_higher_or_equal(b"", ())
+
+    def test_tdx_tcb_svn(self) -> None:
+        assert is_tdx_tcb_svn_higher_or_equal(bytes([0, 0] + [5] * 14), components([0, 0] + [5] * 14))
+        assert not is_tdx_tcb_svn_higher_or_equal(bytes([0, 0] + [4] * 14), components([0, 0] + [5] * 14))
+        # A non-zero module version skips the first two components.
+        assert is_tdx_tcb_svn_higher_or_equal(bytes([0, 3] + [5] * 14), components([9, 9] + [5] * 14))
+        assert not is_tdx_tcb_svn_higher_or_equal(bytes([0, 0] + [5] * 14), components([9, 0] + [5] * 14))
+        assert not is_tdx_tcb_svn_higher_or_equal(bytes(16), components([0] * 15))
 
 
 class TestGetMatchingTcbLevel:
-    """Test TCB level matching."""
+    def test_first_reachable_level(self) -> None:
+        high = TcbLevel(tcb=Tcb(components([3] * 16), 13, components([5] * 16)), tcb_status=TcbStatus.UP_TO_DATE)
+        low = TcbLevel(tcb=Tcb(components([2] * 16), 11, components([4] * 16)), tcb_status=TcbStatus.OUT_OF_DATE)
+        assert get_matching_tcb_level([high, low], bytes([5] * 16), 13, bytes([3] * 16)) is high
+        assert get_matching_tcb_level([high, low], bytes([5] * 16), 12, bytes([3] * 16)) is low
+        assert get_matching_tcb_level([high, low], bytes([4] * 16), 13, bytes([3] * 16)) is low
+        with pytest.raises(CollateralError, match="no matching TCB level found"):
+            get_matching_tcb_level([high, low], bytes([4] * 16), 13, bytes([1] * 16))
+        with pytest.raises(CollateralError, match="no matching TCB level found"):
+            get_matching_tcb_level([], bytes(16), 0, bytes(16))
 
-    def test_find_matching_level(self):
-        """Test finding a matching TCB level."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
 
-        tee_tcb_svn = bytes([5, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        pce_svn = 13
-        cpu_svn = bytes([3, 3, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+class TestVerifyTdQuoteBody:
+    def info(self, **changes: Any) -> TcbInfo:
+        return parse_tcb_info_response(tcb_info_body(**changes)).tcb_info
 
-        result = get_matching_tcb_level(
-            tcb_info.tcb_info.tcb_levels,
-            tee_tcb_svn,
-            pce_svn,
-            cpu_svn,
+    def extensions(self, **changes: Any) -> PckExtensions:
+        base = PckExtensions(
+            ppid=tb.PPID.hex(),
+            tcb=PckCertTCB(pce_svn=tb.PCE_SVN, cpu_svn=tb.CPU_SVN_COMPONENTS, cpu_svn_components=tb.CPU_SVN_COMPONENTS),
+            pceid=tb.PCEID,
+            fmspc=tb.FMSPC,
         )
+        return replace(base, **changes) if changes else base
 
-        assert result is not None
-        assert result.tcb_status == TcbStatus.UP_TO_DATE
+    def body(self, **changes: Any):
+        return parse_quote(tb.quote_bytes(SCENARIO.pck_key, b"x", body=tb.body_bytes(**changes))).td_quote_body
 
-    def test_no_matching_level(self):
-        """Test no matching level found."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
+    def test_matches(self) -> None:
+        level = verify_td_quote_body(self.body(), self.info(), self.extensions())
+        assert level.tcb_status == TcbStatus.UP_TO_DATE
 
-        tee_tcb_svn = bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        pce_svn = 1
-        cpu_svn = bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    def test_fmspc_and_pceid_exact(self) -> None:
+        with pytest.raises(CollateralError, match="FMSPC"):
+            verify_td_quote_body(self.body(), self.info(fmspc=tb.FMSPC.upper()), self.extensions())
+        with pytest.raises(CollateralError, match="FMSPC"):
+            verify_td_quote_body(self.body(), self.info(), self.extensions(fmspc=""))
+        with pytest.raises(CollateralError, match="PCEID"):
+            verify_td_quote_body(self.body(), self.info(), self.extensions(pceid="0001"))
 
-        result = get_matching_tcb_level(
-            tcb_info.tcb_info.tcb_levels,
-            tee_tcb_svn,
-            pce_svn,
-            cpu_svn,
-        )
+    def test_module_signer_and_attributes(self) -> None:
+        with pytest.raises(CollateralError, match="MRSIGNERSEAM"):
+            verify_td_quote_body(self.body(mr_signer_seam=bytes([1]) * 48), self.info(), self.extensions())
+        with pytest.raises(CollateralError, match="size of SeamAttributes"):
+            verify_td_quote_body(self.body(), self.info(attributes_mask=bytes(7)), self.extensions())
+        with pytest.raises(CollateralError, match="AttributesMask value"):
+            verify_td_quote_body(self.body(seam_attributes=bytes([1]) * 8), self.info(), self.extensions())
+        masked = self.info(attributes_mask=bytes([0xFE]) + bytes([0xFF]) * 7)
+        assert verify_td_quote_body(self.body(seam_attributes=b"\x01" + bytes(7)), masked, self.extensions())
 
-        assert result is None
+    def test_missing_module_rejects(self) -> None:
+        info = parse_tcb_info_response(edited(tcb_info_body(), tdxModule=None)).tcb_info
+        with pytest.raises(CollateralError, match="MRSIGNERSEAM"):
+            verify_td_quote_body(self.body(), info, self.extensions())
+
+    def test_tcb_status(self) -> None:
+        with pytest.raises(CollateralError, match="no matching TCB level found"):
+            verify_td_quote_body(
+                self.body(),
+                self.info(),
+                self.extensions(tcb=PckCertTCB(pce_svn=10, cpu_svn_components=tb.CPU_SVN_COMPONENTS)),
+            )
+        with pytest.raises(CollateralError, match="TCB Status is not 'UpToDate', found 'SWHardeningNeeded'"):
+            verify_td_quote_body(self.body(), self.info(status="SWHardeningNeeded"), self.extensions())
+        with pytest.raises(CollateralError, match="TDX Module TCB Status is not 'UpToDate', found 'Revoked'"):
+            verify_td_quote_body(self.body(), self.info(module_status="Revoked"), self.extensions())
+        level = tb.tcb_level(list(tb.CPU_SVN_COMPONENTS), tb.PCE_SVN, tb.TDX_COMPONENTS)
+        del level["tcbStatus"]
+        with pytest.raises(CollateralError, match="found ''"):
+            verify_td_quote_body(self.body(), self.info(levels=[level]), self.extensions())
+
+    def test_pck_without_tcb_matches_nothing(self) -> None:
+        with pytest.raises(CollateralError, match="no matching TCB level found"):
+            verify_td_quote_body(self.body(), self.info(), self.extensions(tcb=PckCertTCB()))
 
 
-class TestGetMatchingQeTcbLevel:
-    """Test QE TCB level matching with isvsvn."""
+class TestVerifyQeReport:
+    def identity(self, **changes: Any) -> EnclaveIdentity:
+        return parse_qe_identity_response(qe_identity_body(**changes)).enclave_identity
 
-    def test_find_matching_level(self):
-        """Test finding a matching QE TCB level by isvsvn."""
-        tcb_levels = [
-            TcbLevel(
-                tcb=Tcb(
-                    sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                    pce_svn=0,
-                    tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                    isv_svn=8,
-                ),
-                tcb_date="2024-01-01T00:00:00Z",
-                tcb_status=TcbStatus.UP_TO_DATE,
-                advisory_ids=[],
-            ),
-            TcbLevel(
-                tcb=Tcb(
-                    sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                    pce_svn=0,
-                    tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                    isv_svn=6,
-                ),
-                tcb_date="2023-06-01T00:00:00Z",
-                tcb_status=TcbStatus.SW_HARDENING_NEEDED,
-                advisory_ids=["INTEL-SA-00001"],
-            ),
+    def report(self, **changes: Any):
+        raw = tb.quote_bytes(SCENARIO.pck_key, b"x", qe_report_kwargs=changes)
+        return parse_quote(raw).signed_data.certification_data.qe_report_data.qe_report_parsed
+
+    def test_matches(self) -> None:
+        verify_qe_report(self.report(), self.identity())
+
+    def test_miscselect(self) -> None:
+        with pytest.raises(CollateralError, match="MISCSELECTMask field size\\(3\\)"):
+            verify_qe_report(self.report(), self.identity(miscselect_mask=bytes(3)))
+        with pytest.raises(CollateralError, match="MISCSELECT field size\\(5\\)"):
+            verify_qe_report(self.report(), self.identity(miscselect=bytes(5)))
+        with pytest.raises(CollateralError, match="MISCSELECT value"):
+            verify_qe_report(self.report(misc_select=1), self.identity())
+        verify_qe_report(self.report(misc_select=0x100), self.identity(miscselect_mask=bytes.fromhex("ff00ffff")))
+        # The published value is compared unmasked.
+        with pytest.raises(CollateralError, match="MISCSELECT value"):
+            verify_qe_report(
+                self.report(misc_select=0x100),
+                self.identity(miscselect=bytes.fromhex("00010000"), miscselect_mask=bytes.fromhex("ff00ffff")),
+            )
+
+    def test_attributes(self) -> None:
+        with pytest.raises(CollateralError, match="size of AttributesMask value\\(15\\)"):
+            verify_qe_report(self.report(), self.identity(attributes_mask=bytes(15)))
+        with pytest.raises(CollateralError, match="AttributesMask value"):
+            verify_qe_report(self.report(attributes=bytes([0x13]) + bytes(15)), self.identity())
+        verify_qe_report(self.report(attributes=tb.QE_ATTRIBUTES[:8] + bytes([0xFF]) * 8), self.identity())
+        with pytest.raises(CollateralError, match="AttributesMask value"):
+            verify_qe_report(self.report(), self.identity(attributes=tb.QE_ATTRIBUTES[:15] + b"\x01"))
+        with pytest.raises(CollateralError, match="AttributesMask value"):
+            verify_qe_report(self.report(), self.identity(attributes=tb.QE_ATTRIBUTES[:15]))
+
+    def test_mrsigner_and_prodid(self) -> None:
+        with pytest.raises(CollateralError, match="MRSIGNER value"):
+            verify_qe_report(self.report(mr_signer=bytes(32)), self.identity())
+        with pytest.raises(CollateralError, match="MRSIGNER value"):
+            verify_qe_report(self.report(), self.identity(mrsigner=tb.QE_MRSIGNER[:31]))
+        with pytest.raises(CollateralError, match="ISV PRODID value\\(3\\)"):
+            verify_qe_report(self.report(isv_prod_id=3), self.identity())
+
+    def test_qe_tcb_status(self) -> None:
+        levels = [
+            TcbLevel(tcb=Tcb(isv_svn=8), tcb_status=TcbStatus.UP_TO_DATE),
+            TcbLevel(tcb=Tcb(isv_svn=5), tcb_status=TcbStatus.OUT_OF_DATE),
         ]
-
-        # ISV SVN 8 should match first level (equal)
-        result = get_matching_qe_tcb_level(tcb_levels, 8)
-        assert result is not None
-        assert result.tcb_status == TcbStatus.UP_TO_DATE
-
-        # ISV SVN 10 should also match first level (>= 8)
-        result = get_matching_qe_tcb_level(tcb_levels, 10)
-        assert result is not None
-        assert result.tcb_status == TcbStatus.UP_TO_DATE
-
-        # ISV SVN 7 should match second level (>= 6 but < 8)
-        result = get_matching_qe_tcb_level(tcb_levels, 7)
-        assert result is not None
-        assert result.tcb_status == TcbStatus.SW_HARDENING_NEEDED
-
-    def test_no_matching_level(self):
-        """Test no matching QE TCB level when isvsvn too low."""
-        tcb_levels = [
-            TcbLevel(
-                tcb=Tcb(
-                    sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                    pce_svn=0,
-                    tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                    isv_svn=8,
-                ),
-                tcb_date="2024-01-01T00:00:00Z",
-                tcb_status=TcbStatus.UP_TO_DATE,
-                advisory_ids=[],
-            ),
-        ]
-
-        # ISV SVN 5 is less than 8, so no match
-        result = get_matching_qe_tcb_level(tcb_levels, 5)
-        assert result is None
-
-    def test_empty_levels(self):
-        """Test empty TCB levels list."""
-        result = get_matching_qe_tcb_level([], 8)
-        assert result is None
-
-    def test_level_without_isv_svn(self):
-        """Test TCB level without isv_svn field is skipped."""
-        tcb_levels = [
-            TcbLevel(
-                tcb=Tcb(
-                    sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                    pce_svn=0,
-                    tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                    isv_svn=None,  # No isv_svn set
-                ),
-                tcb_date="2024-01-01T00:00:00Z",
-                tcb_status=TcbStatus.UP_TO_DATE,
-                advisory_ids=[],
-            ),
-        ]
-
-        result = get_matching_qe_tcb_level(tcb_levels, 8)
-        assert result is None
-
-
-# =============================================================================
-# Validation Tests
-# =============================================================================
-
-
-class TestValidateTcbStatus:
-    """Test TCB status validation."""
-
-    def test_up_to_date_passes(self):
-        """Test UpToDate status passes."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        pck_ext = create_sample_pck_extensions()
-        tee_tcb_svn = bytes([5, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-
-        result = validate_tcb_status(
-            tcb_info.tcb_info,
-            tee_tcb_svn,
-            pck_ext,
-        )
-
-        assert result.tcb_status == TcbStatus.UP_TO_DATE
-
-    def test_no_matching_level_fails(self):
-        """Test that no matching level raises error."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-
-        pck_ext = PckExtensions(
-            ppid="00" * 16,
-            tcb=PckCertTCB(
-                pce_svn=1,
-                cpu_svn=bytes(16),
-                tcb_components=[0] * 16,
-            ),
-            pceid="0000",
-            fmspc="90c06f000000",
-        )
-        tee_tcb_svn = bytes(16)
-
-        with pytest.raises(CollateralError, match="No matching TCB level"):
-            validate_tcb_status(tcb_info.tcb_info, tee_tcb_svn, pck_ext)
-
-    def test_fmspc_mismatch_fails(self):
-        """Test that FMSPC mismatch raises error."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-
-        pck_ext = PckExtensions(
-            ppid="00" * 16,
-            tcb=PckCertTCB(
-                pce_svn=13,
-                cpu_svn=bytes([3, 3, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-                tcb_components=[3, 3, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            ),
-            pceid="0000",
-            fmspc="aabbcc000000",  # Different FMSPC
-        )
-        tee_tcb_svn = bytes([5, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-
-        with pytest.raises(CollateralError, match="FMSPC mismatch"):
-            validate_tcb_status(tcb_info.tcb_info, tee_tcb_svn, pck_ext)
-
-    def test_pceid_mismatch_fails(self):
-        """Test that PCE_ID mismatch raises error."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-
-        pck_ext = PckExtensions(
-            ppid="00" * 16,
-            tcb=PckCertTCB(
-                pce_svn=13,
-                cpu_svn=bytes([3, 3, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-                tcb_components=[3, 3, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            ),
-            pceid="1234",  # Different PCE_ID
-            fmspc="90c06f000000",
-        )
-        tee_tcb_svn = bytes([5, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-
-        with pytest.raises(CollateralError, match="PCE_ID mismatch"):
-            validate_tcb_status(tcb_info.tcb_info, tee_tcb_svn, pck_ext)
-
-
-class TestValidateQeIdentity:
-    """Test QE identity validation."""
-
-    def _create_qe_identity(self) -> EnclaveIdentity:
-        """Create a sample QE Identity for testing."""
-        return EnclaveIdentity(
-            id="TD_QE",
-            version=2,
-            issue_date=datetime.now(UTC),
-            next_update=datetime.now(UTC) + timedelta(days=30),
-            tcb_evaluation_data_number=17,
-            miscselect=b"\x00\x00\x00\x00",
-            miscselect_mask=b"\xff\xff\xff\xff",
-            attributes=b"\x11\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-            attributes_mask=b"\xfb\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\x00\x00\x00\x00",
-            mrsigner=b"\xdc" * 32,
-            isv_prod_id=1,
-            tcb_levels=[
-                TcbLevel(
-                    tcb=Tcb(
-                        sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                        pce_svn=0,
-                        tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                        isv_svn=8,
-                    ),
-                    tcb_date="2024-01-01T00:00:00Z",
-                    tcb_status=TcbStatus.UP_TO_DATE,
-                    advisory_ids=[],
-                ),
-            ],
-        )
-
-    def test_valid_qe_identity(self):
-        """Test validation passes with matching QE identity."""
-        qe_identity = self._create_qe_identity()
-        result = validate_qe_identity(
-            qe_identity=qe_identity,
-            qe_report_isv_svn=8,
-            qe_report_mrsigner=b"\xdc" * 32,
-            qe_report_miscselect=b"\x00\x00\x00\x00",
-            qe_report_attributes=b"\x11\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-            qe_report_isvprodid=1,
-        )
-        assert result.tcb_status == TcbStatus.UP_TO_DATE
-
-    def test_mrsigner_mismatch(self):
-        """Test validation fails with MRSIGNER mismatch."""
-        qe_identity = self._create_qe_identity()
-        with pytest.raises(CollateralError, match="MRSIGNER does not match"):
-            validate_qe_identity(
-                qe_identity=qe_identity,
-                qe_report_isv_svn=8,
-                qe_report_mrsigner=b"\xaa" * 32,  # Wrong MRSIGNER
-                qe_report_miscselect=b"\x00\x00\x00\x00",
-                qe_report_attributes=b"\x11\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-                qe_report_isvprodid=1,
-            )
-
-    def test_miscselect_mismatch(self):
-        """Test validation fails with MISCSELECT mismatch under mask."""
-        qe_identity = self._create_qe_identity()
-        with pytest.raises(CollateralError, match="MISCSELECT does not match"):
-            validate_qe_identity(
-                qe_identity=qe_identity,
-                qe_report_isv_svn=8,
-                qe_report_mrsigner=b"\xdc" * 32,
-                qe_report_miscselect=b"\x01\x00\x00\x00",  # Wrong MISCSELECT
-                qe_report_attributes=b"\x11\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-                qe_report_isvprodid=1,
-            )
-
-    def test_attributes_mismatch(self):
-        """Test validation fails with Attributes mismatch under mask."""
-        qe_identity = self._create_qe_identity()
-        with pytest.raises(CollateralError, match="Attributes do not match"):
-            validate_qe_identity(
-                qe_identity=qe_identity,
-                qe_report_isv_svn=8,
-                qe_report_mrsigner=b"\xdc" * 32,
-                qe_report_miscselect=b"\x00\x00\x00\x00",
-                qe_report_attributes=b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",  # Wrong
-                qe_report_isvprodid=1,
-            )
-
-    def test_isvprodid_mismatch(self):
-        """Test validation fails with ISV ProdID mismatch."""
-        qe_identity = self._create_qe_identity()
-        with pytest.raises(CollateralError, match="ISV ProdID does not match"):
-            validate_qe_identity(
-                qe_identity=qe_identity,
-                qe_report_isv_svn=8,
-                qe_report_mrsigner=b"\xdc" * 32,
-                qe_report_miscselect=b"\x00\x00\x00\x00",
-                qe_report_attributes=b"\x11\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-                qe_report_isvprodid=2,  # Wrong ISV ProdID
-            )
-
-    def test_isv_svn_too_low(self):
-        """Test validation fails when ISV SVN is too low."""
-        qe_identity = self._create_qe_identity()
-        with pytest.raises(CollateralError, match="No matching QE TCB level"):
-            validate_qe_identity(
-                qe_identity=qe_identity,
-                qe_report_isv_svn=5,  # Below required 8
-                qe_report_mrsigner=b"\xdc" * 32,
-                qe_report_miscselect=b"\x00\x00\x00\x00",
-                qe_report_attributes=b"\x11\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-                qe_report_isvprodid=1,
-            )
-
-
-class TestTdxModuleIdentity:
-    """Test TDX module identity validation."""
-
-    def _create_tcb_info_with_module_identities(self) -> TcbInfo:
-        """Create TCB Info with module identities for testing."""
-        return TcbInfo(
-            id="TDX",
-            version=3,
-            issue_date=datetime.now(UTC),
-            next_update=datetime.now(UTC) + timedelta(days=30),
-            fmspc="00a06f000000",
-            pce_id="0000",
-            tcb_type=0,
-            tcb_evaluation_data_number=17,
-            tdx_module=None,
-            tdx_module_identities=[
-                TdxModuleIdentity(
-                    id="TDX_03",
-                    mrsigner=b"\xaa" * 48,
-                    attributes=b"\x00\x00\x00\x00\x00\x00\x00\x00",
-                    attributes_mask=b"\xff\xff\xff\xff\xff\xff\xff\xff",
-                    tcb_levels=[
-                        TcbLevel(
-                            tcb=Tcb(
-                                sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                                pce_svn=0,
-                                tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                                isv_svn=3,  # Minor version 3
-                            ),
-                            tcb_date="2024-01-01T00:00:00Z",
-                            tcb_status=TcbStatus.UP_TO_DATE,
-                            advisory_ids=[],
-                        ),
-                    ],
-                ),
-            ],
-            tcb_levels=[],
-        )
-
-    def test_get_module_identity(self):
-        """Test finding module identity by TEE_TCB_SVN."""
-        tcb_info = self._create_tcb_info_with_module_identities()
-
-        tee_tcb_svn = bytes([5, 3] + [0] * 14)  # minor=5, major=3
-        result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-        assert result is not None
-        assert result.id == "TDX_03"
-
-    def test_get_module_identity_not_found(self):
-        """Test unknown module version raises error."""
-        tcb_info = self._create_tcb_info_with_module_identities()
-
-        tee_tcb_svn = bytes([0, 5] + [0] * 14)  # minor=0, major=5
-        with pytest.raises(CollateralError, match="Unknown TDX module version TDX_05"):
-            get_tdx_module_identity(tcb_info, tee_tcb_svn)
-
-    def test_validate_module_identity_success(self):
-        """Test successful module identity validation."""
-        tcb_info = self._create_tcb_info_with_module_identities()
-
-        tee_tcb_svn = bytes([5, 3] + [0] * 14)
-        mr_signer_seam = b"\xaa" * 48
-        seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
-
-        validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
-
-    def test_validate_module_identity_mrsigner_mismatch(self):
-        """Test module identity validation fails with MR_SIGNER_SEAM mismatch."""
-        tcb_info = self._create_tcb_info_with_module_identities()
-
-        tee_tcb_svn = bytes([5, 3] + [0] * 14)  # minor=5, major=3
-        mr_signer_seam = b"\xbb" * 48  # Wrong MR_SIGNER_SEAM
-        seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
-
-        with pytest.raises(CollateralError, match="MR_SIGNER_SEAM does not match"):
-            validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
-
-    def test_validate_module_identity_unknown_version_raises(self):
-        """Test validation raises when module version is unknown."""
-        tcb_info = self._create_tcb_info_with_module_identities()
-
-        tee_tcb_svn = bytes([0, 5] + [0] * 14)  # minor=0, major=5
-        mr_signer_seam = b"\xaa" * 48
-        seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
-
-        with pytest.raises(CollateralError, match="Unknown TDX module version TDX_05"):
-            validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
-
-    def test_validate_module_identity_no_matching_tcb_level(self):
-        """Test validation raises when minor version is too low for any TCB level."""
-        tcb_info = self._create_tcb_info_with_module_identities()
-
-        tee_tcb_svn = bytes([2, 3] + [0] * 14)  # minor=2, major=3
-        mr_signer_seam = b"\xaa" * 48
-        seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
-
-        with pytest.raises(CollateralError, match="Could not find a TDX Module Identity TCB Level"):
-            validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
-
-
-class TestCheckCollateralFreshness:
-    """Test collateral freshness checking."""
-
-    def test_fresh_collateral_passes(self):
-        """Test fresh collateral passes."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-        )
-
-        # Mock datetime to a time before sample data's nextUpdate (2026-01-16)
-        mock_now = datetime(2026, 1, 10, tzinfo=UTC)
-        with patch("tinfoil._v3.verifier._quote.tdx.lib.collateral.datetime") as mock_dt:
-            mock_dt.now.return_value = mock_now
-            mock_dt.fromisoformat = datetime.fromisoformat
-            # The sample carries tcbEvaluationDataNumber=19, above the threshold
-            check_collateral_freshness(collateral, min_tcb_evaluation_data_number=18)
-
-    def test_expired_tcb_info_fails(self):
-        """Test expired TCB Info fails."""
-        # Modify the sample to have an expired date
-        expired_json = SAMPLE_TCB_INFO_JSON.replace(
-            '"nextUpdate": "2026-01-16T06:24:56Z"', '"nextUpdate": "2020-01-16T06:24:56Z"'
-        )
-        tcb_info = parse_tcb_info_response(expired_json.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=expired_json.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-        )
-
-        with pytest.raises(CollateralError, match="TCB Info has expired"):
-            check_collateral_freshness(collateral, min_tcb_evaluation_data_number=18)
-
-    def test_tcb_evaluation_data_number_threshold_passes(self):
-        """Test collateral passes when tcbEvaluationDataNumber meets threshold."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-        )
-
-        # Mock datetime to a time before sample data's nextUpdate (2026-01-16)
-        mock_now = datetime(2026, 1, 10, tzinfo=UTC)
-        with patch("tinfoil._v3.verifier._quote.tdx.lib.collateral.datetime") as mock_dt:
-            mock_dt.now.return_value = mock_now
-            mock_dt.fromisoformat = datetime.fromisoformat
-            # Sample data has tcbEvaluationDataNumber=19, threshold of 19 should pass
-            check_collateral_freshness(collateral, min_tcb_evaluation_data_number=19)
-
-            # Lower threshold should also pass
-            check_collateral_freshness(collateral, min_tcb_evaluation_data_number=10)
-
-    def test_tcb_info_evaluation_data_number_below_threshold(self):
-        """Test failure when TCB Info tcbEvaluationDataNumber is below threshold."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-        )
-
-        # Mock datetime to a time before sample data's nextUpdate (2026-01-16)
-        mock_now = datetime(2026, 1, 10, tzinfo=UTC)
-        with patch("tinfoil._v3.verifier._quote.tdx.lib.collateral.datetime") as mock_dt:
-            mock_dt.now.return_value = mock_now
-            mock_dt.fromisoformat = datetime.fromisoformat
-            # Sample data has tcbEvaluationDataNumber=19, threshold of 20 should fail
-            with pytest.raises(CollateralError, match=r"TCB Info tcbEvaluationDataNumber .* is below"):
-                check_collateral_freshness(collateral, min_tcb_evaluation_data_number=20)
-
-    def test_qe_identity_evaluation_data_number_below_threshold(self):
-        """Test failure when QE Identity tcbEvaluationDataNumber is below threshold."""
-        high_eval_tcb_json = SAMPLE_TCB_INFO_JSON.replace(
-            '"tcbEvaluationDataNumber": 19', '"tcbEvaluationDataNumber": 25'
-        )
-        tcb_info = parse_tcb_info_response(high_eval_tcb_json.encode())
-        # QE Identity still has tcbEvaluationDataNumber=19
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=high_eval_tcb_json.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-        )
-
-        # Mock datetime to a time before sample data's nextUpdate (2026-01-16)
-        mock_now = datetime(2026, 1, 10, tzinfo=UTC)
-        with patch("tinfoil._v3.verifier._quote.tdx.lib.collateral.datetime") as mock_dt:
-            mock_dt.now.return_value = mock_now
-            mock_dt.fromisoformat = datetime.fromisoformat
-            # TCB Info has 25, QE Identity has 19, threshold of 20 should fail on QE Identity
-            with pytest.raises(CollateralError, match=r"QE Identity tcbEvaluationDataNumber .* is below"):
-                check_collateral_freshness(collateral, min_tcb_evaluation_data_number=20)
-
-
-# =============================================================================
-# Helper Function Tests
-# =============================================================================
-
-
-class TestHelperFunctions:
-    """Test helper functions."""
-
-    def test_parse_datetime(self):
-        """Test datetime parsing."""
-        result = _parse_datetime("2025-12-17T06:24:56Z")
-        assert result.year == 2025
-        assert result.month == 12
-        assert result.day == 17
-        assert result.tzinfo is not None
-
-    def test_parse_hex_bytes(self):
-        """Test hex string parsing."""
-        result = _parse_hex_bytes("aabbccdd")
-        assert result == bytes([0xAA, 0xBB, 0xCC, 0xDD])
-
-
-class TestTcbStatus:
-    """Test TcbStatus enum."""
-
-    def test_status_values(self):
-        """Test all status values can be created."""
-        assert TcbStatus.UP_TO_DATE.value == "UpToDate"
-        assert TcbStatus.OUT_OF_DATE.value == "OutOfDate"
-        assert TcbStatus.REVOKED.value == "Revoked"
-        assert TcbStatus.SW_HARDENING_NEEDED.value == "SWHardeningNeeded"
-
-
-# =============================================================================
-# Issuer Chain Tests
-# =============================================================================
-
-
-class TestIssuerChainParsing:
-    """Test issuer chain header parsing."""
-
-    def test_parse_issuer_chain_missing_certs(self):
-        """Test that parsing fails with too few certificates."""
-        # Single certificate is not enough (need signing + root at minimum)
-        single_cert_pem = """-----BEGIN CERTIFICATE-----
-MIICjzCCAjSgAwIBAgIUImUM1lqdNInzg7SVUr9QGzknBqwwCgYIKoZIzj0EAwIw
-aDEaMBgGA1UEAwwRSW50ZWwgU0dYIFJvb3QgQ0ExGjAYBgNVBAoMEUludGVsIENv
-cnBvcmF0aW9uMRQwEgYDVQQHDAtTYW50YSBDbGFyYTELMAkGA1UECAwCQ0ExCzAJ
-BgNVBAYTAlVTMB4XDTE4MDUyMTEwNDUxMFoXDTQ5MTIzMTIzNTk1OVowaDEaMBgG
-A1UEAwwRSW50ZWwgU0dYIFJvb3QgQ0ExGjAYBgNVBAoMEUludGVsIENvcnBvcmF0
-aW9uMRQwEgYDVQQHDAtTYW50YSBDbGFyYTELMAkGA1UECAwCQ0ExCzAJBgNVBAYT
-AlVTMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEC6nEwMDIYZOj/iPWsCzaEKi7
-1OiOSLRFhWGjbnBVJfVnkY4u3IjkDYYL0MxO4mqsyYjlBalTVYxFP2sJBK5zlKOB
-uzCBuDAfBgNVHSMEGDAWgBQiZQzWWp00ifODtJVSv1AbOScGrDBSBgNVHR8ESzBJ
-MEegRaBDhkFodHRwczovL2NlcnRpZmljYXRlcy50cnVzdGVkc2VydmljZXMuaW50
-ZWwuY29tL0ludGVsU0dYUm9vdENBLmRlcjAdBgNVHQ4EFgQUImUM1lqdNInzg7SV
-Ur9QGzknBqwwDgYDVR0PAQH/BAQDAgEGMBIGA1UdEwEB/wQIMAYBAf8CAQEwCgYI
-KoZIzj0EAwIDSQAwRgIhAOW/5QkR+S9CiSDcNoowLuPRLsWGf/Yi7GSX94BgwTwg
-AiEA4J0lrHoMs+Xo5o/sX6O9QWxHRAvZUGOdRQ7cvqRXaqI=
------END CERTIFICATE-----"""
-        with pytest.raises(CollateralError, match="at least 2 certificates"):
-            _parse_issuer_chain_header(single_cert_pem)
-
-    def test_parse_issuer_chain_invalid_pem(self):
-        """Test that parsing fails with invalid PEM data."""
-        with pytest.raises(CollateralError, match="Failed to parse"):
-            _parse_issuer_chain_header("not-valid-pem-data")
-
-
-class TestCollateralSignatureVerification:
-    """Test collateral signature verification."""
-
-    def test_verify_signature_missing_key(self):
-        """Test that verification fails when JSON key is missing."""
-        json_data = b'{"other": "data"}'
-        with pytest.raises(CollateralError, match="does not contain"):
-            _verify_collateral_signature(
-                json_bytes=json_data,
-                json_key="tcbInfo",
-                signature_hex="00" * 64,
-                signing_cert=MagicMock(),
-                data_name="Test",
-            )
-
-    def test_verify_signature_invalid_hex(self):
-        """Test that verification fails with invalid signature hex."""
-        json_data = b'{"tcbInfo": {}}'
-        with pytest.raises(CollateralError, match="not valid hex"):
-            _verify_collateral_signature(
-                json_bytes=json_data,
-                json_key="tcbInfo",
-                signature_hex="not-hex",
-                signing_cert=MagicMock(),
-                data_name="Test",
-            )
-
-    def test_verify_signature_wrong_length(self):
-        """Test that verification fails with wrong signature length."""
-        json_data = b'{"tcbInfo": {}}'
-        with pytest.raises(CollateralError, match="expected 64"):
-            _verify_collateral_signature(
-                json_bytes=json_data,
-                json_key="tcbInfo",
-                signature_hex="00" * 32,  # 32 bytes instead of 64
-                signing_cert=MagicMock(),
-                data_name="Test",
-            )
-
-    @staticmethod
-    def _signing_certificate() -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
-        key = ec.generate_private_key(ec.SECP256R1())
-        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Intel SGX TCB Signing")])
-        certificate = (
-            x509.CertificateBuilder()
-            .subject_name(name)
-            .issuer_name(name)
-            .public_key(key.public_key())
-            .serial_number(1)
-            .not_valid_before(datetime.now(UTC) - timedelta(days=1))
-            .not_valid_after(datetime.now(UTC) + timedelta(days=1))
-            .sign(key, hashes.SHA256())
-        )
-        return key, certificate
-
-    @staticmethod
-    def _sign(key: ec.EllipticCurvePrivateKey, signed: bytes) -> str:
-        r, s = decode_dss_signature(key.sign(signed, ec.ECDSA(hashes.SHA256())))
-        return (r.to_bytes(32, "big") + s.to_bytes(32, "big")).hex()
-
-    def test_signature_covers_the_top_level_member(self):
-        """The signed object is the top-level member's exact bytes, however the body is laid out around it."""
-        key, certificate = self._signing_certificate()
-        genuine = '{"id": "TDX", "version": 3}'
-        signature = self._sign(key, genuine.encode())
-        for body in (
-            f'{{"tcbInfo":{genuine},"signature":"{signature}"}}',
-            f'{{ "tcbInfo" : {genuine} ,\n  "signature": "{signature}" }}',
-            f'{{"signature": "{signature}",\n\t"tcbInfo":\n{genuine}\n}}',
-            f'{{"other": {{"tcbInfo": 1}}, "tcbInfo":{genuine}, "signature":"{signature}"}}',
-        ):
-            _verify_collateral_signature(body.encode(), "tcbInfo", signature, certificate, "TCB Info")
-
-    def test_nested_copy_does_not_stand_in_for_the_top_level_member(self):
-        """A signed copy of the object nested elsewhere does not vouch for a forged top-level object."""
-        key, certificate = self._signing_certificate()
-        genuine = '{"id": "TDX", "version": 3}'
-        forged = '{"id": "TDX", "version": 4}'
-        signature = self._sign(key, genuine.encode())
-        body = f'{{"a":{{"tcbInfo":{genuine}}},"tcbInfo":{forged},"signature":"{signature}"}}'
-        with pytest.raises(CollateralError, match="signature does not match"):
-            _verify_collateral_signature(body.encode(), "tcbInfo", signature, certificate, "TCB Info")
-
-    def test_duplicate_top_level_member_is_rejected(self):
-        """Two top-level members of the signed name are an error even before the signature is checked."""
-        _, certificate = self._signing_certificate()
-        body = b'{"tcbInfo": {"a": 1}, "tcbInfo": {"a": 2}, "signature": "00"}'
-        with pytest.raises(CollateralError, match="duplicate top-level member"):
-            _verify_collateral_signature(body, "tcbInfo", "00" * 64, certificate, "TCB Info")
-
-    def test_non_object_member_is_rejected(self):
-        _, certificate = self._signing_certificate()
-        with pytest.raises(CollateralError, match="is not an object"):
-            _verify_collateral_signature(b'{"tcbInfo": [1], "signature": "00"}', "tcbInfo", "00" * 64, certificate, "T")
-
-
-# =============================================================================
-# CRL Tests
-# =============================================================================
-
-
-class TestDeterminePckCaType:
-    """Test PCK CA type determination from certificate issuer."""
-
-    def _create_mock_cert_with_issuer(self, cn: str) -> MagicMock:
-        """Create a mock certificate with given issuer CN."""
-        mock_attr = MagicMock()
-        mock_attr.oid = NameOID.COMMON_NAME
-        mock_attr.value = cn
-
-        mock_issuer = MagicMock()
-        mock_issuer.__iter__ = MagicMock(return_value=iter([mock_attr]))
-
-        mock_cert = MagicMock()
-        mock_cert.issuer = mock_issuer
-
-        return mock_cert
-
-    def test_platform_ca(self):
-        """Test detecting Platform CA from issuer CN."""
-        mock_cert = self._create_mock_cert_with_issuer("Intel SGX PCK Platform CA")
-        result = _determine_pck_ca_type(mock_cert)
-        assert result == "platform"
-
-    def test_processor_ca(self):
-        """Test detecting Processor CA from issuer CN."""
-        mock_cert = self._create_mock_cert_with_issuer("Intel SGX PCK Processor CA")
-        result = _determine_pck_ca_type(mock_cert)
-        assert result == "processor"
-
-    def test_unknown_ca_raises_error(self):
-        """Test that unknown CA type raises error."""
-        mock_cert = self._create_mock_cert_with_issuer("Unknown CA")
-        with pytest.raises(CollateralError, match="Could not determine PCK CA type"):
-            _determine_pck_ca_type(mock_cert)
-
-
-class TestValidateCertificateRevocation:
-    """Test certificate revocation validation."""
-
-    def _create_mock_crl(self, revoked_serials: list[int] | None = None) -> MagicMock:
-        """Create a mock CRL with optional revoked serials."""
-        mock_crl = MagicMock()
-        mock_crl.next_update_utc = datetime.now(UTC) + timedelta(days=30)
-
-        def get_revoked(serial):
-            if revoked_serials and serial in revoked_serials:
-                revoked = MagicMock()
-                revoked.revocation_date_utc = datetime.now(UTC) - timedelta(days=1)
-                return revoked
-            return None
-
-        mock_crl.get_revoked_certificate_by_serial_number = get_revoked
-        return mock_crl
-
-    def _create_mock_cert(self, serial: int, issuer_cn: str = "Intel SGX PCK Platform CA") -> MagicMock:
-        """Create a mock certificate with the given serial number and issuer common name."""
-        mock_attr = MagicMock()
-        mock_attr.oid = NameOID.COMMON_NAME
-        mock_attr.value = issuer_cn
-
-        mock_issuer = MagicMock()
-        mock_issuer.__iter__ = MagicMock(return_value=iter([mock_attr]))
-
-        mock_cert = MagicMock()
-        mock_cert.serial_number = serial
-        mock_cert.issuer = mock_issuer
-        return mock_cert
-
-    def _collateral_with_pck_crl(self, ca_type: str, revoked_serials: list[int]) -> TdxCollateral:
-        pck_crl = PckCrl(
-            crl=self._create_mock_crl(revoked_serials=revoked_serials),
-            ca_type=ca_type,
-            next_update=datetime.now(UTC) + timedelta(days=30),
-        )
-        return TdxCollateral(
-            tcb_info=parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode()),
-            qe_identity=parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode()),
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-            pck_crl=pck_crl,
-        )
-
-    def test_pck_crl_for_other_ca_is_rejected(self):
-        """A processor-CA CRL cannot vouch for a PCK certificate that the platform CA issued, and vice versa."""
-        for crl_ca, issuer_cn in (
-            ("processor", "Intel SGX PCK Platform CA"),
-            ("platform", "Intel SGX PCK Processor CA"),
-        ):
-            collateral = self._collateral_with_pck_crl(crl_ca, revoked_serials=[])
-            pck_cert = self._create_mock_cert(serial=12345, issuer_cn=issuer_cn)
-            with pytest.raises(CollateralError, match=f"PCK CRL is for the {crl_ca} CA"):
-                validate_certificate_revocation(collateral, pck_cert)
-
-    def test_pck_crl_for_issuing_ca_is_accepted(self):
-        """The CRL of the CA that issued the PCK certificate passes the binding check."""
-        for ca, issuer_cn in (
-            ("platform", "Intel SGX PCK Platform CA"),
-            ("processor", "Intel SGX PCK Processor CA"),
-        ):
-            collateral = self._collateral_with_pck_crl(ca, revoked_serials=[])
-            validate_certificate_revocation(collateral, self._create_mock_cert(serial=12345, issuer_cn=issuer_cn))
-            collateral = self._collateral_with_pck_crl(ca, revoked_serials=[12345])
-            with pytest.raises(CollateralError, match="has been revoked"):
-                validate_certificate_revocation(collateral, self._create_mock_cert(serial=12345, issuer_cn=issuer_cn))
-
-    def test_certificate_not_revoked(self):
-        """Test that non-revoked certificate passes validation."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        mock_crl = self._create_mock_crl(revoked_serials=[])
-        pck_crl = PckCrl(
-            crl=mock_crl,
-            ca_type="platform",
-            next_update=datetime.now(UTC) + timedelta(days=30),
-        )
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-            pck_crl=pck_crl,
-        )
-
-        mock_cert = self._create_mock_cert(serial=12345)
-
-        validate_certificate_revocation(collateral, mock_cert)
-
-    def test_certificate_revoked(self):
-        """Test that revoked certificate fails validation."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        mock_crl = self._create_mock_crl(revoked_serials=[12345])
-        pck_crl = PckCrl(
-            crl=mock_crl,
-            ca_type="platform",
-            next_update=datetime.now(UTC) + timedelta(days=30),
-        )
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-            pck_crl=pck_crl,
-        )
-
-        mock_cert = self._create_mock_cert(serial=12345)
-
-        with pytest.raises(CollateralError, match="has been revoked"):
-            validate_certificate_revocation(collateral, mock_cert)
-
-    def test_no_crl_raises_error(self):
-        """Test that missing CRL raises error."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-            pck_crl=None,  # No CRL
-        )
-
-        mock_cert = self._create_mock_cert(serial=12345)
-
-        with pytest.raises(CollateralError, match="CRL not available"):
-            validate_certificate_revocation(collateral, mock_cert)
-
-    def test_expired_crl_raises_error(self):
-        """Test that expired CRL raises error."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        mock_crl = MagicMock()
-        mock_crl.next_update_utc = datetime.now(UTC) - timedelta(days=1)  # Expired
-
-        pck_crl = PckCrl(
-            crl=mock_crl,
-            ca_type="platform",
-            next_update=datetime.now(UTC) - timedelta(days=1),
-        )
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-            pck_crl=pck_crl,
-        )
-
-        mock_cert = self._create_mock_cert(serial=12345)
-
-        with pytest.raises(CollateralError, match="CRL has expired"):
-            validate_certificate_revocation(collateral, mock_cert)
-
-    def test_intermediate_cert_not_revoked(self):
-        """Test that non-revoked intermediate CA certificate passes validation."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        mock_pck_crl = self._create_mock_crl(revoked_serials=[])
-        pck_crl = PckCrl(
-            crl=mock_pck_crl,
-            ca_type="platform",
-            next_update=datetime.now(UTC) + timedelta(days=30),
-        )
-
-        mock_root_crl = self._create_mock_crl(revoked_serials=[])
-        from tinfoil._v3.verifier._quote.tdx.lib.collateral import RootCrl
-
-        root_crl = RootCrl(
-            crl=mock_root_crl,
-            next_update=datetime.now(UTC) + timedelta(days=30),
-        )
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-            pck_crl=pck_crl,
-            root_crl=root_crl,
-        )
-
-        mock_pck_cert = self._create_mock_cert(serial=12345)
-        mock_intermediate_cert = self._create_mock_cert(serial=67890)
-
-        validate_certificate_revocation(collateral, mock_pck_cert, mock_intermediate_cert)
-
-    def test_intermediate_cert_revoked(self):
-        """Test that revoked intermediate CA certificate fails validation."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        mock_pck_crl = self._create_mock_crl(revoked_serials=[])
-        pck_crl = PckCrl(
-            crl=mock_pck_crl,
-            ca_type="platform",
-            next_update=datetime.now(UTC) + timedelta(days=30),
-        )
-
-        # Root CRL has the intermediate CA's serial as revoked
-        mock_root_crl = self._create_mock_crl(revoked_serials=[67890])
-        from tinfoil._v3.verifier._quote.tdx.lib.collateral import RootCrl
-
-        root_crl = RootCrl(
-            crl=mock_root_crl,
-            next_update=datetime.now(UTC) + timedelta(days=30),
-        )
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-            pck_crl=pck_crl,
-            root_crl=root_crl,
-        )
-
-        mock_pck_cert = self._create_mock_cert(serial=12345)
-        mock_intermediate_cert = self._create_mock_cert(serial=67890)
-
-        with pytest.raises(CollateralError, match="Intermediate CA certificate has been revoked"):
-            validate_certificate_revocation(collateral, mock_pck_cert, mock_intermediate_cert)
-
-    def test_no_root_crl_with_intermediate_raises_error(self):
-        """Test that missing root CRL raises error when checking intermediate."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        mock_pck_crl = self._create_mock_crl(revoked_serials=[])
-        pck_crl = PckCrl(
-            crl=mock_pck_crl,
-            ca_type="platform",
-            next_update=datetime.now(UTC) + timedelta(days=30),
-        )
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-            pck_crl=pck_crl,
-            root_crl=None,  # No root CRL
-        )
-
-        mock_pck_cert = self._create_mock_cert(serial=12345)
-        mock_intermediate_cert = self._create_mock_cert(serial=67890)
-
-        with pytest.raises(CollateralError, match="Root CRL not available"):
-            validate_certificate_revocation(collateral, mock_pck_cert, mock_intermediate_cert)
-
-    def test_expired_root_crl_raises_error(self):
-        """Test that expired root CRL raises error when checking intermediate."""
-        tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
-        qe_identity = parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode())
-
-        mock_pck_crl = self._create_mock_crl(revoked_serials=[])
-        pck_crl = PckCrl(
-            crl=mock_pck_crl,
-            ca_type="platform",
-            next_update=datetime.now(UTC) + timedelta(days=30),
-        )
-
-        mock_root_crl = MagicMock()
-        mock_root_crl.next_update_utc = datetime.now(UTC) - timedelta(days=1)  # Expired
-        from tinfoil._v3.verifier._quote.tdx.lib.collateral import RootCrl
-
-        root_crl = RootCrl(
-            crl=mock_root_crl,
-            next_update=datetime.now(UTC) - timedelta(days=1),
-        )
-
-        collateral = TdxCollateral(
-            tcb_info=tcb_info,
-            qe_identity=qe_identity,
-            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
-            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
-            pck_crl=pck_crl,
-            root_crl=root_crl,
-        )
-
-        mock_pck_cert = self._create_mock_cert(serial=12345)
-        mock_intermediate_cert = self._create_mock_cert(serial=67890)
-
-        with pytest.raises(CollateralError, match="Root CA CRL has expired"):
-            validate_certificate_revocation(collateral, mock_pck_cert, mock_intermediate_cert)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+        check_qe_tcb_status(levels, 8)
+        check_qe_tcb_status(levels, 9)
+        with pytest.raises(CollateralError, match="TCB Status is not 'UpToDate', found 'OutOfDate'"):
+            check_qe_tcb_status(levels, 7)
+        with pytest.raises(CollateralError, match="it is now OutOfDate"):
+            check_qe_tcb_status(levels, 4)
+        with pytest.raises(CollateralError, match="it is now OutOfDate"):
+            check_qe_tcb_status([], 4)
+        with pytest.raises(CollateralError, match="QE Identity reported by Intel PCS failed TCB status check"):
+            verify_qe_report(self.report(isv_svn=7), self.identity())
+        with pytest.raises(CollateralError, match="found ''"):
+            verify_qe_report(self.report(), self.identity(levels=[{"tcb": {"isvsvn": 1}}]))
+
+    def test_absent_isvsvn_never_reaches_appraisal(self) -> None:
+        """A level without an ISV SVN would be reached by every QE; parsing rejects it before any comparison."""
+        with pytest.raises(CollateralError, match="TCB has no 'isvsvn'"):
+            self.identity(levels=[{"tcb": {}, "tcbStatus": "UpToDate"}])
+
+
+def test_status_values() -> None:
+    assert [s.value for s in TcbStatus] == [
+        "UpToDate",
+        "SWHardeningNeeded",
+        "ConfigurationNeeded",
+        "ConfigurationAndSWHardeningNeeded",
+        "OutOfDate",
+        "OutOfDateConfigurationNeeded",
+        "Revoked",
+    ]
+    assert TdxModuleIdentity().tcb_levels == ()
