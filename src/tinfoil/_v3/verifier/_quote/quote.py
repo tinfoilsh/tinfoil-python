@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import TypeAlias
 
@@ -21,14 +21,37 @@ from tinfoil._v3.verifier._document.document import SEVSNP_REPORT_V1_FORMAT, TDX
 from tinfoil._v3.verifier._measurement import SEVSNP, TDX, Expected, ExpectedSEVSNP, ExpectedTDX
 from tinfoil._v3.verifier._policy import PLATFORM_SEV_SNP, PLATFORM_TDX
 from tinfoil._v3.verifier._quote import sev, tdx
-from tinfoil._v3.verifier._quote.config import ConfigReferenceValues
-from tinfoil._v3.verifier._quote.legacy import LegacyReferenceValues
+from tinfoil._v3.verifier._quote.config import ConfigReferenceValues, resolve_config
+from tinfoil._v3.verifier._quote.legacy import LegacyReferenceValues, resolve_legacy
+from tinfoil._v3.verifier._quote.resolve import AssemblyError, ResolvedValues, complete
 from tinfoil._v3.verifier._quote.sev.authenticate import Quote as SevQuote
 from tinfoil._v3.verifier._quote.sev.authenticate import authenticate as _authenticate_sev
 from tinfoil._v3.verifier._quote.sev.expectations import Expectations as SevExpectations
+from tinfoil._v3.verifier._quote.sev.expectations import SevPolicyError
+from tinfoil._v3.verifier._quote.sev.expectations import validate as _validate_sev
 from tinfoil._v3.verifier._quote.tdx.authenticate import Quote as TdxQuote
 from tinfoil._v3.verifier._quote.tdx.authenticate import authenticate as _authenticate_tdx
 from tinfoil._v3.verifier._quote.tdx.expectations import Expectations as TdxExpectations
+from tinfoil._v3.verifier._quote.tdx.expectations import TdxPolicyError
+from tinfoil._v3.verifier._quote.tdx.expectations import validate as _validate_tdx
+
+__all__ = [
+    "AssembledPolicy",
+    "AssembledSEVSNP",
+    "AssembledTDX",
+    "AssemblyError",
+    "Authenticated",
+    "AuthenticatedSEVSNP",
+    "AuthenticatedTDX",
+    "QuoteError",
+    "QuoteOptions",
+    "ReferenceValues",
+    "TestOnlyRoots",
+    "ValidationError",
+    "assemble",
+    "assemble_with",
+    "authenticate",
+]
 
 ReferenceValues: TypeAlias = LegacyReferenceValues | ConfigReferenceValues
 """Authenticated inputs for one verification contract; each resolves every workload expectation before assembly."""
@@ -38,8 +61,8 @@ class QuoteError(ValueError):
     """Hardware evidence that does not authenticate, or evidence of an unsupported format."""
 
 
-class AssemblyError(ValueError):
-    """A policy that cannot be completed for the quote: an unendorsed machine, a pin conflict, an open register."""
+ValidationError: TypeAlias = SevPolicyError | TdxPolicyError
+"""An authentic quote that does not satisfy its assembled policy; the platform module names the register or field."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,8 +139,11 @@ class AssembledSEVSNP:
         return PLATFORM_SEV_SNP
 
     def validate(self) -> None:
-        """Compare the captured quote against the assembled policy in one call: no lookups, no translation."""
-        raise NotImplementedError
+        """Compare the captured quote against the assembled policy in one call: no lookups, no translation.
+
+        Raises SevPolicyError for a quote that does not satisfy the policy.
+        """
+        _validate_sev(self.expectations, self.quote.quote)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,8 +164,11 @@ class AssembledTDX:
         return PLATFORM_TDX
 
     def validate(self) -> None:
-        """Compare the captured quote against the assembled policy in one call: no lookups, no translation."""
-        raise NotImplementedError
+        """Compare the captured quote against the assembled policy in one call: no lookups, no translation.
+
+        Raises TdxPolicyError for a quote that does not satisfy the policy.
+        """
+        _validate_tdx(self.expectations, self.quote.quote)
 
 
 AssembledPolicy: TypeAlias = AssembledSEVSNP | AssembledTDX
@@ -196,10 +225,27 @@ def assemble(doc: Document, refs: ReferenceValues, pins: Expected | None, quote:
 
     ``doc`` must come from ``document.parse`` so that its expected
     REPORT_DATA was recomputed from the caller's nonce, and ``quote`` must
-    have been authenticated from ``doc``'s own CPU evidence; either
-    failing is an error. Then ``assemble_with``.
+    have been authenticated from ``doc``'s own CPU evidence: a quote cannot
+    be appraised against another document's challenge. Either failing is
+    an AssemblyError. Then ``assemble_with``.
     """
-    raise NotImplementedError
+    return assemble_with(refs, pins, _report_data(doc, quote), quote)
+
+
+def _report_data(doc: Document, quote: Authenticated) -> bytes:
+    """The REPORT_DATA that ``doc`` binds, once ``quote`` is confirmed to be the quote of ``doc``'s evidence.
+
+    Both checks bind the quote to the caller's challenge. The verifier never
+    fails them, so failing one is a bug in the caller, and the document is
+    rejected.
+    """
+    report_data = doc.expected_report_data()
+    if report_data is None:
+        raise AssemblyError("a document checked by document.parse is required")
+    evidence = doc.cpu_evidence()
+    if evidence.format != quote.evidence.format or evidence.report != quote.evidence.report:
+        raise AssemblyError("authenticated quote is not this document's CPU evidence")
+    return report_data
 
 
 def assemble_with(
@@ -210,6 +256,58 @@ def assemble_with(
     The reference values resolve the policy and the expected registers for
     the quote's platform; pins fill unset registers or must agree with the
     resolved value; every register must end up fixed; then the platform's
-    ``assemble`` translates the policy into its expectations.
+    ``assemble`` translates the policy into its expectations. Every failure
+    is an AssemblyError.
     """
-    raise NotImplementedError
+    resolved = _resolve(refs, quote, pins)
+    expected = complete(resolved.expected)
+    if isinstance(expected, SEVSNP):
+        if not isinstance(quote, AuthenticatedSEVSNP):
+            raise AssemblyError(f"expected an SEV-SNP measurement for a {quote.platform} quote")
+        return _assemble_sev(resolved, quote, expected, report_data)
+    if not isinstance(quote, AuthenticatedTDX):
+        raise AssemblyError(f"expected a TDX measurement for a {quote.platform} quote")
+    return _assemble_tdx(resolved, quote, expected, report_data)
+
+
+def _resolve(refs: ReferenceValues, quote: Authenticated, pins: Expected | None) -> ResolvedValues:
+    if isinstance(refs, LegacyReferenceValues):
+        return resolve_legacy(refs, quote, pins)
+    if isinstance(refs, ConfigReferenceValues):
+        return resolve_config(refs, quote, pins)
+    raise AssemblyError(f"unsupported reference values {type(refs).__name__}")
+
+
+def _assemble_sev(
+    resolved: ResolvedValues, quote: AuthenticatedSEVSNP, expected: SEVSNP, report_data: bytes
+) -> AssembledSEVSNP:
+    policy = resolved.policy.sev_snp
+    if policy is None or not isinstance(resolved.code, ExpectedSEVSNP):
+        raise AssemblyError(f"policy {resolved.policy_name!r} does not resolve {PLATFORM_SEV_SNP} values")
+    # The contract decided HOST_DATA: the policy's own value under the legacy contract, the config hash under the
+    # config contract.
+    policy = replace(policy, host_data=resolved.host_data)
+    try:
+        expectations = sev.assemble(policy, quote.quote, expected.launch, report_data)
+    except SevPolicyError as err:
+        raise AssemblyError(str(err)) from err
+    return AssembledSEVSNP(
+        code_measurement=resolved.code, policy_name=resolved.policy_name, quote=quote, expectations=expectations
+    )
+
+
+def _assemble_tdx(resolved: ResolvedValues, quote: AuthenticatedTDX, expected: TDX, report_data: bytes) -> AssembledTDX:
+    policy = resolved.policy.tdx
+    if policy is None or not isinstance(resolved.code, ExpectedTDX):
+        raise AssemblyError(f"policy {resolved.policy_name!r} does not resolve {PLATFORM_TDX} values")
+    try:
+        expectations = tdx.assemble(policy, expected, report_data, resolved.config_id)
+    except TdxPolicyError as err:
+        raise AssemblyError(str(err)) from err
+    return AssembledTDX(
+        code_measurement=resolved.code,
+        policy_name=resolved.policy_name,
+        platform_measurement_name=resolved.platform_measurement_name,
+        quote=quote,
+        expectations=expectations,
+    )
