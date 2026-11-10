@@ -1,414 +1,384 @@
-"""The AMD VCEK certificate chain (ARK, ASK, VCEK): format checks, chain verification and the report signature.
+"""The AMD endorsement key chain: the VCEK certificate profile and its KDS extensions, chain verification up to the
+pinned ARK, revocation of the ASK, and the report signature.
 
-The ARK and ASK come from the embedded AMD trust material; the VCEK comes
-from the caller, who takes it from the attestation document.
+The ARK and ASK are trust material that the caller pins; the VCEK comes
+from the attestation document.
 """
 
 from __future__ import annotations
 
-import warnings
-from typing import TypeAlias
+from dataclasses import dataclass
+from datetime import datetime
+from urllib.parse import urlsplit
 
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, utils
-from cryptography.utils import CryptographyDeprecationWarning
-from cryptography.x509.oid import ObjectIdentifier
-from OpenSSL import crypto
-from pyasn1.codec.der import decoder as der_decoder
-from pyasn1.type.char import IA5String as Asn1IA5String
-from pyasn1.type.univ import Integer as Asn1Integer
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
-from tinfoil._v3.verifier._quote.sev.lib.abi import Report, ReportSigner
-from tinfoil._v3.verifier._quote.sev.lib.tcb import TCBParts
-from tinfoil._v3.verifier._trust import AMD_GENOA_CERT_CHAIN_PEM
+from tinfoil._v3.verifier._quote.sev.lib.abi import (
+    Report,
+    ReportSigner,
+    report_signature_der,
+    signed_component,
+    validate_report_format,
+)
+from tinfoil._v3.verifier._quote.sev.lib.tcb import (
+    HWID_SIZE_VERSION_0,
+    HWID_SIZE_VERSION_1,
+    TCB_STRUCT_VERSION_0,
+    TCB_STRUCT_VERSION_1,
+    TcbError,
+    TCBParts,
+    TCBVersionStruct,
+    tcb_struct_version,
+)
+from tinfoil._v3.verifier._x509 import der
+from tinfoil._v3.verifier._x509.certificate import (
+    OID_ECDSA_SHA384,
+    OID_RSA_PSS,
+    Certificate,
+    SignatureAlgorithm,
+    X509Error,
+    can_issue_certificates,
+    certificate_public_key,
+    extensions,
+    parse_certificate,
+    signature_algorithm,
+    verify_chain,
+    verify_signature,
+)
+from tinfoil._v3.verifier._x509.crl import (
+    CRLError,
+    RevocationList,
+    VerifiedRevocationList,
+    is_revoked,
+    verify_revocation_list,
+)
 
-# Type alias for certificate extensions
-Extensions: TypeAlias = dict[ObjectIdentifier, bytes]
+# The KDS extensions of a VCEK certificate.
+OID_STRUCT_VERSION = "1.3.6.1.4.1.3704.1.1"
+OID_PRODUCT_NAME_1 = "1.3.6.1.4.1.3704.1.2"
+OID_BL_SPL = "1.3.6.1.4.1.3704.1.3.1"
+OID_TEE_SPL = "1.3.6.1.4.1.3704.1.3.2"
+OID_SNP_SPL = "1.3.6.1.4.1.3704.1.3.3"
+OID_SPL4 = "1.3.6.1.4.1.3704.1.3.4"
+OID_SPL5 = "1.3.6.1.4.1.3704.1.3.5"
+OID_SPL6 = "1.3.6.1.4.1.3704.1.3.6"
+OID_SPL7 = "1.3.6.1.4.1.3704.1.3.7"
+OID_UCODE_SPL = "1.3.6.1.4.1.3704.1.3.8"
+OID_FMC_SPL = "1.3.6.1.4.1.3704.1.3.9"
+OID_HWID = "1.3.6.1.4.1.3704.1.4"
+OID_CSP_ID = "1.3.6.1.4.1.3704.1.5"
+OID_AUTHORITY_KEY_IDENTIFIER = "2.5.29.35"
+"""Imparted by the issuing ASK; the one non-KDS extension a VCEK may carry."""
+_KDS_OIDS = frozenset(
+    {
+        OID_STRUCT_VERSION,
+        OID_PRODUCT_NAME_1,
+        OID_BL_SPL,
+        OID_TEE_SPL,
+        OID_SNP_SPL,
+        OID_SPL4,
+        OID_SPL5,
+        OID_SPL6,
+        OID_SPL7,
+        OID_UCODE_SPL,
+        OID_FMC_SPL,
+        OID_HWID,
+        OID_CSP_ID,
+    }
+)
+
+# The subject and issuer attributes that every AMD certificate carries.
+AMD_COUNTRY = "US"
+AMD_LOCALITY = "Santa Clara"
+AMD_STATE = "CA"
+AMD_ORGANIZATION = "Advanced Micro Devices"
+AMD_ORGANIZATIONAL_UNIT = "Engineering"
+VCEK_COMMON_NAME = "SEV-VCEK"
+
+_CRL_PATH_SUFFIX = "/crl"
 
 
-class SnpOid:
-    """OID extensions for the VCEK, used to verify attestation report"""
-
-    BOOTLOADER = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.1")
-    TEE = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.2")
-    SNP = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.3")
-    STRUCT_VERSION = ObjectIdentifier("1.3.6.1.4.1.3704.1.1")
-    PRODUCT_NAME_1 = ObjectIdentifier("1.3.6.1.4.1.3704.1.2")
-    BL_SPL = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.1")
-    TEE_SPL = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.2")
-    SNP_SPL = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.3")
-    SPL4 = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.4")
-    SPL5 = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.5")
-    SPL6 = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.6")
-    SPL7 = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.7")
-    UCODE = ObjectIdentifier("1.3.6.1.4.1.3704.1.3.8")
-    HWID = ObjectIdentifier("1.3.6.1.4.1.3704.1.4")
-    CSP_ID = ObjectIdentifier("1.3.6.1.4.1.3704.1.5")
+class ChainError(ValueError):
+    """A certificate that does not fit the AMD profile, does not chain to the pinned root, is revoked, or a report
+    signature that does not verify."""
 
 
-def genoa_ask_ark() -> tuple[x509.Certificate, x509.Certificate]:
-    """The embedded AMD Genoa ASK and ARK certificates, in that order."""
-    ask, ark = x509.load_pem_x509_certificates(AMD_GENOA_CERT_CHAIN_PEM)
-    return ask, ark
+@dataclass(frozen=True, slots=True)
+class VcekExtensions:
+    """The KDS extensions of a VCEK certificate."""
+
+    struct_version: int
+    product_name: str
+    hwid: bytes
+    """64 bytes in layout version 0; 8 bytes (the PSN-based hardware id) in layout version 1."""
+    tcb: TCBVersionStruct
+    """The TCB that the certificate is certified for, in the layout that ``struct_version`` names."""
 
 
-def load_vcek_der(vcek_der: bytes) -> x509.Certificate:
-    """Parse a DER VCEK certificate.
-
-    AMD issues VCEKs with a non-positive serial number, which the parser
-    reports as a deprecation warning; the warning is suppressed here.
-    """
-    try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r"Parsed a serial number which wasn't positive",
-                category=CryptographyDeprecationWarning,
-            )
-            return x509.load_der_x509_certificate(vcek_der)
-    except Exception as e:
-        raise ValueError(f"Failed to parse VCEK certificate: {e}") from e
-
-
+@dataclass(frozen=True, slots=True)
 class CertificateChain:
-    """Represents the SEV certificate chain (ARK > ASK > VCEK)"""
+    """The verified ARK, ASK and VCEK."""
 
-    ark: x509.Certificate
-    ask: x509.Certificate
-    vcek: x509.Certificate
-
-    def __init__(self, ark: x509.Certificate, ask: x509.Certificate, vcek: x509.Certificate):
-        self.ark = ark
-        self.ask = ask
-        self.vcek = vcek
-
-    @classmethod
-    def from_report(cls, report: Report, vcek_der: bytes) -> CertificateChain:
-        """Build the chain for a report from the embedded Genoa ASK and ARK and the supplied VCEK.
-
-        The VCEK is validated against the AMD ARK/ASK root chain in
-        ``verify_chain``, so accepting it here does not weaken trust.
-        """
-        productName: str = report.productName
-
-        if productName != "Genoa":
-            raise ValueError("This implementation only supports Genoa processors")
-
-        ask, ark = genoa_ask_ark()
-
-        signer_info = report.signer_info_parsed
-
-        if signer_info.signingKey != ReportSigner.VcekReportSigner:
-            raise ValueError("This implementation only supports VCEK signed reports")
-
-        if not vcek_der:
-            raise ValueError("A VCEK certificate is required")
-
-        vcek = load_vcek_der(vcek_der)
-
-        # Return the complete certificate chain
-        return cls(ark=ark, ask=ask, vcek=vcek)
-
-    def verify_chain(self) -> bool:
-        # Validate VCEK format
-        try:
-            self._validate_vcek_format()
-        except ValueError as e:
-            print(f"VCEK certificate validation failed: {e}")
-            return False
-
-        # Validate ARK and ASK format
-        try:
-            self._validate_ark_format()
-        except ValueError as e:
-            print(f"ARK certificate validation failed: {e}")
-            return False
-        try:
-            self._validate_ask_format()
-        except ValueError as e:
-            print(f"ASK certificate validation failed: {e}")
-            return False
-
-        # Verify the certificate chain using OpenSSL
-        try:
-            # Create a store and add the root (ARK) certificate
-            store = crypto.X509Store()
-            store.add_cert(crypto.X509.from_cryptography(self.ark))
-
-            # Add the intermediate (ASK) certificate
-            store.add_cert(crypto.X509.from_cryptography(self.ask))
-
-            # Create a store context
-            store_ctx = crypto.X509StoreContext(store, crypto.X509.from_cryptography(self.vcek))
-
-            # Verify the certificate
-            try:
-                store_ctx.verify_certificate()
-                return True
-            except crypto.X509StoreContextError as e:
-                print(f"Certificate chain verification failed: {e}")
-                return False
-
-        except Exception as e:
-            print(f"Error during chain verification: {e}")
-            return False
-
-    def _validate_ark_format(self) -> None:
-        if self.ark.version != x509.Version.v3:
-            raise ValueError("ARK certificate version is not 3")
-        if not _validateAmdLocation(self.ark.issuer):
-            raise ValueError("ARK certificate issuer is not a valid AMD location")
-        if not _validateAmdLocation(self.ark.subject):
-            raise ValueError("ARK certificate subject is not a valid AMD location")
-
-        cn = self.ark.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-        if cn != "ARK-Genoa":
-            raise ValueError(f"ARK certificate subject common name is not ARK-Genoa but {cn!r}")
-
-        # TODO add support for Certificate Revocation Lists
-        # NOTE The ARK is embedded trust material, so its SEV format is not cross-checked against the certificate.
-
-    def _validate_ask_format(self) -> None:
-        # Validate ASK format
-        if self.ask.version != x509.Version.v3:
-            raise ValueError("ASK certificate version is not 3")
-        if not _validateAmdLocation(self.ask.issuer):
-            raise ValueError("ASK certificate issuer is not a valid AMD location")
-        if not _validateAmdLocation(self.ask.subject):
-            raise ValueError("ASK certificate subject is not a valid AMD location")
-
-        cn = self.ask.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-        if cn != "SEV-Genoa":
-            raise ValueError(f"ASK certificate subject common name is not SEV-Genoa but {cn!r}")
-
-        # TODO add support for Certificate Revocation Lists
-        # NOTE The ASK is embedded trust material, so its SEV format is not cross-checked against the certificate.
-
-    def _validate_vcek_format(self) -> None:
-        """Validate the format of a VCEK certificate"""
-
-        if self.vcek.version != x509.Version.v3:
-            raise ValueError(f"VCEK certificate version is not 3 but {self.vcek.version}")
-
-        if self.vcek.signature_algorithm_oid != x509.SignatureAlgorithmOID.RSASSA_PSS:
-            raise ValueError(
-                f"VCEK certificate signature algorithm is not RSASSA_PSS but {self.vcek.signature_algorithm_oid}"
-            )
-
-        if self.vcek.public_key_algorithm_oid != x509.PublicKeyAlgorithmOID.EC_PUBLIC_KEY:
-            raise ValueError(
-                f"VCEK certificate public key algorithm is not ECDSA but {self.vcek.public_key_algorithm_oid}"
-            )
-
-        public_key = self.vcek.public_key()
-        if not isinstance(public_key, ec.EllipticCurvePublicKey) or public_key.curve.name != "secp384r1":
-            raise ValueError("VCEK certificate public key curve is not secp384r1")
-
-        # Validate KDS Cert Subject
-        if not _validateAmdLocation(self.vcek.subject):
-            raise ValueError("VCEK certificate subject is not a valid AMD location")
-
-        cn = self.vcek.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
-        if cn != "SEV-VCEK":
-            raise ValueError(f"VCEK certificate subject common name is not SEV-VCEK but {cn!r}")
-
-        # Get KDS and validate Cert Extensions
-        extensions = _get_certificate_extensions(self.vcek)
-        if SnpOid.CSP_ID in extensions:
-            raise ValueError(f"unexpected CSP_ID in VCEK certificate: {extensions[SnpOid.CSP_ID]!r}")
-
-        if (SnpOid.HWID not in extensions) or len(extensions[SnpOid.HWID]) != 64:  # ChipIDSize
-            raise ValueError("missing HWID extension for VCEK certificate")
-
-        product_name = _decode_der_ia5string(extensions[SnpOid.PRODUCT_NAME_1])
-        if product_name != "Genoa":
-            raise ValueError(f"unexpected PRODUCT_NAME_1 in VCEK certificate: {product_name}")
-
-    def validate_vcek_tcb(self, tcb: TCBParts) -> None:
-        """Validate the TCB extension in the VCEK certificate matches a given TCB"""
-        extensions = _get_certificate_extensions(self.vcek)
-
-        if SnpOid.BL_SPL not in extensions:
-            raise ValueError("missing BL_SPL extension for VCEK certificate")
-        bl_spl = _decode_der_integer(extensions[SnpOid.BL_SPL])
-        if bl_spl != tcb.bl_spl:
-            raise ValueError(
-                f"BL_SPL extension in VCEK certificate does not match tcb.bl_spl: {bl_spl} != {tcb.bl_spl}"
-            )
-
-        if SnpOid.TEE_SPL not in extensions:
-            raise ValueError("missing TEE_SPL extension for VCEK certificate")
-        tee_spl = _decode_der_integer(extensions[SnpOid.TEE_SPL])
-        if tee_spl != tcb.tee_spl:
-            raise ValueError(
-                f"TEE_SPL extension in VCEK certificate does not match tcb.tee_spl: {tee_spl} != {tcb.tee_spl}"
-            )
-
-        if SnpOid.SNP_SPL not in extensions:
-            raise ValueError("missing SNP_SPL extension for VCEK certificate")
-        snp_spl = _decode_der_integer(extensions[SnpOid.SNP_SPL])
-        if snp_spl != tcb.snp_spl:
-            raise ValueError(
-                f"SNP_SPL extension in VCEK certificate does not match tcb.snp_spl: {snp_spl} != {tcb.snp_spl}"
-            )
-
-        if SnpOid.UCODE not in extensions:
-            raise ValueError("missing UCODE extension for VCEK certificate")
-        ucode_spl = _decode_der_integer(extensions[SnpOid.UCODE])
-        if ucode_spl != tcb.ucode_spl:
-            raise ValueError(
-                f"UCODE extension in VCEK certificate does not match tcb.ucode_spl: {ucode_spl} != {tcb.ucode_spl}"
-            )
-
-    def validate_vcek_hwid(self, chip_id: bytes) -> None:
-        """Validate the HWID extension in the VCEK certificate matches a given chip id"""
-        extensions = _get_certificate_extensions(self.vcek)
-        if SnpOid.HWID not in extensions:
-            raise ValueError("missing HWID extension for VCEK certificate")
-        if extensions[SnpOid.HWID] != chip_id:
-            raise ValueError(
-                f"HWID extension in VCEK certificate does not match chip_id: {extensions[SnpOid.HWID]!r} != {chip_id!r}"
-            )
+    ark: Certificate
+    ask: Certificate
+    vcek: Certificate
 
 
-## HELPER FUNCTIONS
+def kds_extensions(certificate: Certificate) -> dict[str, bytes]:
+    """The KDS extensions by OID; any extension other than those and the authority key identifier is an error."""
+    found: dict[str, bytes] = {}
+    for ext in extensions(certificate):
+        if ext.oid == OID_AUTHORITY_KEY_IDENTIFIER:
+            continue
+        if ext.oid not in _KDS_OIDS:
+            raise ChainError(f"not an AMD KDS OID: {ext.oid}")
+        found[ext.oid] = ext.value
+    return found
 
 
-def _get_certificate_extensions(cert: x509.Certificate) -> Extensions:
-    """Get the extensions from the VCEK certificate"""
-    extensions: Extensions = {}
-    for ext in cert.extensions:
-        extensions[ext.oid] = ext.value.value
-    return extensions
-
-
-def _decode_der_integer(der_bytes: bytes) -> int:
-    """Decode a DER-encoded INTEGER, rejecting non-INTEGER types and trailing bytes."""
+def vcek_certificate_extensions(certificate: Certificate) -> VcekExtensions:
+    """Decode the KDS extensions of a VCEK: the struct version selects the layout, every level is required, the
+    hardware id has the layout's size, and a CSP id (a VLEK marker) is an error."""
+    exts = kds_extensions(certificate)
+    struct_version = _u8(exts, OID_STRUCT_VERSION, "StructVersion")
+    product_name = _ia5_string(exts, OID_PRODUCT_NAME_1, "ProductName1")
+    if struct_version == TCB_STRUCT_VERSION_0:
+        hwid_size = HWID_SIZE_VERSION_0
+    elif struct_version == TCB_STRUCT_VERSION_1:
+        hwid_size = HWID_SIZE_VERSION_1
+    else:
+        raise ChainError(f"unsupported TCB structVersion {struct_version}")
+    hwid = _octet_string(exts, OID_HWID, "HWID", hwid_size) if OID_HWID in exts else b""
+    if OID_CSP_ID in exts:
+        csp_id = _ia5_string(exts, OID_CSP_ID, "CSP_ID")
+        if OID_HWID in exts:
+            raise ChainError(f"certificate has both HWID ({hwid.hex()}) and CSP_ID ({csp_id}) extensions")
+        raise ChainError(f"unexpected CSP_ID in VCEK certificate: {csp_id}")
+    bl_spl = _u8(exts, OID_BL_SPL, "BlSpl")
+    tee_spl = _u8(exts, OID_TEE_SPL, "TeeSpl")
+    snp_spl = _u8(exts, OID_SNP_SPL, "SnpSpl")
+    spl5 = _u8(exts, OID_SPL5, "Spl5")
+    spl6 = _u8(exts, OID_SPL6, "Spl6")
+    spl7 = _u8(exts, OID_SPL7, "Spl7")
+    ucode_spl = _u8(exts, OID_UCODE_SPL, "UcodeSpl")
+    spl4 = fmc_spl = 0
+    if struct_version == TCB_STRUCT_VERSION_0:
+        if OID_FMC_SPL in exts:
+            raise ChainError("FmcSpl extension is not valid for TCB struct version 0")
+        spl4 = _u8(exts, OID_SPL4, "Spl4")
+    else:
+        if OID_SPL4 in exts:
+            raise ChainError("Spl4 extension is not valid for TCB struct version 1")
+        fmc_spl = _u8(exts, OID_FMC_SPL, "FmcSpl")
+    parts = TCBParts(
+        version=struct_version,
+        bl_spl=bl_spl,
+        tee_spl=tee_spl,
+        spl4=spl4,
+        spl5=spl5,
+        spl6=spl6,
+        spl7=spl7,
+        snp_spl=snp_spl,
+        ucode_spl=ucode_spl,
+        fmc_spl=fmc_spl,
+    )
     try:
-        result, remainder = der_decoder.decode(der_bytes, asn1Spec=Asn1Integer())
-    except Exception as e:
-        raise ValueError(f"Failed to decode DER integer: {e}") from e
-    if remainder:
-        raise ValueError(f"Unexpected trailing bytes after DER integer: {len(remainder)} bytes")
-    return int(result)
+        tcb = parts.to_version_struct()
+    except TcbError as err:
+        raise ChainError(str(err)) from err
+    if len(hwid) not in (HWID_SIZE_VERSION_0, HWID_SIZE_VERSION_1):
+        raise ChainError("missing HWID extension for VCEK certificate")
+    return VcekExtensions(struct_version=struct_version, product_name=product_name, hwid=hwid, tcb=tcb)
 
 
-def _decode_der_ia5string(der_bytes: bytes) -> str:
-    """Decode a DER-encoded IA5String, rejecting non-IA5String types and trailing bytes."""
+def _u8(exts: dict[str, bytes], oid: str, field: str) -> int:
+    value = exts.get(oid)
+    if value is None:
+        raise ChainError(f"no extension for field {field}")
     try:
-        result, remainder = der_decoder.decode(der_bytes, asn1Spec=Asn1IA5String())
-    except Exception as e:
-        raise ValueError(f"Failed to decode DER IA5String: {e}") from e
-    if remainder:
-        raise ValueError(f"Unexpected trailing bytes after DER IA5String: {len(remainder)} bytes")
-    return str(result)
+        number = der.integer(der.decode(value))
+    except der.DerError as err:
+        raise ChainError(f"could not parse extension {field} as an integer: {err}") from err
+    if not 0 <= number <= 255:
+        raise ChainError(f"int value for field {field} isn't a uint8: {number}")
+    return number
 
 
-def _validateAmdLocation(name: x509.Name) -> bool:
-    """Validate that the certificate subject name matches AMD's expected values.
+def _ia5_string(exts: dict[str, bytes], oid: str, field: str) -> str:
+    value = exts.get(oid)
+    if not value:
+        raise ChainError(f"no extension for field {field}")
+    if value[0] != der.TAG_IA5_STRING:
+        raise ChainError(f"value is not tagged as an IA5String: {value[0]}")
+    try:
+        return der.ia5_string(der.decode(value))
+    except der.DerError as err:
+        raise ChainError(f"could not parse extension {field} as an IA5String: {err}") from err
 
-    Args:
-        name: The x509.Name object to validate
 
-    Returns:
-        bool: True if all fields match expected values, False otherwise
-    """
+def _octet_string(exts: dict[str, bytes], oid: str, field: str, size: int) -> bytes:
+    """The extension's value, which the KDS writes either bare or wrapped in an OCTET STRING."""
+    value = exts[oid]
+    if len(value) == size:
+        return value
+    try:
+        octets = der.octet_string(der.decode(value))
+    except der.DerError as err:
+        raise ChainError(f"could not parse extension {field} as an octet string: {err}") from err
+    if len(octets) != size:
+        raise ChainError(f"{field} size is {len(octets)}, expected {size}")
+    return octets
 
-    def check_singleton_list(values: list[str | bytes], field_name: str, expected: str) -> bool:
+
+def common_name(name: x509.Name) -> str:
+    """The last commonName attribute of a name, or "" when it has none."""
+    value = ""
+    for attribute in name.get_attributes_for_oid(x509.NameOID.COMMON_NAME):
+        if isinstance(attribute.value, str):
+            value = attribute.value
+    return value
+
+
+def validate_amd_location(name: x509.Name, role: str) -> None:
+    """Require exactly one of each of AMD's country, locality, state, organization and organizational unit."""
+    for oid, label, plural, want in (
+        (x509.NameOID.COUNTRY_NAME, "country", "countries", AMD_COUNTRY),
+        (x509.NameOID.LOCALITY_NAME, "locality", "localities", AMD_LOCALITY),
+        (x509.NameOID.STATE_OR_PROVINCE_NAME, "state", "states", AMD_STATE),
+        (x509.NameOID.ORGANIZATION_NAME, "organization", "organizations", AMD_ORGANIZATION),
+        (x509.NameOID.ORGANIZATIONAL_UNIT_NAME, "organizational unit", "organizational units", AMD_ORGANIZATIONAL_UNIT),
+    ):
+        values = [a.value for a in name.get_attributes_for_oid(oid) if isinstance(a.value, str)]
         if len(values) != 1:
-            print(f"Expected exactly one {field_name}, got {len(values)}")
-            return False
-        if values[0] != expected:
-            print(f"Unexpected {field_name} value: '{values[0]!r}', expected '{expected}'")
-            return False
-        return True
-
-    # Get the name attributes
-    country = name.get_attributes_for_oid(x509.NameOID.COUNTRY_NAME)
-    locality = name.get_attributes_for_oid(x509.NameOID.LOCALITY_NAME)
-    state = name.get_attributes_for_oid(x509.NameOID.STATE_OR_PROVINCE_NAME)
-    org = name.get_attributes_for_oid(x509.NameOID.ORGANIZATION_NAME)
-    org_unit = name.get_attributes_for_oid(x509.NameOID.ORGANIZATIONAL_UNIT_NAME)
-
-    # Extract the values from the attributes
-    country_values = [attr.value for attr in country]
-    locality_values = [attr.value for attr in locality]
-    state_values = [attr.value for attr in state]
-    org_values = [attr.value for attr in org]
-    org_unit_values = [attr.value for attr in org_unit]
-
-    # Validate each field
-    if not check_singleton_list(country_values, "country", "US"):
-        return False
-    if not check_singleton_list(locality_values, "locality", "Santa Clara"):
-        return False
-    if not check_singleton_list(state_values, "state", "CA"):
-        return False
-    if not check_singleton_list(org_values, "organization", "Advanced Micro Devices"):
-        return False
-    return check_singleton_list(org_unit_values, "organizational unit", "Engineering")
+            raise ChainError(f"{role} has {len(values)} {plural}, want 1")
+        if values[0] != want:
+            raise ChainError(f"{role} {label} '{values[0]}' not expected for AMD. Expected '{want}'")
 
 
-def _verify_report_signature(vcek: x509.Certificate, report: Report) -> bool:
-    """Verify the attestation report signature using VCEK's public key"""
+def intermediate_common_name(product_line: str) -> str:
+    """The commonName of the ASK that issues VCEKs for a product line."""
+    return f"SEV-{product_line}"
 
-    # Validate Report Format
-    POLICY_RESERVED_1_BIT = 17
 
-    if report.version < 2:
-        raise ValueError(f"Report version is lower than 2: is {report.version}")
-
-    # Check reserved bit must be 1
-    if not (report.policy & (1 << POLICY_RESERVED_1_BIT)):
-        raise ValueError(f"policy[{POLICY_RESERVED_1_BIT}] is reserved, must be 1, got 0")
-
-    # Check bits 63-26 must be zero
-    if report.policy >> 26:
-        raise ValueError("policy bits 63-26 must be zero")
-
+def validate_vcek_certificate(certificate: Certificate, product_line: str) -> VcekExtensions:
+    """Check the VCEK against the KDS profile: X.509 v3, signed with RSA-PSS SHA-384, an ECDSA P-384 key, AMD's
+    subject with the VCEK common name, well-formed KDS extensions, and a TCB layout that matches ``product_line``."""
+    if certificate.version != x509.Version.v3:
+        raise ChainError(f"VCEK certificate version is {certificate.version.value + 1}, expected 3")
+    if _signature_algorithm_oid(certificate) != OID_RSA_PSS:
+        raise ChainError("VCEK certificate signature algorithm is not SHA-384 with RSASSA-PSS")
+    key = certificate_public_key(certificate)
+    if not isinstance(key, ec.EllipticCurvePublicKey):
+        raise ChainError("VCEK certificate public key type is not ECDSA")
+    if not isinstance(key.curve, ec.SECP384R1):
+        raise ChainError(f"VCEK certificate public key curve is {key.curve.name}, expected P-384")
+    validate_amd_location(certificate.subject, "VCEK subject")
+    cn = common_name(certificate.subject)
+    if cn != VCEK_COMMON_NAME:
+        raise ChainError(f"VCEK certificate subject common name {cn} not expected. Expected {VCEK_COMMON_NAME}")
+    exts = vcek_certificate_extensions(certificate)
     try:
-        # Check signature algorithm
-        if report.signature_algo != 1:  # 1 = SignEcdsaP384Sha384
-            print(f"Unknown SignatureAlgo: {report.signature_algo}")
-            return False
-
-        # Verify the public key is an EC key
-        public_key = vcek.public_key()
-        if not isinstance(public_key, ec.EllipticCurvePublicKey):
-            print("VCEK doesn't contain an EC public key")
-            return False
-
-        # Convert the raw signature to DER format
-        # The signature in the report is in raw R||S format in AMD's little-endian format
-        # Each component is 72 bytes (0x48) for P384
-        r_bytes = bytes(reversed(report.signature[0:0x48]))  # Reverse bytes for big-endian
-        s_bytes = bytes(reversed(report.signature[0x48:0x90]))  # Reverse bytes for big-endian
-
-        r = int.from_bytes(r_bytes.lstrip(b"\x00"), byteorder="big")
-        s = int.from_bytes(s_bytes.lstrip(b"\x00"), byteorder="big")
-
-        der_signature = utils.encode_dss_signature(r, s)
-
-        # Verify signature
-        public_key.verify(der_signature, report.signed_data, ec.ECDSA(hashes.SHA384()))
-        return True
-    except Exception as e:
-        print(f"Attestation signature verification failed: {e}")
-        return False
+        expected = tcb_struct_version(product_line)
+    except TcbError as err:
+        raise ChainError(f"could not determine TCB format for product {product_line!r}: {err}") from err
+    if expected != exts.tcb.version:
+        raise ChainError(f"product {product_line!r} and VCEK certificate use different TCB formats")
+    return exts
 
 
-def verify_attestation(chain: CertificateChain, report: Report) -> bool:
-    """Verify attestation report with the certificate chain"""
+def validate_vcek_issuer(certificate: Certificate, product_line: str) -> None:
+    """Require the VCEK's issuer to be AMD's ASK for ``product_line``, by name."""
+    validate_amd_location(certificate.issuer, "VCEK issuer")
+    want = intermediate_common_name(product_line)
+    cn = common_name(certificate.issuer)
+    if cn != want:
+        raise ChainError(f"VCEK certificate issuer common name {cn} not expected. Expected {want}")
+
+
+def _signature_algorithm_oid(certificate: Certificate) -> str | None:
+    """The OID of a supported signature algorithm, or None for one that is not supported."""
+    outer = der.children(der.decode(certificate.public_bytes(serialization.Encoding.DER)))
     try:
-        # Verify certificate chain
-        if not chain.verify_chain():
-            # Since verify_chain() already prints its own error messages
-            return False
+        return signature_algorithm(outer[1]).oid
+    except (X509Error, der.DerError):
+        return None
 
-        # Verify report
-        return _verify_report_signature(chain.vcek, report)
 
-    except Exception as e:
-        print(f"Verification failed: {e}")
-        return False
+def verify_vcek_chain(vcek: Certificate, ask: Certificate, ark: Certificate, now: datetime) -> None:
+    """Verify the path VCEK, ASK, ARK at ``now``: validity, issuing authority and every signature along it."""
+    try:
+        verify_chain(vcek, [ask], [ark], now)
+    except X509Error as err:
+        raise ChainError(f"error verifying VCEK certificate: {err}") from err
+
+
+def crl_distribution_points(certificate: Certificate) -> tuple[str, ...]:
+    """The URIs named by the certificate's CRL distribution points, in order; empty without the extension."""
+    try:
+        points = certificate.extensions.get_extension_for_class(x509.CRLDistributionPoints).value
+    except x509.ExtensionNotFound:
+        return ()
+    except ValueError as err:
+        raise ChainError(f"CRL distribution points: {err}") from err
+    return tuple(
+        name.value
+        for point in points
+        for name in (point.full_name or ())
+        if isinstance(name, x509.UniformResourceIdentifier)
+    )
+
+
+def check_ask_not_revoked(
+    ask: Certificate, ark: Certificate, crl: RevocationList, now: datetime
+) -> VerifiedRevocationList:
+    """Check the product revocation list: the ASK must name a distribution point for it, the ARK must have signed
+    it, ``now`` must lie within its window, and the ASK must not be listed.
+
+    The VCEK's own serial is not looked up: AMD supersedes VCEKs through
+    the TCB rather than revoking them.
+    """
+    if not any(urlsplit(url).path.endswith(_CRL_PATH_SUFFIX) for url in crl_distribution_points(ask)):
+        raise ChainError("ASK names no CRL distribution point for the product revocation list")
+    if not can_issue_certificates(ark):
+        raise ChainError("ARK is not a certificate authority")
+    try:
+        verified = verify_revocation_list(crl, ark, now)
+    except CRLError as err:
+        raise ChainError(f"CRL is not signed by ARK: {err}") from err
+    if is_revoked(verified, ask.serial_number):
+        raise ChainError("ASK was revoked")
+    return verified
+
+
+def verify_report_signature(report: Report, vcek: Certificate) -> None:
+    """Verify the report's ECDSA P-384 signature over the signed component under the VCEK's key.
+
+    The report must have a supported version and a well-formed policy,
+    and its signature algorithm must be ECDSA P-384 with SHA-384.
+    """
+    try:
+        validate_report_format(report.raw)
+        signature = report_signature_der(report)
+    except ValueError as err:
+        raise ChainError(f"attestation report format error: {err}") from err
+    try:
+        verify_signature(
+            SignatureAlgorithm(oid=OID_ECDSA_SHA384),
+            certificate_public_key(vcek),
+            signature,
+            signed_component(report.raw),
+        )
+    except X509Error as err:
+        raise ChainError(f"report signature verification error: {err}") from err
+
+
+def parse_vcek(vcek_der: bytes) -> Certificate:
+    """Parse the VCEK's DER; an empty value is an error naming the signer."""
+    if not vcek_der:
+        raise ChainError(f"missing {ReportSigner.VCEK} certificate")
+    try:
+        return parse_certificate(vcek_der)
+    except X509Error as err:
+        raise ChainError(f"could not interpret {ReportSigner.VCEK} DER bytes: {err}") from err
