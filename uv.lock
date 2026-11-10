@@ -1290,7 +1290,7 @@ requires-dist = [
     { name = "rfc3161-client", specifier = ">=1.0.7" },
     { name = "sigstore", specifier = ">=4.3.0" },
     { name = "sigstore-models", specifier = ">=0.0.6" },
-    { name = "tinfoil-ehbp", specifier = ">=0.3.0" },
+    { name = "tinfoil-ehbp", specifier = ">=0.5.0" },
     { name = "urllib3", specifier = ">=2.8.0" },
 ]
 
@@ -1305,16 +1305,16 @@ dev = [
 
 [[package]]
 name = "tinfoil-ehbp"
-version = "0.3.1"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "pyhpke" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/59/fe/059da3785148a51f5c11297a2dde0874030348a88b4f451d481dba3d5d04/tinfoil_ehbp-0.3.1.tar.gz", hash = "sha256:1c773c62619a0b70697d0e25c3439f25bd6d95f8cf56116f6ecc251e28b08932", size = 17142, upload-time = "2026-07-23T22:54:05.18Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/3b/2c1d2c4038a0602b388b3c1857b4c8c83833a3b7f679adb848e8f8a03f42/tinfoil_ehbp-0.5.0.tar.gz", hash = "sha256:6b6e0c778079ce28039403339687920e1781a93ce21df5c28c651971e85618a9", size = 23347, upload-time = "2026-11-06T16:34:17.428Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7c/10/b5a15c438e441e76fda2f2a3ce683cd41c0d095e91e23ef137f3773fa63f/tinfoil_ehbp-0.3.1-py3-none-any.whl", hash = "sha256:d06895441bfd3e61810f7d2b625309d4cf665be07b6f55113657c4f2b110ab27", size = 15511, upload-time = "2026-07-23T22:54:03.702Z" },
+    { url = "https://files.pythonhosted.org/packages/20/a0/e7f272a66b412e9d60d7f91b4c16f431d21c881d896ae35a24cf8134da8a/tinfoil_ehbp-0.5.0-py3-none-any.whl", hash = "sha256:06475c46b38ee6de83495460ea4be3f486a4c643671f2772f77032f68133a6d6", size = 18448, upload-time = "2026-11-06T16:34:16.147Z" },
 ]
 
 [[package]]
