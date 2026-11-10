@@ -46,8 +46,9 @@ __all__ = [
     "QuoteError",
     "QuoteOptions",
     "ReferenceValues",
+    "SevPolicyError",
+    "TdxPolicyError",
     "TestOnlyRoots",
-    "ValidationError",
     "assemble",
     "assemble_with",
     "authenticate",
@@ -59,10 +60,6 @@ ReferenceValues: TypeAlias = LegacyReferenceValues | ConfigReferenceValues
 
 class QuoteError(ValueError):
     """Hardware evidence that does not authenticate, or evidence of an unsupported format."""
-
-
-ValidationError: TypeAlias = SevPolicyError | TdxPolicyError
-"""An authentic quote that does not satisfy its assembled policy; the platform module names the register or field."""
 
 
 @dataclass(frozen=True, slots=True)
