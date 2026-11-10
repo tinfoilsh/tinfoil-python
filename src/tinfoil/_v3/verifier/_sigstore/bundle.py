@@ -128,6 +128,8 @@ class Subject:
     name: str
     digest: Mapping[str, str]
     """Algorithm to lowercase hex; a read-only view (``MappingProxyType``) built by ``parse_statement``."""
+    signed_digest: Mapping[str, str]
+    """The same map with each hex value exactly as signed, for a layer that must compare the signed string."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,8 +348,8 @@ def parse_statement(payload: bytes) -> Statement:
     non-empty subject list whose entries each carry a name and a digest
     map, a predicate type and an object predicate; unknown members at the
     statement level reject, and a null subject rejects. Each subject's
-    digest map is wrapped in a ``MappingProxyType`` over a private dict, so
-    the record is immutable.
+    digest maps are wrapped in a ``MappingProxyType`` over a private dict,
+    so the record is immutable.
     """
     if not payload or len(payload) > MAX_STATEMENT_SIZE:
         raise BundleError("statement size is outside allowed bounds")
@@ -386,21 +388,28 @@ def _subjects(items: tuple[_json.JsonValue, ...]) -> tuple[Subject, ...]:
         if item is None:
             raise BundleError(f"in-toto statement subject {index} is null")
         record = _json.object_(item, f"subject[{index}]", ("name", "digest"))
-        digests = _json.mapping(record, "digest", functools.partial(_digest, index=index))
-        if len(digests) > MAX_SUBJECT_DIGESTS:
-            raise BundleError(f"too many digests in subject {index}: {len(digests)} > {MAX_SUBJECT_DIGESTS}")
-        out.append(Subject(name=_json.string(record, "name"), digest=MappingProxyType(dict(digests))))
+        signed = _json.mapping(record, "digest", functools.partial(_digest, index=index))
+        if len(signed) > MAX_SUBJECT_DIGESTS:
+            raise BundleError(f"too many digests in subject {index}: {len(signed)} > {MAX_SUBJECT_DIGESTS}")
+        out.append(
+            Subject(
+                name=_json.string(record, "name"),
+                digest=MappingProxyType({algorithm: value.lower() for algorithm, value in signed.items()}),
+                signed_digest=MappingProxyType(dict(signed)),
+            )
+        )
     return tuple(out)
 
 
 def _digest(value: _json.JsonValue, algorithm: str, *, index: int) -> str:
+    """Check that a digest value is non-empty hex of either case and return it as signed."""
     if not isinstance(value, str):
         raise BundleError(f"in-toto statement subject {index} digest {algorithm!r} is not a string")
     if not value:
         raise BundleError(f"in-toto statement subject {index} digest {algorithm!r} is empty")
     if len(value) % 2 or not all(ch in "0123456789abcdefABCDEF" for ch in value):
         raise BundleError(f"in-toto statement subject {index} digest {algorithm!r} is not hex")
-    return value.lower()
+    return value
 
 
 def _member_span(text: str, key: str) -> bytes:

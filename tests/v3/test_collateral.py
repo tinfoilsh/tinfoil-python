@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from tinfoil._v3.verifier._canonical import base64_length
 from tinfoil._v3.verifier._document.collateral import collateral, config, entry, runtime
 from tinfoil._v3.verifier._document.collateral.collateral import (
     AMD_CRL_V1_FORMAT,
@@ -37,7 +38,13 @@ from tinfoil._v3.verifier._document.collateral.runtime import (
     RUNTIME_V1_FORMAT,
     RuntimeReference,
 )
-from tinfoil._v3.verifier._document.collateral.sev import AMDCRL, AMDVCEK
+from tinfoil._v3.verifier._document.collateral.sev import (
+    AMDCRL,
+    AMDVCEK,
+    MAX_CERT_CHAIN_PEM_SIZE,
+    MAX_CRL_DER_SIZE,
+    MAX_VCEK_DER_SIZE,
+)
 from tinfoil._v3.verifier._document.collateral.sigstore import Freshness
 from tinfoil._v3.verifier._document.collateral.tdx import IntelPCS, PCSResponse
 from tinfoil._v3.verifier._json import JsonObject, strict_parse
@@ -87,6 +94,58 @@ def test_decode_sev_collateral() -> None:
     assert decode(*sev_entries()).cpu == CPUEndorsements(
         amd_vcek=AMDVCEK(vcek_der=b"vcek der", cert_chain_pem="chain"), amd_crl=AMDCRL(crl_der=b"crl der")
     )
+
+
+def test_decode_sev_collateral_bounds_sizes_before_parsing() -> None:
+    """Each AMD member is bounded at decode: a value at the bound is carried as is, one byte over is rejected."""
+    vcek_at = b"\x30" * MAX_VCEK_DER_SIZE
+    pem_at = "-" * MAX_CERT_CHAIN_PEM_SIZE
+    crl_at = b"\x30" * MAX_CRL_DER_SIZE
+    got = decode(
+        cpu("cpu-endorsement", AMD_VCEK_V1_FORMAT, {"vcek_der_base64": b64(vcek_at), "cert_chain_pem": pem_at}),
+        cpu("cpu-crl", AMD_CRL_V1_FORMAT, {"crl_der_base64": b64(crl_at)}),
+    )
+    assert got.cpu == CPUEndorsements(
+        amd_vcek=AMDVCEK(vcek_der=vcek_at, cert_chain_pem=pem_at), amd_crl=AMDCRL(crl_der=crl_at)
+    )
+    raises_decode(
+        cpu("cpu-endorsement", AMD_VCEK_V1_FORMAT, {"vcek_der_base64": b64(vcek_at + b"\x30"), "cert_chain_pem": "c"}),
+        match=f"amd-vcek collateral entry 'cpu-endorsement': vcek_der_base64 exceeds {MAX_VCEK_DER_SIZE} bytes",
+    )
+    raises_decode(
+        cpu("cpu-endorsement", AMD_VCEK_V1_FORMAT, {"vcek_der_base64": b64(b"v"), "cert_chain_pem": pem_at + "-"}),
+        match=f"amd-vcek collateral entry 'cpu-endorsement': cert_chain_pem exceeds {MAX_CERT_CHAIN_PEM_SIZE}",
+    )
+    raises_decode(
+        cpu("cpu-crl", AMD_CRL_V1_FORMAT, {"crl_der_base64": b64(crl_at + b"\x30")}),
+        match=f"amd-crl collateral entry 'cpu-crl': crl_der_base64 exceeds {MAX_CRL_DER_SIZE} bytes",
+    )
+
+
+def test_decode_sev_collateral_bounds_the_encoded_length_before_decoding() -> None:
+    """An encoded value longer than the bound's base64 expansion is rejected as oversized without being decoded:
+    one that is not base64 at all still reports the size. At the expansion the value is decoded, so the same
+    non-base64 content reports the decoding error, and a value that decodes past the bound reports the size."""
+
+    def vcek_entry(value: str) -> dict[str, Any]:
+        return cpu("cpu-endorsement", AMD_VCEK_V1_FORMAT, {"vcek_der_base64": value, "cert_chain_pem": "c"})
+
+    def crl_entry(value: str) -> dict[str, Any]:
+        return cpu("cpu-crl", AMD_CRL_V1_FORMAT, {"crl_der_base64": value})
+
+    for entry_with, member, limit in (
+        (vcek_entry, "vcek_der_base64", MAX_VCEK_DER_SIZE),
+        (crl_entry, "crl_der_base64", MAX_CRL_DER_SIZE),
+    ):
+        bound = base64_length(limit)
+        assert bound == len(b64(bytes(limit)))
+        over = "!" + "A" * bound
+        at = "!" + "A" * (bound - 1)
+        past = "A" * bound  # decodes within the expansion to limit + 1 or 2 bytes
+        assert len(base64.b64decode(past)) > limit
+        raises_decode(entry_with(over), match=f"{member} exceeds {limit} bytes")
+        raises_decode(entry_with(at), match=f"decoding {member}")
+        raises_decode(entry_with(past), match=f"{member} exceeds {limit} bytes")
 
 
 def test_decode_tdx_collateral() -> None:

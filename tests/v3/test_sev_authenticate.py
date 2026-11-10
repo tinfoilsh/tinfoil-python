@@ -3,6 +3,7 @@ captures, and the single rules of each step."""
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -23,6 +24,7 @@ from tinfoil._v3.verifier._quote.sev.authenticate import (
     parse_report_bytes,
     product_from_report,
     reject_masked_chip_id,
+    reject_zero_chip_id,
     trusted_roots,
     verify_signature,
 )
@@ -276,6 +278,52 @@ def test_masked_chip_id_is_rejected_after_the_signature_check() -> None:
     with pytest.raises(SevAuthenticationError, match="masks CHIP_ID"):
         reject_masked_chip_id(fx.make_report(signer_info=masked))
     reject_masked_chip_id(fx.make_report())
+
+
+def test_zero_chip_id_without_the_mask_flag_is_rejected() -> None:
+    """A real Genoa and a real Turin report with CHIP_ID zeroed are rejected, since neither masks it; the same
+    reports with their CHIP_ID intact pass, and so does a Turin CHIP_ID, which is zero-padded after its 8 bytes."""
+    genoa = parse_report(fx.happy_case().document.cpu_evidence().report)
+    turin = parse_report(fx.box2_turin_report())
+    for report in (genoa, turin):
+        assert not abi.parse_signer_info(report.signer_info).mask_chip_key
+        reject_zero_chip_id(report)
+        with pytest.raises(SevAuthenticationError, match="CHIP_ID is all zero"):
+            reject_zero_chip_id(replace(report, chip_id=bytes(64)))
+    assert turin.chip_id[8:] == bytes(56)
+    with pytest.raises(SevAuthenticationError, match="CHIP_ID is all zero"):
+        reject_zero_chip_id(replace(turin, chip_id=bytes(8) + turin.chip_id[8:]))
+    # Through the entry point: the check follows the signature check, so a zeroed CHIP_ID in the signed bytes is
+    # caught there first; the ordering is pinned by the standalone rule above.
+    case = fx.happy_case()
+    assert case.chain_pem is not None
+    zeroed = bytearray(sev_evidence(case).report)
+    zeroed[0x1A0:0x1E0] = bytes(64)
+    with pytest.raises(SevAuthenticationError, match="signature"):
+        authenticate_sev(
+            replace(sev_evidence(case), report=bytes(zeroed)), case.now, sev.Options(test_only_root_pem=case.chain_pem)
+        )
+
+
+def test_entry_point_rejects_a_zero_chip_id_once_the_signature_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the signature check stubbed to accept the zeroed report, ``authenticate`` reaches the zero-CHIP_ID rule
+    and fails with its own message; the same stub lets the unmodified report through."""
+    case = fx.happy_case()
+    assert case.chain_pem is not None
+    module = importlib.import_module("tinfoil._v3.verifier._quote.sev.authenticate")
+    roots = trusted_roots(sev.PRODUCT_GENOA, case.chain_pem)
+    vcek = parse_certificate(sev_evidence(case).vcek_der)
+
+    def accept(*args: Any) -> chain.CertificateChain:
+        return chain.CertificateChain(ark=roots.ark, ask=roots.ask, vcek=vcek)
+
+    monkeypatch.setattr(module, "verify_signature", accept)
+    options = sev.Options(test_only_root_pem=case.chain_pem)
+    assert authenticate_sev(sev_evidence(case), case.now, options).identity == fx.GENOA_HWID.hex()
+    zeroed = bytearray(sev_evidence(case).report)
+    zeroed[0x1A0:0x1E0] = bytes(64)
+    with pytest.raises(SevAuthenticationError, match="CHIP_ID is all zero without the mask flag set"):
+        authenticate_sev(replace(sev_evidence(case), report=bytes(zeroed)), case.now, options)
 
 
 def test_non_vcek_signers_are_rejected() -> None:
