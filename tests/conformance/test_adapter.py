@@ -243,11 +243,18 @@ def test_cli_rejects_non_json_stdin_as_malformed() -> None:
     assert out["rejection"] == {"code": "MALFORMED_INPUT"}
 
 
-def test_cli_live_and_capture_unsupported() -> None:
-    for command in (adapter.STAGE_LIVE_VERIFY, adapter.STAGE_CAPTURE):
-        code, out = _cli([command], b"{}")
-        assert code == adapter.EXIT_UNSUPPORTED
-        assert out == {"stage": command, "accepted": False}
+def test_cli_live_verify_without_a_request_is_malformed() -> None:
+    """A request that names no enclave is reported before any connection is opened."""
+    code, out = _cli([adapter.STAGE_LIVE_VERIFY], b"{}")
+    assert code == adapter.EXIT_MALFORMED
+    assert out == {"stage": adapter.STAGE_LIVE_VERIFY, "accepted": False, "rejection": {"code": "MALFORMED_INPUT"}}
+
+
+def test_cli_capture_without_flags_is_usage_error() -> None:
+    proc = subprocess.run([sys.executable, str(_CLI), adapter.STAGE_CAPTURE], capture_output=True, check=False)
+    assert proc.returncode == adapter.EXIT_MALFORMED
+    assert proc.stdout == b""
+    assert b"usage" in proc.stderr
 
 
 def test_main_without_arguments_is_usage_error() -> None:
