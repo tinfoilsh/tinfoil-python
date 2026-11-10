@@ -212,28 +212,36 @@ def _uri_sans(value: bytes) -> tuple[str, ...]:
         if name.tag_class != der.CLASS_CONTEXT or name.tag > 8:
             raise X509Error("GeneralName has an unexpected tag")
         if name.tag == _GENERAL_NAME_URI:
-            if name.constructed:
-                raise X509Error("URI GeneralName must be primitive")
-            text = der.ia5_string(der.Element(der.CLASS_UNIVERSAL, False, der.TAG_IA5_STRING, name.content, b""))
-            # A URI with an ASCII control character cannot be a URL, and a
-            # percent escape must name a byte.
-            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text) or not _valid_percent_escapes(text):
-                raise X509Error("URI GeneralName is not a URL")
-            out.append(text)
+            out.append(_uri_general_name(name))
         elif name.tag == _GENERAL_NAME_IP and len(name.content) not in (4, 16):
             raise X509Error("IP GeneralName must be 4 or 16 bytes")
     return tuple(out)
 
 
+def _uri_general_name(name: der.Element) -> str:
+    """Decode a ``uniformResourceIdentifier`` GeneralName: a primitive IA5String that can be a URL.
+
+    A URI with an ASCII control character cannot be a URL, and a percent
+    escape must name a byte.
+    """
+    if name.constructed:
+        raise X509Error("URI GeneralName must be primitive")
+    text = der.ia5_string(der.Element(der.CLASS_UNIVERSAL, False, der.TAG_IA5_STRING, name.content, b""))
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text) or not _valid_percent_escapes(text):
+        raise X509Error("URI GeneralName is not a URL")
+    return text
+
+
 def crl_distribution_point_uris(certificate: Certificate) -> tuple[str, ...]:
     """The URI names of the certificate's CRL distribution points, in order; empty when there is no extension.
 
-    Only a ``fullName`` holding a ``uniformResourceIdentifier`` contributes;
-    a distribution point named relative to the CRL issuer and every other
-    GeneralName form (including the X.400 and EDI party forms that have no
-    URI) are skipped. A structure that is not a well-formed
-    CRLDistributionPoints, including a DistributionPoint whose optional
-    fields repeat or are out of order, is an X509Error.
+    Only a ``fullName`` holding a ``uniformResourceIdentifier`` contributes,
+    decoded under the same rules as a subjectAltName URI; a distribution
+    point named relative to the CRL issuer and every other GeneralName
+    form (including the X.400 and EDI party forms that have no URI) are
+    skipped. A structure that is not a well-formed CRLDistributionPoints,
+    including a DistributionPoint whose optional fields repeat or are out
+    of order, is an X509Error.
     """
     ext = extension(certificate, OID_CRL_DISTRIBUTION_POINTS)
     if ext is None:
@@ -273,15 +281,8 @@ def _crl_distribution_point_uris(value: bytes) -> tuple[str, ...]:
             for general_name in der.children(name):
                 if general_name.tag_class != der.CLASS_CONTEXT or general_name.tag > 8:
                     raise X509Error("GeneralName has an unexpected tag")
-                if general_name.tag != _GENERAL_NAME_URI:
-                    continue
-                if general_name.constructed:
-                    raise X509Error("URI GeneralName must be primitive")
-                out.append(
-                    der.ia5_string(
-                        der.Element(der.CLASS_UNIVERSAL, False, der.TAG_IA5_STRING, general_name.content, b"")
-                    )
-                )
+                if general_name.tag == _GENERAL_NAME_URI:
+                    out.append(_uri_general_name(general_name))
     return tuple(out)
 
 

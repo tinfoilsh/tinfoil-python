@@ -378,6 +378,31 @@ def test_crl_distribution_point_fields_are_unique_and_ordered() -> None:
         c.crl_distribution_point_uris(with_distribution_points(_sequence(full_name, _context(3, b""))))
 
 
+def test_crl_distribution_point_uris_are_decoded_like_subject_alt_name_uris() -> None:
+    """A distribution point URI with an ASCII control character or a malformed percent escape is rejected with the
+    same error as the subjectAltName URI that carries it, and a constructed or non-IA5 URI is malformed."""
+    uri = "https://crl.example.test/a_b.crl"
+    assert c.crl_distribution_point_uris(
+        with_distribution_points(_sequence(_context(0, _context(0, _uri_name(uri.encode())))))
+    ) == (uri,)
+    san = pki.certificate("san", pki.p256(), sans=[x509.UniformResourceIdentifier(uri)])
+    for bad in (uri.replace("_", "\t"), uri.replace("a_b", "%zz"), uri.replace("_", "\x7f")):
+        with pytest.raises(c.X509Error, match="URI GeneralName is not a URL") as from_san:
+            c.uri_sans(c.parse_certificate(san.der.replace(uri.encode(), bad.encode())))
+        point = _sequence(_context(0, _context(0, _uri_name(bad.encode()))))
+        with pytest.raises(c.X509Error, match="URI GeneralName is not a URL") as from_point:
+            c.crl_distribution_point_uris(with_distribution_points(point))
+        assert str(from_san.value) == str(from_point.value)
+    with pytest.raises(c.X509Error, match="URI GeneralName must be primitive"):
+        c.crl_distribution_point_uris(
+            with_distribution_points(_sequence(_context(0, _context(0, _context(6, _uri_name(uri.encode()))))))
+        )
+    with pytest.raises(c.X509Error, match="cRLDistributionPoints: IA5String"):
+        c.crl_distribution_point_uris(
+            with_distribution_points(_sequence(_context(0, _context(0, _uri_name(uri.encode() + b"\xc3\xa9")))))
+        )
+
+
 def test_valid_at_is_inclusive_and_requires_an_aware_time() -> None:
     parsed = c.parse_certificate(pki.certificate("t", pki.p256()).der)
     assert c.valid_at(parsed, pki.NOT_BEFORE)
