@@ -19,13 +19,92 @@ _PRODUCT_LINE_LAYOUT = {
     "siena": TCB_STRUCT_VERSION_0,
     "turin": TCB_STRUCT_VERSION_1,
 }
-_TURIN_RESERVED_MASK = 0x00FF_FFFF_0000_0000
 _MAX_LEVEL = 127
 """Every level except the microcode level is at most 127."""
+_TCB_MASK = (1 << 64) - 1
 
 
 class TcbError(ValueError):
     """A TCB value that does not fit its layout, or a product line without one."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Level:
+    """One security patch level inside a packed TCB_VERSION."""
+
+    field: str
+    """The ``TCBParts`` attribute that holds the level."""
+    label: str
+    """The level's name in messages and renderings."""
+    shift: int
+    """The position of the level's low bit in the packed value."""
+    width: int = 8
+    """The number of bits that the packed value reserves for the level."""
+
+    @property
+    def mask(self) -> int:
+        return (1 << self.width) - 1
+
+
+@dataclass(frozen=True, slots=True)
+class _Layout:
+    """The levels of one TCB struct version, in ascending bit order."""
+
+    name: str
+    levels: tuple[_Level, ...]
+    undefined_levels_error: str
+    """The error for a level that this layout does not carry being non-zero."""
+
+    @property
+    def reserved_mask(self) -> int:
+        """The bits of the packed value that no level covers, which must be zero."""
+        covered = 0
+        for level in self.levels:
+            covered |= level.mask << level.shift
+        return _TCB_MASK & ~covered
+
+    def fields(self) -> frozenset[str]:
+        return frozenset(level.field for level in self.levels)
+
+
+_LAYOUTS: dict[int, _Layout] = {
+    TCB_STRUCT_VERSION_0: _Layout(
+        name="Milan or Genoa",
+        levels=(
+            _Level("bl_spl", "BlSpl", 0),
+            _Level("tee_spl", "TeeSpl", 8),
+            _Level("spl4", "Spl4", 16),
+            _Level("spl5", "Spl5", 24),
+            _Level("spl6", "Spl6", 32),
+            _Level("spl7", "Spl7", 40),
+            _Level("snp_spl", "SnpSpl", 48),
+            _Level("ucode_spl", "UcodeSpl", 56),
+        ),
+        undefined_levels_error="FmcSpl is not defined for TCB struct version 0",
+    ),
+    TCB_STRUCT_VERSION_1: _Layout(
+        name="Turin",
+        levels=(
+            _Level("fmc_spl", "FmcSpl", 0),
+            _Level("bl_spl", "BlSpl", 8),
+            _Level("tee_spl", "TeeSpl", 16),
+            _Level("snp_spl", "SnpSpl", 24),
+            _Level("ucode_spl", "UcodeSpl", 56),
+        ),
+        undefined_levels_error="reserved Turin TCB components must be zero",
+    ),
+}
+
+_LEVELS_CHECKED: tuple[_Level, ...] = (
+    *(level for level in _LAYOUTS[TCB_STRUCT_VERSION_0].levels[-2::-1]),
+    _LAYOUTS[TCB_STRUCT_VERSION_1].levels[0],
+)
+"""Every level but the microcode level, in the order that packing range-checks them."""
+
+_ALL_FIELDS: tuple[str, ...] = tuple(
+    dict.fromkeys(level.field for layout in _LAYOUTS.values() for level in layout.levels)
+)
+"""Every level field of any layout, in the order that the comparison applies."""
 
 
 def tcb_struct_version(product_line: str) -> int:
@@ -45,31 +124,14 @@ class TCBVersionStruct:
 
     def to_parts(self) -> TCBParts:
         """Unpack the levels; a Turin value with its reserved bits 55 to 32 set is an error."""
-        if self.version == TCB_STRUCT_VERSION_1:
-            reserved = self.tcb & _TURIN_RESERVED_MASK
-            if reserved:
-                raise TcbError(f"non-zero reserved bits in Turin TCB: 0x{reserved:x}")
-            return TCBParts(
-                version=self.version,
-                ucode_spl=(self.tcb >> 56) & 0xFF,
-                snp_spl=(self.tcb >> 24) & 0xFF,
-                tee_spl=(self.tcb >> 16) & 0xFF,
-                bl_spl=(self.tcb >> 8) & 0xFF,
-                fmc_spl=self.tcb & 0xFF,
-            )
-        if self.version == TCB_STRUCT_VERSION_0:
-            return TCBParts(
-                version=self.version,
-                ucode_spl=(self.tcb >> 56) & 0xFF,
-                snp_spl=(self.tcb >> 48) & 0xFF,
-                spl7=(self.tcb >> 40) & 0xFF,
-                spl6=(self.tcb >> 32) & 0xFF,
-                spl5=(self.tcb >> 24) & 0xFF,
-                spl4=(self.tcb >> 16) & 0xFF,
-                tee_spl=(self.tcb >> 8) & 0xFF,
-                bl_spl=self.tcb & 0xFF,
-            )
-        raise TcbError(f"unknown TCB version: {self.version}")
+        layout = _LAYOUTS.get(self.version)
+        if layout is None:
+            raise TcbError(f"unknown TCB version: {self.version}")
+        reserved = self.tcb & layout.reserved_mask
+        if reserved:
+            raise TcbError(f"non-zero reserved bits in {layout.name} TCB: 0x{reserved:x}")
+        levels = {level.field: (self.tcb >> level.shift) & level.mask for level in layout.levels}
+        return TCBParts(version=self.version, **levels)
 
     def with_tcb(self, tcb: int) -> TCBVersionStruct:
         """Another packed value in this layout."""
@@ -79,11 +141,10 @@ class TCBVersionStruct:
         return self.version == other.version
 
     def __str__(self) -> str:
-        if self.version == TCB_STRUCT_VERSION_0:
-            return f"Milan or Genoa TCB: 0x{self.tcb:x}"
-        if self.version == TCB_STRUCT_VERSION_1:
-            return f"Turin TCB: 0x{self.tcb:x}"
-        return "Unknown TCB"
+        layout = _LAYOUTS.get(self.version)
+        if layout is None:
+            return "Unknown TCB"
+        return f"{layout.name} TCB: 0x{self.tcb:x}"
 
 
 def new_tcb_version_struct(product_line: str, tcb: int) -> TCBVersionStruct:
@@ -109,51 +170,25 @@ class TCBParts:
     def to_version_struct(self) -> TCBVersionStruct:
         """Pack the levels; levels above 127 (other than the microcode level) and levels that the layout does not
         carry are errors."""
-        for name, value in (
-            ("SnpSpl", self.snp_spl),
-            ("Spl7", self.spl7),
-            ("Spl6", self.spl6),
-            ("Spl5", self.spl5),
-            ("Spl4", self.spl4),
-            ("TeeSpl", self.tee_spl),
-            ("BlSpl", self.bl_spl),
-            ("FmcSpl", self.fmc_spl),
-        ):
+        for level in _LEVELS_CHECKED:
+            value: int = getattr(self, level.field)
             if value > _MAX_LEVEL:
-                raise TcbError(f"{name} TCB part is {value}. Expect 0-{_MAX_LEVEL}")
-        if self.version == TCB_STRUCT_VERSION_0:
-            if self.fmc_spl != 0:
-                raise TcbError("FmcSpl is not defined for TCB struct version 0")
-            tcb = (
-                (self.ucode_spl << 56)
-                | (self.snp_spl << 48)
-                | (self.spl7 << 40)
-                | (self.spl6 << 32)
-                | (self.spl5 << 24)
-                | (self.spl4 << 16)
-                | (self.tee_spl << 8)
-                | self.bl_spl
-            )
-            return TCBVersionStruct(version=self.version, tcb=tcb)
-        if self.version == TCB_STRUCT_VERSION_1:
-            if self.spl4 or self.spl5 or self.spl6 or self.spl7:
-                raise TcbError("reserved Turin TCB components must be zero")
-            tcb = (
-                (self.ucode_spl << 56) | (self.snp_spl << 24) | (self.tee_spl << 16) | (self.bl_spl << 8) | self.fmc_spl
-            )
-            return TCBVersionStruct(version=self.version, tcb=tcb)
-        raise TcbError(f"unsupported TCB struct version: {self.version}")
+                raise TcbError(f"{level.label} TCB part is {value}. Expect 0-{_MAX_LEVEL}")
+        layout = _LAYOUTS.get(self.version)
+        if layout is None:
+            raise TcbError(f"unsupported TCB struct version: {self.version}")
+        carried = layout.fields()
+        if any(getattr(self, field) for field in _ALL_FIELDS if field not in carried):
+            raise TcbError(layout.undefined_levels_error)
+        tcb = 0
+        for level in layout.levels:
+            tcb |= getattr(self, level.field) << level.shift
+        return TCBVersionStruct(version=self.version, tcb=tcb)
 
     def __str__(self) -> str:
-        if self.version == TCB_STRUCT_VERSION_1:
-            return (
-                f"{{FmcSpl:{self.fmc_spl} BlSpl:{self.bl_spl} TeeSpl:{self.tee_spl} SnpSpl:{self.snp_spl} "
-                f"UcodeSpl:{self.ucode_spl}}}"
-            )
-        return (
-            f"{{BlSpl:{self.bl_spl} TeeSpl:{self.tee_spl} Spl4:{self.spl4} Spl5:{self.spl5} Spl6:{self.spl6} "
-            f"Spl7:{self.spl7} SnpSpl:{self.snp_spl} UcodeSpl:{self.ucode_spl}}}"
-        )
+        layout = _LAYOUTS.get(self.version, _LAYOUTS[TCB_STRUCT_VERSION_0])
+        rendered = " ".join(f"{level.label}:{getattr(self, level.field)}" for level in layout.levels)
+        return f"{{{rendered}}}"
 
 
 def new_tcb_parts(product_line: str, parts: TCBParts) -> TCBParts:
@@ -165,15 +200,6 @@ def new_tcb_parts(product_line: str, parts: TCBParts) -> TCBParts:
 
 def tcb_parts_le(lower: TCBParts, higher: TCBParts) -> bool:
     """Whether every level of ``lower`` is at most the corresponding level of ``higher``, in the same layout."""
-    return (
-        lower.version == higher.version
-        and lower.ucode_spl <= higher.ucode_spl
-        and lower.snp_spl <= higher.snp_spl
-        and lower.spl7 <= higher.spl7
-        and lower.spl6 <= higher.spl6
-        and lower.spl5 <= higher.spl5
-        and lower.spl4 <= higher.spl4
-        and lower.tee_spl <= higher.tee_spl
-        and lower.bl_spl <= higher.bl_spl
-        and lower.fmc_spl <= higher.fmc_spl
+    return lower.version == higher.version and all(
+        getattr(lower, field) <= getattr(higher, field) for field in _ALL_FIELDS
     )
