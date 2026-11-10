@@ -11,7 +11,7 @@ name = "tinfoil"
 version = "0.15.0"
 description = "Python client for Tinfoil"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "openai>=3.26.0",
     "httpx>=0.28",
@@ -19,7 +19,7 @@ dependencies = [
     "requests>=2.31.0",
     "cryptography>=42.0.0",
     "pyOpenSSL>=25.0.0",
-    "pyasn1>=0.4.0",
+    "pyasn1>=0.6.5",
     "sigstore>=4.3.0",
     "platformdirs>=4.2.0",
     "urllib3>=2.8.0",
@@ -45,6 +45,7 @@ exclude-newer = "4 days"
 constraint-dependencies = [
     "idna>=3.15", # GHSA-65pc-fj4g-8rjx
     "pyjwt>=2.15.0", # GHSA-42vr-xj54-vc7v, GHSA-x33g-cr3x-6449 (via sigstore)
+    "dnspython>=2.9.0", # GHSA-45c3-73f7-pv4m (via sigstore -> pydantic[email])
 ]
 
 [tool.uv.exclude-newer-package]
