@@ -19,7 +19,6 @@ from typing import Any
 import pytest
 
 import tinfoil_conformance as adapter
-from tinfoil._v3.verifier._document.document import TDX_QUOTE_V1_FORMAT
 
 _CLI = Path(__file__).resolve().parents[2] / "conformance" / "tinfoil_conformance.py"
 
@@ -176,13 +175,6 @@ def test_vector(fixture: dict[str, Any]) -> None:
         assert result.exit_code == adapter.EXIT_UNSUPPORTED, result.output
         assert result.output == {"stage": stage, "accepted": False}
         return
-    if _pending_platform(fixture):
-        # A supported stage reports a platform whose authentication has not
-        # landed yet as a clean unsupported and nothing else; a verdict here
-        # means that the platform has landed and this exemption must go.
-        assert result.exit_code == adapter.EXIT_UNSUPPORTED, result.output
-        assert result.output == {"stage": stage, "accepted": False}
-        return
     assert result.output["stage"] == stage
     if expected["accepted"]:
         assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
@@ -198,25 +190,6 @@ def test_vector(fixture: dict[str, Any]) -> None:
         assert result.output["accepted"] is False
         if expected.get("code"):
             assert result.output["rejection"]["code"] == expected["code"]
-
-
-_PENDING_EVIDENCE_FORMATS = frozenset({TDX_QUOTE_V1_FORMAT})
-"""CPU evidence formats whose authentication the quote stage cannot run yet."""
-_REJECTED_BEFORE_DISPATCH = frozenset({"t24-missing-pcs"})
-"""Fixtures of a pending format that the quote stage rejects for absent endorsement collateral before it reaches
-the platform's authentication, so their verdict is checked like any other."""
-
-
-def _pending_platform(fixture: dict[str, Any]) -> bool:
-    """Whether the fixture's document carries CPU evidence of a format that the quote stage cannot authenticate yet,
-    and the stage gets as far as that authentication."""
-    if fixture["stage"] != adapter.STAGE_AUTHENTICATE_QUOTE or fixture["id"] in _REJECTED_BEFORE_DISPATCH:
-        return False
-    try:
-        doc = json.loads(base64.b64decode(fixture["input"].get("document_b64", "")))
-        return doc["cpu_evidence"]["format"] in _PENDING_EVIDENCE_FORMATS
-    except (ValueError, KeyError, TypeError):
-        return False
 
 
 def _cli(args: list[str], stdin: bytes = b"") -> tuple[int, dict[str, Any]]:

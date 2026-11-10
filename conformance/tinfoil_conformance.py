@@ -241,7 +241,7 @@ def capabilities() -> dict[str, Any]:
         "v3": {
             "supported": bool(STAGES_SUPPORTED),
             "stages_supported": list(STAGES_SUPPORTED),
-            "synthetic_roots": {"amd": True, "intel": False, "sigstore": True},
+            "synthetic_roots": {"amd": True, "intel": True, "sigstore": True},
             "freshness_enforced": True,
             "live_verify": False,
             "channel_binding": "tls-spki",
@@ -438,8 +438,6 @@ def _authenticate_quote(decoded: Input) -> Result:
         authenticated = quote.authenticate(parsed.cpu_evidence(), parsed.cpu_endorsements(), appraisal, options)
     except quote.QuoteError:
         return _rejected(STAGE_AUTHENTICATE_QUOTE, QUOTE_REJECTED)
-    except NotImplementedError:
-        return _unsupported(STAGE_AUTHENTICATE_QUOTE)
     outputs = {"enclave_measurement": _measurement_of(authenticated.measurement)}
     return Result({"stage": STAGE_AUTHENTICATE_QUOTE, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
 
