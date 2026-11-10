@@ -54,7 +54,10 @@ def pin_tls_key(fp: str) -> Callable[[ssl.SSLSocket | ssl.SSLObject], None]:
     The SDK's HTTP clients do this in their transport; a caller that opens
     its own connection does it like this::
 
-        check = pin_tls_key(verified.tls_public_key_fp)
+        fp = verified.tls_public_key_fp
+        if fp is None:  # a valid verification may endorse no TLS key
+            raise RuntimeError("the document endorses no TLS key")
+        check = pin_tls_key(fp)
         context = ssl.create_default_context()
         with socket.create_connection((host, 443)) as raw:
             with context.wrap_socket(raw, server_hostname=host) as tls:

@@ -128,8 +128,8 @@ class Verifier:
         ``freshness_max_age``: how old an authenticated witness or approval
         may be at the verification instant. None keeps the seven-day
         default. Any non-negative ``timedelta`` is honored as given: zero
-        means zero, so every witness is stale, and a negative age is a
-        UsageError.
+        accepts only a witness that is no older than the verification
+        instant, and a negative age is a UsageError.
 
         ``config_signing_keys``: ECDSA P-256 keys (``load_public_key``)
         that replace the public config trust. Configs must be key-signed by
@@ -205,13 +205,18 @@ class Verifier:
         ``org/project[@revision][@sha256:digest]`` reference; when ``repo``
         is set and this verifier has a config authorizer, which cannot
         authenticate a repository pin; or when this verifier has an embedded
-        config whose name or digest ``repo`` does not match. An empty
-        ``repo``, or None, which means the same, accepts configs authorized
-        by the configured registry trust. ``verify_v3`` rejects every such
-        ``repo``, whatever the document. It can still reject a ``repo``
-        that passes: v3 collateral also requires the repo and revision to be
-        valid config identity components, such as lowercase slugs, and v2
-        collateral does not, so that check waits for the document.
+        config whose name or digest ``repo`` does not match. ``verify_v3``
+        rejects every such ``repo``, whatever the document.
+
+        An empty ``repo``, or None, which means the same, pins no
+        repository and passes this check: v3 collateral then accepts
+        configs authorized by the configured registry trust. It can still
+        fail once the document is in hand. v2 collateral requires a
+        repository pin, so ``verify_v3`` raises UsageError for an empty
+        ``repo`` on a v2 document; and v3 collateral also requires the repo
+        and revision to be valid config identity components, such as
+        lowercase slugs, which v2 collateral does not, so that check waits
+        for the document.
         """
         reference_pins(self._trust, _repo(repo))
 
@@ -220,8 +225,10 @@ class Verifier:
         carries, at the current time.
 
         ``repo`` pins the expected repository or registry project as
-        ``org/project[@revision][@sha256:digest]``; an empty ``repo``, or
-        None, which means the same, accepts authorized registry ids. An
+        ``org/project[@revision][@sha256:digest]``. An empty ``repo``, or
+        None, which means the same, pins no repository: v3 collateral then
+        accepts configs authorized by the configured registry trust, and
+        v2 collateral, which requires a repository pin, is a UsageError. An
         embedded config instead authorizes its exact caller-supplied bytes.
         A config authorizer requires an empty ``repo`` and owns config
         authorization.
@@ -229,9 +236,12 @@ class Verifier:
         The caller owns both expectations that cannot come from the
         document: the nonce it generated, and any additional workload
         constraints. On success it must bind traffic to the returned keys
-        and enforce a non-None ``freshness_expires_at``. With all references
-        embedded, the caller owns renewal and cache lifetime; None is not a
-        guarantee of unlimited evidence validity.
+        and enforce a non-None ``freshness_expires_at``. A None deadline
+        means that no endorsed reference supplied an approval time, as when
+        every reference is embedded or a caller-authorized config is
+        combined with an embedded runtime and platform; the caller then
+        owns renewal and cache lifetime, and None is not a guarantee of
+        unlimited evidence validity.
         """
         # The only clock read.
         return self.verify_v3_at(doc, nonce, repo, datetime.now(UTC))
@@ -240,6 +250,8 @@ class Verifier:
         """``verify_v3`` for an archived document. ``verification_time`` replaces the current time in every
         time-bound check: the freshness witnesses and approvals, and the vendor certificate and CRL validity windows
         of the CPU evidence. ``metadata.verified_at`` reports it, and a naive or missing time is a UsageError.
+        ``repo`` means what it means to ``verify_v3``: an empty ``repo``, or None, pins no repository, which v3
+        collateral accepts and v2 collateral rejects with a UsageError.
 
         The caller must authenticate ``verification_time`` independently,
         for example from a trusted timestamp recorded when the document was
@@ -446,7 +458,8 @@ def _verify_v3(trust: TrustPolicy, doc_bytes: bytes, nonce: bytes, repo: str, no
 
 def _code_references(trust: TrustPolicy, doc: Document, repo: str, now: datetime) -> EndorsementResult:
     """Resolve v2 collateral: the code release and the platform endorsements, each with its freshness witness
-    appraised at ``now``. An invalid repository reference is a UsageError."""
+    appraised at ``now``. v2 collateral requires a repository pin, so an invalid or empty ``repo`` (what None
+    normalizes to) is a UsageError."""
     if requires_config_collateral(trust):
         raise ReferencesError(f"configured trust requires {FORMAT_V3}")
     code_ref = doc.sigstore_code()

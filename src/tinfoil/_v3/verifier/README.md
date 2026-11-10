@@ -21,6 +21,10 @@ Everything documented here is importable from `tinfoil.verifier`; the
 `_`-prefixed submodules are implementation detail and may change without
 notice.
 
+Until the package is promoted to that name, it imports as
+`tinfoil._v3.verifier`; every example below works with that path
+substituted.
+
 ## Fetch, then verify
 
 Verification is three steps: generate a nonce, fetch the document for that
@@ -43,7 +47,9 @@ def fetch_and_verify(host: str, repo: str) -> Verification:
 
 `repo` is `org/repo`, optionally pinned to a revision or a digest as
 `org/repo@v1.2.3` or `org/repo@sha256:<hex>`. An empty string or `None`
-pins nothing and accepts any config that the public registry authorized.
+pins no repository. A document that carries v3 collateral is then accepted
+on any config that the public registry authorized; one that carries v2
+collateral requires a repository pin, so the call is a `UsageError`.
 
 A successful return is not the end of the caller's job. The returned
 `Verification` proves facts about the enclave that served the document; the
@@ -55,9 +61,12 @@ caller must bind its traffic to them:
 - `verified.hpke_public_key`: encrypt request bodies to this key when the
   transport uses HPKE.
 - `verified.freshness_expires_at`: stop using the result at this instant
-  and verify a fresh document. It is `None` only when every reference value
-  was embedded by the caller; then renewal is the caller's own policy, and
-  `None` is not a promise that the evidence stays valid.
+  and verify a fresh document. It is `None` when no endorsed reference
+  value supplied an approval deadline, which happens when every reference
+  value was embedded by the caller, and also when a caller-authorized
+  config is combined with embedded runtime and platform references. Then
+  renewal is the caller's own policy, and `None` is not a promise that the
+  evidence stays valid.
 
 ```python
 from datetime import UTC, datetime
@@ -96,7 +105,7 @@ freshness bound. Every option is keyword-only:
 | Option | Effect |
 | --- | --- |
 | `pinned_registers` | Registers that the enclave must have measured, on top of what the release fixes. |
-| `freshness_max_age` | How old a witness or approval may be. `None` keeps seven days; `timedelta(0)` rejects every witness. |
+| `freshness_max_age` | How old a witness or approval may be. `None` keeps seven days; `timedelta(0)` accepts only a witness that is no older than the verification instant. |
 | `config_signing_keys` | ECDSA P-256 keys that replace the public config trust. |
 | `freshness_signing_keys` | ECDSA P-256 keys that replace the public keys for runtime and platform freshness approvals. |
 | `config_registry_ids` | The registries whose certified approvals are accepted, in place of the public registry alone. |
@@ -192,12 +201,14 @@ pretty = verified.to_json(indent=2)
 ```
 
 The TLS fingerprint and HPKE key are the two crypto-material items that
-every client needs; any other endorsed key is read by id and format:
+every client needs, and the record names them. Any endorsed item is also
+read by id and format; the TLS item carries the SPKI fingerprint format:
 
 ```python
-from tinfoil.verifier import KEY_SPKI_V1_FORMAT
+from tinfoil.verifier import KEY_SPKI_FP_SHA256_V1_FORMAT
 
-tls_spki = verified.crypto_material_data("tls", KEY_SPKI_V1_FORMAT)
+tls_fp = verified.tls_public_key_fp
+same_fp = verified.crypto_material_data("tls", KEY_SPKI_FP_SHA256_V1_FORMAT)
 ```
 
 `None` means that the document endorses no such item.

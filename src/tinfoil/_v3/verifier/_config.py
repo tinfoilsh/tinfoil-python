@@ -140,8 +140,8 @@ def requires_config_collateral(trust: TrustPolicy) -> bool:
 
 
 def freshness_expiration(max_age: timedelta, *approved_at: datetime | None) -> datetime | None:
-    """The deadline that the earliest authenticated approval time sets, or None when every component was embedded.
-    Uses authenticated witness times, never the local verification time."""
+    """The deadline that the earliest authenticated approval time sets, or None when no component supplied one, as
+    when every component was embedded. Uses authenticated witness times, never the local verification time."""
     known = [at for at in approved_at if at is not None]
     if not known:
         return None

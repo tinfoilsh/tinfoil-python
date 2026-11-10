@@ -116,8 +116,10 @@ class Verification:
     freshness_expires_at: datetime | None = None
     """The earlier authenticated code/platform witness deadline. Cached verification must not authorize new
     requests at or after this time; re-verifying the same witness does not extend it. Config verification uses the
-    earliest config, platform or runtime approval deadline. Embedded components add no deadline; all-embedded
-    verification has none."""
+    earliest config, platform or runtime approval deadline. None means that no endorsed reference supplied an
+    approval deadline: embedded components add none, and neither does a caller-authorized config, so a verification
+    with every reference embedded, or with a caller-authorized config and an embedded runtime and platform, has
+    none. Renewal is then the caller's own policy; None is not a promise that the evidence stays valid."""
     config: ConfigVerification | None = None
     """The config bound to hardware; None for verification against a code release, which has no config."""
     runtime: ArtifactVerification | None = None
