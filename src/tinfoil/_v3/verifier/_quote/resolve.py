@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING
 
 from tinfoil._v3.verifier._measurement import SEVSNP, TDX, Expected, ExpectedSEVSNP, ExpectedTDX, Measurement
@@ -13,8 +13,10 @@ if TYPE_CHECKING:
 
 MR_CONFIG_ID_SIZE = 48
 
-_TDX_REGISTERS = ("mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3")
-_TDX_LABELS = ("MRTD", "RTMR0", "RTMR1", "RTMR2", "RTMR3")
+# The register names come from the dataclass so that a register added to it cannot be left out of the pin merge or
+# the completeness check; each label is the register's conventional upper-case name (MRTD, RTMR0, ...).
+_TDX_REGISTERS = tuple(field.name for field in fields(ExpectedTDX))
+_TDX_LABELS = tuple(name.upper() for name in _TDX_REGISTERS)
 _LAUNCH_LABEL = "launch measurement"
 
 

@@ -99,6 +99,10 @@ def test_complete_requires_every_register() -> None:
     assert complete(ExpectedSEVSNP(launch=REGISTER)) == SEVSNP(launch=REGISTER)
     with pytest.raises(AssemblyError, match="nothing fixes the expected MRTD, RTMR0, RTMR3"):
         complete(ExpectedTDX(rtmr1=REGISTER, rtmr2=REGISTER))
+    # Every register of the expected measurement is checked, under its upper-case label.
+    every_label = ", ".join(field.name.upper() for field in dataclasses.fields(ExpectedTDX))
+    with pytest.raises(AssemblyError, match=f"nothing fixes the expected {every_label}$"):
+        complete(ExpectedTDX())
     with pytest.raises(AssemblyError, match="nothing fixes the expected launch measurement"):
         complete(ExpectedSEVSNP())
     with pytest.raises(AssemblyError, match="unsupported expected measurement"):
