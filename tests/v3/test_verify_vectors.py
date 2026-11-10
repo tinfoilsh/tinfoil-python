@@ -99,9 +99,11 @@ def test_full_verify_vectors(fixture: dict[str, Any]) -> None:
         "tls_public_key_fp": verified.tls_public_key_fp,
         "hpke_public_key": verified.hpke_public_key,
     }
-    for key, want in expected.items():
-        if key in facts:
-            assert facts[key] == want, key
+    expectations = {key: want for key, want in expected.items() if key not in ("accepted", "code")}
+    missing = set(expectations) - set(facts)
+    assert not missing, f"the fixture expects facts that this test does not compute: {sorted(missing)}"
+    for key, want in expectations.items():
+        assert facts[key] == want, key
     assert verified.metadata.verified_at == now
     assert verified.freshness_expires_at is not None, "every vector's references are endorsed, so a deadline applies"
     assert verified.freshness_expires_at >= now
