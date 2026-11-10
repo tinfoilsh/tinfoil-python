@@ -206,6 +206,22 @@ class TestVerifyPckCertificateChain:
         with pytest.raises(TdxVerificationError, match="not valid at"):
             verify_pck_certificate_chain(self.chain(), [ROOT], root_crl, pck_crl, tb.NOW + timedelta(days=400))
 
+    def test_leaf_key_usage_must_allow_digital_signatures(self) -> None:
+        """A keyUsage extension on the leaf must allow digitalSignature; a leaf without the extension is allowed."""
+        root_crl, pck_crl = crls()
+
+        def chain_with(key_usage: x509.KeyUsage | None) -> PCKCertificateChain:
+            pck = tb.pck_certificate(SCENARIO.intel.platform_ca, SCENARIO.pck_key, key_usage=key_usage)
+            return PCKCertificateChain(
+                pck_cert=pki.load(pck.der), intermediate_cert=pki.load(SCENARIO.intel.platform_ca.der), root_cert=ROOT
+            )
+
+        with pytest.raises(TdxVerificationError, match="key usage does not allow digital signatures"):
+            verify_pck_certificate_chain(chain_with(tb.ENCIPHERMENT_USAGE), [ROOT], root_crl, pck_crl, tb.NOW)
+        with pytest.raises(TdxVerificationError, match="key usage does not allow digital signatures"):
+            verify_pck_certificate_chain(chain_with(pki.CA_USAGE), [ROOT], root_crl, pck_crl, tb.NOW)
+        verify_pck_certificate_chain(chain_with(None), [ROOT], root_crl, pck_crl, tb.NOW)
+
     def test_revocation(self) -> None:
         root_crl, pck_crl = crls(pck_revoked=[4])
         with pytest.raises(TdxVerificationError, match=r"PCK Leaf certificate .* was revoked"):

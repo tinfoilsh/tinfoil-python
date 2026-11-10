@@ -48,6 +48,12 @@ from tinfoil._v3.verifier._x509.crl import parse_revocation_list
 
 SCENARIO = tb.Scenario()
 ROOTS = (pki.load(SCENARIO.intel.root.der),)
+PLATFORM_TCB: dict[str, Any] = tb.tcb_level(list(tb.CPU_SVN_COMPONENTS), tb.PCE_SVN, tb.TDX_COMPONENTS)["tcb"]
+
+
+def level(tcb: dict[str, Any] | None = None, **members: Any) -> dict[str, Any]:
+    """A TCB Info level whose ``tcb`` is complete, with ``tcb`` members and level members replaced as given."""
+    return {"tcb": {**PLATFORM_TCB, **(tcb or {})}, **members}
 
 
 def tcb_info_body(**changes: Any) -> bytes:
@@ -182,11 +188,41 @@ class TestParseTcbInfoResponse:
         with pytest.raises(CollateralError, match="'mrsigner' is not a hex string"):
             parse_tcb_info_response(edited(tcb_info_body(), tdxModule={"mrsigner": None}))
         with pytest.raises(CollateralError, match="'tcbStatus' is not a status string"):
-            parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[{"tcbStatus": None}]))
+            parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[level(tcbStatus=None)]))
 
     def test_level_without_status(self) -> None:
-        info = parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[{"tcb": {"pcesvn": 1}}])).tcb_info
-        assert info.tcb_levels[0] == TcbLevel(tcb=Tcb(pce_svn=1))
+        info = parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[level(tcb={"pcesvn": 1})])).tcb_info
+        assert info.tcb_levels[0] == TcbLevel(
+            tcb=Tcb(components(list(tb.CPU_SVN_COMPONENTS)), 1, components(tb.TDX_COMPONENTS))
+        )
+
+    @pytest.mark.parametrize("member", ["sgxtcbcomponents", "pcesvn", "tdxtcbcomponents"])
+    def test_platform_level_requires_the_compared_tcb_members(self, member: str) -> None:
+        """A level without a member that the appraisal compares would be reached by every quote."""
+        tcb = dict(PLATFORM_TCB)
+        del tcb[member]
+        with pytest.raises(CollateralError, match=f"TCB has no '{member}'"):
+            parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[{"tcb": tcb, "tcbStatus": "UpToDate"}]))
+        with pytest.raises(CollateralError, match=f"TCB has no '{member}'"):
+            parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[level(tcb={member: None})]))
+
+    def test_platform_level_requires_a_tcb(self) -> None:
+        for levels in ([{"tcbStatus": "UpToDate"}], [{"tcb": None, "tcbStatus": "UpToDate"}]):
+            with pytest.raises(CollateralError, match="TCB level has no 'tcb'"):
+                parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=levels))
+
+    def test_module_identity_level_requires_an_isvsvn(self) -> None:
+        def identities(levels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [{"id": "TDX_03", "tcbLevels": levels}]
+
+        with pytest.raises(CollateralError, match="TCB has no 'isvsvn'"):
+            parse_tcb_info_response(edited(tcb_info_body(), tdxModuleIdentities=identities([{"tcb": {}}])))
+        with pytest.raises(CollateralError, match="TCB has no 'isvsvn'"):
+            parse_tcb_info_response(
+                edited(tcb_info_body(), tdxModuleIdentities=identities([{"tcb": {"isvsvn": None}}]))
+            )
+        with pytest.raises(CollateralError, match="TCB level has no 'tcb'"):
+            parse_tcb_info_response(edited(tcb_info_body(), tdxModuleIdentities=identities([{}])))
 
     @pytest.mark.parametrize(
         ("members", "match"),
@@ -201,18 +237,20 @@ class TestParseTcbInfoResponse:
             ({"issueDate": "2025-12-17"}, "'issueDate'"),
             ({"tcbEvaluationDataNumber": "18"}, "'tcbEvaluationDataNumber' is not a number"),
             ({"tcbEvaluationDataNumber": 1e3}, "not an integer"),
+            ({"tcbEvaluationDataNumber": -5}, "'tcbEvaluationDataNumber': JSON number -5 is negative"),
+            ({"tcbEvaluationDataNumber": 2**64}, "overflows uint64"),
             ({"tdxModule": {"mrsigner": "zz"}}, "'mrsigner': invalid hex byte"),
             ({"tdxModule": {"attributes": "abc"}}, "odd length"),
             ({"tdxModule": "x"}, "tdxModule is not a JSON object"),
             ({"tdxModuleIdentities": {}}, "'tdxModuleIdentities' is not an array"),
-            ({"tcbLevels": [{"tcbStatus": "Fine"}]}, "unexpected tcb status found: 'Fine'"),
-            ({"tcbLevels": [{"tcbStatus": 1}]}, "'tcbStatus' is not a status string"),
-            ({"tcbLevels": [{"tcb": {"pcesvn": 65536}}]}, "overflows uint16"),
-            ({"tcbLevels": [{"tcb": {"sgxtcbcomponents": [{"svn": 256}]}}]}, "overflows uint8"),
-            ({"tcbLevels": [{"tcb": {"sgxtcbcomponents": [{"svn": "1"}]}}]}, "'svn' is not a number"),
-            ({"tcbLevels": [{"tcb": {"isvsvn": -1}}]}, "negative"),
-            ({"tcbLevels": [{"advisoryIDs": [1]}]}, "not an array of strings"),
-            ({"tcbLevels": [{"tcbDate": 1}]}, "'tcbDate' is not a string"),
+            ({"tcbLevels": [level(tcbStatus="Fine")]}, "unexpected tcb status found: 'Fine'"),
+            ({"tcbLevels": [level(tcbStatus=1)]}, "'tcbStatus' is not a status string"),
+            ({"tcbLevels": [level(tcb={"pcesvn": 65536})]}, "overflows uint16"),
+            ({"tcbLevels": [level(tcb={"sgxtcbcomponents": [{"svn": 256}]})]}, "overflows uint8"),
+            ({"tcbLevels": [level(tcb={"sgxtcbcomponents": [{"svn": "1"}]})]}, "'svn' is not a number"),
+            ({"tcbLevels": [level(tcb={"isvsvn": -1})]}, "negative"),
+            ({"tcbLevels": [level(advisoryIDs=[1])]}, "not an array of strings"),
+            ({"tcbLevels": [level(tcbDate=1)]}, "'tcbDate' is not a string"),
             ({"tcbLevels": [1]}, "TCB level is not a JSON object"),
         ],
     )
@@ -220,9 +258,21 @@ class TestParseTcbInfoResponse:
         with pytest.raises(CollateralError, match=match):
             parse_tcb_info_response(edited(tcb_info_body(), **members))
 
-    def test_negative_evaluation_number_parses(self) -> None:
-        info = parse_tcb_info_response(edited(tcb_info_body(), tcbEvaluationDataNumber=-5)).tcb_info
-        assert info.tcb_evaluation_data_number == -5
+    def test_evaluation_number_is_optional_but_never_negative(self) -> None:
+        assert (
+            parse_tcb_info_response(
+                edited(tcb_info_body(), tcbEvaluationDataNumber=0)
+            ).tcb_info.tcb_evaluation_data_number
+            == 0
+        )
+        assert (
+            parse_tcb_info_response(
+                edited(tcb_info_body(), tcbEvaluationDataNumber=None)
+            ).tcb_info.tcb_evaluation_data_number
+            is None
+        )
+        with pytest.raises(CollateralError, match="negative"):
+            parse_tcb_info_response(edited(tcb_info_body(), tcbEvaluationDataNumber=-1))
 
     def test_member_names_match_exactly(self) -> None:
         body = tcb_info_body().replace(b'"tcbLevels"', b'"TcbLevels"')
@@ -265,7 +315,11 @@ class TestParseQeIdentityResponse:
         [
             ({"isvprodid": 65536}, "overflows uint16"),
             ({"mrsigner": "DCDC "}, "'mrsigner'"),
+            ({"tcbEvaluationDataNumber": -1}, "'tcbEvaluationDataNumber': JSON number -1 is negative"),
             ({"tcbLevels": [{"tcb": {"isvsvn": 4294967296}}]}, "overflows uint32"),
+            ({"tcbLevels": [{"tcb": {"isvsvn": None}}]}, "TCB has no 'isvsvn'"),
+            ({"tcbLevels": [{"tcb": {}, "tcbStatus": "UpToDate"}]}, "TCB has no 'isvsvn'"),
+            ({"tcbLevels": [{"tcbStatus": "UpToDate"}]}, "TCB level has no 'tcb'"),
         ],
     )
     def test_wrong_types_reject(self, members: dict[str, Any], match: str) -> None:
@@ -614,8 +668,10 @@ class TestVerifyQeReport:
         with pytest.raises(CollateralError, match="found ''"):
             verify_qe_report(self.report(), self.identity(levels=[{"tcb": {"isvsvn": 1}}]))
 
-    def test_absent_isvsvn_is_zero(self) -> None:
-        verify_qe_report(self.report(isv_svn=0), self.identity(levels=[{"tcb": {}, "tcbStatus": "UpToDate"}]))
+    def test_absent_isvsvn_never_reaches_appraisal(self) -> None:
+        """A level without an ISV SVN would be reached by every QE; parsing rejects it before any comparison."""
+        with pytest.raises(CollateralError, match="TCB has no 'isvsvn'"):
+            self.identity(levels=[{"tcb": {}, "tcbStatus": "UpToDate"}])
 
 
 def test_status_values() -> None:

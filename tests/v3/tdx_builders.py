@@ -80,6 +80,19 @@ MR_SEAM = bytes([0xAA]) * 48
 
 _SGX_OID = "1.2.840.113741.1.13.1"
 
+ENCIPHERMENT_USAGE = x509.KeyUsage(
+    digital_signature=False,
+    content_commitment=False,
+    key_encipherment=True,
+    data_encipherment=False,
+    key_agreement=False,
+    key_cert_sign=False,
+    crl_sign=False,
+    encipher_only=False,
+    decipher_only=False,
+)
+"""A keyUsage that allows no signatures, for a PCK leaf that must not authenticate a QE report."""
+
 
 # --- DER helpers -------------------------------------------------------------------
 
@@ -216,9 +229,10 @@ def pck_certificate(
     serial: int = 4,
     cn: str = PCK_CN,
     extra_extensions: tuple[tuple[x509.ExtensionType, bool], ...] = (),
+    key_usage: x509.KeyUsage | None = pki.SIGNING_USAGE,
 ) -> pki.Issued:
     """A PCK leaf with the six extensions of the profile: AKI, CDP, SKI, keyUsage, basicConstraints and the SGX
-    extension."""
+    extension. ``key_usage`` None leaves the keyUsage extension out."""
     key = key or pki.p256()
     issuer_cert = pki.load(issuer.der)
     value = extension_value if extension_value is not None else sgx_extension()
@@ -233,7 +247,7 @@ def pck_certificate(
         cn,
         key,
         issuer,
-        key_usage=pki.SIGNING_USAGE,
+        key_usage=key_usage,
         serial=serial,
         extra=extra,
         not_before=now - timedelta(days=365),

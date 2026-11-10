@@ -65,6 +65,15 @@ class TestModuleIdentityMatching:
         with pytest.raises(CollateralError, match="ISVSVN \\(1\\)"):
             get_matching_tdx_module_tcb_level(identities, svn(1, 3))
 
+    def test_tee_tcb_svn_too_short_for_a_module_version_rejects(self) -> None:
+        """A one-byte value would otherwise name the module ``TDX_`` from its missing second byte, and an empty one
+        has no ISV SVN at all; neither may select a level."""
+        identities = (identity("TDX_"), identity("TDX_03"))
+        for short in (b"", b"\x03"):
+            with pytest.raises(CollateralError, match=r"TEE TCB SVN of [01] bytes is too short to name a TDX module"):
+                get_matching_tdx_module_tcb_level(identities, short)
+        assert get_matching_tdx_module_tcb_level(identities, bytes([3, 3])) == identities[1].tcb_levels[0]
+
     def test_returns_the_level_with_its_status(self) -> None:
         level = get_matching_tdx_module_tcb_level((identity("TDX_03", status=TcbStatus.OUT_OF_DATE),), svn(3, 3))
         assert level.tcb_status == TcbStatus.OUT_OF_DATE

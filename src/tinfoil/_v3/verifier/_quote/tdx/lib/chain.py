@@ -38,6 +38,7 @@ from tinfoil._v3.verifier._x509.certificate import (
     X509Error,
     basic_constraints,
     can_issue_certificates,
+    can_sign_data,
     issuer_name,
     parse_certificate,
     signature_algorithm,
@@ -212,8 +213,8 @@ def verify_pck_certificate_chain(
     pck_crl: RevocationList,
     now: datetime,
 ) -> None:
-    """Verify the quote's chain: each certificate's profile, the path from the leaf to a trusted root at ``now``,
-    both CRLs, and that neither the intermediate nor the leaf is revoked."""
+    """Verify the quote's chain: each certificate's profile, that the leaf's key may sign data, the path from the
+    leaf to a trusted root at ``now``, both CRLs, and that neither the intermediate nor the leaf is revoked."""
     root, intermediate, pck = chain.root_cert, chain.intermediate_cert, chain.pck_cert
     try:
         validate_certificate(root, root, ROOT_CERT_PHRASE)
@@ -227,6 +228,10 @@ def verify_pck_certificate_chain(
         validate_certificate(pck, intermediate, PCK_CERT_PHRASE)
     except TdxVerificationError as err:
         raise TdxVerificationError(f"unable to validate PCK leaf certificate: {err}") from err
+    # The leaf's key authenticates the QE report, so a keyUsage extension on
+    # it must allow digitalSignature.
+    if not can_sign_data(pck):
+        raise TdxVerificationError("PCK leaf certificate's key usage does not allow digital signatures")
     try:
         verify_chain(pck, [intermediate], trusted_roots, now, extended_key_usage=OID_EKU_SERVER_AUTH)
     except X509Error as err:

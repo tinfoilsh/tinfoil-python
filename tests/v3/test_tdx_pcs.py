@@ -99,6 +99,24 @@ def test_header_lookup() -> None:
         captured.header("X-Empty")
 
 
+def test_header_repeated_under_another_case_rejects() -> None:
+    """Two captured names with one canonical form never overwrite each other: the replay refuses to pick one."""
+    replay = PCSReplay(
+        [
+            PCSResponse(
+                url=TCB_URL,
+                headers={"Tcb-Info-Issuer-Chain": ("first",), "tcb-info-issuer-chain": ("second",)},
+                body=b"{}",
+            )
+        ],
+        tb.NOW,
+    )
+    with pytest.raises(PCSReplayError, match="repeated header 'Tcb-Info-Issuer-Chain'"):
+        replay.get(TCB_URL)
+    with pytest.raises(PCSReplayError, match="repeated header 'Tcb-Info-Issuer-Chain'"):
+        replay.tcb_info("90c06f000000")
+
+
 @pytest.mark.parametrize(
     ("name", "canonical"),
     [

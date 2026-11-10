@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from tinfoil._v3.verifier._measurement import TDX
 from tinfoil._v3.verifier._policy import PolicyError, TDXPolicy
 from tinfoil._v3.verifier._quote.tdx.authenticate import Quote
+from tinfoil._v3.verifier._quote.tdx.lib.abi import (
+    MR_CONFIG_ID_SIZE,
+    MR_OWNER_CONFIG_SIZE,
+    MR_OWNER_SIZE,
+    REPORT_DATA_SIZE,
+)
 from tinfoil._v3.verifier._quote.tdx.lib.validate import (
     HeaderOptions,
     PolicyOptions,
@@ -14,11 +20,6 @@ from tinfoil._v3.verifier._quote.tdx.lib.validate import (
     TdxValidationError,
     validate_tdx_policy,
 )
-
-MR_CONFIG_ID_SIZE = 48
-MR_OWNER_SIZE = 48
-MR_OWNER_CONFIG_SIZE = 48
-REPORT_DATA_SIZE = 64
 
 
 class TdxPolicyError(ValueError):

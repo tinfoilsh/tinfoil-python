@@ -125,7 +125,9 @@ class PCSReplay:
 
         A body that parses as a CRL must have ``now`` within its window;
         a body under a URL containing ``crl`` that does not parse as a CRL
-        is an error.
+        is an error. Two captured header names with the same canonical
+        form are an error, so that one cannot silently stand in for the
+        other.
         """
         key = pcs_collateral_key(url)
         response = self._responses.get(key)
@@ -139,7 +141,12 @@ class PCSReplay:
         else:
             if self._now < crl.this_update or self._now > crl.next_update:
                 raise PCSReplayError(f"captured CRL for {url} is outside its validity window")
-        headers = {canonical_header_name(name): tuple(values) for name, values in response.headers.items()}
+        headers: dict[str, tuple[str, ...]] = {}
+        for name, values in response.headers.items():
+            canonical = canonical_header_name(name)
+            if canonical in headers:
+                raise PCSReplayError(f"repeated header {canonical!r} in the captured response for {url}")
+            headers[canonical] = tuple(values)
         return Captured(url=response.url, headers=headers, body=bytes(response.body))
 
     def tcb_info(self, fmspc: str) -> tuple[TdxTcbInfo, bytes, tuple[Certificate, Certificate]]:

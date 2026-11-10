@@ -7,7 +7,10 @@ member name at any depth rejects) and read the way a typed decoder would:
 a member that is absent or null keeps its zero value, a member of the
 wrong type is an error, members that are not read are ignored, and
 member names match exactly. Checks that depend on an absent member fail
-where the value is used.
+where the value is used, with one exception: the TCB members that the
+appraisal compares a quote against (a platform level's component lists
+and PCE SVN, an enclave level's ISV SVN) must be present, because their
+zero values would be reached by every quote.
 """
 
 from __future__ import annotations
@@ -46,6 +49,13 @@ QE_IDENTITY_VERSION = 2
 TCB_SIGNING_PHRASE = "Intel SGX TCB Signing"
 TDX_MODULE_ID_PREFIX = "TDX_"
 MISCSELECT_SIZE = 4
+TDX_MODULE_VERSION_BYTES = 2
+"""The leading TEE TCB SVN bytes that name the TDX module: its ISV SVN, then its major version."""
+
+# The members of a level's ``tcb`` that the appraisal compares against the
+# quote, by the kind of level that carries it.
+_PLATFORM_TCB_MEMBERS = ("sgxtcbcomponents", "pcesvn", "tdxtcbcomponents")
+_ENCLAVE_TCB_MEMBERS = ("isvsvn",)
 
 _HEX = re.compile(r"[0-9a-fA-F]*")
 _RFC3339 = re.compile(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})")
@@ -203,6 +213,14 @@ def _present(obj: _json.JsonObject, key: str) -> _json.JsonValue:
     return obj.get(key)
 
 
+def _required(obj: _json.JsonObject, key: str, what: str) -> _json.JsonValue:
+    """The member's value; absent or null is an error."""
+    value = _present(obj, key)
+    if value is None:
+        raise CollateralError(f"{what} has no '{key}'")
+    return value
+
+
 def _string(obj: _json.JsonObject, key: str, what: str) -> str:
     value = _present(obj, key)
     if value is None:
@@ -224,16 +242,12 @@ def _unsigned(obj: _json.JsonObject, key: str, what: str, bits: int) -> int:
         raise CollateralError(f"{what} '{key}': {err}") from err
 
 
-def _signed64(obj: _json.JsonObject, key: str, what: str) -> int | None:
-    value = _present(obj, key)
-    if value is None:
+def _optional_unsigned(obj: _json.JsonObject, key: str, what: str, bits: int) -> int | None:
+    """Like ``_unsigned``, but an absent or null member is None rather than zero, so that a check which needs the
+    member can tell that it was never published."""
+    if _present(obj, key) is None:
         return None
-    if not isinstance(value, _json.JsonNumber):
-        raise CollateralError(f"{what} '{key}' is not a number")
-    try:
-        return value.to_int(bits=64, signed=True)
-    except _json.JsonError as err:
-        raise CollateralError(f"{what} '{key}': {err}") from err
+    return _unsigned(obj, key, what, bits)
 
 
 def _time(obj: _json.JsonObject, key: str, what: str) -> datetime | None:
@@ -347,8 +361,11 @@ def _parse_tcb_component(value: _json.JsonValue) -> TcbComponent:
     )
 
 
-def _parse_tcb(value: _json.JsonValue) -> Tcb:
+def _parse_tcb(value: _json.JsonValue, required: tuple[str, ...]) -> Tcb:
+    """A level's ``tcb`` object; the ``required`` members, which the appraisal compares, must be present."""
     data = _object(value, "TCB")
+    for key in required:
+        _required(data, key, "TCB")
     return Tcb(
         sgx_tcb_components=tuple(_parse_tcb_component(c) for c in _array(data, "sgxtcbcomponents", "TCB")),
         pce_svn=_unsigned(data, "pcesvn", "TCB", 16),
@@ -357,14 +374,25 @@ def _parse_tcb(value: _json.JsonValue) -> Tcb:
     )
 
 
-def _parse_tcb_level(value: _json.JsonValue) -> TcbLevel:
+def _parse_tcb_level(value: _json.JsonValue, required_tcb_members: tuple[str, ...]) -> TcbLevel:
+    """A TCB level whose ``tcb`` carries at least ``required_tcb_members``."""
     data = _object(value, "TCB level")
     return TcbLevel(
-        tcb=_parse_tcb(_present(data, "tcb")),
+        tcb=_parse_tcb(_required(data, "tcb", "TCB level"), required_tcb_members),
         tcb_date=_string(data, "tcbDate", "TCB level"),
         tcb_status=_status(data, "tcbStatus", "TCB level"),
         advisory_ids=_strings(data, "advisoryIDs", "TCB level"),
     )
+
+
+def _parse_platform_tcb_levels(obj: _json.JsonObject, what: str) -> tuple[TcbLevel, ...]:
+    """The ``tcbLevels`` of a TCB Info: each level's ``tcb`` carries the component lists and PCE SVN."""
+    return tuple(_parse_tcb_level(level, _PLATFORM_TCB_MEMBERS) for level in _array(obj, "tcbLevels", what))
+
+
+def _parse_enclave_tcb_levels(obj: _json.JsonObject, what: str) -> tuple[TcbLevel, ...]:
+    """The ``tcbLevels`` of a QE Identity or TDX module identity: each level's ``tcb`` carries the ISV SVN."""
+    return tuple(_parse_tcb_level(level, _ENCLAVE_TCB_MEMBERS) for level in _array(obj, "tcbLevels", what))
 
 
 def _parse_tdx_module(value: _json.JsonValue) -> TdxModule:
@@ -383,7 +411,7 @@ def _parse_tdx_module_identity(value: _json.JsonValue) -> TdxModuleIdentity:
         mrsigner=_hex(data, "mrsigner", "TDX module identity"),
         attributes=_hex(data, "attributes", "TDX module identity"),
         attributes_mask=_hex(data, "attributesMask", "TDX module identity"),
-        tcb_levels=tuple(_parse_tcb_level(level) for level in _array(data, "tcbLevels", "TDX module identity")),
+        tcb_levels=_parse_enclave_tcb_levels(data, "TDX module identity"),
     )
 
 
@@ -397,12 +425,12 @@ def _parse_tcb_info(value: _json.JsonValue) -> TcbInfo:
         fmspc=_string(data, "fmspc", "TCB Info"),
         pce_id=_string(data, "pceId", "TCB Info"),
         tcb_type=_unsigned(data, "tcbType", "TCB Info", 8),
-        tcb_evaluation_data_number=_signed64(data, "tcbEvaluationDataNumber", "TCB Info"),
+        tcb_evaluation_data_number=_optional_unsigned(data, "tcbEvaluationDataNumber", "TCB Info", 64),
         tdx_module=_parse_tdx_module(_present(data, "tdxModule")),
         tdx_module_identities=tuple(
             _parse_tdx_module_identity(m) for m in _array(data, "tdxModuleIdentities", "TCB Info")
         ),
-        tcb_levels=tuple(_parse_tcb_level(level) for level in _array(data, "tcbLevels", "TCB Info")),
+        tcb_levels=_parse_platform_tcb_levels(data, "TCB Info"),
     )
 
 
@@ -413,14 +441,14 @@ def _parse_enclave_identity(value: _json.JsonValue) -> EnclaveIdentity:
         version=_unsigned(data, "version", "QE Identity", 8),
         issue_date=_time(data, "issueDate", "QE Identity"),
         next_update=_time(data, "nextUpdate", "QE Identity"),
-        tcb_evaluation_data_number=_signed64(data, "tcbEvaluationDataNumber", "QE Identity"),
+        tcb_evaluation_data_number=_optional_unsigned(data, "tcbEvaluationDataNumber", "QE Identity", 64),
         miscselect=_hex(data, "miscselect", "QE Identity"),
         miscselect_mask=_hex(data, "miscselectMask", "QE Identity"),
         attributes=_hex(data, "attributes", "QE Identity"),
         attributes_mask=_hex(data, "attributesMask", "QE Identity"),
         mrsigner=_hex(data, "mrsigner", "QE Identity"),
         isv_prod_id=_unsigned(data, "isvprodid", "QE Identity", 16),
-        tcb_levels=tuple(_parse_tcb_level(level) for level in _array(data, "tcbLevels", "QE Identity")),
+        tcb_levels=_parse_enclave_tcb_levels(data, "QE Identity"),
     )
 
 
@@ -716,7 +744,13 @@ def get_matching_tcb_level(
 
 def get_matching_tdx_module_tcb_level(identities: Sequence[TdxModuleIdentity], tee_tcb_svn: bytes) -> TcbLevel:
     """The first level of the module identity ``TDX_<major>`` (the second TEE TCB SVN byte, hex) that the module's
-    ISV SVN (the first byte) reaches."""
+    ISV SVN (the first byte) reaches. A TEE TCB SVN too short to carry both bytes is an error, never a lookup of
+    a module id derived from a missing byte."""
+    if len(tee_tcb_svn) < TDX_MODULE_VERSION_BYTES:
+        raise CollateralError(
+            f"TEE TCB SVN of {len(tee_tcb_svn)} bytes is too short to name a TDX module version "
+            f"(expected at least {TDX_MODULE_VERSION_BYTES})"
+        )
     major = tee_tcb_svn[1:2]
     module_id = TDX_MODULE_ID_PREFIX + major.hex()
     isv_svn = tee_tcb_svn[0]

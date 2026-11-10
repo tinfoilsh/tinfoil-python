@@ -422,6 +422,19 @@ def test_issuer_chain_header_with_trailing_newline_rejects() -> None:
     rejects(BASE.with_(tcb_info_header=header), "unexpected trailing bytes")
 
 
+def test_issuer_chain_header_repeated_under_another_case_rejects() -> None:
+    """A second spelling of the issuer-chain header cannot stand in for, or hide behind, the first."""
+    evidence = BASE.evidence()
+    doubled = tuple(
+        tb.response(r.url, r.body, {**dict(r.headers), "TCB-INFO-ISSUER-CHAIN": ("",)})
+        if r.url.endswith("/tcb?fmspc=" + tb.FMSPC)
+        else r
+        for r in evidence.pcs
+    )
+    with pytest.raises(TdxAuthenticationError, match="repeated header 'Tcb-Info-Issuer-Chain'"):
+        authenticate(Evidence(quote=evidence.quote, pcs=doubled), tb.NOW, ROOT)
+
+
 def test_issuer_chain_header_must_hold_two_certificates() -> None:
     intel = BASE.intel
     one = tb.issuer_chain_header(intel.pem(intel.tcb_signing))
@@ -596,6 +609,20 @@ def test_pck_extension_count_must_be_six() -> None:
     )
     quote = tb.quote_bytes(scenario.pck_key, chain)
     with pytest.raises(TdxAuthenticationError, match="extensions length found 7"):
+        authenticate(Evidence(quote=quote, pcs=scenario.responses()), tb.NOW, ROOT)
+
+
+def test_pck_key_usage_must_allow_digital_signatures() -> None:
+    """The PCK key authenticates the QE report, so a keyUsage extension on the leaf must allow digitalSignature."""
+    scenario = BASE
+    pck = tb.pck_certificate(scenario.intel.platform_ca, scenario.pck_key, now=tb.NOW, key_usage=tb.ENCIPHERMENT_USAGE)
+    chain = (
+        scenario.intel.pem(pck)
+        + scenario.intel.pem(scenario.intel.platform_ca)
+        + scenario.intel.pem(scenario.intel.root)
+    )
+    quote = tb.quote_bytes(scenario.pck_key, chain)
+    with pytest.raises(TdxAuthenticationError, match="key usage does not allow digital signatures"):
         authenticate(Evidence(quote=quote, pcs=scenario.responses()), tb.NOW, ROOT)
 
 
