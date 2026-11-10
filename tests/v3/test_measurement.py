@@ -78,3 +78,19 @@ def test_registers_must_be_the_register_size() -> None:
         ExpectedTDX(rtmr3=b"")
     with pytest.raises(ValueError, match="MRTD: register must be 48 bytes, got 49"):
         TDX(mrtd=bytes(49), rtmr0=register(0), rtmr1=register(0), rtmr2=register(0), rtmr3=register(0))
+
+
+def test_parse_register_rejects_whitespace_and_prefixes() -> None:
+    body = "ab" * (REGISTER_SIZE - 1)
+    for text in (" " + body + " ", body + "\n0", "0x" + body):
+        assert len(text) == 2 * REGISTER_SIZE
+        with pytest.raises(ValueError, match="not hex"):
+            parse_register(text)
+
+
+def test_measurements_require_every_register() -> None:
+    with pytest.raises(ValueError, match="Launch: register is required"):
+        SEVSNP(launch=None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="RTMR1: register is required"):
+        TDX(mrtd=register(0), rtmr0=register(0), rtmr1=None, rtmr2=register(0), rtmr3=register(0))  # type: ignore[arg-type]
+    assert ExpectedSEVSNP(launch=None).launch is None

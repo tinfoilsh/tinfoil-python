@@ -110,6 +110,21 @@ def test_nesting_depth_is_bounded_and_reported_as_a_json_error() -> None:
         parse("[" * 100_000 + "]" * 100_000)
 
 
+def test_converts_arrays_nested_anywhere_to_tuples() -> None:
+    value = parse_object('{"a":[[1,[2]],{"b":[[]]}],"c":[]}')
+    a = value["a"]
+    assert isinstance(a, tuple) and isinstance(a[0], tuple)
+    inner = a[0]
+    assert isinstance(inner, tuple) and inner[1] == (JsonNumber("2"),)
+    b = a[1]
+    assert isinstance(b, JsonObject) and b["b"] == ((),)
+    assert value["c"] == ()
+    deep = parse("[" * 500 + "]" * 500)
+    for _ in range(500):
+        assert isinstance(deep, tuple) and len(deep) <= 1
+        deep = deep[0] if deep else ()
+
+
 def test_builds_ordered_objects_tuples_and_raw_literal_numbers() -> None:
     value = parse_object('{"z":[1,"x",null,true],"a":{"n":-1.50e3},"__proto__":false}')
     assert list(value) == ["z", "a", "__proto__"]
@@ -253,6 +268,14 @@ def test_to_int_signed() -> None:
             JsonNumber(raw).to_int(bits=64, signed=True)
 
 
+def test_to_int_reports_a_literal_beyond_the_conversion_cap_as_overflow() -> None:
+    huge = parse_object('{"n":' + "9" * 5000 + "}")
+    with pytest.raises(JsonError, match='overflows uint64 within "/n"'):
+        _json.uint(huge, "n", 64)
+    with pytest.raises(JsonError, match="overflows int64"):
+        _json.int64(huge, "n")
+
+
 def test_to_int_unsigned_rejects_any_sign() -> None:
     assert JsonNumber("255").to_int(bits=8, signed=False) == 255
     assert JsonNumber("18446744073709551615").to_int(bits=64, signed=False) == 18446744073709551615
@@ -387,6 +410,8 @@ def test_canonical_is_idempotent() -> None:
 def test_canonical_rejects_values_it_cannot_encode() -> None:
     with pytest.raises(JsonError):
         canonicalize("\ud800")
+    with pytest.raises(JsonError):
+        canonicalize(JsonObject({"\udc00": None, "a": None}))
     with pytest.raises(JsonError):
         canonicalize(JsonNumber("01"))
     with pytest.raises(JsonError):

@@ -7,6 +7,7 @@ distinguish them by type.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, fields
 from typing import TypeAlias
 
@@ -14,18 +15,26 @@ REGISTER_SIZE = 48
 """The size of every SEV-SNP and TDX measurement register, in bytes."""
 
 
+_HEX = re.compile(r"[0-9a-fA-F]*")
+
+
 def parse_register(text: str) -> bytes:
     """Decode a register from hex in either case."""
     if len(text) != 2 * REGISTER_SIZE:
         raise ValueError(f"register must be {2 * REGISTER_SIZE} hex characters, got {len(text)}")
-    try:
-        return bytes.fromhex(text)
-    except ValueError as err:
-        raise ValueError(f"register is not hex: {err}") from None
+    # The character class is checked explicitly: the bytes decoder would skip
+    # whitespace and return a short register.
+    if not _HEX.fullmatch(text):
+        raise ValueError("register is not hex: invalid byte")
+    return bytes.fromhex(text)
 
 
-def _check_register(label: str, value: bytes | None) -> None:
-    if value is not None and len(value) != REGISTER_SIZE:
+def _check_register(label: str, value: bytes | None, *, required: bool) -> None:
+    if value is None:
+        if required:
+            raise ValueError(f"{label}: register is required")
+        return
+    if not isinstance(value, bytes) or len(value) != REGISTER_SIZE:
         raise ValueError(f"{label}: register must be {REGISTER_SIZE} bytes, got {len(value)}")
 
 
@@ -36,7 +45,7 @@ class SEVSNP:
     launch: bytes
 
     def __post_init__(self) -> None:
-        _check_register("Launch", self.launch)
+        _check_register("Launch", self.launch, required=True)
 
     def expected(self) -> ExpectedSEVSNP:
         """Expectations that pin every register of the measurement."""
@@ -58,7 +67,7 @@ class TDX:
 
     def __post_init__(self) -> None:
         for label, value in zip(_TDX_LABELS, self._registers(), strict=True):
-            _check_register(label, value)
+            _check_register(label, value, required=True)
 
     def _registers(self) -> tuple[bytes, ...]:
         return (self.mrtd, self.rtmr0, self.rtmr1, self.rtmr2, self.rtmr3)
@@ -82,7 +91,7 @@ class ExpectedSEVSNP:
     launch: bytes | None = None
 
     def __post_init__(self) -> None:
-        _check_register("Launch", self.launch)
+        _check_register("Launch", self.launch, required=False)
 
     def __str__(self) -> str:
         return _format("SEV-SNP", ("Launch",), (self.launch,))
@@ -100,7 +109,7 @@ class ExpectedTDX:
 
     def __post_init__(self) -> None:
         for label, value in zip(_TDX_LABELS, self._registers(), strict=True):
-            _check_register(label, value)
+            _check_register(label, value, required=False)
 
     def _registers(self) -> tuple[bytes | None, ...]:
         return tuple(getattr(self, field.name) for field in fields(self))

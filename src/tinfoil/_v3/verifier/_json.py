@@ -69,7 +69,14 @@ class JsonNumber:
             raise JsonError(f"JSON number {self.raw} is not an integer")
         if not signed and self.raw.startswith("-"):
             raise JsonError(f"JSON number {self.raw} is negative")
-        value = int(self.raw)
+        try:
+            value = int(self.raw)
+        except ValueError as err:
+            # The interpreter caps the digits that it will convert; a literal
+            # beyond that cap is out of range for any width.
+            raise JsonError(
+                f"JSON number of {len(self.raw)} digits overflows {'int' if signed else 'uint'}{bits}"
+            ) from err
         if signed:
             low, high = -(1 << (bits - 1)), (1 << (bits - 1)) - 1
         else:
@@ -126,11 +133,12 @@ def strict_parse(data: bytes) -> JsonValue:
             parse_float=JsonNumber,
             parse_constant=_reject_constant,
         )
+        checked = _checked(parsed)
     except RecursionError as err:
         raise JsonError("exceeded max depth") from err
     except json.JSONDecodeError as err:
         raise JsonError(f"invalid JSON: {err.msg} at offset {err.pos}") from err
-    return _checked(parsed)
+    return checked
 
 
 def _object(pairs: list[tuple[str, object]]) -> JsonObject:
@@ -166,11 +174,36 @@ def _checked(root: object) -> JsonValue:
 
 
 def _convert(value: object) -> JsonValue:
-    """Arrays come back from the parser as lists; everything else is already in its final form."""
-    if isinstance(value, list):
-        # Iterative over siblings; recursion depth equals the nesting depth
-        # that the parser already accepted.
-        return tuple(_convert(item) for item in value)
+    """Arrays come back from the parser as lists and become tuples; everything else is already in its final form.
+
+    Nested lists are converted with an explicit stack, so a value as deep as
+    the parser accepts cannot exhaust the interpreter's own stack here.
+    """
+    if not isinstance(value, list):
+        return _scalar(value)
+    # Each frame is a source list, the index of the next item to convert, and
+    # the converted items so far.
+    stack: list[tuple[list[object], int, list[JsonValue]]] = [(value, 0, [])]
+    while True:
+        source, index, out = stack[-1]
+        if index == len(source):
+            stack.pop()
+            done: JsonValue = tuple(out)
+            if not stack:
+                return done
+            parent_source, parent_index, parent_out = stack[-1]
+            parent_out.append(done)
+            stack[-1] = (parent_source, parent_index + 1, parent_out)
+            continue
+        item = source[index]
+        if isinstance(item, list):
+            stack.append((item, 0, []))
+        else:
+            out.append(_scalar(item))
+            stack[-1] = (source, index + 1, out)
+
+
+def _scalar(value: object) -> JsonValue:
     if value is None or isinstance(value, bool | str | JsonNumber | JsonObject):
         return value
     raise JsonError(f"unexpected parser output {type(value).__name__}")
@@ -254,7 +287,9 @@ def _write(out: list[str], root: JsonValue, *, canonical: bool) -> None:
             out.append("{")
             items = list(value.items())
             if canonical:
-                items.sort(key=lambda item: item[0].encode("utf-16-be"))
+                # Sorted by UTF-16 code units. A lone surrogate in a name still
+                # sorts here and is rejected when the output is encoded.
+                items.sort(key=lambda item: item[0].encode("utf-16-be", "surrogatepass"))
             stack.append(_object_items(items))
         else:
             raise JsonError(f"unsupported JSON value {type(value).__name__}")
