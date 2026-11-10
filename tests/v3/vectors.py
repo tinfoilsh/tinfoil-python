@@ -47,6 +47,11 @@ def vector(name: str, fixture_id: str) -> dict[str, Any]:
     fixtures = vector_group(name)
     if not fixtures:
         pytest.skip("conformance vectors not found")
+    return find_vector(fixtures, name, fixture_id)
+
+
+def find_vector(fixtures: list[dict[str, Any]], name: str, fixture_id: str) -> dict[str, Any]:
+    """The fixture of group ``name`` with ``fixture_id``; a group that lacks it is a failure, never an omission."""
     for fixture in fixtures:
         if fixture["id"] == fixture_id:
             return fixture
