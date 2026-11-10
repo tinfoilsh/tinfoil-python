@@ -17,14 +17,17 @@ from datetime import datetime
 from typing import TypeAlias
 
 from tinfoil._v3.verifier._document.collateral.collateral import CPUEndorsements
-from tinfoil._v3.verifier._document.document import CpuEvidence, Document
+from tinfoil._v3.verifier._document.document import SEVSNP_REPORT_V1_FORMAT, TDX_QUOTE_V1_FORMAT, CpuEvidence, Document
 from tinfoil._v3.verifier._measurement import SEVSNP, TDX, Expected, ExpectedSEVSNP, ExpectedTDX
 from tinfoil._v3.verifier._policy import PLATFORM_SEV_SNP, PLATFORM_TDX
+from tinfoil._v3.verifier._quote import sev, tdx
 from tinfoil._v3.verifier._quote.config import ConfigReferenceValues
 from tinfoil._v3.verifier._quote.legacy import LegacyReferenceValues
 from tinfoil._v3.verifier._quote.sev.authenticate import Quote as SevQuote
+from tinfoil._v3.verifier._quote.sev.authenticate import authenticate as _authenticate_sev
 from tinfoil._v3.verifier._quote.sev.expectations import Expectations as SevExpectations
 from tinfoil._v3.verifier._quote.tdx.authenticate import Quote as TdxQuote
+from tinfoil._v3.verifier._quote.tdx.authenticate import authenticate as _authenticate_tdx
 from tinfoil._v3.verifier._quote.tdx.expectations import Expectations as TdxExpectations
 
 ReferenceValues: TypeAlias = LegacyReferenceValues | ConfigReferenceValues
@@ -153,7 +156,39 @@ def authenticate(
     rejected, never fetched. Certificate and CRL windows are appraised at
     ``now``. Any other evidence format is rejected.
     """
-    raise NotImplementedError
+    roots = options.test_only_roots if options is not None else None
+    if evidence.format == SEVSNP_REPORT_V1_FORMAT:
+        if endorsements.amd_vcek is None:
+            raise QuoteError("no amd-vcek endorsement collateral for the cpu")
+        if endorsements.amd_crl is None:
+            raise QuoteError("no amd-crl endorsement collateral for the cpu")
+        sev_evidence = sev.Evidence(
+            report=evidence.report,
+            vcek_der=endorsements.amd_vcek.vcek_der,
+            cert_chain_pem=endorsements.amd_vcek.cert_chain_pem,
+            crl_der=endorsements.amd_crl.crl_der,
+        )
+        sev_options = sev.Options(test_only_root_pem=roots.amd if roots is not None else None)
+        try:
+            sev_quote = _authenticate_sev(sev_evidence, now, sev_options)
+        except sev.SevAuthenticationError as err:
+            raise QuoteError(str(err)) from err
+        return AuthenticatedSEVSNP(
+            identity=sev_quote.identity, measurement=sev_quote.measurement, evidence=evidence, quote=sev_quote
+        )
+    if evidence.format == TDX_QUOTE_V1_FORMAT:
+        if endorsements.intel_pcs is None:
+            raise QuoteError("no intel-pcs endorsement collateral for the cpu")
+        tdx_evidence = tdx.Evidence(quote=evidence.report, pcs=endorsements.intel_pcs.responses)
+        tdx_options = tdx.Options(test_only_root_pem=roots.intel if roots is not None else None)
+        try:
+            tdx_quote = _authenticate_tdx(tdx_evidence, now, tdx_options)
+        except tdx.TdxAuthenticationError as err:
+            raise QuoteError(str(err)) from err
+        return AuthenticatedTDX(
+            identity=tdx_quote.identity, measurement=tdx_quote.measurement, evidence=evidence, quote=tdx_quote
+        )
+    raise QuoteError(f"unsupported cpu_evidence format {evidence.format!r}")
 
 
 def assemble(doc: Document, refs: ReferenceValues, pins: Expected | None, quote: Authenticated) -> AssembledPolicy:

@@ -12,4 +12,6 @@ def identity(chip_id: bytes) -> str:
     the endorsed form, so no product-specific handling is needed. Any other
     length is an error.
     """
-    raise NotImplementedError
+    if len(chip_id) != CHIP_ID_SIZE:
+        raise ValueError(f"SEV CHIP_ID must be {CHIP_ID_SIZE} bytes, got {len(chip_id)}")
+    return chip_id.hex()

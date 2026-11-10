@@ -28,11 +28,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, BinaryIO, TextIO
 
+from tinfoil._v3.verifier import _measurement
 from tinfoil._v3.verifier._document import document
 from tinfoil._v3.verifier._document.collateral.collateral import NotFoundError
 from tinfoil._v3.verifier._endorsement import approval, provenance, reference
 from tinfoil._v3.verifier._endorsement import time as approval_time
 from tinfoil._v3.verifier._policy import ARTIFACT_FORMAT
+from tinfoil._v3.verifier._quote import quote
 from tinfoil._v3.verifier._sigstore import bundle as sigstore_bundle
 from tinfoil._v3.verifier._sigstore import timestamp as sigstore_timestamp
 from tinfoil._v3.verifier._sigstore import trusted_root as sigstore_trusted_root
@@ -73,9 +75,14 @@ STAGES_SUPPORTED: tuple[str, ...] = (
     STAGE_CHECK_ENVELOPE,
     STAGE_AUTHENTICATE_PROVENANCE,
     STAGE_ASSEMBLE_POLICY,
+    STAGE_AUTHENTICATE_QUOTE,
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
 )
+
+# The measurement types of the wire contract.
+SEV_SNP_MEASUREMENT_TYPE = "https://tinfoil.sh/predicate/sev-snp-guest/v2"
+TDX_MEASUREMENT_TYPE = "https://tinfoil.sh/predicate/tdx-guest/v2"
 
 ENVELOPE_REJECTED = "ENVELOPE_REJECTED"
 PROVENANCE_REJECTED = "PROVENANCE_REJECTED"
@@ -234,7 +241,7 @@ def capabilities() -> dict[str, Any]:
         "v3": {
             "supported": bool(STAGES_SUPPORTED),
             "stages_supported": list(STAGES_SUPPORTED),
-            "synthetic_roots": {"amd": False, "intel": False, "sigstore": True},
+            "synthetic_roots": {"amd": True, "intel": True, "sigstore": True},
             "freshness_enforced": True,
             "live_verify": False,
             "channel_binding": "tls-spki",
@@ -280,6 +287,8 @@ def _run_stage(stage: str, raw: Any) -> Result:
         return _assemble_policy(decoded)
     if stage == STAGE_AUTHENTICATE_APPROVAL:
         return _authenticate_approval(decoded)
+    if stage == STAGE_AUTHENTICATE_QUOTE:
+        return _authenticate_quote(decoded)
     if stage == STAGE_VERIFY_TIMESTAMP:
         return _verify_timestamp(decoded)
     # Further stage handlers are added here as the modules that they drive land.
@@ -390,11 +399,65 @@ def _authenticate_approval(decoded: Input) -> Result:
     return Result({"stage": stage, "accepted": True, "outputs": {"signing_key_hint": hint}}, EXIT_ACCEPTED)
 
 
+def _injected_sigstore_root_parses(decoded: Input) -> bool:
+    """Whether the injected Sigstore trusted root, when there is one, is a trusted-root document.
+
+    The document stages hold a provenance client built from it, so one
+    that does not parse is malformed input for every one of them.
+    """
+    if decoded.sigstore_trusted_root is None:
+        return True
+    try:
+        sigstore_trusted_root.parse_trusted_root(decoded.sigstore_trusted_root)
+    except sigstore_trusted_root.TrustedRootError:
+        return False
+    return True
+
+
+def _authenticate_quote(decoded: Input) -> Result:
+    """The CPU quote's signature chain up to the vendor root, from the document's own collateral.
+
+    The document is decoded without its challenge bindings (the envelope
+    stage owns those); one that does not decode is malformed input. The
+    injected vendor roots replace the embedded anchors; an absent
+    verification time means the current time. Every authentication failure
+    is a quote rejection. A platform whose authentication is not available
+    yet is reported as unsupported.
+    """
+    if not _injected_sigstore_root_parses(decoded):
+        return _malformed(STAGE_AUTHENTICATE_QUOTE)
+    try:
+        parsed = document.decode_unbound(decoded.document or b"")
+    except document.DocumentError:
+        return _malformed(STAGE_AUTHENTICATE_QUOTE)
+    appraisal = decoded.verification_time or datetime.now(UTC)
+    options = quote.QuoteOptions(
+        test_only_roots=quote.TestOnlyRoots(amd=decoded.amd_chain_pem, intel=decoded.intel_root_pem)
+    )
+    try:
+        authenticated = quote.authenticate(parsed.cpu_evidence(), parsed.cpu_endorsements(), appraisal, options)
+    except quote.QuoteError:
+        return _rejected(STAGE_AUTHENTICATE_QUOTE, QUOTE_REJECTED)
+    outputs = {"enclave_measurement": _measurement_of(authenticated.measurement)}
+    return Result({"stage": STAGE_AUTHENTICATE_QUOTE, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
+
+
+def _measurement_of(measurement: _measurement.Measurement) -> dict[str, Any]:
+    """An authenticated measurement for the wire, in platform register order."""
+    if isinstance(measurement, _measurement.SEVSNP):
+        return {"type": SEV_SNP_MEASUREMENT_TYPE, "registers": [measurement.launch.hex()]}
+    registers = (measurement.mrtd, measurement.rtmr0, measurement.rtmr1, measurement.rtmr2, measurement.rtmr3)
+    return {"type": TDX_MEASUREMENT_TYPE, "registers": [register.hex() for register in registers]}
+
+
 def _check_envelope(decoded: Input) -> Result:
     """Strict parse plus the nonce, endorsed-hash and REPORT_DATA bindings.
 
-    A document or nonce that is absent is rejected like any other that fails.
+    An injected Sigstore root that does not parse is malformed input. A
+    document or nonce that is absent is rejected like any other that fails.
     """
+    if not _injected_sigstore_root_parses(decoded):
+        return _malformed(STAGE_CHECK_ENVELOPE)
     try:
         document.parse(decoded.document or b"", decoded.nonce or b"")
     except (document.DocumentError, document.InvalidInputError):

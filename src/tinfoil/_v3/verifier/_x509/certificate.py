@@ -9,6 +9,7 @@ at the instant the caller supplies, never the wall clock.
 from __future__ import annotations
 
 import hashlib
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,10 +19,19 @@ from cryptography import x509
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
+from cryptography.utils import CryptographyDeprecationWarning
 
 from tinfoil._v3.verifier._x509 import der
 
 T = TypeVar("T")
+
+# Production AMD VCEK certificates carry serial number zero. The library warns
+# about it today and will reject it in a future release, which the
+# library-claims test pins; the warning is silenced once, here, rather than by
+# mutating the process-wide filters around every parse.
+warnings.filterwarnings(
+    "ignore", message=r"^Parsed a serial number which wasn't positive", category=CryptographyDeprecationWarning
+)
 
 Certificate: TypeAlias = x509.Certificate
 PublicKey: TypeAlias = ec.EllipticCurvePublicKey | rsa.RSAPublicKey | ed25519.Ed25519PublicKey

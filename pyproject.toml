@@ -46,6 +46,12 @@ markers = [
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["conformance"]
+# pytest discards the warning filters that imported modules install, so the
+# filter that tinfoil._v3.verifier._x509.certificate sets for the zero serial
+# of production AMD VCEK certificates is re-stated for the test run.
+filterwarnings = [
+    "ignore:^Parsed a serial number which wasn't positive:cryptography.utils.CryptographyDeprecationWarning",
+]
 
 # Lint and type checks cover the code written for the v3 rewrite. The modules
 # that the rewrite replaces are excluded until they are removed, so that the
@@ -103,7 +109,7 @@ files = ["src/tinfoil/_v3", "conformance", "tests/conformance", "tests/v3"]
 # The SEV-SNP and TDX library code was moved from the 0.x tree and is typed
 # incrementally; its tests follow it. Everything else under _v3 is strict.
 [[tool.mypy.overrides]]
-module = ["tinfoil._v3.verifier._quote.sev.lib.*", "tinfoil._v3.verifier._quote.tdx.lib.*", "tests.v3.lib.*"]
+module = ["tinfoil._v3.verifier._quote.tdx.lib.*", "tests.v3.lib.*"]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 check_untyped_defs = true

@@ -87,6 +87,14 @@ def test_malformed_input_is_reported_first(raw: Any) -> None:
         assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": "MALFORMED_INPUT"}}
 
 
+@pytest.mark.parametrize("stage", [adapter.STAGE_CHECK_ENVELOPE, adapter.STAGE_AUTHENTICATE_QUOTE])
+def test_document_stages_treat_an_unparseable_sigstore_root_as_malformed(stage: str) -> None:
+    # "e30=" is "{}": well-formed base64 and JSON that is not a trusted-root document.
+    result = adapter.run(stage, {**_WELL_FORMED, "sigstore_trusted_root_json_b64": "e30="})
+    assert result.exit_code == adapter.EXIT_MALFORMED
+    assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": "MALFORMED_INPUT"}}
+
+
 def test_unknown_stage_is_unsupported() -> None:
     result = adapter.run("no-such-stage", _WELL_FORMED)
     assert result.exit_code == adapter.EXIT_UNSUPPORTED
