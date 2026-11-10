@@ -90,6 +90,8 @@ def decode_at(data: bytes, offset: int) -> tuple[Element, int]:
     it, so a walk over a long list of siblings stays linear in the size of
     the list.
     """
+    if offset < 0:
+        raise DerError("negative element offset")
     if len(data) - offset < 2:
         raise DerError("truncated element header")
     identifier = data[offset]

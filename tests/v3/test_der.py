@@ -83,6 +83,8 @@ def test_children_walk_a_long_sibling_list_without_copying_the_tail() -> None:
     assert (e.raw, end) == (b"\x04\x01\xff", 6)
     with pytest.raises(der.DerError, match="truncated element header"):
         der.decode_at(b"\x02\x01\x07\x04", 3)
+    with pytest.raises(der.DerError, match="negative element offset"):
+        der.decode_at(b"\x02\x01\x07\x04\x01\xff", -3)
 
 
 def test_implicitly_tagged_primitives_are_left_to_their_schema() -> None:
