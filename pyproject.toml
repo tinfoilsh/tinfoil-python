@@ -15,7 +15,7 @@ requires-python = ">=3.11"
 dependencies = [
     "openai>=3.26.0",
     "httpx>=0.28",
-    "tinfoil-ehbp>=0.3.0",
+    "tinfoil-ehbp>=0.5.0",
     "requests>=2.31.0",
     "cryptography>=42.0.0",
     "pyOpenSSL>=25.0.0",
