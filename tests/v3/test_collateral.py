@@ -37,7 +37,13 @@ from tinfoil._v3.verifier._document.collateral.runtime import (
     RUNTIME_V1_FORMAT,
     RuntimeReference,
 )
-from tinfoil._v3.verifier._document.collateral.sev import AMDCRL, AMDVCEK
+from tinfoil._v3.verifier._document.collateral.sev import (
+    AMDCRL,
+    AMDVCEK,
+    MAX_CERT_CHAIN_PEM_SIZE,
+    MAX_CRL_DER_SIZE,
+    MAX_VCEK_DER_SIZE,
+)
 from tinfoil._v3.verifier._document.collateral.sigstore import Freshness
 from tinfoil._v3.verifier._document.collateral.tdx import IntelPCS, PCSResponse
 from tinfoil._v3.verifier._json import JsonObject, strict_parse
@@ -86,6 +92,32 @@ def sev_entries() -> list[dict[str, Any]]:
 def test_decode_sev_collateral() -> None:
     assert decode(*sev_entries()).cpu == CPUEndorsements(
         amd_vcek=AMDVCEK(vcek_der=b"vcek der", cert_chain_pem="chain"), amd_crl=AMDCRL(crl_der=b"crl der")
+    )
+
+
+def test_decode_sev_collateral_bounds_sizes_before_parsing() -> None:
+    """Each AMD member is bounded at decode: a value at the bound is carried as is, one byte over is rejected."""
+    vcek_at = b"\x30" * MAX_VCEK_DER_SIZE
+    pem_at = "-" * MAX_CERT_CHAIN_PEM_SIZE
+    crl_at = b"\x30" * MAX_CRL_DER_SIZE
+    got = decode(
+        cpu("cpu-endorsement", AMD_VCEK_V1_FORMAT, {"vcek_der_base64": b64(vcek_at), "cert_chain_pem": pem_at}),
+        cpu("cpu-crl", AMD_CRL_V1_FORMAT, {"crl_der_base64": b64(crl_at)}),
+    )
+    assert got.cpu == CPUEndorsements(
+        amd_vcek=AMDVCEK(vcek_der=vcek_at, cert_chain_pem=pem_at), amd_crl=AMDCRL(crl_der=crl_at)
+    )
+    raises_decode(
+        cpu("cpu-endorsement", AMD_VCEK_V1_FORMAT, {"vcek_der_base64": b64(vcek_at + b"\x30"), "cert_chain_pem": "c"}),
+        match=f"amd-vcek collateral entry 'cpu-endorsement': vcek_der_base64 exceeds {MAX_VCEK_DER_SIZE} bytes",
+    )
+    raises_decode(
+        cpu("cpu-endorsement", AMD_VCEK_V1_FORMAT, {"vcek_der_base64": b64(b"v"), "cert_chain_pem": pem_at + "-"}),
+        match=f"amd-vcek collateral entry 'cpu-endorsement': cert_chain_pem exceeds {MAX_CERT_CHAIN_PEM_SIZE}",
+    )
+    raises_decode(
+        cpu("cpu-crl", AMD_CRL_V1_FORMAT, {"crl_der_base64": b64(crl_at + b"\x30")}),
+        match=f"amd-crl collateral entry 'cpu-crl': crl_der_base64 exceeds {MAX_CRL_DER_SIZE} bytes",
     )
 
 
