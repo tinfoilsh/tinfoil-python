@@ -4,7 +4,6 @@ signatures."""
 from __future__ import annotations
 
 import hashlib
-import struct
 from datetime import timedelta
 
 import pytest
@@ -289,8 +288,6 @@ class TestQuoteSignatures:
 
     def test_binding_covers_the_auth_data(self) -> None:
         attestation = pki.p256()
-        header, body = tb.header_bytes(), tb.body_bytes()
-        digest = hashlib.sha256(header + body).digest()
         bound = hashlib.sha256(tb.raw_public_key(attestation) + b"\x88" * 32).digest() + bytes(32)
         report = tb.qe_report_bytes(bound)
         raw = tb.quote_bytes(
@@ -302,7 +299,6 @@ class TestQuoteSignatures:
         )
         with pytest.raises(TdxVerificationError, match="QE Report Data does not match"):
             verify_qe_report_data_binding(parse_quote(raw))
-        assert digest
 
 
 class TestHelpers:
@@ -321,4 +317,3 @@ class TestHelpers:
         assert len(der) > 64
         with pytest.raises(TdxVerificationError, match="Expected 64"):
             signature_to_der(bytes(63))
-        assert struct.unpack("<H", b"\x40\x00")[0] == 64

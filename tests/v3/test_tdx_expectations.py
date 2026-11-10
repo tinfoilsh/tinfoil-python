@@ -164,7 +164,9 @@ def test_assembled_expectations_do_not_alias_their_inputs(authenticated: Quote) 
     code = TDX(mrtd=body.mr_td, rtmr0=body.rtmrs[0], rtmr1=body.rtmrs[1], rtmr2=body.rtmrs[2], rtmr3=body.rtmrs[3])
     report_data = bytearray(body.report_data)
     config_id = bytearray(48)
-    expectations = assemble(matching_policy(quote), code, bytes(report_data), bytes(config_id))
+    # The mutable buffers go in as they are, so that the mutations below reach
+    # the expectations unless assembly copied them.
+    expectations = assemble(matching_policy(quote), code, cast(bytes, report_data), cast(bytes, config_id))
     report_data[0] ^= 1
     config_id[0] ^= 1
     validate(expectations, quote)

@@ -197,6 +197,18 @@ def test_certificates_are_checked_at_the_verification_time() -> None:
     rejects(scenario, "not valid at", now=tb.NOW - timedelta(days=400))
 
 
+def test_a_scenario_anchored_at_another_time_authenticates_at_that_time() -> None:
+    """Every default validity and signing time follows the scenario's ``now``, whether given at construction or
+    changed afterwards; the given fields (here the PCK key) are kept."""
+    later = tb.NOW + timedelta(days=400)
+    for scenario in (tb.Scenario(now=later), BASE.with_(now=later)):
+        options = Options(test_only_root_pem=scenario.root_pem())
+        assert run(scenario, now=later, options=options).identity == tb.PPID.hex()
+        rejects(scenario, "outside its validity window|not valid at", now=tb.NOW, options=options)
+    assert BASE.with_(now=later).pck_key is BASE.pck_key
+    assert BASE.with_(now=later).intel is not BASE.intel
+
+
 # --- quote structure ---------------------------------------------------------------------------
 
 

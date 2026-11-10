@@ -493,13 +493,28 @@ def response(url: str, body: bytes, headers: dict[str, tuple[str, ...]] | None =
 
 # --- scenario --------------------------------------------------------------------------
 
+_DERIVED: Any = None
+"""The default of a ``Scenario`` field that is derived from the scenario's ``now`` rather than given."""
+
+
+def _is_derived(value: object) -> bool:
+    return value is None
+
 
 @dataclass(frozen=True)
 class Scenario:
-    """Every knob of a synthetic TDX attestation; the defaults verify."""
+    """Every knob of a synthetic TDX attestation; the defaults verify.
+
+    ``now`` anchors every default time: the PKI's validity, the PCK's
+    validity, the two responses' issue dates and next updates, and the CRL
+    windows. A field left at its default is derived from ``now`` when the
+    scenario is built, and derived again by ``with_`` when ``now`` changes,
+    so that one scenario is coherent at one time; a field given explicitly
+    is kept as given.
+    """
 
     now: datetime = NOW
-    intel: IntelPKI = field(default_factory=intel_pki)
+    intel: IntelPKI = _DERIVED
     pck_key: ec.EllipticCurvePrivateKey = field(default_factory=pki.p256)
     extension_value: bytes | None = None
     pck_cn: str = PCK_CN
@@ -512,8 +527,8 @@ class Scenario:
     qe_auth_data: bytes = b""
     extra_bytes: bytes = b""
     quote_signature: bytes | None = None
-    tcb_info: dict[str, Any] = field(default_factory=tcb_info_object)
-    qe_identity: dict[str, Any] = field(default_factory=qe_identity_object)
+    tcb_info: dict[str, Any] = _DERIVED
+    qe_identity: dict[str, Any] = _DERIVED
     tcb_info_url: str | None = None
     pck_crl_revoked: tuple[int, ...] = ()
     root_crl_revoked: tuple[int, ...] = ()
@@ -525,6 +540,21 @@ class Scenario:
     tcb_info_header: str | None = None
     qe_identity_header: str | None = None
     pck_crl_header: str | None = None
+    derived: frozenset[str] = field(init=False, default=frozenset())
+    """The fields that were derived from ``now`` rather than given."""
+
+    def __post_init__(self) -> None:
+        derived: set[str] = set()
+        if _is_derived(self.intel):
+            object.__setattr__(self, "intel", intel_pki(self.now))
+            derived.add("intel")
+        if _is_derived(self.tcb_info):
+            object.__setattr__(self, "tcb_info", tcb_info_object(now=self.now))
+            derived.add("tcb_info")
+        if _is_derived(self.qe_identity):
+            object.__setattr__(self, "qe_identity", qe_identity_object(now=self.now))
+            derived.add("qe_identity")
+        object.__setattr__(self, "derived", frozenset(derived))
 
     def pck(self) -> pki.Issued:
         return pck_certificate(
@@ -598,4 +628,8 @@ class Scenario:
         return self.intel.pem(self.intel.root)
 
     def with_(self, **changes: Any) -> Scenario:
+        """A copy with ``changes``; when ``now`` changes, the fields derived from it are derived again."""
+        if "now" in changes:
+            for name in self.derived:
+                changes.setdefault(name, _DERIVED)
         return replace(self, **changes)
