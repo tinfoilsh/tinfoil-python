@@ -15,7 +15,6 @@ from dataclasses import dataclass
 # =============================================================================
 
 # Quote structure sizes
-QUOTE_MIN_SIZE = 0x3FC  # 1020 bytes minimum
 HEADER_SIZE = 0x30  # 48 bytes
 TD_QUOTE_BODY_SIZE = 0x248  # 584 bytes
 QE_REPORT_SIZE = 0x180  # 384 bytes
@@ -59,6 +58,24 @@ PCK_CERT_CHAIN_COUNT = 3  # leaf, intermediate, root
 
 # Intel QE Vendor ID: 939a7233-f79c-4ca9-940a-0db3957f0607
 INTEL_QE_VENDOR_ID = bytes.fromhex("939a7233f79c4ca9940a0db3957f0607")
+
+# The smallest quote the parser accepts: header, body, the signed-data size,
+# the signature and attestation key, the type-6 certification data header, the
+# QE report, its signature, an empty auth data (2-byte size) and the nested
+# PCK chain header with an empty chain. Anything shorter cannot hold the
+# fixed-size parts that parsing reads.
+QUOTE_MIN_SIZE = (
+    HEADER_SIZE
+    + TD_QUOTE_BODY_SIZE
+    + 4
+    + SIGNATURE_SIZE
+    + ATTESTATION_KEY_SIZE
+    + CERT_DATA_HEADER_SIZE
+    + QE_REPORT_SIZE
+    + SIGNATURE_SIZE
+    + 2
+    + CERT_DATA_HEADER_SIZE
+)
 
 # =============================================================================
 # Header offsets (relative to quote start)

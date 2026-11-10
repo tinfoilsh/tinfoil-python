@@ -169,17 +169,16 @@ def _parse_sgx_extension(raw_value: bytes) -> PckExtensions:
     """Parse the SGX extension: a SEQUENCE OF SEQUENCE(OID, value)."""
     outer_seq = _der_decode(raw_value, "SGX extension")
 
-    if len(outer_seq) < SGX_EXTENSION_MIN_SIZE:
-        raise PckExtensionError(
-            f"SGX extension has {len(outer_seq)} elements, expected at least {SGX_EXTENSION_MIN_SIZE}"
-        )
-
     ppid = None
     tcb = None
     pceid = None
     fmspc = None
 
     with _asn1_errors("SGX extension"):
+        if len(outer_seq) < SGX_EXTENSION_MIN_SIZE:
+            raise PckExtensionError(
+                f"SGX extension has {len(outer_seq)} elements, expected at least {SGX_EXTENSION_MIN_SIZE}"
+            )
         for item in outer_seq:
             if len(item) < 2:
                 raise PckExtensionError(f"Malformed SGX extension item: expected at least 2 fields, got {len(item)}")

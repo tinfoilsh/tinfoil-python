@@ -33,7 +33,9 @@ def resolve_legacy(refs: LegacyReferenceValues, quote: Authenticated, pins: Expe
     quote's platform, then applies the pins. On SEV-SNP the policy's
     ``host_data`` is the expectation. On TDX the release fixes only RTMR1
     and RTMR2: the platform endorsements resolve MRTD and RTMR0 from the
-    quote's own values and the required shape, and an unpinned RTMR3 must
-    be zero.
+    quote's own values and the required shape, and an unpinned RTMR3 is
+    expected to be zero: neither the release nor the platform extends
+    RTMR3, so a non-zero value means something was measured after launch
+    that no reference value accounts for.
     """
     raise NotImplementedError

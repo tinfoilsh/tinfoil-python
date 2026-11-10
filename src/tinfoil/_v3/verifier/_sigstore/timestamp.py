@@ -18,7 +18,6 @@ from tinfoil._v3.verifier._sigstore.trusted_root import TrustedRoot
 
 SIGSTORE_TIMESTAMP_POLICY = "1.3.6.1.4.1.57264.2"
 STATUS_GRANTED = 0
-STATUS_GRANTED_WITH_MODS = 1
 TST_INFO_VERSION = 1
 OID_SHA256 = "2.16.840.1.101.3.4.2.1"
 
@@ -43,7 +42,7 @@ class TimestampResponse:
     raw: bytes
 
 
-def timestamp_input(domain: str, core: _json.JsonValue) -> bytes:
+def timestamp_input(domain: bytes, core: _json.JsonValue) -> bytes:
     """The bytes that an approval timestamps: ``domain`` followed by the RFC 8785 canonical form of ``core``."""
     raise NotImplementedError
 
@@ -52,7 +51,8 @@ def parse_timestamp_response(response: bytes) -> TimestampResponse:
     """Decode a DER TimeStampResp.
 
     Rejects a response outside (0, MAX_TIMESTAMP_SIZE], a status other
-    than granted, a TSTInfo version other than 1, a genTime that is not
+    than STATUS_GRANTED (a token granted with modifications is rejected
+    too), a TSTInfo version other than 1, a genTime that is not
     GeneralizedTime with ``Z`` and a message imprint that is not SHA-256.
     """
     raise NotImplementedError

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from tinfoil._v3.verifier import _json
 from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact
 from tinfoil._v3.verifier._endorsement.time import DEFAULT_FUTURE_SKEW, DEFAULT_MAX_AGE, TimePolicy
+from tinfoil._v3.verifier._sigstore.bundle import Subject
 
 if TYPE_CHECKING:
     from tinfoil._v3.verifier._endorsement.provenance import ProvenanceClient
@@ -50,8 +51,8 @@ class FreshnessWitness:
 @dataclass(frozen=True, slots=True)
 class FreshnessStatement:
     type: str
-    subjects: tuple[tuple[str, dict[str, str]], ...]
-    """Each subject's name and digest map."""
+    subjects: tuple[Subject, ...]
+    """The in-toto subjects: each a name and an algorithm-to-hex digest map."""
     predicate_type: str
     predicate: FreshnessWitness
 

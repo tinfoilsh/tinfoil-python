@@ -265,8 +265,10 @@ class ConfigPolicy:
     now: datetime | None = None
     max_age: timedelta | None = None
     future_skew: timedelta | None = None
-    registry_ids: tuple[str, ...] | None = None
-    """None accepts any registry; an empty tuple is an error."""
+    registry_ids: tuple[str, ...] | None = (PUBLIC_REGISTRY_ID,)
+    """The registries whose approvals are accepted; the public registry by default. None accepts any registry and is
+    meant only for a verifier whose caller supplied its own config signing keys, where the registry is not what
+    authorizes the config; an empty tuple is an error."""
 
     def validate_pins(self) -> None:
         """Check the identity, revision, lowercase digest and registry ids (valid, no duplicates) independently of

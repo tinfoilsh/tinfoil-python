@@ -28,7 +28,7 @@ class Expectations:
     minimum_tcb_evaluation_data_number: int
 
 
-def assemble(policy: TDXPolicy, quote: Quote, measurement: TDX, report_data: bytes, config_id: bytes) -> Expectations:
+def assemble(policy: TDXPolicy, measurement: TDX, report_data: bytes, config_id: bytes) -> Expectations:
     """Translate complete reference values into validation options: the policy's fields, the five registers of
     ``measurement``, the 64-byte ``report_data`` and the 48-byte ``config_id``."""
     raise NotImplementedError

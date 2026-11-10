@@ -24,7 +24,8 @@ class ResolvedValues:
     """The registers the release fixes."""
     expected: Expected
     """``code`` plus pins and, for legacy TDX, the platform registers."""
-    platform_measurement_name: str = ""
+    platform_measurement_name: str | None = None
+    """The resolved TDX platform configuration under the legacy contract; None otherwise."""
     host_data: str = ""
     """The SEV-SNP HOST_DATA expectation, lowercase hex; "" leaves the policy's value."""
     config_id: bytes = bytes(MR_CONFIG_ID_SIZE)

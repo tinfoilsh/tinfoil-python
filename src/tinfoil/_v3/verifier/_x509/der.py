@@ -33,7 +33,8 @@ TAG_UTC_TIME = 23
 TAG_GENERALIZED_TIME = 24
 
 MAX_DEPTH = 32
-"""The deepest nesting that ``children`` follows; deeper structures are rejected."""
+"""The deepest nesting that ``children`` and every recursive walker built on it follow; deeper structures are
+rejected."""
 
 
 class DerError(ValueError):

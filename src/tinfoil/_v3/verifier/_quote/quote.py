@@ -18,7 +18,8 @@ from typing import TypeAlias
 
 from tinfoil._v3.verifier._document.collateral.collateral import CPUEndorsements
 from tinfoil._v3.verifier._document.document import CpuEvidence, Document
-from tinfoil._v3.verifier._measurement import Expected, Measurement
+from tinfoil._v3.verifier._measurement import SEVSNP, TDX, Expected, ExpectedSEVSNP, ExpectedTDX
+from tinfoil._v3.verifier._policy import PLATFORM_SEV_SNP, PLATFORM_TDX
 from tinfoil._v3.verifier._quote.config import ConfigReferenceValues
 from tinfoil._v3.verifier._quote.legacy import LegacyReferenceValues
 from tinfoil._v3.verifier._quote.sev.authenticate import Quote as SevQuote
@@ -60,39 +61,86 @@ class QuoteOptions:
 
 
 @dataclass(frozen=True, slots=True)
-class Authenticated:
-    """A signature-verified quote, not yet compared against any expected value."""
+class AuthenticatedSEVSNP:
+    """A signature-verified SEV-SNP report, not yet compared against any expected value."""
 
-    platform: str
-    """PLATFORM_SEV_SNP or PLATFORM_TDX."""
     identity: str
-    """The authenticated machine identifier (SEV CHIP_ID or TDX PPID), lowercase hex."""
-    measurement: Measurement
-    """The authenticated launch measurement (SEV-SNP) or MRTD and RTMRs (TDX)."""
+    """The authenticated machine identifier: CHIP_ID, lowercase hex."""
+    measurement: SEVSNP
+    """The authenticated launch measurement."""
     evidence: CpuEvidence
     """The evidence that was authenticated, so that assembly can check it came from the document being appraised."""
-    sev: SevQuote | None = None
-    tdx: TdxQuote | None = None
+    quote: SevQuote
+
+    @property
+    def platform(self) -> str:
+        return PLATFORM_SEV_SNP
 
 
 @dataclass(frozen=True, slots=True)
-class AssembledPolicy:
-    """The complete expected state of a quote, resolved before validation and bound to the quote it was built for."""
+class AuthenticatedTDX:
+    """A signature-verified TDX quote, not yet compared against any expected value."""
 
-    code_measurement: Expected
-    """The registers the release fixes on the quote's platform."""
+    identity: str
+    """The authenticated machine identifier: PPID, lowercase hex."""
+    measurement: TDX
+    """The authenticated MRTD and RTMRs."""
+    evidence: CpuEvidence
+    quote: TdxQuote
+
+    @property
+    def platform(self) -> str:
+        return PLATFORM_TDX
+
+
+Authenticated: TypeAlias = AuthenticatedSEVSNP | AuthenticatedTDX
+"""A signature-verified quote of either platform; callers distinguish them by type."""
+
+
+@dataclass(frozen=True, slots=True)
+class AssembledSEVSNP:
+    """The complete expected state of an SEV-SNP quote, resolved before validation and bound to that quote."""
+
+    code_measurement: ExpectedSEVSNP
+    """The registers the release fixes."""
     policy_name: str
     """The matched policy name."""
-    platform_measurement_name: str
-    """The resolved TDX platform configuration; "" for SEV-SNP."""
-    quote: Authenticated
-    sev: SevExpectations | None = None
-    tdx: TdxExpectations | None = None
+    quote: AuthenticatedSEVSNP
+    expectations: SevExpectations
+
+    @property
+    def platform(self) -> str:
+        return PLATFORM_SEV_SNP
 
     def validate(self) -> None:
-        """Compare the captured quote against the assembled policy in one platform call: no lookups, no
-        translation."""
+        """Compare the captured quote against the assembled policy in one call: no lookups, no translation."""
         raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
+class AssembledTDX:
+    """The complete expected state of a TDX quote, resolved before validation and bound to that quote."""
+
+    code_measurement: ExpectedTDX
+    """The registers the release fixes."""
+    policy_name: str
+    """The matched policy name."""
+    platform_measurement_name: str | None
+    """The resolved platform configuration under the legacy contract; None under the config contract."""
+    quote: AuthenticatedTDX
+    expectations: TdxExpectations
+
+    @property
+    def platform(self) -> str:
+        return PLATFORM_TDX
+
+    def validate(self) -> None:
+        """Compare the captured quote against the assembled policy in one call: no lookups, no translation."""
+        raise NotImplementedError
+
+
+AssembledPolicy: TypeAlias = AssembledSEVSNP | AssembledTDX
+"""An assembled policy of either platform; callers distinguish them by type."""
 
 
 def authenticate(

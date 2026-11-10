@@ -110,15 +110,16 @@ class ProvenanceClient:
         raise NotImplementedError
 
     def authenticate_platform_endorsements(
-        self, bundle: _json.JsonValue, repo: str, tag: str, digest: str, format: str
+        self, bundle: _json.JsonValue, repo: str, tag: str, digest: str, artifact_format: str
     ) -> PlatformEndorsements:
         """Verify the platform-endorsements bundle.
 
-        ``format`` is the artifact format the verification flow selected
+        ``artifact_format`` is the artifact format the verification flow selected
         (v1 or v2); ``repo`` must be the platform-endorsements repository.
         The bundle must be signed by the platform-release workflow over
         the digest; the signed predicate must parse as a policy artifact
-        whose format, and the statement's predicate type, equal ``format``.
+        whose format, and the statement's predicate type, equal
+        ``artifact_format``.
         """
         raise NotImplementedError
 

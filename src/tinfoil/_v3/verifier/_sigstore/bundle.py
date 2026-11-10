@@ -107,6 +107,7 @@ class Subject:
 
     name: str
     digest: Mapping[str, str]
+    """Algorithm to lowercase hex; a read-only view (``MappingProxyType``) built by ``parse_statement``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +151,9 @@ def parse_statement(payload: bytes) -> Statement:
     Requires a size within MAX_STATEMENT_SIZE, the v1 statement type, a
     non-empty subject list whose entries each carry a name and a digest
     map, a predicate type and an object predicate; unknown members at the
-    statement level reject, and a null subject rejects.
+    statement level reject, and a null subject rejects. Each subject's
+    digest map is wrapped in a ``MappingProxyType`` over a private dict, so
+    the record is immutable.
     """
     raise NotImplementedError
 

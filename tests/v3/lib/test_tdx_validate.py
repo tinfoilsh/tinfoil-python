@@ -24,7 +24,7 @@ from tinfoil._v3.verifier._quote.tdx.lib.validate import (
     validate_xfam,
 )
 
-# Values that a production TDX quote carries, used as the "known good" inputs below.
+# Known-good values used as the accepted inputs below.
 EXPECTED_TD_ATTRIBUTES = bytes.fromhex("0000001000000000")
 EXPECTED_XFAM = bytes.fromhex("e702060000000000")
 EXPECTED_MINIMUM_TEE_TCB_SVN = bytes.fromhex("03010200000000000000000000000000")
@@ -36,17 +36,17 @@ class TestValidateXfam:
     def test_valid_xfam_with_fixed1_bits(self):
         """XFAM with required FIXED1 bits set passes."""
         xfam = struct.pack("<Q", XFAM_FIXED1)
-        validate_xfam(xfam)  # Should not raise
+        validate_xfam(xfam)
 
     def test_valid_xfam_with_additional_allowed_bits(self):
         """XFAM with FIXED1 plus other allowed bits passes."""
         # XFAM_FIXED0 defines which bits are allowed
         xfam = struct.pack("<Q", XFAM_FIXED0)
-        validate_xfam(xfam)  # Should not raise
+        validate_xfam(xfam)
 
     def test_expected_xfam_value_passes(self):
-        """The XFAM value of a production quote passes validation."""
-        validate_xfam(EXPECTED_XFAM)  # Should not raise
+        """The known-good XFAM value passes validation."""
+        validate_xfam(EXPECTED_XFAM)
 
     def test_missing_fixed1_bits_rejected(self):
         """XFAM missing required FIXED1 bits is rejected."""
@@ -73,27 +73,27 @@ class TestValidateTdAttributes:
     def test_valid_with_sept_ve_dis(self):
         """TD_ATTRIBUTES with SEPT_VE_DIS bit passes."""
         td_attrs = struct.pack("<Q", TD_ATTRIBUTES_SEPT_VE_DIS)
-        validate_td_attributes(td_attrs)  # Should not raise
+        validate_td_attributes(td_attrs)
 
     def test_valid_with_pks(self):
         """TD_ATTRIBUTES with PKS bit passes."""
         td_attrs = struct.pack("<Q", TD_ATTRIBUTES_PKS)
-        validate_td_attributes(td_attrs)  # Should not raise
+        validate_td_attributes(td_attrs)
 
     def test_valid_with_perfmon(self):
         """TD_ATTRIBUTES with PERFMON bit passes."""
         td_attrs = struct.pack("<Q", TD_ATTRIBUTES_PERFMON)
-        validate_td_attributes(td_attrs)  # Should not raise
+        validate_td_attributes(td_attrs)
 
     def test_valid_with_multiple_allowed_bits(self):
         """TD_ATTRIBUTES with multiple allowed bits passes."""
         value = TD_ATTRIBUTES_SEPT_VE_DIS | TD_ATTRIBUTES_PKS
         td_attrs = struct.pack("<Q", value)
-        validate_td_attributes(td_attrs)  # Should not raise
+        validate_td_attributes(td_attrs)
 
     def test_expected_td_attributes_value_passes(self):
-        """The TD_ATTRIBUTES value of a production quote passes validation."""
-        validate_td_attributes(EXPECTED_TD_ATTRIBUTES)  # Should not raise
+        """The known-good TD_ATTRIBUTES value passes validation."""
+        validate_td_attributes(EXPECTED_TD_ATTRIBUTES)
 
     def test_debug_bit_rejected_unconditionally(self):
         """DEBUG bit is rejected unconditionally, even though it's in FIXED0."""
@@ -119,7 +119,7 @@ class TestValidateSeamAttributes:
 
     def test_zero_accepted(self):
         """Zero SEAMATTRIBUTES passes."""
-        validate_seam_attributes(b"\x00" * 8)  # Should not raise
+        validate_seam_attributes(b"\x00" * 8)
 
     def test_non_zero_rejected(self):
         """Non-zero SEAMATTRIBUTES is rejected."""
@@ -142,7 +142,7 @@ class TestValidateMrSignerSeam:
 
     def test_zero_accepted(self):
         """Zero MRSIGNERSEAM passes."""
-        validate_mr_signer_seam(b"\x00" * 48)  # Should not raise
+        validate_mr_signer_seam(b"\x00" * 48)
 
     def test_non_zero_rejected(self):
         """Non-zero MRSIGNERSEAM is rejected."""
@@ -242,7 +242,7 @@ class TestOptionsLengthValidation:
                 mr_owner_config=b"\x00" * 48,
             ),
         )
-        _check_options_lengths(opts)  # Should not raise
+        _check_options_lengths(opts)
 
 
 if __name__ == "__main__":

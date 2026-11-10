@@ -1,4 +1,4 @@
-"""Unit tests for TDX module identity matching against realistic TEE_TCB_SVN values."""
+"""Unit tests for TDX module identity matching against synthetic TEE_TCB_SVN values."""
 
 from __future__ import annotations
 
@@ -19,38 +19,42 @@ from tinfoil._v3.verifier._quote.tdx.lib.collateral import (
 )
 
 
-class TestModuleIdentityMatchingWithRealTeeTcbSvn:
-    """Test module-identity matching with realistic tee_tcb_svn byte patterns."""
+class TestModuleIdentityMatching:
+    """Module-identity matching on synthetic tee_tcb_svn byte patterns."""
 
     def _create_tcb_info_with_modules(
         self,
         module_ids: list[str],
         module_mrsigner: bytes = b"\xaa" * 48,
+        *,
+        attributes: bytes = b"\x00" * 8,
+        attributes_mask: bytes = b"\xff" * 8,
+        isv_svn: int = 3,
+        tcb_status: TcbStatus = TcbStatus.UP_TO_DATE,
     ) -> TcbInfo:
-        """Create TCB Info with specified module identities."""
-        module_identities = []
-        for module_id in module_ids:
-            module_identities.append(
-                TdxModuleIdentity(
-                    id=module_id,
-                    mrsigner=module_mrsigner,
-                    attributes=b"\x00" * 8,
-                    attributes_mask=b"\xff" * 8,
-                    tcb_levels=[
-                        TcbLevel(
-                            tcb=Tcb(
-                                sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                                pce_svn=0,
-                                tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                                isv_svn=3,  # Minimum minor version
-                            ),
-                            tcb_date="2024-01-01T00:00:00Z",
-                            tcb_status=TcbStatus.UP_TO_DATE,
-                            advisory_ids=[],
+        """Create TCB Info whose module identities share one signer, attribute set and single TCB level."""
+        module_identities = [
+            TdxModuleIdentity(
+                id=module_id,
+                mrsigner=module_mrsigner,
+                attributes=attributes,
+                attributes_mask=attributes_mask,
+                tcb_levels=[
+                    TcbLevel(
+                        tcb=Tcb(
+                            sgx_tcb_components=[TcbComponent(svn=0)] * 16,
+                            pce_svn=0,
+                            tdx_tcb_components=[TcbComponent(svn=0)] * 16,
+                            isv_svn=isv_svn,
                         ),
-                    ],
-                )
+                        tcb_date="2024-01-01T00:00:00Z",
+                        tcb_status=tcb_status,
+                        advisory_ids=[],
+                    ),
+                ],
             )
+            for module_id in module_ids
+        ]
 
         return TcbInfo(
             id="TDX",
@@ -136,67 +140,31 @@ class TestModuleIdentityMatchingWithRealTeeTcbSvn:
         with pytest.raises(CollateralError, match="TEE_TCB_SVN is too short"):
             get_tdx_module_identity(tcb_info, tee_tcb_svn)
 
-    def test_validate_module_identity_with_real_svn_values(self):
-        """Test full module identity validation with realistic SVN values."""
+    def test_validate_module_identity_passes(self):
+        """Module identity validation passes on a matching signer, attributes and minor SVN."""
         module_mrsigner = b"\xaa" * 48
         tcb_info = self._create_tcb_info_with_modules(
             ["TDX_03"],
             module_mrsigner=module_mrsigner,
         )
 
-        # Realistic TEE_TCB_SVN: minor=5, major=3
-        # This should match TDX_03 and pass TCB level check (minor >= 3)
         tee_tcb_svn = bytes([5, 3] + [0] * 14)
         mr_signer_seam = module_mrsigner
         seam_attributes = b"\x00" * 8
 
-        # Should not raise - validation succeeds
         validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
 
     def test_validate_module_identity_minor_svn_too_low_raises_error(self):
         """Test that minor SVN below threshold raises CollateralError."""
         module_mrsigner = b"\xaa" * 48
 
-        tcb_info = TcbInfo(
-            id="TDX",
-            version=3,
-            issue_date=datetime.now(UTC),
-            next_update=datetime.now(UTC) + timedelta(days=30),
-            fmspc="00a06f000000",
-            pce_id="0000",
-            tcb_type=0,
-            tcb_evaluation_data_number=17,
-            tdx_module=None,
-            tdx_module_identities=[
-                TdxModuleIdentity(
-                    id="TDX_03",
-                    mrsigner=module_mrsigner,
-                    attributes=b"\x00" * 8,
-                    attributes_mask=b"\xff" * 8,
-                    tcb_levels=[
-                        TcbLevel(
-                            tcb=Tcb(
-                                sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                                pce_svn=0,
-                                tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                                isv_svn=5,  # Requires minor >= 5
-                            ),
-                            tcb_date="2024-01-01T00:00:00Z",
-                            tcb_status=TcbStatus.UP_TO_DATE,
-                            advisory_ids=[],
-                        ),
-                    ],
-                )
-            ],
-            tcb_levels=[],
-        )
+        tcb_info = self._create_tcb_info_with_modules(["TDX_03"], module_mrsigner=module_mrsigner, isv_svn=5)
 
         # TEE_TCB_SVN: minor=2, major=3 - minor too low (< 5)
         tee_tcb_svn = bytes([2, 3] + [0] * 14)
         mr_signer_seam = module_mrsigner
         seam_attributes = b"\x00" * 8
 
-        # No matching level found raises CollateralError
         with pytest.raises(CollateralError, match="Could not find a TDX Module Identity TCB Level"):
             validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
 
@@ -220,38 +188,8 @@ class TestModuleIdentityMatchingWithRealTeeTcbSvn:
         """Test that SEAM_ATTRIBUTES mismatch under mask raises error."""
         module_mrsigner = b"\xaa" * 48
 
-        tcb_info = TcbInfo(
-            id="TDX",
-            version=3,
-            issue_date=datetime.now(UTC),
-            next_update=datetime.now(UTC) + timedelta(days=30),
-            fmspc="00a06f000000",
-            pce_id="0000",
-            tcb_type=0,
-            tcb_evaluation_data_number=17,
-            tdx_module=None,
-            tdx_module_identities=[
-                TdxModuleIdentity(
-                    id="TDX_03",
-                    mrsigner=module_mrsigner,
-                    attributes=b"\x01" * 8,  # Expected: all 0x01
-                    attributes_mask=b"\xff" * 8,  # Full mask
-                    tcb_levels=[
-                        TcbLevel(
-                            tcb=Tcb(
-                                sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                                pce_svn=0,
-                                tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                                isv_svn=3,
-                            ),
-                            tcb_date="2024-01-01T00:00:00Z",
-                            tcb_status=TcbStatus.UP_TO_DATE,
-                            advisory_ids=[],
-                        ),
-                    ],
-                )
-            ],
-            tcb_levels=[],
+        tcb_info = self._create_tcb_info_with_modules(
+            ["TDX_03"], module_mrsigner=module_mrsigner, attributes=b"\x01" * 8
         )
 
         tee_tcb_svn = bytes([5, 3] + [0] * 14)
@@ -265,38 +203,8 @@ class TestModuleIdentityMatchingWithRealTeeTcbSvn:
         """Test that REVOKED module TCB status raises error."""
         module_mrsigner = b"\xaa" * 48
 
-        tcb_info = TcbInfo(
-            id="TDX",
-            version=3,
-            issue_date=datetime.now(UTC),
-            next_update=datetime.now(UTC) + timedelta(days=30),
-            fmspc="00a06f000000",
-            pce_id="0000",
-            tcb_type=0,
-            tcb_evaluation_data_number=17,
-            tdx_module=None,
-            tdx_module_identities=[
-                TdxModuleIdentity(
-                    id="TDX_03",
-                    mrsigner=module_mrsigner,
-                    attributes=b"\x00" * 8,
-                    attributes_mask=b"\xff" * 8,
-                    tcb_levels=[
-                        TcbLevel(
-                            tcb=Tcb(
-                                sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                                pce_svn=0,
-                                tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                                isv_svn=3,
-                            ),
-                            tcb_date="2024-01-01T00:00:00Z",
-                            tcb_status=TcbStatus.REVOKED,  # REVOKED!
-                            advisory_ids=[],
-                        ),
-                    ],
-                )
-            ],
-            tcb_levels=[],
+        tcb_info = self._create_tcb_info_with_modules(
+            ["TDX_03"], module_mrsigner=module_mrsigner, tcb_status=TcbStatus.REVOKED
         )
 
         tee_tcb_svn = bytes([5, 3] + [0] * 14)
@@ -306,21 +214,12 @@ class TestModuleIdentityMatchingWithRealTeeTcbSvn:
         with pytest.raises(CollateralError, match="REVOKED"):
             validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
 
-    def test_real_world_tee_tcb_svn_pattern(self):
-        """Test with a realistic TEE_TCB_SVN pattern from production."""
-        # Real-world example: TDX module 3.x with minor version 5
-        # and non-zero values in other positions
+    def test_tee_tcb_svn_minor_and_major_select_module(self):
+        """A TEE_TCB_SVN with minor 5 and major 3 selects TDX_03."""
         tcb_info = self._create_tcb_info_with_modules(["TDX_03"])
 
-        # Realistic 16-byte TEE_TCB_SVN:
-        # [0]=5 (minor), [1]=3 (major), [2]=0, [3]=0, ...
-        # Some positions might have non-zero values for platform TCB
         tee_tcb_svn = bytes([5, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 
         result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
         assert result is not None
         assert result.id == "TDX_03"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

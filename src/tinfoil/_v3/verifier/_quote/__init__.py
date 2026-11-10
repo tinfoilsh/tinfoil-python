@@ -4,8 +4,12 @@ from tinfoil._v3.verifier._quote.config import ConfigReferenceValues
 from tinfoil._v3.verifier._quote.legacy import LegacyReferenceValues
 from tinfoil._v3.verifier._quote.quote import (
     AssembledPolicy,
+    AssembledSEVSNP,
+    AssembledTDX,
     AssemblyError,
     Authenticated,
+    AuthenticatedSEVSNP,
+    AuthenticatedTDX,
     QuoteError,
     QuoteOptions,
     ReferenceValues,
@@ -16,8 +20,12 @@ from tinfoil._v3.verifier._quote.quote import (
 
 __all__ = [
     "AssembledPolicy",
+    "AssembledSEVSNP",
+    "AssembledTDX",
     "AssemblyError",
     "Authenticated",
+    "AuthenticatedSEVSNP",
+    "AuthenticatedTDX",
     "ConfigReferenceValues",
     "LegacyReferenceValues",
     "QuoteError",

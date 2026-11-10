@@ -82,7 +82,7 @@ class SnpPlatformInfo:
 
 @dataclass
 class SnpPolicy:
-    """Decoded view of the 64-bit POLICY field (bits 0-20)."""
+    """Decoded view of the 64-bit POLICY field (bits 0-25)."""
 
     abi_minor: int
     abi_major: int
@@ -198,7 +198,7 @@ class Report:
         self.current_tcb = int.from_bytes(data[0x38:0x40], byteorder="little")
 
         try:
-            mbz64(int(self.current_tcb), "current_tcb", 47, 16)
+            mbz64(int(self.current_tcb), "current_tcb", 16, 47)
         except ValueError as e:
             raise ValueError(f"current_tcb not correctly formed: {e}") from e
 
@@ -210,7 +210,7 @@ class Report:
 
         self.signer_info_parsed = SignerInfo()
         try:
-            mbz64(int(self.signer_info), "signer_info", 31, 5)
+            mbz64(int(self.signer_info), "signer_info", 5, 31)
         except ValueError as e:
             raise ValueError(f"signer_info not correctly formed: {e}") from e
 
@@ -238,7 +238,7 @@ class Report:
         self.reported_tcb = int.from_bytes(data[0x180:0x188], byteorder="little")
 
         try:
-            mbz64(int(self.reported_tcb), "reported_tcb", 47, 16)
+            mbz64(int(self.reported_tcb), "reported_tcb", 16, 47)
         except ValueError as e:
             raise ValueError(f"reported_tcb not correctly formed: {e}") from e
 
@@ -267,7 +267,7 @@ class Report:
         self.committed_tcb = int.from_bytes(data[0x1E0:0x1E8], byteorder="little")
 
         try:
-            mbz64(int(self.committed_tcb), "committed_tcb", 47, 16)
+            mbz64(int(self.committed_tcb), "committed_tcb", 16, 47)
         except ValueError as e:
             raise ValueError(f"committed_tcb not correctly formed: {e}") from e
 
@@ -293,7 +293,7 @@ class Report:
         self.launch_tcb = int.from_bytes(data[0x1F0:0x1F8], byteorder="little")
 
         try:
-            mbz64(int(self.launch_tcb), "launch_tcb", 47, 16)
+            mbz64(int(self.launch_tcb), "launch_tcb", 16, 47)
         except ValueError as e:
             raise ValueError(f"launch_tcb not correctly formed: {e}") from e
 
@@ -369,15 +369,15 @@ def mbz(data: bytes, lo: int, hi: int) -> None:
         raise ValueError(f"mbz range [0x{lo:x}:0x{hi:x}] not all zero: {hex_str}")
 
 
-def mbz64(data: int, base: str, hi: int, lo: int) -> None:
+def mbz64(data: int, base: str, lo: int, hi: int) -> None:
     """
     Checks if a range of bits in an integer is all zeros.
 
     Args:
         data: Integer to check
         base: String identifier for error message
-        hi: Highest bit position (inclusive)
         lo: Lowest bit position (inclusive)
+        hi: Highest bit position (inclusive)
     Raises:
         ValueError: If any bit in the range is non-zero
     """

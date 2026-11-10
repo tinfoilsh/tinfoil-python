@@ -28,7 +28,7 @@ class TrustedRootError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ValidFor:
-    """A half-open validity window; ``end`` None means still valid."""
+    """A closed validity window: ``start`` and ``end`` are both inclusive; ``end`` None means still valid."""
 
     start: datetime
     end: datetime | None = None
