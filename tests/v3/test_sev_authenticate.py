@@ -18,6 +18,7 @@ from tinfoil._v3.verifier._quote import quote, sev
 from tinfoil._v3.verifier._quote.sev import expectations
 from tinfoil._v3.verifier._quote.sev.authenticate import (
     SevAuthenticationError,
+    authenticate as authenticate_sev,
     decode_cert_chain,
     parse_crl,
     parse_report_bytes,
@@ -72,7 +73,7 @@ def test_sev_vectors(fixture: dict[str, Any]) -> None:
 def test_happy_vector_through_the_sev_entry_point() -> None:
     case = fx.happy_case()
     assert case.chain_pem is not None
-    verified = sev.authenticate(sev_evidence(case), case.now, sev.Options(test_only_root_pem=case.chain_pem))
+    verified = authenticate_sev(sev_evidence(case), case.now, sev.Options(test_only_root_pem=case.chain_pem))
     assert verified.identity == fx.GENOA_HWID.hex()
     assert verified.chain.vcek == parse_certificate(sev_evidence(case).vcek_der)
     assert chain.common_name(verified.chain.ask.subject) == "SEV-Genoa"
@@ -128,7 +129,7 @@ def test_authenticate_requires_an_aware_verification_time() -> None:
     case = fx.happy_case()
     naive = datetime(2025, 1, 1)
     with pytest.raises(SevAuthenticationError, match="verification time is required"):
-        sev.authenticate(sev_evidence(case), naive, sev.Options(test_only_root_pem=case.chain_pem))
+        authenticate_sev(sev_evidence(case), naive, sev.Options(test_only_root_pem=case.chain_pem))
 
 
 def test_trusted_roots_select_the_product() -> None:

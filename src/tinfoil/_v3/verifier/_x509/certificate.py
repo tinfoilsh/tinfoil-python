@@ -9,12 +9,14 @@ at the instant the caller supplies, never the wall clock.
 from __future__ import annotations
 
 import hashlib
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TypeAlias, TypeVar
 
 from cryptography import x509
+from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
@@ -102,7 +104,12 @@ def parse_certificate(der_bytes: bytes) -> Certificate:
     """
     _with_context("certificate", lambda: _check_certificate_der(der_bytes))
     try:
-        certificate = x509.load_der_x509_certificate(der_bytes)
+        # Production AMD VCEK certificates carry serial number zero; the library
+        # warns about it today and will reject it in a future release (pinned
+        # by the library-claims tests), so the warning is silenced here.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Parsed a serial number", category=CryptographyDeprecationWarning)
+            certificate = x509.load_der_x509_certificate(der_bytes)
     except (ValueError, TypeError, UnsupportedAlgorithm) as err:
         raise X509Error(f"certificate: {err}") from err
     if certificate.public_bytes(serialization.Encoding.DER) != der_bytes:

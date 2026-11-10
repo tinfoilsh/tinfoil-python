@@ -24,6 +24,7 @@ from tinfoil._v3.verifier._quote import sev, tdx
 from tinfoil._v3.verifier._quote.config import ConfigReferenceValues
 from tinfoil._v3.verifier._quote.legacy import LegacyReferenceValues
 from tinfoil._v3.verifier._quote.sev.authenticate import Quote as SevQuote
+from tinfoil._v3.verifier._quote.sev.authenticate import authenticate as _authenticate_sev
 from tinfoil._v3.verifier._quote.sev.expectations import Expectations as SevExpectations
 from tinfoil._v3.verifier._quote.tdx.authenticate import Quote as TdxQuote
 from tinfoil._v3.verifier._quote.tdx.authenticate import authenticate as _authenticate_tdx
@@ -169,7 +170,7 @@ def authenticate(
         )
         sev_options = sev.Options(test_only_root_pem=roots.amd if roots is not None else None)
         try:
-            sev_quote = sev.authenticate(sev_evidence, now, sev_options)
+            sev_quote = _authenticate_sev(sev_evidence, now, sev_options)
         except sev.SevAuthenticationError as err:
             raise QuoteError(str(err)) from err
         return AuthenticatedSEVSNP(
