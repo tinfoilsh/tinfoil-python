@@ -34,7 +34,7 @@ from tinfoil._v3.verifier._endorsement.approval import (
     parse_name,
 )
 from tinfoil._v3.verifier._endorsement.provenance import ProvenanceClient
-from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact, ReferenceError, parse_reference
+from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact, ReleaseReferenceError, parse_reference
 from tinfoil._v3.verifier._errors import LAYER_PROVENANCE, UsageError, VerificationError
 from tinfoil._v3.verifier._measurement import Expected
 from tinfoil._v3.verifier._policy import ARTIFACT_FORMAT_V2, Artifact
@@ -133,7 +133,7 @@ def reference_pins(trust: TrustPolicy, ref: str) -> ConfigPolicy:
     if ref != "":
         try:
             parsed = parse_reference(ref)
-        except ReferenceError as err:
+        except ReleaseReferenceError as err:
             raise UsageError(str(err)) from err
         identity, revision, digest = "/" + parsed.repo, parsed.tag, parsed.digest
     embedded = trust.embedded.config

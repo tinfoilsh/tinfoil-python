@@ -10,7 +10,7 @@ from tinfoil._v3.verifier._endorsement.reference import (
     PLATFORM_ENDORSEMENTS_REPO,
     AuthenticatedArtifact,
     Reference,
-    ReferenceError,
+    ReleaseReferenceError,
     parse_reference,
     validate_authenticated_artifact,
 )
@@ -60,7 +60,7 @@ def test_parse_reference_accepts(ref: str, want: Reference) -> None:
     ],
 )
 def test_parse_reference_rejects(ref: str) -> None:
-    with pytest.raises(ReferenceError, match="invalid release reference"):
+    with pytest.raises(ReleaseReferenceError, match="invalid release reference"):
         parse_reference(ref)
 
 
@@ -78,5 +78,5 @@ def test_validate_authenticated_artifact() -> None:
         ("digest", "ABCDEF" + DIGEST[6:], "digest is malformed"),
     ]:
         bad = dataclasses.replace(sample_artifact(), **{field: value})
-        with pytest.raises(ReferenceError, match=message):
+        with pytest.raises(ReleaseReferenceError, match=message):
             validate_authenticated_artifact(bad)

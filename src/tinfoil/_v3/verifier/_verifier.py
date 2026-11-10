@@ -39,7 +39,7 @@ from tinfoil._v3.verifier._document.document import Document, InvalidInputError,
 from tinfoil._v3.verifier._embedded import EmbeddedReferences, ResolvedReferences, resolve_embedded
 from tinfoil._v3.verifier._endorsement.approval import ApprovalError, ConfigPolicy, public_signing_keys
 from tinfoil._v3.verifier._endorsement.provenance import ProvenanceClient, ProvenanceError
-from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact, Reference, ReferenceError
+from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact, Reference, ReleaseReferenceError
 from tinfoil._v3.verifier._endorsement.reference import parse_reference as _parse_reference
 from tinfoil._v3.verifier._endorsement.time import DEFAULT_MAX_AGE
 from tinfoil._v3.verifier._errors import (
@@ -409,7 +409,7 @@ def _code_references(trust: TrustPolicy, doc: Document, repo: str, now: datetime
     code_ref = doc.sigstore_code()
     try:
         pin = _parse_reference(repo)
-    except ReferenceError as err:
+    except ReleaseReferenceError as err:
         raise UsageError(str(err)) from err
     code = trust.endorsements.authenticate_code(code_ref.bundle, pin, code_ref.tag, code_ref.digest)
     platform_ref = doc.sigstore_platform()
