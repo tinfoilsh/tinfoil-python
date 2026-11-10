@@ -15,7 +15,6 @@ from tinfoil._v3.verifier._x509.crl import RevocationList
 PRODUCT_GENOA = "Genoa"
 PRODUCT_TURIN = "Turin"
 SUPPORTED_PRODUCTS = (PRODUCT_GENOA, PRODUCT_TURIN)
-REPORT_SIZE = 1184
 MINIMUM_REPORT_VERSION = 3
 """The first report version that carries the CPUID family, model and stepping."""
 
@@ -26,7 +25,12 @@ class SevAuthenticationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Options:
-    """Per-authentication overrides; the default selects the embedded per-product anchor."""
+    """Per-authentication overrides; the default selects the embedded per-product anchor.
+
+    This package is private and the public verifier builds these options
+    itself, so the override is reachable only from the conformance adapter's
+    internal factory, never from the public constructor.
+    """
 
     test_only_root_pem: bytes | None = None
     """A replacement AMD KDS ``cert_chain`` PEM (ASK then ARK) for the conformance harness."""
@@ -95,7 +99,12 @@ def product_from_report(report: Report) -> str:
 
 
 def reject_masked_chip_id(report: Report) -> None:
-    """Reject a report whose SIGNER_INFO masks CHIP_ID: masked platform identities are unsupported."""
+    """Reject a report whose SIGNER_INFO masks CHIP_ID: masked platform identities are unsupported.
+
+    Authentication owns this rule: the identity is derived from CHIP_ID
+    right after the signature check, so a masked report never produces a
+    quote, and validation does not check it again.
+    """
     raise NotImplementedError
 
 

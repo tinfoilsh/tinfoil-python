@@ -28,7 +28,7 @@ class Expectations:
     ``options`` holds the bounds and equalities that the library applies;
     the ``want_*`` fields are compared by strict equality on top, since
     the library treats the guest policy and platform info as maximum
-    masks.
+    masks. The library records are mutable; callers must not mutate them.
     """
 
     options: ValidationOptions
@@ -61,8 +61,8 @@ def validate(expectations: Expectations, quote: Quote) -> None:
 
 
 def check_signer(report: Report) -> None:
-    """Reject a report with a masked CHIP_ID, an author key, a non-zero ID key digest or a non-zero author key
-    digest: ID-block launches are unsupported."""
+    """Reject a report with an author key, a non-zero ID key digest or a non-zero author key digest: ID-block
+    launches are unsupported. (A masked CHIP_ID is rejected at authentication.)"""
     raise NotImplementedError
 
 
@@ -76,7 +76,7 @@ def expected_platform_info(policy: SEVSNPPolicy) -> SnpPlatformInfo:
     raise NotImplementedError
 
 
-def options(policy: SEVSNPPolicy, product_line: str) -> ValidationOptions:
+def _options(policy: SEVSNPPolicy, product_line: str) -> ValidationOptions:
     """Translate the policy block into validation options for ``product_line``.
 
     The policy must validate. Genoa forbids ``fmc_spl`` and

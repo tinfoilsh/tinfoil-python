@@ -157,6 +157,9 @@ def signing_keys(source: Source) -> list[str]:
     keys = _PEM_PUBLIC_KEY.findall(text)
     if not keys:
         raise SyncError(f"{source.relative_path}: no PEM public key found")
+    markers = text.count("-----BEGIN PUBLIC KEY-----")
+    if markers != len(keys):
+        raise SyncError(f"{source.relative_path}: {markers} PEM public key blocks but only {len(keys)} parse")
     for pem in keys:
         key = serialization.load_pem_public_key(pem.encode("ascii"))
         if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256R1):

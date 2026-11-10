@@ -6,11 +6,10 @@ from tinfoil._v3.verifier._quote.tdx.authenticate import (
     Options,
     Quote,
     TdxAuthenticationError,
-    authenticate,
     platform_measurements,
 )
 from tinfoil._v3.verifier._quote.tdx.expectations import Expectations, TdxPolicyError, assemble
-from tinfoil._v3.verifier._quote.tdx.identity import PPID_SIZE, identity
+from tinfoil._v3.verifier._quote.tdx.identity import PPID_SIZE
 from tinfoil._v3.verifier._quote.tdx.pcs import PCSReplay, PCSReplayError
 
 __all__ = [
@@ -24,7 +23,5 @@ __all__ = [
     "TdxAuthenticationError",
     "TdxPolicyError",
     "assemble",
-    "authenticate",
-    "identity",
     "platform_measurements",
 ]

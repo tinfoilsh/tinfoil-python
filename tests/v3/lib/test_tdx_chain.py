@@ -182,8 +182,8 @@ def build_signed_quote_with_keys() -> tuple[bytes, ec.EllipticCurvePrivateKey, e
     # Sign QE report with QE key
     qe_signature = sign_message(qe_priv, qe_report)
 
-    # Build PCK cert chain (using self-signed certs for testing)
-    pck_cert_pem = _generate_self_signed_cert_pem("PCK Leaf")
+    # Build PCK cert chain (self-signed certs for testing); the leaf carries the QE key that signed the report
+    pck_cert_pem = _generate_self_signed_cert_pem("PCK Leaf", qe_priv)
     intermediate_cert_pem = _generate_self_signed_cert_pem("Intermediate CA")
     root_cert_pem = INTEL_SGX_ROOT_CA_PEM  # Use real Intel root for chain validation tests
 
@@ -234,14 +234,14 @@ def _build_signed_data_bytes(
     return signature + attestation_key + cert_data
 
 
-def _generate_self_signed_cert_pem(cn: str) -> bytes:
-    """Generate a self-signed certificate for testing."""
+def _generate_self_signed_cert_pem(cn: str, private_key: ec.EllipticCurvePrivateKey | None = None) -> bytes:
+    """Generate a self-signed certificate for testing, over ``private_key`` or a fresh one."""
     import datetime
 
-    from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import NameOID
 
-    private_key = ec.generate_private_key(ec.SECP256R1())
+    if private_key is None:
+        private_key = ec.generate_private_key(ec.SECP256R1())
 
     subject = issuer = x509.Name(
         [

@@ -12,14 +12,14 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from tinfoil._v3.verifier import _json
+from tinfoil._v3.verifier._sigstore.bundle import MAX_STATEMENT_SIZE as MAX_STATEMENT_SIZE
+from tinfoil._v3.verifier._sigstore.bundle import MAX_TIMESTAMP_SIZE as MAX_TIMESTAMP_SIZE
 from tinfoil._v3.verifier._sigstore.trusted_root import TrustedRoot
 
 SIGSTORE_TIMESTAMP_POLICY = "1.3.6.1.4.1.57264.2"
 STATUS_GRANTED = 0
 STATUS_GRANTED_WITH_MODS = 1
 TST_INFO_VERSION = 1
-MAX_TIMESTAMP_SIZE = 64 << 10
-MAX_STATEMENT_SIZE = 128 << 10
 OID_SHA256 = "2.16.840.1.101.3.4.2.1"
 
 
@@ -63,11 +63,13 @@ def check_imprint(response: TimestampResponse, data: bytes) -> None:
     raise NotImplementedError
 
 
-def verify_timestamp(root: TrustedRoot, response: bytes, data: bytes, *, policy: str | None = None) -> datetime:
+def verify_timestamp(
+    root: TrustedRoot, response: bytes, data: bytes, *, policy: str = SIGSTORE_TIMESTAMP_POLICY
+) -> datetime:
     """Verify a timestamp over ``data`` and return its genTime.
 
-    The response is decoded and its imprint checked; when ``policy`` is
-    given the token's policy OID must equal it. Then each timestamp
+    The response is decoded and its imprint checked; the token's policy
+    OID must equal ``policy``. Then each timestamp
     authority whose window contains the genTime is tried: the token's
     signing certificate must chain to the authority at the genTime with
     the time-stamping EKU and the CMS signature must verify. The first

@@ -160,7 +160,7 @@ QE_REPORT_DATA_END = 0x180
 # =============================================================================
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TdxHeader:
     """
     TDX Quote header (48 bytes).
@@ -189,7 +189,7 @@ class TdxHeader:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TdQuoteBody:
     """
     TD Quote Body (584 bytes).
@@ -208,7 +208,7 @@ class TdQuoteBody:
     mr_config_id: bytes  # 48 bytes - Config ID
     mr_owner: bytes  # 48 bytes - Owner measurement
     mr_owner_config: bytes  # 48 bytes - Owner config measurement
-    rtmrs: list[bytes]  # 4 x 48 bytes - Runtime measurement registers
+    rtmrs: tuple[bytes, ...]  # 4 x 48 bytes - Runtime measurement registers
     report_data: bytes  # 64 bytes - Custom data (TLS key FP + HPKE key)
 
     def __str__(self) -> str:
@@ -230,7 +230,7 @@ class TdQuoteBody:
         return [self.mr_td, *self.rtmrs]
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class QeReport:
     """
     Quoting Enclave Report (384 bytes).
@@ -257,7 +257,7 @@ class QeReport:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class QeReportCertificationData:
     """
     QE Report Certification Data.
@@ -273,7 +273,7 @@ class QeReportCertificationData:
     pck_cert_chain_data: PckCertChainData  # Nested PCK certificate chain
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class PckCertChainData:
     """
     PCK Certificate Chain Data.
@@ -287,7 +287,7 @@ class PckCertChainData:
     cert_data: bytes  # Variable - PEM certificate chain
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class CertificationData:
     """
     Certification Data from the quote (type 6 only).
@@ -306,7 +306,7 @@ class CertificationData:
         return self.qe_report_data.pck_cert_chain_data
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class SignedData:
     """
     Signed Data section of the quote.
@@ -327,7 +327,7 @@ class SignedData:
         )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class QuoteV4:
     """
     TDX Quote Version 4.
@@ -437,7 +437,7 @@ def _parse_td_quote_body(data: bytes) -> TdQuoteBody:
         mr_config_id=data[TD_MR_CONFIG_ID_START:TD_MR_CONFIG_ID_END],
         mr_owner=data[TD_MR_OWNER_START:TD_MR_OWNER_END],
         mr_owner_config=data[TD_MR_OWNER_CONFIG_START:TD_MR_OWNER_CONFIG_END],
-        rtmrs=rtmrs,
+        rtmrs=tuple(rtmrs),
         report_data=data[TD_REPORT_DATA_START:TD_REPORT_DATA_END],
     )
 

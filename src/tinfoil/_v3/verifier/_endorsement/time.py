@@ -25,10 +25,13 @@ class TimePolicy:
         raise NotImplementedError
 
 
-def new_time_policy(now: datetime, max_age: timedelta, future_skew: timedelta) -> TimePolicy:
+def new_time_policy(
+    now: datetime, max_age: timedelta | None = None, future_skew: timedelta | None = None
+) -> TimePolicy:
     """Build the window around ``now``.
 
-    ``now`` must be timezone-aware; a negative age or skew is an error; a
-    zero age or skew selects the default.
+    ``now`` must be timezone-aware; None selects DEFAULT_MAX_AGE or
+    DEFAULT_FUTURE_SKEW; a negative age or skew is an error, and a zero one
+    is honoured.
     """
     raise NotImplementedError

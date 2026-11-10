@@ -24,7 +24,12 @@ class TdxAuthenticationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Options:
-    """Per-authentication overrides; the default selects the embedded Intel SGX root."""
+    """Per-authentication overrides; the default selects the embedded Intel SGX root.
+
+    This package is private and the public verifier builds these options
+    itself, so the override is reachable only from the conformance adapter's
+    internal factory, never from the public constructor.
+    """
 
     test_only_root_pem: bytes | None = None
     """A replacement Intel SGX root certificate PEM for the conformance harness."""

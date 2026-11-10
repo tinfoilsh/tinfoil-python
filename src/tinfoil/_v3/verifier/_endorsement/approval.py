@@ -19,6 +19,7 @@ from tinfoil._v3.verifier._document.collateral.runtime import RuntimeReference
 from tinfoil._v3.verifier._endorsement.time import TimePolicy
 from tinfoil._v3.verifier._sigstore.bundle import Bundle
 from tinfoil._v3.verifier._sigstore.keyed import PinnedKey
+from tinfoil._v3.verifier._sigstore.keyed import key_hint as key_hint
 from tinfoil._v3.verifier._sigstore.trusted_root import TrustedRoot
 from tinfoil._v3.verifier._x509.certificate import Certificate, PublicKey
 
@@ -208,11 +209,6 @@ def public_signing_keys() -> tuple[PublicKey, ...]:
     raise NotImplementedError
 
 
-def key_hint(key: PublicKey) -> str:
-    """The approval key hint of an ECDSA P-256 key."""
-    raise NotImplementedError
-
-
 # --- Registry certificates --------------------------------------------------
 
 
@@ -261,14 +257,14 @@ class ApprovalVerifier:
 
 @dataclass(frozen=True, slots=True)
 class ConfigPolicy:
-    """What a config approval must match, plus the clock and window; zero age and skew select the defaults."""
+    """What a config approval must match, plus the clock and window; None age and skew select the defaults."""
 
     identity: str = ""
     revision: str = ""
     digest: str = ""
     now: datetime | None = None
-    max_age: timedelta = timedelta(0)
-    future_skew: timedelta = timedelta(0)
+    max_age: timedelta | None = None
+    future_skew: timedelta | None = None
     registry_ids: tuple[str, ...] | None = None
     """None accepts any registry; an empty tuple is an error."""
 
@@ -341,8 +337,8 @@ class ConfigVerifier:
 class FreshnessPolicy:
     artifact: FreshnessArtifact
     now: datetime
-    max_age: timedelta = timedelta(0)
-    future_skew: timedelta = timedelta(0)
+    max_age: timedelta | None = None
+    future_skew: timedelta | None = None
 
     def time_policy(self) -> TimePolicy:
         """The artifact validated, then the window around ``now``."""

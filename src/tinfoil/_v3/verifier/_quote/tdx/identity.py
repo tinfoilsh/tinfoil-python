@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from tinfoil._v3.verifier._quote.tdx.lib.abi import QuoteV4
+from tinfoil._v3.verifier._quote.tdx.lib.pck import PPID_SIZE as PPID_SIZE
 from tinfoil._v3.verifier._x509.certificate import Certificate
-
-PPID_SIZE = 16
 
 
 def identity(quote: QuoteV4) -> str:

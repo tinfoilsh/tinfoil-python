@@ -41,7 +41,7 @@ def validate(expectations: Expectations, quote: Quote) -> None:
     raise NotImplementedError
 
 
-def options(policy: TDXPolicy) -> PolicyOptions:
+def _options(policy: TDXPolicy) -> PolicyOptions:
     """Translate the policy block into validation options.
 
     The policy must validate; the QE vendor id, minimum TEE TCB SVN,

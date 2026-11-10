@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from tinfoil._v3.verifier import _json
 from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact
+from tinfoil._v3.verifier._endorsement.time import DEFAULT_FUTURE_SKEW, DEFAULT_MAX_AGE, TimePolicy
 
 if TYPE_CHECKING:
     from tinfoil._v3.verifier._endorsement.provenance import ProvenanceClient
@@ -17,8 +18,8 @@ if TYPE_CHECKING:
 FRESHNESS_PREDICATE_FORMAT = "https://tinfoil.sh/predicate/freshness-witness/v1"
 IN_TOTO_STATEMENT_V1 = "https://in-toto.io/Statement/v1"
 SHA256_DIGEST_PREFIX = "sha256:"
-MAX_FRESHNESS_AGE = timedelta(days=7)
-MAX_FRESHNESS_FUTURE_SKEW = timedelta(minutes=5)
+MAX_FRESHNESS_AGE = DEFAULT_MAX_AGE
+MAX_FRESHNESS_FUTURE_SKEW = DEFAULT_FUTURE_SKEW
 
 
 class FreshnessError(ValueError):
@@ -60,17 +61,17 @@ def authenticate_freshness(
     bundle: _json.JsonValue,
     expected: AuthenticatedArtifact,
     now: datetime,
-    max_age: timedelta,
+    max_age: timedelta | None = None,
 ) -> datetime:
     """Verify a freshness witness for ``expected`` and return its transparency-log time.
 
-    In order: ``max_age`` is not negative (zero selects
-    MAX_FRESHNESS_AGE); ``expected`` is well formed; the bundle verifies
+    In order: the window is built with ``time.new_time_policy`` (None
+    selects the default age, a negative one rejects, the default skew
+    applies); ``expected`` is well formed; the bundle verifies
     as a Fulcio bundle signed by the freshness-witness workflow over
     ``expected.digest``; the statement is an in-toto v1 statement with the
     witness predicate whose one subject and endorsement match
-    ``expected``; the log time is not after ``now`` plus the skew and not
-    older than ``max_age``.
+    ``expected``; the log time lies within the window.
     """
     raise NotImplementedError
 
@@ -85,7 +86,6 @@ def validate_witness(witness: FreshnessWitness, expected: AuthenticatedArtifact)
     raise NotImplementedError
 
 
-def validate_freshness_time(logged_at: Sequence[datetime], now: datetime, max_age: timedelta) -> datetime:
-    """Pick the earliest verified log time and check it against ``now``: not in the future beyond the skew, not
-    older than ``max_age``. No verified log time is an error."""
+def validate_freshness_time(logged_at: Sequence[datetime], policy: TimePolicy) -> datetime:
+    """Pick the earliest verified log time and check it against the window. No verified log time is an error."""
     raise NotImplementedError

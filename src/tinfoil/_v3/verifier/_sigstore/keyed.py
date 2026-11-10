@@ -73,8 +73,9 @@ def pinned_keys(keys: Sequence[PublicKey]) -> tuple[PinnedKey, ...]:
 def check_layout(bundle: Bundle, *, timestamps: Literal["none", "one"]) -> None:
     """Check the approval bundle layout.
 
-    Requires the in-toto payload type, exactly one DSSE signature, a key
-    hint or certificate, between one and MAX_LOG_RECEIPTS log entries that
+    Requires the in-toto payload type, exactly one DSSE signature, the
+    material that the caller expects (``KeyMaterial`` for a key-signed
+    bundle, ``CertificateMaterial`` for a certified one), between one and MAX_LOG_RECEIPTS log entries that
     are each hashedrekord 0.0.2 with an inclusion proof, no integrated
     time and no inclusion promise, and the number of RFC 3161 timestamps
     that ``timestamps`` says: none for a key-signed bundle, exactly one
@@ -91,7 +92,7 @@ def signature_timestamp(bundle: Bundle) -> bytes:
 def verify_keyed_bundle(root: TrustedRoot, bundle: Bundle, keys: Sequence[PinnedKey], digest: bytes) -> str:
     """Verify a key-signed DSSE bundle and return the hint of the key that signed it.
 
-    In order: the layout; the bundle's hint names one of ``keys``; the
+    In order: the layout; the bundle's ``KeyMaterial`` hint names one of ``keys``; the
     DSSE signature verifies with that key over the PAE; the statement names
     ``digest`` as a subject; every log entry verifies with
     ``verify_log_entries``.

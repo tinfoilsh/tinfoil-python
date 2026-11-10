@@ -36,6 +36,7 @@ from tinfoil._v3.verifier._x509.certificate import (
 from tinfoil._v3.verifier._x509.crl import (
     CRLError,
     RevocationList,
+    VerifiedRevocationList,
     is_revoked,
     parse_revocation_list,
     verify_revocation_list,
@@ -107,6 +108,7 @@ __all__ = [
     "Extension",
     "PublicKey",
     "RevocationList",
+    "VerifiedRevocationList",
     "X509Error",
     "bit_string",
     "boolean",

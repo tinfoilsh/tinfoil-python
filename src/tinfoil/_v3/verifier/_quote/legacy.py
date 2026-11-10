@@ -20,7 +20,8 @@ class LegacyReferenceValues:
     sevsnp: ExpectedSEVSNP
     """The registers the release fixes on SEV-SNP."""
     tdx: ExpectedTDX
-    """The registers the release fixes on TDX."""
+    """The registers the release fixes on TDX: RTMR1 and RTMR2 are set, the other registers are left
+    unconstrained and are resolved from the platform endorsements and the pins."""
     shape: Shape | None
     """The VM shape the release declares; selects the TDX platform measurement."""
 

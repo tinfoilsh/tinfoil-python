@@ -30,7 +30,7 @@ OID_EKU_CODE_SIGNING = "1.3.6.1.5.5.7.3.3"
 OID_EKU_TIME_STAMPING = "1.3.6.1.5.5.7.3.8"
 
 MAX_CHAIN_LENGTH = 6
-"""The most certificates that a chain may hold between a leaf and a root."""
+"""The most certificates a verified path may hold, counting the leaf and the root."""
 
 
 class X509Error(ValueError):
@@ -148,7 +148,8 @@ def verify_chain(
 
     Every certificate on the path must be valid at ``at``, each must be
     signed by the next, each non-leaf must be able to issue certificates,
-    the path may not exceed MAX_CHAIN_LENGTH, no certificate may carry an
+    the path (leaf and root included) may hold at most MAX_CHAIN_LENGTH
+    certificates, no certificate may carry an
     unsupported critical extension, and when ``extended_key_usage`` is
     given the leaf and every intermediate that lists extendedKeyUsage must
     include it. Returns the path from the leaf to the matched root.

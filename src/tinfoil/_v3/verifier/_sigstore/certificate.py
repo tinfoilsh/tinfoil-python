@@ -151,7 +151,7 @@ def verify_dsse_signature(leaf: Certificate, bundle: Bundle) -> None:
 def verify_fulcio_bundle(root: TrustedRoot, bundle: Bundle, identity: SigningIdentity, digest: bytes) -> VerifiedBundle:
     """Verify a Fulcio-signed DSSE bundle: the production path for release provenance.
 
-    In order: the bundle carries a certificate; its SCTs verify (at least
+    In order: the bundle's material is a ``CertificateMaterial``; its SCTs verify (at least
     one, no duplicate logs); the signing time is established from at least
     one verified observer timestamp or transparency-log receipt (the log
     entries are verified against the trusted logs, including inclusion

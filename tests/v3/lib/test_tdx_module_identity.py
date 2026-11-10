@@ -18,34 +18,6 @@ from tinfoil._v3.verifier._quote.tdx.lib.collateral import (
     validate_tdx_module_identity,
 )
 
-# =============================================================================
-# Test Data - Realistic TDX Measurements
-# =============================================================================
-
-# 48-byte hex strings (96 chars) for TDX measurements
-SAMPLE_MRTD = "a1" * 48
-SAMPLE_RTMR0 = "b2" * 48
-SAMPLE_RTMR1 = "c3" * 48
-SAMPLE_RTMR2 = "d4" * 48
-SAMPLE_RTMR3_ZEROS = "00" * 48
-SAMPLE_RTMR3_NONZERO = "e5" * 48
-SAMPLE_SNP_MEASUREMENT = "f6" * 48
-
-
-# =============================================================================
-# Sigstore Multiplatform TDX Measurement Parsing Tests
-# =============================================================================
-
-
-# =============================================================================
-# RTMR3-Zero Enforcement Tests
-# =============================================================================
-
-
-# =============================================================================
-# Module Identity Matching with Real TEE_TCB_SVN Values
-# =============================================================================
-
 
 class TestModuleIdentityMatchingWithRealTeeTcbSvn:
     """Test module-identity matching with realistic tee_tcb_svn byte patterns."""

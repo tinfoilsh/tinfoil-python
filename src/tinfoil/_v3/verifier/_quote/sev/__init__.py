@@ -8,10 +8,9 @@ from tinfoil._v3.verifier._quote.sev.authenticate import (
     Options,
     Quote,
     SevAuthenticationError,
-    authenticate,
 )
 from tinfoil._v3.verifier._quote.sev.expectations import Expectations, SevPolicyError, assemble
-from tinfoil._v3.verifier._quote.sev.identity import CHIP_ID_SIZE, identity
+from tinfoil._v3.verifier._quote.sev.identity import CHIP_ID_SIZE
 
 __all__ = [
     "CHIP_ID_SIZE",
@@ -24,6 +23,4 @@ __all__ = [
     "SevAuthenticationError",
     "SevPolicyError",
     "assemble",
-    "authenticate",
-    "identity",
 ]

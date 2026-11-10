@@ -123,7 +123,11 @@ class ProvenanceClient:
         raise NotImplementedError
 
     def authenticate_freshness(
-        self, bundle: _json.JsonValue, expected: AuthenticatedArtifact, now: datetime, max_age: timedelta
+        self,
+        bundle: _json.JsonValue,
+        expected: AuthenticatedArtifact,
+        now: datetime,
+        max_age: timedelta | None = None,
     ) -> datetime:
         """Verify a freshness witness for ``expected`` and return its log time; see ``freshness``."""
         raise NotImplementedError

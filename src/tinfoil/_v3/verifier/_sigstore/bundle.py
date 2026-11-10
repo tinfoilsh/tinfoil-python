@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TypeAlias
 
 from tinfoil._v3.verifier import _json
 
@@ -70,14 +71,30 @@ class DsseEnvelope:
 
 
 @dataclass(frozen=True, slots=True)
+class CertificateMaterial:
+    """The verification material of a certificate-signed bundle."""
+
+    certificate: bytes
+    """The signing certificate's DER."""
+
+
+@dataclass(frozen=True, slots=True)
+class KeyMaterial:
+    """The verification material of a key-signed bundle."""
+
+    hint: str
+    """Names the pinned key; never empty."""
+
+
+VerificationMaterial: TypeAlias = CertificateMaterial | KeyMaterial
+
+
+@dataclass(frozen=True, slots=True)
 class Bundle:
     """A decoded v0.3 bundle: one DSSE envelope plus its verification material."""
 
     media_type: str
-    certificate: bytes | None
-    """The signing certificate's DER, when the bundle is certificate-signed."""
-    public_key_hint: str | None
-    """The key hint, when the bundle is key-signed."""
+    material: VerificationMaterial
     tlog_entries: tuple[TlogEntry, ...]
     rfc3161_timestamps: tuple[bytes, ...]
     """DER TimeStampResp tokens over the DSSE signature."""
@@ -114,7 +131,8 @@ def parse_bundle(value: _json.JsonValue) -> Bundle:
     Rejects: a media type other than v0.3; a ``messageSignature`` content;
     the ``x509CertificateChain`` layout; an envelope without exactly one
     signature or with an empty one; a bundle with neither a certificate
-    nor a non-empty key hint; a certificate above MAX_CERTIFICATE_SIZE; a
+    nor a non-empty key hint (the material is the certificate when one is
+    present, else the hint); a certificate above MAX_CERTIFICATE_SIZE; a
     DSSE ``keyid`` that disagrees with the key hint; unknown members at any
     depth; base64 that is not canonical.
     """

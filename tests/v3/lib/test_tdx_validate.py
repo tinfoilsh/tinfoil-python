@@ -29,19 +29,6 @@ EXPECTED_TD_ATTRIBUTES = bytes.fromhex("0000001000000000")
 EXPECTED_XFAM = bytes.fromhex("e702060000000000")
 EXPECTED_MINIMUM_TEE_TCB_SVN = bytes.fromhex("03010200000000000000000000000000")
 
-# Orchestration imports (from attestation_tdx)
-
-# Policy validation imports (from validate_tdx)
-
-# ABI imports
-
-# Import test fixtures from test_tdx_verify
-
-
-# =============================================================================
-# Unit Tests for Policy Validation Functions
-# =============================================================================
-
 
 class TestValidateXfam:
     """Test XFAM fixed bit validation."""
@@ -256,21 +243,6 @@ class TestOptionsLengthValidation:
             ),
         )
         _check_options_lengths(opts)  # Should not raise
-
-
-# =============================================================================
-# Test Fixtures
-# =============================================================================
-
-
-# =============================================================================
-# Unit Tests for verify_tdx_attestation
-# =============================================================================
-
-
-# =============================================================================
-# Integration Tests with attestation.py
-# =============================================================================
 
 
 if __name__ == "__main__":

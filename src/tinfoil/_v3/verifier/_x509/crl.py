@@ -16,16 +16,37 @@ class CRLError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class RevocationList:
-    """A parsed CRL."""
+    """A parsed CRL, not yet checked against its issuer."""
 
     raw: bytes
-    issuer: x509.Name
-    this_update: datetime
-    next_update: datetime
-    """Required: a CRL without nextUpdate is rejected at parse time."""
-    revoked_serials: frozenset[int]
     crl: x509.CertificateRevocationList
-    """The library object, for the signature check."""
+    """The library object; the properties below read from it."""
+
+    @property
+    def issuer(self) -> x509.Name:
+        raise NotImplementedError
+
+    @property
+    def this_update(self) -> datetime:
+        raise NotImplementedError
+
+    @property
+    def next_update(self) -> datetime:
+        """Required: a CRL without nextUpdate is rejected at parse time."""
+        raise NotImplementedError
+
+    @property
+    def revoked_serials(self) -> frozenset[int]:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedRevocationList:
+    """A CRL whose issuer signature and validity window were checked; the only type that ``is_revoked`` accepts."""
+
+    crl: RevocationList
+    issuer: Certificate
+    verified_at: datetime
 
 
 def parse_revocation_list(der: bytes) -> RevocationList:
@@ -39,7 +60,7 @@ def parse_revocation_list(der: bytes) -> RevocationList:
     raise NotImplementedError
 
 
-def verify_revocation_list(crl: RevocationList, issuer: Certificate, at: datetime) -> None:
+def verify_revocation_list(crl: RevocationList, issuer: Certificate, at: datetime) -> VerifiedRevocationList:
     """Check that ``issuer`` signed the CRL, may sign CRLs, and that ``at`` lies within thisUpdate and nextUpdate.
 
     The issuer's name must equal the CRL's issuer name.
@@ -47,6 +68,6 @@ def verify_revocation_list(crl: RevocationList, issuer: Certificate, at: datetim
     raise NotImplementedError
 
 
-def is_revoked(crl: RevocationList, serial: int) -> bool:
-    """Whether a certificate serial number is listed."""
+def is_revoked(crl: VerifiedRevocationList, serial: int) -> bool:
+    """Whether a certificate serial number is listed by a verified CRL."""
     raise NotImplementedError
