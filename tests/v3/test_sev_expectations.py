@@ -195,6 +195,24 @@ def test_check_signer_rejects_masked_chip_id_and_id_blocks() -> None:
     exp.check_signer(fx.make_report())
 
 
+def test_check_signer_rejects_an_all_zero_chip_id() -> None:
+    """The zero-CHIP_ID rule is applied at validation as well as at authentication, so a quote that reaches
+    expectations with 64 zero bytes as its identity is rejected whichever path built it."""
+    with pytest.raises(sev.SevPolicyError, match="CHIP_ID is all zero without the mask flag set"):
+        exp.check_signer(fx.make_report(chip_id=bytes(64)))
+    turin = parse_report(fx.box2_turin_report())
+    exp.check_signer(turin)
+    with pytest.raises(sev.SevPolicyError, match="CHIP_ID is all zero"):
+        exp.check_signer(replace(turin, chip_id=bytes(64)))
+    # A quote built around a zero identity, with expectations assembled for that identity, passes every other
+    # check and is rejected by the signer check alone.
+    verified, report = box2_quote()
+    zeroed = replace(verified, identity=identity(bytes(64)), report=replace(report, chip_id=bytes(64)))
+    expectations = exp.assemble(fx.sev_policy(verified.identity), zeroed, report.measurement, report.report_data)
+    with pytest.raises(sev.SevPolicyError, match="CHIP_ID is all zero"):
+        exp.validate(expectations, zeroed)
+
+
 def test_assemble_checks_its_byte_arguments() -> None:
     verified, report = box2_quote()
     policy = fx.sev_policy(verified.identity)

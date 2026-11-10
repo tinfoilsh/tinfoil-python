@@ -176,9 +176,9 @@ def product_from_report(report: Report) -> str:
 def reject_masked_chip_id(report: Report) -> None:
     """Reject a report whose SIGNER_INFO masks CHIP_ID: masked platform identities are unsupported.
 
-    Authentication owns this rule: the identity is derived from CHIP_ID
-    right after the signature check, so a masked report never produces a
-    quote, and validation does not check it again.
+    The identity is derived from CHIP_ID right after the signature check,
+    so a masked report never produces a quote; validation applies the rule
+    again as part of its signer check.
     """
     try:
         signer = parse_signer_info(report.signer_info)
