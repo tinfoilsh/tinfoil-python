@@ -115,13 +115,18 @@ def test_new_defaults() -> None:
 
 
 def test_freshness_max_age() -> None:
-    # Zero keeps the default, so a caller passing an unset policy field does not silently disable the bound.
-    assert Verifier(freshness_max_age=timedelta(0)).freshness_max_age == DEFAULT_MAX_AGE
+    # None keeps the default; every non-negative age is honoured, including zero, which accepts only a witness that
+    # is no older than the verification instant.
     assert Verifier(freshness_max_age=None).freshness_max_age == DEFAULT_MAX_AGE
+    assert Verifier(freshness_max_age=timedelta(0)).freshness_max_age == timedelta(0)
+    assert Verifier(freshness_max_age=timedelta(microseconds=1)).freshness_max_age == timedelta(microseconds=1)
     assert Verifier(freshness_max_age=timedelta(hours=24)).freshness_max_age == timedelta(hours=24)
     for max_age in (timedelta(microseconds=-1), timedelta(hours=-1)):
         with pytest.raises(UsageError, match="freshness maximum age must not be negative"):
             Verifier(freshness_max_age=max_age)
+    for bad in (0, 3600, "7d"):
+        with pytest.raises(UsageError, match="freshness maximum age must be a timedelta"):
+            Verifier(freshness_max_age=bad)  # type: ignore[arg-type]
 
 
 def test_pinned_registers_must_be_expected_values() -> None:
@@ -531,14 +536,14 @@ def test_embedded_trust_rejects_invalid_or_unused_inputs() -> None:
     for version in ("", "0.15.0", "v0.15"):
         with pytest.raises(UsageError):
             Verifier(embedded_references=EmbeddedReferences(runtime=vf.manifest_bytes(version)))
+    for config in (b"config bytes", "sha256:" + "cd" * 32, {"data": b"config bytes"}):
+        with pytest.raises(UsageError, match="embedded config must be an EmbeddedConfig or EmbeddedConfigReference"):
+            Verifier(embedded_references=EmbeddedReferences(config=config))  # type: ignore[arg-type]
     with pytest.raises(UsageError, match="conflicting trust sources"):
         Verifier(embedded_references=inputs, config_signing_keys=keys)
     with pytest.raises(UsageError, match="no endorsed artifact"):
         Verifier(embedded_references=inputs, freshness_signing_keys=keys)
     raw, nonce, _ = vf.embedded_document(FORMAT_V2)
-    for config in (b"config bytes", "sha256:" + "cd" * 32, {"data": b"config bytes"}):
-        with pytest.raises(UsageError, match="embedded config must be an EmbeddedConfig or EmbeddedConfigReference"):
-            Verifier(embedded_references=EmbeddedReferences(config=config))  # type: ignore[arg-type]
     configured: list[dict[str, Any]] = [
         {"embedded_references": inputs},
         {"config_signing_keys": keys},

@@ -121,8 +121,9 @@ class Verifier:
         match the enclave; it fills a register the release leaves open and
         must equal one the release fixes; pins for one platform reject
         every enclave on the other. ``freshness_max_age`` bounds how old an
-        authenticated witness may be; None or zero keeps the seven-day
-        default and a negative age is invalid. ``config_signing_keys``
+        authenticated witness may be; None keeps the seven-day default,
+        every non-negative age including zero is honoured, and a negative
+        age is invalid. ``config_signing_keys``
         replaces public config trust with the supplied keys, which use no
         registry ids and authorize no artifact freshness.
         ``freshness_signing_keys`` pins the platform and runtime approval
@@ -267,10 +268,11 @@ def _trust_policy(
         )
     max_age = DEFAULT_MAX_AGE
     if freshness_max_age is not None:
+        if not isinstance(freshness_max_age, timedelta):
+            raise UsageError(f"freshness maximum age must be a timedelta, not {type(freshness_max_age).__name__}")
         if freshness_max_age < timedelta(0):
             raise UsageError("freshness maximum age must not be negative")
-        if freshness_max_age > timedelta(0):
-            max_age = freshness_max_age
+        max_age = freshness_max_age
     config_keys = None if config_signing_keys is None else tuple(config_signing_keys)
     if config_keys is not None and len(config_keys) == 0:
         raise UsageError("config signing keys must not be empty")
