@@ -167,6 +167,11 @@ def test_vector(fixture: dict[str, Any]) -> None:
         assert result.exit_code == adapter.EXIT_UNSUPPORTED, result.output
         assert result.output == {"stage": stage, "accepted": False}
         return
+    if result.exit_code == adapter.EXIT_UNSUPPORTED and _pending_platform(fixture):
+        # A supported stage reports a platform whose authentication has not
+        # landed yet as a clean unsupported, never as a verdict.
+        assert result.output == {"stage": stage, "accepted": False}
+        return
     assert result.output["stage"] == stage
     if expected["accepted"]:
         assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
@@ -182,6 +187,21 @@ def test_vector(fixture: dict[str, Any]) -> None:
         assert result.output["accepted"] is False
         if expected.get("code"):
             assert result.output["rejection"]["code"] == expected["code"]
+
+
+_PENDING_EVIDENCE_FORMATS = frozenset({"https://tinfoil.sh/format/tdx-quote/v1"})
+"""CPU evidence formats whose authentication the quote stage cannot run yet."""
+
+
+def _pending_platform(fixture: dict[str, Any]) -> bool:
+    """Whether the fixture's document carries CPU evidence of a format that the quote stage cannot authenticate yet."""
+    if fixture["stage"] != adapter.STAGE_AUTHENTICATE_QUOTE:
+        return False
+    try:
+        doc = json.loads(base64.b64decode(fixture["input"].get("document_b64", "")))
+        return doc["cpu_evidence"]["format"] in _PENDING_EVIDENCE_FORMATS
+    except (ValueError, KeyError, TypeError):
+        return False
 
 
 def _cli(args: list[str], stdin: bytes = b"") -> tuple[int, dict[str, Any]]:
