@@ -228,6 +228,20 @@ def test_parse_statement_reads_the_parts() -> None:
     assert parsed.predicate == json.dumps(_STATEMENT["predicate"]).encode()
 
 
+def test_parse_statement_keeps_the_signed_digest_verbatim() -> None:
+    """Beside the lowercase map, each subject keeps its digest values exactly as signed, in a read-only view."""
+    parsed = bm.parse_statement(statement_bytes(_STATEMENT))
+    (subject,) = parsed.subjects
+    assert dict(subject.signed_digest) == {"sha256": "AB" * 32, "sha512": "cd" * 64}
+    assert dict(subject.digest) == {"sha256": "ab" * 32, "sha512": "cd" * 64}
+    with pytest.raises(TypeError):
+        subject.signed_digest["x"] = "y"  # type: ignore[index]
+    mixed = {**_STATEMENT, "subject": [{"name": "a", "digest": {"sha256": "aB" * 32}}]}
+    (subject,) = bm.parse_statement(statement_bytes(mixed)).subjects
+    assert subject.signed_digest["sha256"] == "aB" * 32
+    assert subject.digest["sha256"] == "ab" * 32
+
+
 def test_parse_statement_keeps_the_predicate_bytes_exactly() -> None:
     text = '{"predicate" : {"n": 1.50 ,"s":"\\u00e9\\n"} , "_type":"https://in-toto.io/Statement/v1","subject":[{"name":"a","digest":{"sha256":"00"}}],"predicateType":"t"}'
     parsed = bm.parse_statement(text.encode())

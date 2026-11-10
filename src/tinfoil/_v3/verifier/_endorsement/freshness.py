@@ -22,7 +22,7 @@ from tinfoil._v3.verifier._endorsement.time import (
     TimePolicyError,
     new_time_policy,
 )
-from tinfoil._v3.verifier._sigstore.bundle import IN_TOTO_STATEMENT_V1
+from tinfoil._v3.verifier._sigstore.bundle import DIGEST_ALGORITHM, IN_TOTO_STATEMENT_V1
 
 if TYPE_CHECKING:
     from tinfoil._v3.verifier._endorsement.provenance import ProvenanceClient
@@ -99,8 +99,14 @@ def authenticate_freshness(
         raise FreshnessError(f"unexpected freshness statement type {statement.type!r}")
     if statement.predicate_type != FRESHNESS_PREDICATE_FORMAT:
         raise FreshnessError("unexpected freshness predicate format")
-    subject_name, subject_digest = signed_subject(verified.payload)
-    if len(statement.subjects) != 1 or subject_name != expected.subject_name or subject_digest != expected.digest:
+    # The statement parser lowercases digests for the layers that compare bytes; the witness compares the digest
+    # string exactly as signed, which the parser keeps beside the normalized map.
+    subject = statement.subjects[0]
+    if (
+        len(statement.subjects) != 1
+        or subject.name != expected.subject_name
+        or subject.signed_digest.get(DIGEST_ALGORITHM) != expected.digest
+    ):
         raise FreshnessError("freshness statement subject does not match authenticated artifact")
     witness = parse_freshness_witness(statement.predicate)
     if witness.format != FRESHNESS_PREDICATE_FORMAT:
@@ -108,29 +114,6 @@ def authenticate_freshness(
     validate_witness(witness, expected)
     logged_at = [verified.logged_at] if verified.logged_at is not None else []
     return validate_freshness_time(logged_at, policy)
-
-
-def signed_subject(payload: bytes) -> tuple[str, str]:
-    """The name and ``sha256`` digest of the statement's first subject, exactly as signed.
-
-    The statement parser normalizes digests to lower case for the layers
-    that compare bytes; the witness compares the signed string to the
-    artifact's lowercase digest, so the member is read again from the
-    payload bytes with no normalization. A payload without a subject, or
-    whose first subject has no ``sha256`` string, yields empty values,
-    which the matching rejects.
-    """
-    try:
-        statement = _json.object_(_json.strict_parse(payload), "statement")
-        subjects = _json.array(statement, "subject") or ()
-        if not subjects:
-            return "", ""
-        subject = _json.object_(subjects[0], "subject", _WITNESS_SUBJECT_MEMBERS)
-        digest = _json.object_(_json.raw(subject, "digest"), "subject digest").get("sha256")
-        name = _json.string(subject, "name")
-    except _json.JsonError as err:
-        raise FreshnessError(f"parsing freshness statement subject: {err}") from err
-    return name, digest if isinstance(digest, str) else ""
 
 
 def parse_freshness_witness(predicate: bytes) -> FreshnessWitness:

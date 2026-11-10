@@ -24,7 +24,6 @@ from tinfoil._v3.verifier._endorsement.freshness import (
     WitnessSubject,
     authenticate_freshness,
     parse_freshness_witness,
-    signed_subject,
     validate_freshness_time,
     validate_witness,
 )
@@ -266,16 +265,11 @@ def test_subject_digest_must_match_as_signed() -> None:
     for digest in (expected.digest.upper(), expected.digest[:32].upper() + expected.digest[32:]):
         with pytest.raises(FreshnessError, match="subject does not match authenticated artifact"):
             authenticate_freshness(client, bundle(digest), expected, world.now)
-    assert signed_subject(witness_payload(expected)) == (expected.subject_name, expected.digest)
-    upper = witness_payload(expected, subject=[{"name": "n", "digest": {"sha256": expected.digest.upper()}}])
-    assert signed_subject(upper) == ("n", expected.digest.upper())
     # Another algorithm beside sha256 is tolerated, as the statement parser tolerates it.
-    both = witness_payload(expected, subject=[{"name": "n", "digest": {"sha512": "ab", "sha256": expected.digest}}])
-    assert signed_subject(both) == ("n", expected.digest)
-    assert signed_subject(b'{"subject": []}') == ("", "")
-    assert signed_subject(b'{"subject": [{"name": "n", "digest": {"sha512": "ab"}}]}') == ("n", "")
-    with pytest.raises(FreshnessError, match="parsing freshness statement subject"):
-        signed_subject(b'{"subject": [{"name": "n", "digest": "sha256:ab"}]}')
+    both = witness_payload(
+        expected, subject=[{"name": expected.subject_name, "digest": {"sha512": "ab", "sha256": expected.digest}}]
+    )
+    assert authenticate_freshness(client, as_json(world.fulcio_bundle(both, WITNESS, logged)), expected, world.now)
 
 
 def test_production_witness_authenticates_the_real_code_artifact() -> None:
