@@ -455,8 +455,11 @@ def _measurement_of(measurement: _measurement.Measurement) -> dict[str, Any]:
 def _check_envelope(decoded: Input) -> Result:
     """Strict parse plus the nonce, endorsed-hash and REPORT_DATA bindings.
 
-    A document or nonce that is absent is rejected like any other that fails.
+    An injected Sigstore root that does not parse is malformed input. A
+    document or nonce that is absent is rejected like any other that fails.
     """
+    if not _injected_sigstore_root_parses(decoded):
+        return _malformed(STAGE_CHECK_ENVELOPE)
     try:
         document.parse(decoded.document or b"", decoded.nonce or b"")
     except (document.DocumentError, document.InvalidInputError):
