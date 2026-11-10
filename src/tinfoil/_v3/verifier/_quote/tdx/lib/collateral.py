@@ -1,47 +1,74 @@
-"""Intel PCS collateral for TDX: parsing of TCB Info, QE Identity and CRL responses, their signatures, and the
-TCB appraisal of a quote against them.
+"""Intel PCS collateral for TDX: parsing of TCB Info, QE Identity and issuer-chain responses, verification of their
+signatures, and the appraisal of a quote against them.
 
-Collateral arrives as bytes (and the issuer-chain response headers) that the
-caller captured; nothing here is fetched. The appraisal functions compare a
-parsed quote and PCK certificate against the parsed collateral.
+Every function works on bytes and parsed values that the caller supplies;
+nothing here is fetched. The JSON bodies are decoded strictly (a duplicate
+member name at any depth rejects) and read the way a typed decoder would:
+a member that is absent or null keeps its zero value, a member of the
+wrong type is an error, members that are not read are ignored, and
+member names match exactly. Checks that depend on an absent member fail
+where the value is used, with one exception: the TCB members that the
+appraisal compares a quote against (a platform level's component lists
+and PCE SVN, an enclave level's ISV SVN) must be present, because their
+zero values would be reached by every quote.
 """
 
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from enum import StrEnum
-from urllib.parse import unquote
+from urllib.parse import unquote_to_bytes
 
-from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 from tinfoil._v3.verifier import _json
-from tinfoil._v3.verifier._quote.tdx.lib.abi import QuoteV4
+from tinfoil._v3.verifier._quote.tdx.lib.abi import QeReport, TdQuoteBody
 from tinfoil._v3.verifier._quote.tdx.lib.chain import (
-    CertificateChainError,
-    PCKCertificateChain,
-    get_intel_root_ca,
-    parse_pem_chain,
-    verify_intel_chain,
+    OID_EKU_SERVER_AUTH,
+    ROOT_CERT_PHRASE,
+    TdxVerificationError,
+    pem_certificates,
+    signature_to_der,
+    validate_certificate,
+    validate_crl,
 )
-from tinfoil._v3.verifier._quote.tdx.lib.pck import PckExtensionError, PckExtensions, extract_pck_extensions
+from tinfoil._v3.verifier._quote.tdx.lib.pck import PckExtensions
+from tinfoil._v3.verifier._x509.certificate import Certificate, X509Error, verify_chain
+from tinfoil._v3.verifier._x509.crl import RevocationList
 
-# Intel PCS API base URLs
-INTEL_PCS_TDX_BASE_URL = "https://api.trustedservices.intel.com/tdx/certification/v4"
-INTEL_PCS_SGX_BASE_URL = "https://api.trustedservices.intel.com/sgx/certification/v4"
+TCB_INFO_ID = "TDX"
+TCB_INFO_VERSION = 3
+QE_IDENTITY_ID = "TD_QE"
+QE_IDENTITY_VERSION = 2
+TCB_SIGNING_PHRASE = "Intel SGX TCB Signing"
+TDX_MODULE_ID_PREFIX = "TDX_"
+MISCSELECT_SIZE = 4
+TDX_MODULE_VERSION_BYTES = 2
+"""The leading TEE TCB SVN bytes that name the TDX module: its ISV SVN, then its major version."""
+
+# The members of a level's ``tcb`` that the appraisal compares against the
+# quote, by the kind of level that carries it.
+_PLATFORM_TCB_MEMBERS = ("sgxtcbcomponents", "pcesvn", "tdxtcbcomponents")
+_ENCLAVE_TCB_MEMBERS = ("isvsvn",)
+
+_HEX = re.compile(r"[0-9a-fA-F]*")
+_RFC3339 = re.compile(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})")
+_QUERY_ESCAPE = re.compile(r"%(?![0-9a-fA-F]{2})")
+_JSON_WHITESPACE = " \t\n\r"
 
 
-class CollateralError(Exception):
-    """Raised when collateral fetching or validation fails."""
+class CollateralError(ValueError):
+    """Collateral that does not parse, is not signed by Intel, or does not vouch for the quote."""
 
 
 class TcbStatus(StrEnum):
-    """TCB status values from Intel PCS."""
+    """The status of a TCB level."""
 
     UP_TO_DATE = "UpToDate"
     SW_HARDENING_NEEDED = "SWHardeningNeeded"
@@ -52,219 +79,150 @@ class TcbStatus(StrEnum):
     REVOKED = "Revoked"
 
 
-@dataclass
-class PckCrl:
-    """
-    PCK Certificate Revocation List from Intel PCS.
-
-    Contains the parsed CRL and metadata for caching.
-    """
-
-    crl: x509.CertificateRevocationList
-    ca_type: str  # "platform" or "processor"
-    next_update: datetime
+# --- records ------------------------------------------------------------------
 
 
-@dataclass
-class RootCrl:
-    """
-    Intel SGX Root CA Certificate Revocation List.
-
-    Used to check if intermediate CA certificates have been revoked.
-    """
-
-    crl: x509.CertificateRevocationList
-    next_update: datetime
-
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TcbComponent:
-    """A single TCB component with SVN and metadata."""
-
-    svn: int
+    svn: int = 0
     category: str = ""
     type: str = ""
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Tcb:
-    """TCB level data containing SVN components."""
-
-    sgx_tcb_components: list[TcbComponent]  # 16 SGX components
-    pce_svn: int
-    tdx_tcb_components: list[TcbComponent]  # 16 TDX components
-    isv_svn: int | None = None  # ISV SVN for QE Identity TCB levels
+    sgx_tcb_components: tuple[TcbComponent, ...] = ()
+    pce_svn: int = 0
+    tdx_tcb_components: tuple[TcbComponent, ...] = ()
+    isv_svn: int = 0
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TcbLevel:
-    """A TCB level with status and advisory IDs."""
+    tcb: Tcb = Tcb()
+    tcb_date: str = ""
+    tcb_status: TcbStatus | None = None
+    """None when the level names no status; only ``UP_TO_DATE`` is ever accepted."""
+    advisory_ids: tuple[str, ...] = ()
 
-    tcb: Tcb
-    tcb_date: str
-    tcb_status: TcbStatus
-    advisory_ids: list[str]
 
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TdxModule:
-    """TDX module identity information."""
-
-    mrsigner: bytes  # 48 bytes
-    attributes: bytes
-    attributes_mask: bytes
+    mrsigner: bytes = b""
+    attributes: bytes = b""
+    attributes_mask: bytes = b""
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TdxModuleIdentity:
-    """TDX module identity with associated TCB levels."""
-
-    id: str  # e.g., "TDX_01", "TDX_03"
-    mrsigner: bytes
-    attributes: bytes
-    attributes_mask: bytes
-    tcb_levels: list[TcbLevel]
+    id: str = ""
+    mrsigner: bytes = b""
+    attributes: bytes = b""
+    attributes_mask: bytes = b""
+    tcb_levels: tuple[TcbLevel, ...] = ()
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TcbInfo:
-    """TCB Info structure from Intel PCS."""
-
-    id: str  # Must be "TDX"
-    version: int  # Must be 3
-    issue_date: datetime
-    next_update: datetime
-    fmspc: str
-    pce_id: str
-    tcb_type: int
-    tcb_evaluation_data_number: int
-    tdx_module: TdxModule | None
-    tdx_module_identities: list[TdxModuleIdentity]
-    tcb_levels: list[TcbLevel]
+    id: str = ""
+    version: int = 0
+    issue_date: datetime | None = None
+    next_update: datetime | None = None
+    fmspc: str = ""
+    pce_id: str = ""
+    tcb_type: int = 0
+    tcb_evaluation_data_number: int | None = None
+    tdx_module: TdxModule = TdxModule()
+    tdx_module_identities: tuple[TdxModuleIdentity, ...] = ()
+    tcb_levels: tuple[TcbLevel, ...] = ()
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class TdxTcbInfo:
-    """Top-level TCB Info response with signature."""
+    """A TCB Info response: the signed object and its signature as published."""
 
     tcb_info: TcbInfo
-    signature: str
+    signature: str = ""
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class EnclaveIdentity:
-    """Quoting Enclave identity information."""
-
-    id: str  # Must be "TD_QE"
-    version: int  # Must be 2
-    issue_date: datetime
-    next_update: datetime
-    tcb_evaluation_data_number: int
-    miscselect: bytes  # 4 bytes
-    miscselect_mask: bytes  # 4 bytes
-    attributes: bytes  # 16 bytes
-    attributes_mask: bytes  # 16 bytes
-    mrsigner: bytes  # 32 bytes
-    isv_prod_id: int
-    tcb_levels: list[TcbLevel]
+    id: str = ""
+    version: int = 0
+    issue_date: datetime | None = None
+    next_update: datetime | None = None
+    tcb_evaluation_data_number: int | None = None
+    miscselect: bytes = b""
+    miscselect_mask: bytes = b""
+    attributes: bytes = b""
+    attributes_mask: bytes = b""
+    mrsigner: bytes = b""
+    isv_prod_id: int = 0
+    tcb_levels: tuple[TcbLevel, ...] = ()
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class QeIdentity:
-    """Top-level QE Identity response with signature."""
+    """A QE Identity response: the signed object and its signature as published."""
 
     enclave_identity: EnclaveIdentity
-    signature: str
+    signature: str = ""
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
+class PckCrl:
+    """A PCK CRL with the issuer chain that its response carried."""
+
+    crl: RevocationList
+    ca_type: str
+    issuer_intermediate: Certificate
+    issuer_root: Certificate
+
+
+@dataclass(frozen=True, slots=True)
+class RootCrl:
+    """The Intel SGX Root CA CRL."""
+
+    crl: RevocationList
+
+
+@dataclass(frozen=True, slots=True)
 class TdxCollateral:
-    """Container for all TDX collateral data."""
+    """Everything that the appraisal of one quote reads: the two signed responses with their issuer chains and
+    signed bodies, and the two CRLs."""
 
     tcb_info: TdxTcbInfo
+    tcb_info_body: bytes
+    """The exact bytes of the ``tcbInfo`` member, which the signature covers."""
+    tcb_info_issuer_intermediate: Certificate
+    tcb_info_issuer_root: Certificate
     qe_identity: QeIdentity
-    tcb_info_raw: bytes  # Raw JSON for signature verification
-    qe_identity_raw: bytes  # Raw JSON for signature verification
-    pck_crl: PckCrl | None = None  # PCK CRL for revocation checking
-    root_crl: RootCrl | None = None  # Root CA CRL for intermediate revocation checking
-    tcb_info_issuer_chain: list[x509.Certificate] | None = None  # TCB Info signing chain for CRL checking
-    qe_identity_issuer_chain: list[x509.Certificate] | None = None  # QE Identity signing chain for CRL checking
+    enclave_identity_body: bytes
+    """The exact bytes of the ``enclaveIdentity`` member."""
+    qe_identity_issuer_intermediate: Certificate
+    qe_identity_issuer_root: Certificate
+    pck_crl: PckCrl
+    root_crl: RootCrl
 
 
-# Minimum required tcbEvaluationDataNumber.
-# This prevents accepting collateral issued before critical security updates.
-# See: https://www.intel.com/content/www/us/en/developer/topic-technology/software-security-guidance/trusted-computing-base-recovery-attestation.html
-#
-# This value should ideally be set dynamically using:
-#   from tinfoil.attestation.collateral_tdx import calculate_min_tcb_evaluation_data_number
-#   min_num = calculate_min_tcb_evaluation_data_number()
-#
-# That function queries Intel PCS and returns the lowest tcbEvaluationDataNumber
-# whose TCB recovery event date is within the last year.
-DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER = 19
+# --- JSON reading --------------------------------------------------------------
 
 
-TDX_MRSIGNER_SIZE = 48  # TDX module MRSIGNER: 48 bytes
+def _present(obj: _json.JsonObject, key: str) -> _json.JsonValue:
+    """The member's value, or None when it is absent or null."""
+    return obj.get(key)
 
 
-QE_MRSIGNER_SIZE = 32  # QE enclave MRSIGNER: 32 bytes
-
-
-QE_ATTRIBUTES_SIZE = 16  # QE enclave attributes: 16 bytes
-
-
-MISCSELECT_SIZE = 4  # MISCSELECT field: 4 bytes
-
-
-TCB_COMPONENT_COUNT = 16  # Number of TCB SVN components
-
-
-ECDSA_P256_COMPONENT_SIZE = 32  # 32 bytes per R or S component
-
-
-ECDSA_SIGNATURE_SIZE = 64  # R || S (32 + 32 bytes)
-
-
-def _parse_hex_bytes(hex_str: str) -> bytes:
-    """Parse hex string to bytes."""
-    return bytes.fromhex(hex_str)
-
-
-def _parse_datetime(dt_str: str) -> datetime:
-    """Parse ISO datetime string to datetime object."""
-    # Handle format: "2025-12-17T06:24:56Z"
-    return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-
-
-# The Intel PCS JSON bodies are decoded with the strict parser, which rejects a
-# duplicate member name at every depth, so the values read here are the values
-# that the signature check covers. A member that appraisal relies on must be
-# present; only members that are informational, or whose absence can only make
-# appraisal fail, have a default.
-
-
-def _member(obj: _json.JsonObject, key: str, what: str) -> _json.JsonValue:
-    value = obj.get(key)
+def _required(obj: _json.JsonObject, key: str, what: str) -> _json.JsonValue:
+    """The member's value; absent or null is an error."""
+    value = _present(obj, key)
     if value is None:
-        raise CollateralError(f"{what} is missing '{key}'")
-    return value
-
-
-def _object(value: _json.JsonValue, what: str) -> _json.JsonObject:
-    if not isinstance(value, _json.JsonObject):
-        raise CollateralError(f"{what} is not a JSON object")
+        raise CollateralError(f"{what} has no '{key}'")
     return value
 
 
 def _string(obj: _json.JsonObject, key: str, what: str) -> str:
-    value = _member(obj, key, what)
-    if not isinstance(value, str):
-        raise CollateralError(f"{what} '{key}' is not a string")
-    return value
-
-
-def _optional_string(obj: _json.JsonObject, key: str, what: str) -> str:
-    value = obj.get(key)
+    value = _present(obj, key)
     if value is None:
         return ""
     if not isinstance(value, str):
@@ -272,123 +230,172 @@ def _optional_string(obj: _json.JsonObject, key: str, what: str) -> str:
     return value
 
 
-def _integer(obj: _json.JsonObject, key: str, what: str) -> int:
-    """A required non-negative integer member.
-
-    Every integer in the PCS documents (versions, SVNs, evaluation numbers,
-    product ids) is unsigned; a negative SVN would make the "at least"
-    comparisons trivially true.
-    """
-    value = _member(obj, key, what)
+def _unsigned(obj: _json.JsonObject, key: str, what: str, bits: int) -> int:
+    value = _present(obj, key)
+    if value is None:
+        return 0
     if not isinstance(value, _json.JsonNumber):
         raise CollateralError(f"{what} '{key}' is not a number")
     try:
-        return value.to_int(bits=64, signed=False)
-    except _json.JsonError as e:
-        raise CollateralError(f"{what} '{key}' is not a non-negative integer: {e}") from e
+        return value.to_int(bits=bits, signed=False)
+    except _json.JsonError as err:
+        raise CollateralError(f"{what} '{key}': {err}") from err
 
 
-def _optional_integer(obj: _json.JsonObject, key: str, what: str) -> int | None:
-    if obj.get(key) is None:
+def _optional_unsigned(obj: _json.JsonObject, key: str, what: str, bits: int) -> int | None:
+    """Like ``_unsigned``, but an absent or null member is None rather than zero, so that a check which needs the
+    member can tell that it was never published."""
+    if _present(obj, key) is None:
         return None
-    return _integer(obj, key, what)
+    return _unsigned(obj, key, what, bits)
+
+
+def _time(obj: _json.JsonObject, key: str, what: str) -> datetime | None:
+    value = _present(obj, key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise CollateralError(f"{what} '{key}' is not a timestamp string")
+    try:
+        return parse_rfc3339(value)
+    except ValueError as err:
+        raise CollateralError(f"{what} '{key}': {err}") from err
 
 
 def _hex(obj: _json.JsonObject, key: str, what: str) -> bytes:
+    """A hex-encoded member. Absent is empty; null is an error, as for a typed hex decoder."""
+    if key not in obj:
+        return b""
+    value = obj[key]
+    if not isinstance(value, str):
+        raise CollateralError(f"{what} '{key}' is not a hex string")
     try:
-        return _parse_hex_bytes(_string(obj, key, what))
-    except ValueError as e:
-        raise CollateralError(f"{what} '{key}' is not hex: {e}") from e
+        return decode_hex(value)
+    except ValueError as err:
+        raise CollateralError(f"{what} '{key}': {err}") from err
 
 
-def _datetime(obj: _json.JsonObject, key: str, what: str) -> datetime:
+def _status(obj: _json.JsonObject, key: str, what: str) -> TcbStatus | None:
+    """A TCB status member. Absent is None; null or an unknown status is an error."""
+    if key not in obj:
+        return None
+    value = obj[key]
+    if not isinstance(value, str):
+        raise CollateralError(f"{what} '{key}' is not a status string")
     try:
-        return _parse_datetime(_string(obj, key, what))
-    except ValueError as e:
-        raise CollateralError(f"{what} '{key}' is not a timestamp: {e}") from e
+        return TcbStatus(value)
+    except ValueError:
+        raise CollateralError(f"unexpected tcb status found: {value!r}") from None
 
 
 def _array(obj: _json.JsonObject, key: str, what: str) -> tuple[_json.JsonValue, ...]:
-    value = _member(obj, key, what)
+    value = _present(obj, key)
+    if value is None:
+        return ()
     if not isinstance(value, tuple):
         raise CollateralError(f"{what} '{key}' is not an array")
     return value
 
 
-def _optional_array(obj: _json.JsonObject, key: str, what: str) -> tuple[_json.JsonValue, ...]:
-    if obj.get(key) is None:
-        return ()
-    return _array(obj, key, what)
+def _object(value: _json.JsonValue, what: str) -> _json.JsonObject:
+    if value is None:
+        return _json.JsonObject()
+    if not isinstance(value, _json.JsonObject):
+        raise CollateralError(f"{what} is not a JSON object")
+    return value
+
+
+def _strings(obj: _json.JsonObject, key: str, what: str) -> tuple[str, ...]:
+    out: list[str] = []
+    for item in _array(obj, key, what):
+        if item is None:
+            out.append("")
+        elif isinstance(item, str):
+            out.append(item)
+        else:
+            raise CollateralError(f"{what} '{key}' is not an array of strings")
+    return tuple(out)
+
+
+def decode_hex(value: str) -> bytes:
+    """Decode hex in either case; an odd length or a non-hex character is an error."""
+    if not _HEX.fullmatch(value):
+        raise ValueError("invalid hex byte")
+    if len(value) % 2:
+        raise ValueError("odd length hex string")
+    return bytes.fromhex(value)
+
+
+def parse_rfc3339(value: str) -> datetime:
+    """An RFC 3339 timestamp with a zone designator; fractional seconds beyond microseconds are truncated."""
+    match = _RFC3339.fullmatch(value)
+    if match is None:
+        raise ValueError(f"not an RFC 3339 timestamp: {value!r}")
+    fraction = match[7]
+    microsecond = int(fraction[1:7].ljust(6, "0")) if fraction else 0
+    try:
+        parsed = datetime(
+            int(match[1]), int(match[2]), int(match[3]), int(match[4]), int(match[5]), int(match[6]), microsecond
+        )
+    except ValueError as err:
+        raise ValueError(f"not a valid calendar time: {value!r}") from err
+    zone = match[8]
+    if zone == "Z":
+        return parsed.replace(tzinfo=UTC)
+    hours, minutes = int(zone[1:3]), int(zone[4:6])
+    if hours > 23 or minutes > 59:
+        raise ValueError(f"timezone offset out of range: {value!r}")
+    offset = timedelta(hours=hours, minutes=minutes)
+    return parsed.replace(tzinfo=timezone(-offset if zone[0] == "-" else offset))
+
+
+# --- response parsing ----------------------------------------------------------
 
 
 def _parse_tcb_component(value: _json.JsonValue) -> TcbComponent:
-    """Parse a TCB component from JSON; the SVN is required, category and type are informational."""
     data = _object(value, "TCB component")
     return TcbComponent(
-        svn=_integer(data, "svn", "TCB component"),
-        category=_optional_string(data, "category", "TCB component"),
-        type=_optional_string(data, "type", "TCB component"),
+        svn=_unsigned(data, "svn", "TCB component", 8),
+        category=_string(data, "category", "TCB component"),
+        type=_string(data, "type", "TCB component"),
     )
 
 
-def _parse_tcb(data: _json.JsonObject) -> Tcb:
-    """Parse a full TCB from JSON.
-
-    The component lists are taken as published: a list that is not 16
-    entries long cannot match the 16-byte SVNs and fails appraisal.
-    """
-    sgx_components = [_parse_tcb_component(c) for c in _array(data, "sgxtcbcomponents", "TCB")]
-    tdx_components = [_parse_tcb_component(c) for c in _array(data, "tdxtcbcomponents", "TCB")]
-
+def _parse_tcb(value: _json.JsonValue, required: tuple[str, ...]) -> Tcb:
+    """A level's ``tcb`` object; the ``required`` members, which the appraisal compares, must be present."""
+    data = _object(value, "TCB")
+    for key in required:
+        _required(data, key, "TCB")
     return Tcb(
-        sgx_tcb_components=sgx_components,
-        pce_svn=_integer(data, "pcesvn", "TCB"),
-        tdx_tcb_components=tdx_components,
-        # Present only in QE Identity TCB levels
-        isv_svn=_optional_integer(data, "isvsvn", "TCB"),
+        sgx_tcb_components=tuple(_parse_tcb_component(c) for c in _array(data, "sgxtcbcomponents", "TCB")),
+        pce_svn=_unsigned(data, "pcesvn", "TCB", 16),
+        tdx_tcb_components=tuple(_parse_tcb_component(c) for c in _array(data, "tdxtcbcomponents", "TCB")),
+        isv_svn=_unsigned(data, "isvsvn", "TCB", 32),
     )
 
 
-def _parse_tcb_level(value: _json.JsonValue) -> TcbLevel:
-    """Parse a TCB level from JSON; the TCB, date and status are required."""
+def _parse_tcb_level(value: _json.JsonValue, required_tcb_members: tuple[str, ...]) -> TcbLevel:
+    """A TCB level whose ``tcb`` carries at least ``required_tcb_members``."""
     data = _object(value, "TCB level")
-    tcb_data = _object(_member(data, "tcb", "TCB level"), "TCB level 'tcb'")
-
-    # Handle simple TCB (just isvsvn) vs full TCB
-    if "sgxtcbcomponents" in tcb_data:
-        tcb = _parse_tcb(tcb_data)
-    else:
-        # Simple TCB with just isvsvn (used by QE Identity and TDX module identities)
-        tcb = Tcb(
-            sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-            pce_svn=0,
-            tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-            isv_svn=_integer(tcb_data, "isvsvn", "TCB level 'tcb'"),
-        )
-
-    status = _string(data, "tcbStatus", "TCB level")
-    try:
-        tcb_status = TcbStatus(status)
-    except ValueError as e:
-        raise CollateralError(f"TCB level has unknown tcbStatus {status!r}") from e
-
-    # Informational: only quoted in error messages
-    advisory_ids: list[str] = []
-    for advisory in _optional_array(data, "advisoryIDs", "TCB level"):
-        if not isinstance(advisory, str):
-            raise CollateralError("TCB level 'advisoryIDs' is not a list of strings")
-        advisory_ids.append(advisory)
-
     return TcbLevel(
-        tcb=tcb,
+        tcb=_parse_tcb(_required(data, "tcb", "TCB level"), required_tcb_members),
         tcb_date=_string(data, "tcbDate", "TCB level"),
-        tcb_status=tcb_status,
-        advisory_ids=advisory_ids,
+        tcb_status=_status(data, "tcbStatus", "TCB level"),
+        advisory_ids=_strings(data, "advisoryIDs", "TCB level"),
     )
+
+
+def _parse_platform_tcb_levels(obj: _json.JsonObject, what: str) -> tuple[TcbLevel, ...]:
+    """The ``tcbLevels`` of a TCB Info: each level's ``tcb`` carries the component lists and PCE SVN."""
+    return tuple(_parse_tcb_level(level, _PLATFORM_TCB_MEMBERS) for level in _array(obj, "tcbLevels", what))
+
+
+def _parse_enclave_tcb_levels(obj: _json.JsonObject, what: str) -> tuple[TcbLevel, ...]:
+    """The ``tcbLevels`` of a QE Identity or TDX module identity: each level's ``tcb`` carries the ISV SVN."""
+    return tuple(_parse_tcb_level(level, _ENCLAVE_TCB_MEMBERS) for level in _array(obj, "tcbLevels", what))
 
 
 def _parse_tdx_module(value: _json.JsonValue) -> TdxModule:
-    """Parse TDX module from JSON."""
     data = _object(value, "tdxModule")
     return TdxModule(
         mrsigner=_hex(data, "mrsigner", "tdxModule"),
@@ -398,219 +405,145 @@ def _parse_tdx_module(value: _json.JsonValue) -> TdxModule:
 
 
 def _parse_tdx_module_identity(value: _json.JsonValue) -> TdxModuleIdentity:
-    """Parse TDX module identity from JSON."""
     data = _object(value, "TDX module identity")
     return TdxModuleIdentity(
         id=_string(data, "id", "TDX module identity"),
         mrsigner=_hex(data, "mrsigner", "TDX module identity"),
         attributes=_hex(data, "attributes", "TDX module identity"),
         attributes_mask=_hex(data, "attributesMask", "TDX module identity"),
-        tcb_levels=[_parse_tcb_level(level) for level in _array(data, "tcbLevels", "TDX module identity")],
+        tcb_levels=_parse_enclave_tcb_levels(data, "TDX module identity"),
     )
 
 
-def _parse_tcb_info(data: _json.JsonObject) -> TcbInfo:
-    """Parse TCB Info from JSON.
-
-    ``tdxModule`` is informational and optional. ``tdxModuleIdentities``
-    defaults to none, which makes module identity appraisal fail.
-    """
-    tdx_module = None
-    if data.get("tdxModule") is not None:
-        tdx_module = _parse_tdx_module(data["tdxModule"])
-
+def _parse_tcb_info(value: _json.JsonValue) -> TcbInfo:
+    data = _object(value, "tcbInfo")
     return TcbInfo(
         id=_string(data, "id", "TCB Info"),
-        version=_integer(data, "version", "TCB Info"),
-        issue_date=_datetime(data, "issueDate", "TCB Info"),
-        next_update=_datetime(data, "nextUpdate", "TCB Info"),
+        version=_unsigned(data, "version", "TCB Info", 8),
+        issue_date=_time(data, "issueDate", "TCB Info"),
+        next_update=_time(data, "nextUpdate", "TCB Info"),
         fmspc=_string(data, "fmspc", "TCB Info"),
         pce_id=_string(data, "pceId", "TCB Info"),
-        tcb_type=_integer(data, "tcbType", "TCB Info"),
-        tcb_evaluation_data_number=_integer(data, "tcbEvaluationDataNumber", "TCB Info"),
-        tdx_module=tdx_module,
-        tdx_module_identities=[
-            _parse_tdx_module_identity(m) for m in _optional_array(data, "tdxModuleIdentities", "TCB Info")
-        ],
-        tcb_levels=[_parse_tcb_level(level) for level in _array(data, "tcbLevels", "TCB Info")],
+        tcb_type=_unsigned(data, "tcbType", "TCB Info", 8),
+        tcb_evaluation_data_number=_optional_unsigned(data, "tcbEvaluationDataNumber", "TCB Info", 64),
+        tdx_module=_parse_tdx_module(_present(data, "tdxModule")),
+        tdx_module_identities=tuple(
+            _parse_tdx_module_identity(m) for m in _array(data, "tdxModuleIdentities", "TCB Info")
+        ),
+        tcb_levels=_parse_platform_tcb_levels(data, "TCB Info"),
     )
 
 
-def _parse_enclave_identity(data: _json.JsonObject) -> EnclaveIdentity:
-    """Parse Enclave Identity from JSON; every member is required."""
+def _parse_enclave_identity(value: _json.JsonValue) -> EnclaveIdentity:
+    data = _object(value, "enclaveIdentity")
     return EnclaveIdentity(
         id=_string(data, "id", "QE Identity"),
-        version=_integer(data, "version", "QE Identity"),
-        issue_date=_datetime(data, "issueDate", "QE Identity"),
-        next_update=_datetime(data, "nextUpdate", "QE Identity"),
-        tcb_evaluation_data_number=_integer(data, "tcbEvaluationDataNumber", "QE Identity"),
+        version=_unsigned(data, "version", "QE Identity", 8),
+        issue_date=_time(data, "issueDate", "QE Identity"),
+        next_update=_time(data, "nextUpdate", "QE Identity"),
+        tcb_evaluation_data_number=_optional_unsigned(data, "tcbEvaluationDataNumber", "QE Identity", 64),
         miscselect=_hex(data, "miscselect", "QE Identity"),
         miscselect_mask=_hex(data, "miscselectMask", "QE Identity"),
         attributes=_hex(data, "attributes", "QE Identity"),
         attributes_mask=_hex(data, "attributesMask", "QE Identity"),
         mrsigner=_hex(data, "mrsigner", "QE Identity"),
-        isv_prod_id=_integer(data, "isvprodid", "QE Identity"),
-        tcb_levels=[_parse_tcb_level(level) for level in _array(data, "tcbLevels", "QE Identity")],
+        isv_prod_id=_unsigned(data, "isvprodid", "QE Identity", 16),
+        tcb_levels=_parse_enclave_tcb_levels(data, "QE Identity"),
     )
 
 
-def _parse_response(response_bytes: bytes, data_name: str) -> _json.JsonObject:
-    """Strictly decode a PCS response body: invalid JSON, a non-object body and a duplicate member name at any
-    depth are rejected."""
+def _parse_response(body: bytes, what: str) -> _json.JsonObject:
+    """Strictly decode a response body: invalid JSON, a non-object body and a duplicate member name at any depth
+    reject."""
     try:
-        value = _json.strict_parse(response_bytes)
-    except _json.JsonError as e:
-        raise CollateralError(f"Failed to parse {data_name} JSON: {e}") from e
-    return _object(value, f"{data_name} response")
+        value = _json.strict_parse(body)
+    except _json.JsonError as err:
+        raise CollateralError(f"unable to unmarshal {what} response: {err}") from err
+    if not isinstance(value, _json.JsonObject):
+        raise CollateralError(f"{what} response is not a JSON object")
+    return value
 
 
-def parse_tcb_info_response(response_bytes: bytes) -> TdxTcbInfo:
+def parse_tcb_info_response(body: bytes) -> TdxTcbInfo:
+    """Decode a TCB Info response. The id, version and levels are checked at verification, not here."""
+    data = _parse_response(body, "tcbInfo")
+    return TdxTcbInfo(
+        tcb_info=_parse_tcb_info(_present(data, "tcbInfo")), signature=_string(data, "signature", "TCB Info response")
+    )
+
+
+def parse_qe_identity_response(body: bytes) -> QeIdentity:
+    """Decode a QE Identity response. The id, version and levels are checked at verification, not here."""
+    data = _parse_response(body, "QeIdentity")
+    return QeIdentity(
+        enclave_identity=_parse_enclave_identity(_present(data, "enclaveIdentity")),
+        signature=_string(data, "signature", "QE Identity response"),
+    )
+
+
+def top_level_member(body: bytes, key: str) -> bytes:
+    """The exact bytes of the value of ``key`` in the top-level object of ``body``: what the response signature
+    covers.
+
+    The top-level object is walked member by member, so a member of the
+    same name nested inside another value is never mistaken for the
+    top-level one, and the span is exactly the value's own bytes. The value
+    must be an object; a repeated top-level name is an error.
     """
-    Parse TCB Info response from Intel PCS.
-
-    Args:
-        response_bytes: Raw JSON response bytes
-
-    Returns:
-        Parsed TdxTcbInfo
-
-    Raises:
-        CollateralError: If parsing fails
-    """
-    data = _parse_response(response_bytes, "TCB Info")
-
+    if not body:
+        raise CollateralError(f"{key!r} is empty")
     try:
-        tcb_info = _parse_tcb_info(_object(_member(data, "tcbInfo", "TCB Info response"), "tcbInfo"))
-        signature = _string(data, "signature", "TCB Info response")
-    except (ValueError, TypeError, KeyError, AttributeError) as e:
-        raise CollateralError(f"Failed to parse TCB Info: {e}") from e
-
-    # Validate required fields
-    if tcb_info.id != "TDX":
-        raise CollateralError(f"TCB Info ID must be 'TDX', got '{tcb_info.id}'")
-    if tcb_info.version != 3:
-        raise CollateralError(f"TCB Info version must be 3, got {tcb_info.version}")
-
-    return TdxTcbInfo(tcb_info=tcb_info, signature=signature)
-
-
-def parse_qe_identity_response(response_bytes: bytes) -> QeIdentity:
-    """
-    Parse QE Identity response from Intel PCS.
-
-    Args:
-        response_bytes: Raw JSON response bytes
-
-    Returns:
-        Parsed QeIdentity
-
-    Raises:
-        CollateralError: If parsing fails
-    """
-    data = _parse_response(response_bytes, "QE Identity")
-
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as err:
+        raise CollateralError(f"could not convert {key!r} body to raw message: {err}") from err
     try:
-        enclave_identity = _parse_enclave_identity(
-            _object(_member(data, "enclaveIdentity", "QE Identity response"), "enclaveIdentity")
-        )
-        signature = _string(data, "signature", "QE Identity response")
-    except (ValueError, TypeError, KeyError, AttributeError) as e:
-        raise CollateralError(f"Failed to parse QE Identity: {e}") from e
-
-    # Validate required fields
-    if enclave_identity.id != "TD_QE":
-        raise CollateralError(f"QE Identity ID must be 'TD_QE', got '{enclave_identity.id}'")
-    if enclave_identity.version != 2:
-        raise CollateralError(f"QE Identity version must be 2, got {enclave_identity.version}")
-
-    return QeIdentity(enclave_identity=enclave_identity, signature=signature)
+        return _top_level_member_text(text, key).encode("utf-8")
+    except ValueError as err:
+        raise CollateralError(f"{key!r} body: {err}") from err
 
 
-def _parse_issuer_chain_header(header_value: str) -> list[x509.Certificate]:
-    """
-    Parse the issuer certificate chain from a PCS response header.
-
-    Intel PCS returns the chain as URL-encoded concatenated PEM certificates
-    in the TCB-Info-Issuer-Chain or SGX-Enclave-Identity-Issuer-Chain header.
-
-    Args:
-        header_value: URL-encoded PEM certificate chain
-
-    Returns:
-        List of parsed certificates (signing cert first, root last)
-
-    Raises:
-        CollateralError: If parsing fails
-    """
-    # URL-decode the header value
-    pem_data = unquote(header_value).encode("utf-8")
-
-    try:
-        certs = parse_pem_chain(pem_data)
-    except CertificateChainError as e:
-        raise CollateralError(f"Failed to parse issuer chain certificate: {e}") from e
-
-    if len(certs) < 2:
-        raise CollateralError(f"Issuer chain should contain at least 2 certificates, got {len(certs)}")
-
-    return certs
-
-
-_JSON_WHITESPACE = " \t\n\r"
-
-
-def _top_level_member_bytes(json_str: str, key: str) -> str:
-    """The raw text of the value of ``key`` in the top-level object of ``json_str``.
-
-    The top-level object is walked member by member with the standard
-    decoder, so a member of the same name nested inside another value is
-    never mistaken for the top-level one, and the span returned is exactly
-    the bytes between the member's colon and its separator, which is what
-    the collateral signature covers. The value must be an object. Only the
-    top-level object is walked; a repeated top-level name is an error here
-    as well as in the strict parser.
-    """
+def _top_level_member_text(text: str, key: str) -> str:
     decoder = json.JSONDecoder()
-    pos = _skip_whitespace(json_str, 0)
-    if pos >= len(json_str) or json_str[pos] != "{":
+    pos = _skip_whitespace(text, 0)
+    if pos >= len(text) or text[pos] != "{":
         raise ValueError("body is not a JSON object")
     pos += 1
     found: str | None = None
     while True:
-        pos = _skip_whitespace(json_str, pos)
-        if pos >= len(json_str):
+        pos = _skip_whitespace(text, pos)
+        if pos >= len(text):
             raise ValueError("unterminated top-level object")
-        if json_str[pos] == "}":
+        if text[pos] == "}":
             break
         try:
-            name, pos = decoder.raw_decode(json_str, pos)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"malformed member name: {e}") from e
+            name, pos = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError as err:
+            raise ValueError(f"malformed member name: {err}") from err
         if not isinstance(name, str):
             raise ValueError("member name is not a string")
-        pos = _skip_whitespace(json_str, pos)
-        if pos >= len(json_str) or json_str[pos] != ":":
+        pos = _skip_whitespace(text, pos)
+        if pos >= len(text) or text[pos] != ":":
             raise ValueError(f"member {name!r} has no value")
-        value_start = _skip_whitespace(json_str, pos + 1)
+        value_start = _skip_whitespace(text, pos + 1)
         try:
-            _, value_end = decoder.raw_decode(json_str, value_start)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"malformed value of member {name!r}: {e}") from e
+            _, value_end = decoder.raw_decode(text, value_start)
+        except json.JSONDecodeError as err:
+            raise ValueError(f"malformed value of member {name!r}: {err}") from err
         if name == key:
             if found is not None:
                 raise ValueError(f"duplicate top-level member {key!r}")
-            if json_str[value_start] != "{":
-                raise ValueError(f"'{key}' is not an object")
-            found = json_str[value_start:value_end]
-        pos = _skip_whitespace(json_str, value_end)
-        if pos >= len(json_str):
+            if text[value_start] != "{":
+                raise ValueError(f"{key!r} is not an object")
+            found = text[value_start:value_end]
+        pos = _skip_whitespace(text, value_end)
+        if pos >= len(text):
             raise ValueError("unterminated top-level object")
-        if json_str[pos] == ",":
+        if text[pos] == ",":
             pos += 1
-        elif json_str[pos] != "}":
+        elif text[pos] != "}":
             raise ValueError(f"unexpected character after member {name!r}")
     if found is None:
-        raise ValueError(f"does not contain '{key}' key")
+        raise ValueError(f"{key!r} field is missing in the response received")
     return found
 
 
@@ -620,1012 +553,332 @@ def _skip_whitespace(text: str, pos: int) -> int:
     return pos
 
 
-def _verify_collateral_signature(
-    json_bytes: bytes,
-    json_key: str,
+def parse_issuer_chain_header(value: str, phrase: str) -> tuple[Certificate, Certificate]:
+    """The signing certificate and the root from a URL-encoded issuer-chain header: exactly two PEM certificates.
+
+    ``+`` decodes to a space and ``%XX`` to a byte; a ``%`` not followed by
+    two hex digits is an error.
+    """
+    if value == "":
+        raise CollateralError(f"issuer chain certificates missing in {phrase!r}")
+    if _QUERY_ESCAPE.search(value):
+        raise CollateralError(f"unable to decode issuer chain in {phrase!r}: invalid URL escape")
+    data = unquote_to_bytes(value.replace("+", " "))
+    try:
+        signing, root = pem_certificates(data, 2, phrase)
+    except TdxVerificationError as err:
+        raise CollateralError(str(err)) from err
+    return signing, root
+
+
+# --- response verification ----------------------------------------------------------
+
+
+def verify_response(
+    signing_phrase: str,
+    root: Certificate,
+    signing: Certificate,
+    raw_body: bytes,
     signature_hex: str,
-    signing_cert: x509.Certificate,
-    data_name: str,
+    root_crl: RevocationList,
+    trusted_roots: Sequence[Certificate],
+    now: datetime,
 ) -> None:
+    """Verify one signed PCS response.
+
+    The issuer chain's root is self-consistent and named as the Intel root;
+    the signing certificate is named ``signing_phrase``, issued by that
+    root, and chains to a trusted root at ``now``; the hex signature is a
+    64-byte ECDSA P-256 signature over ``raw_body``; the root CRL is the
+    issuer root's and does not list the signing certificate.
     """
-    Verify the signature over collateral JSON data.
-
-    Intel PCS signs the raw JSON string of the inner object (tcbInfo or
-    enclaveIdentity), not the outer wrapper. The signature is ECDSA P-256
-    over SHA256 of the raw JSON bytes.
-
-    Args:
-        json_bytes: Raw response bytes (full JSON)
-        json_key: Key name to extract for signing ("tcbInfo" or "enclaveIdentity")
-        signature_hex: Hex-encoded signature from response
-        signing_cert: Signing certificate (leaf of issuer chain)
-        data_name: Human-readable name for error messages
-
-    Raises:
-        CollateralError: If signature verification fails
-    """
-    # The signature covers the exact bytes of the inner object as they appear
-    # in the response, whitespace included, so the object is located by
-    # walking the top-level members rather than by searching the text.
     try:
-        json_str = json_bytes.decode("utf-8")
-    except UnicodeDecodeError as e:
-        raise CollateralError(f"Failed to decode {data_name} JSON: {e}") from e
-
+        validate_certificate(root, root, ROOT_CERT_PHRASE)
+    except TdxVerificationError as err:
+        raise CollateralError(f"unable to validate root certificate in the issuer chain: {err}") from err
     try:
-        signed_json = _top_level_member_bytes(json_str, json_key).encode("utf-8")
-    except ValueError as e:
-        raise CollateralError(f"{data_name} JSON: {e}") from e
-
-    # Parse signature (hex-encoded raw R||S format, 64 bytes = 128 hex chars)
+        validate_certificate(signing, root, signing_phrase)
+    except TdxVerificationError as err:
+        raise CollateralError(f"unable to validate signing certificate in the issuer chain: {err}") from err
     try:
-        sig_bytes = bytes.fromhex(signature_hex)
-    except ValueError as e:
-        raise CollateralError(f"{data_name} signature is not valid hex: {e}") from e
-
-    if len(sig_bytes) != ECDSA_SIGNATURE_SIZE:
-        raise CollateralError(f"{data_name} signature is {len(sig_bytes)} bytes, expected {ECDSA_SIGNATURE_SIZE}")
-
-    # Convert R||S to DER format
-    r = int.from_bytes(sig_bytes[0:ECDSA_P256_COMPONENT_SIZE], byteorder="big")
-    s = int.from_bytes(sig_bytes[ECDSA_P256_COMPONENT_SIZE:ECDSA_SIGNATURE_SIZE], byteorder="big")
-    signature_der = encode_dss_signature(r, s)
-
-    # Verify ECDSA signature
+        verify_chain(signing, [], trusted_roots, now, extended_key_usage=OID_EKU_SERVER_AUTH)
+    except X509Error as err:
+        raise CollateralError(f"unable to verify signing certificate: {err}") from err
     try:
-        public_key = signing_cert.public_key()
-        if not isinstance(public_key, ec.EllipticCurvePublicKey):
-            raise CollateralError(f"{data_name} signing certificate does not carry an EC public key")
-        public_key.verify(signature_der, signed_json, ec.ECDSA(hashes.SHA256()))
+        signature = decode_hex(signature_hex)
+    except ValueError as err:
+        raise CollateralError(f"unable to decode signature string in the response: {err}") from err
+    try:
+        signature_der = signature_to_der(signature)
+    except TdxVerificationError as err:
+        raise CollateralError(f"unable to convert signature to DER format: {err}") from err
+    key = signing.public_key()
+    if not isinstance(key, ec.EllipticCurvePublicKey):
+        raise CollateralError("signing certificate public key is not of type ecdsa public key")
+    try:
+        key.verify(signature_der, raw_body, ec.ECDSA(hashes.SHA256()))
     except InvalidSignature:
-        raise CollateralError(f"{data_name} signature verification failed: signature does not match content") from None
-
-
-def verify_tcb_info_signature(
-    response_bytes: bytes,
-    tcb_info: TdxTcbInfo,
-    issuer_chain: list[x509.Certificate],
-) -> None:
-    """
-    Verify TCB Info signature against the issuer certificate chain.
-
-    Args:
-        response_bytes: Raw TCB Info response bytes
-        tcb_info: Parsed TCB Info
-        issuer_chain: Issuer certificate chain from response header
-
-    Raises:
-        CollateralError: If verification fails
-    """
-    # Verify the issuer chain
+        raise CollateralError("could not verify response body using the signing certificate") from None
     try:
-        verify_intel_chain(issuer_chain, "TCB Info issuer chain")
-    except CertificateChainError as e:
-        raise CollateralError(str(e)) from e
-
-    # Verify signature over tcbInfo JSON
-    _verify_collateral_signature(
-        json_bytes=response_bytes,
-        json_key="tcbInfo",
-        signature_hex=tcb_info.signature,
-        signing_cert=issuer_chain[0],
-        data_name="TCB Info",
-    )
+        verified = validate_crl(root_crl, root, now)
+    except TdxVerificationError as err:
+        raise CollateralError(
+            f"root CA CRL verification failed using root certificate in the issuer's chain: {err}"
+        ) from err
+    if signing.serial_number in verified.crl.revoked_serials:
+        raise CollateralError("signing certificate was revoked")
 
 
-def verify_qe_identity_signature(
-    response_bytes: bytes,
-    qe_identity: QeIdentity,
-    issuer_chain: list[x509.Certificate],
-) -> None:
-    """
-    Verify QE Identity signature against the issuer certificate chain.
-
-    Args:
-        response_bytes: Raw QE Identity response bytes
-        qe_identity: Parsed QE Identity
-        issuer_chain: Issuer certificate chain from response header
-
-    Raises:
-        CollateralError: If verification fails
-    """
-    # Verify the issuer chain
+def verify_tcb_info(collateral: TdxCollateral, trusted_roots: Sequence[Certificate], now: datetime) -> None:
+    """The TCB Info is for TDX, version 3, lists at least one level, and its response verifies."""
+    tcb_info = collateral.tcb_info.tcb_info
+    if tcb_info.id != TCB_INFO_ID:
+        raise CollateralError(f"tcbInfo ID {tcb_info.id!r} does not match with expected ID {TCB_INFO_ID!r}")
+    if tcb_info.version != TCB_INFO_VERSION:
+        raise CollateralError(f"tcbInfo version {tcb_info.version} does not match with expected version 3")
+    if not tcb_info.tcb_levels:
+        raise CollateralError("tcbInfo contains empty TcbLevels")
     try:
-        verify_intel_chain(issuer_chain, "QE Identity issuer chain")
-    except CertificateChainError as e:
-        raise CollateralError(str(e)) from e
-
-    # Verify signature over enclaveIdentity JSON
-    _verify_collateral_signature(
-        json_bytes=response_bytes,
-        json_key="enclaveIdentity",
-        signature_hex=qe_identity.signature,
-        signing_cert=issuer_chain[0],
-        data_name="QE Identity",
-    )
-
-
-# =============================================================================
-# Collateral Loading
-# =============================================================================
-
-
-def load_tcb_info(body: bytes, issuer_chain_header: str) -> tuple[TdxTcbInfo, bytes, list[x509.Certificate]]:
-    """
-    Parse and verify a captured TCB Info response.
-
-    Args:
-        body: Raw TCB Info response bytes
-        issuer_chain_header: The TCB-Info-Issuer-Chain response header
-
-    Returns:
-        Tuple of (parsed TdxTcbInfo, raw response bytes, issuer certificate chain)
-
-    Raises:
-        CollateralError: If parsing or signature verification fails
-    """
-    tcb_info = parse_tcb_info_response(body)
-
-    if not issuer_chain_header:
-        raise CollateralError("TCB Info response missing TCB-Info-Issuer-Chain header")
-
-    issuer_chain = _parse_issuer_chain_header(issuer_chain_header)
-    verify_tcb_info_signature(body, tcb_info, issuer_chain)
-
-    return tcb_info, body, issuer_chain
-
-
-def load_qe_identity(body: bytes, issuer_chain_header: str) -> tuple[QeIdentity, bytes, list[x509.Certificate]]:
-    """
-    Parse and verify a captured QE Identity response.
-
-    Args:
-        body: Raw QE Identity response bytes
-        issuer_chain_header: The SGX-Enclave-Identity-Issuer-Chain response header
-
-    Returns:
-        Tuple of (parsed QeIdentity, raw response bytes, issuer certificate chain)
-
-    Raises:
-        CollateralError: If parsing or signature verification fails
-    """
-    qe_identity = parse_qe_identity_response(body)
-
-    if not issuer_chain_header:
-        raise CollateralError("QE Identity response missing SGX-Enclave-Identity-Issuer-Chain header")
-
-    issuer_chain = _parse_issuer_chain_header(issuer_chain_header)
-    verify_qe_identity_signature(body, qe_identity, issuer_chain)
-
-    return qe_identity, body, issuer_chain
-
-
-def load_pck_crl(ca_type: str, body: bytes, issuer_chain_header: str) -> PckCrl:
-    """
-    Parse and verify a captured PCK CRL response (PEM).
-
-    Args:
-        ca_type: CA type - "platform" or "processor"
-        body: Raw PCK CRL response bytes
-        issuer_chain_header: The SGX-PCK-CRL-Issuer-Chain response header
-
-    Returns:
-        Parsed PckCrl
-
-    Raises:
-        CollateralError: If parsing or signature verification fails
-    """
-    if ca_type not in ("platform", "processor"):
-        raise CollateralError(f"Invalid CA type: {ca_type}. Must be 'platform' or 'processor'")
-
-    # Parse the PEM-encoded CRL
-    try:
-        crl = x509.load_pem_x509_crl(body)
-    except ValueError as e:
-        raise CollateralError(f"Failed to parse PCK CRL ({ca_type}): {e}") from e
-
-    if not issuer_chain_header:
-        raise CollateralError(f"PCK CRL ({ca_type}) response missing SGX-PCK-CRL-Issuer-Chain header")
-
-    issuer_chain = _parse_issuer_chain_header(issuer_chain_header)
-    _verify_crl_signature(crl, issuer_chain, ca_type)
-
-    next_update = crl.next_update_utc
-    if next_update is None:
-        raise CollateralError(f"PCK CRL ({ca_type}) is missing next_update field")
-
-    return PckCrl(crl=crl, ca_type=ca_type, next_update=next_update)
-
-
-def load_root_ca_crl(body: bytes) -> RootCrl:
-    """
-    Parse and verify a captured Intel SGX Root CA CRL (DER).
-
-    This CRL lists revoked intermediate CA certificates (Platform CA, Processor CA).
-
-    Args:
-        body: Raw DER CRL bytes
-
-    Returns:
-        Parsed RootCrl
-
-    Raises:
-        CollateralError: If parsing or signature verification fails
-    """
-    # Parse the DER-encoded CRL
-    try:
-        crl = x509.load_der_x509_crl(body)
-    except Exception as e:
-        raise CollateralError(f"Failed to parse Intel SGX Root CA CRL: {e}") from e
-
-    # Verify CRL is signed by the Intel SGX Root CA
-    _verify_root_crl_signature(crl)
-
-    next_update = crl.next_update_utc
-    if next_update is None:
-        raise CollateralError("Intel SGX Root CA CRL is missing next_update field")
-
-    return RootCrl(crl=crl, next_update=next_update)
-
-
-def _verify_crl_signature(
-    crl: x509.CertificateRevocationList,
-    issuer_chain: list[x509.Certificate],
-    ca_type: str,
-) -> None:
-    """
-    Verify the CRL signature against the issuer certificate chain.
-
-    Args:
-        crl: Parsed CRL
-        issuer_chain: Issuer certificate chain from response header
-        ca_type: CA type for error messages
-
-    Raises:
-        CollateralError: If verification fails
-    """
-    # Verify the issuer chain first
-    try:
-        verify_intel_chain(issuer_chain, f"PCK CRL ({ca_type}) issuer chain")
-    except CertificateChainError as e:
-        raise CollateralError(str(e)) from e
-
-    # Verify CRL signature using the signing cert (first in chain)
-    signing_cert = issuer_chain[0]
-    hash_algo = crl.signature_hash_algorithm
-    if hash_algo is None:
-        raise CollateralError(f"PCK CRL ({ca_type}) has no signature hash algorithm")
-    signing_key = signing_cert.public_key()
-    if not isinstance(signing_key, ec.EllipticCurvePublicKey):
-        raise CollateralError(f"PCK CRL ({ca_type}) signing certificate does not carry an EC public key")
-    try:
-        signing_key.verify(
-            crl.signature,
-            crl.tbs_certlist_bytes,
-            ec.ECDSA(hash_algo),
+        verify_response(
+            TCB_SIGNING_PHRASE,
+            collateral.tcb_info_issuer_root,
+            collateral.tcb_info_issuer_intermediate,
+            collateral.tcb_info_body,
+            collateral.tcb_info.signature,
+            collateral.root_crl.crl,
+            trusted_roots,
+            now,
         )
-    except InvalidSignature:
-        raise CollateralError(f"PCK CRL ({ca_type}) signature verification failed") from None
+    except CollateralError as err:
+        raise CollateralError(f"tcbInfo response verification failed: {err}") from err
 
 
-# Intel SGX Root CA CRL URL (from the certificate's CRL Distribution Point)
-INTEL_SGX_ROOT_CA_CRL_URL = "https://certificates.trustedservices.intel.com/IntelSGXRootCA.der"
-
-
-def _verify_root_crl_signature(crl: x509.CertificateRevocationList) -> None:
-    """
-    Verify the Root CA CRL signature against Intel SGX Root CA.
-
-    Args:
-        crl: Parsed CRL
-
-    Raises:
-        CollateralError: If signature verification fails
-    """
-    intel_root = get_intel_root_ca()
-    hash_algo = crl.signature_hash_algorithm
-    if hash_algo is None:
-        raise CollateralError("Intel SGX Root CA CRL has no signature hash algorithm")
-    root_key = intel_root.public_key()
-    if not isinstance(root_key, ec.EllipticCurvePublicKey):
-        raise CollateralError("Intel SGX Root CA does not carry an EC public key")
+def verify_qe_identity(collateral: TdxCollateral, trusted_roots: Sequence[Certificate], now: datetime) -> None:
+    """The QE Identity is for the TD QE, version 2, lists at least one level, and its response verifies."""
+    identity = collateral.qe_identity.enclave_identity
+    if identity.id != QE_IDENTITY_ID:
+        raise CollateralError(f"QeIdentity ID {identity.id!r} does not match with expected ID {QE_IDENTITY_ID!r}")
+    if identity.version != QE_IDENTITY_VERSION:
+        raise CollateralError(f"QeIdentity version {identity.version} does not match with expected version 2")
+    if not identity.tcb_levels:
+        raise CollateralError("QeIdentity contains empty TcbLevels")
     try:
-        root_key.verify(
-            crl.signature,
-            crl.tbs_certlist_bytes,
-            ec.ECDSA(hash_algo),
+        verify_response(
+            TCB_SIGNING_PHRASE,
+            collateral.qe_identity_issuer_root,
+            collateral.qe_identity_issuer_intermediate,
+            collateral.enclave_identity_body,
+            collateral.qe_identity.signature,
+            collateral.root_crl.crl,
+            trusted_roots,
+            now,
         )
-    except InvalidSignature:
-        raise CollateralError("Intel SGX Root CA CRL signature verification failed") from None
+    except CollateralError as err:
+        raise CollateralError(f"QeIdentity response verification failed: {err}") from err
 
 
-def _determine_pck_ca_type(pck_cert: x509.Certificate) -> str:
-    """
-    Determine which CA issued the PCK certificate.
-
-    The PCK certificate issuer CN indicates the CA type:
-    - "Intel SGX PCK Platform CA" -> "platform"
-    - "Intel SGX PCK Processor CA" -> "processor"
-
-    Args:
-        pck_cert: PCK certificate from the quote
-
-    Returns:
-        CA type string ("platform" or "processor")
-
-    Raises:
-        CollateralError: If CA type cannot be determined
-    """
-    try:
-        issuer = pck_cert.issuer
-        for attr in issuer:
-            if attr.oid == x509.oid.NameOID.COMMON_NAME:
-                cn = attr.value
-                if "Platform" in cn:
-                    return "platform"
-                elif "Processor" in cn:
-                    return "processor"
-        raise CollateralError(f"Could not determine PCK CA type from issuer: {issuer}")
-    except Exception as e:
-        raise CollateralError(f"Failed to determine PCK CA type: {e}") from e
+def check_collateral_expiration(collateral: TdxCollateral, now: datetime) -> None:
+    """Nothing in the collateral is past its end at ``now``: the two responses' next updates, every issuer
+    certificate's notAfter, and the two CRLs' next updates."""
+    tcb_next = collateral.tcb_info.tcb_info.next_update
+    if tcb_next is None or now > tcb_next:
+        raise CollateralError("tcbInfo has expired")
+    qe_next = collateral.qe_identity.enclave_identity.next_update
+    if qe_next is None or now > qe_next:
+        raise CollateralError("QeIdentity has expired")
+    if now > collateral.tcb_info_issuer_intermediate.not_valid_after_utc:
+        raise CollateralError("tcbInfo signing certificate has expired")
+    if now > collateral.tcb_info_issuer_root.not_valid_after_utc:
+        raise CollateralError("tcbInfo root certificate has expired")
+    if now > collateral.qe_identity_issuer_root.not_valid_after_utc:
+        raise CollateralError("QeIdentity root certificate has expired")
+    if now > collateral.qe_identity_issuer_intermediate.not_valid_after_utc:
+        raise CollateralError("QeIdentity signing certificate has expired")
+    if now > collateral.root_crl.crl.next_update:
+        raise CollateralError("root CA CRL has expired")
+    if now > collateral.pck_crl.crl.next_update:
+        raise CollateralError("PCK CRL has expired")
+    if now > collateral.pck_crl.issuer_intermediate.not_valid_after_utc:
+        raise CollateralError("PCK CRL signing certificate has expired")
+    if now > collateral.pck_crl.issuer_root.not_valid_after_utc:
+        raise CollateralError("PCK CRL root certificate has expired")
 
 
-def is_cpu_svn_higher_or_equal(
-    pck_cert_cpu_svn: bytes,
-    sgx_tcb_components: list[TcbComponent],
-) -> bool:
-    """
-    Check if PCK certificate CPU SVN is >= TCB level SGX components.
+# --- appraisal ---------------------------------------------------------------------
 
-    Args:
-        pck_cert_cpu_svn: CPU SVN from PCK certificate (16 bytes)
-        sgx_tcb_components: SGX TCB components from TCB level
 
-    Returns:
-        True if all components are >=
-    """
-    if len(pck_cert_cpu_svn) != len(sgx_tcb_components):
+def apply_mask(mask: bytes, value: bytes) -> bytes:
+    """``value`` masked by ``mask``, over the length of ``mask``."""
+    return bytes(m & v for m, v in zip(mask, value, strict=False))
+
+
+def is_cpu_svn_higher_or_equal(cpu_svn_components: bytes, sgx_tcb_components: Sequence[TcbComponent]) -> bool:
+    """Every PCK TCB component is at least the level's; the two must have the same length."""
+    if len(cpu_svn_components) != len(sgx_tcb_components):
         return False
+    return all(cpu_svn_components[i] >= component.svn for i, component in enumerate(sgx_tcb_components))
 
-    return all(pck_cert_cpu_svn[i] >= component.svn for i, component in enumerate(sgx_tcb_components))
 
-
-def is_tdx_tcb_svn_higher_or_equal(
-    tee_tcb_svn: bytes,
-    tdx_tcb_components: list[TcbComponent],
-) -> bool:
-    """
-    Check if TEE TCB SVN is >= TCB level TDX components.
-
-    Args:
-        tee_tcb_svn: TEE TCB SVN from quote body (16 bytes)
-        tdx_tcb_components: TDX TCB components from TCB level
-
-    Returns:
-        True if all relevant components are >=
-    """
+def is_tdx_tcb_svn_higher_or_equal(tee_tcb_svn: bytes, tdx_tcb_components: Sequence[TcbComponent]) -> bool:
+    """Every TEE TCB SVN component is at least the level's, skipping the first two when the second (the TDX module
+    major version) is non-zero, since those are then appraised through the module identity."""
     if len(tee_tcb_svn) != len(tdx_tcb_components):
         return False
-
-    # If teeTcbSvn[1] > 0, skip first 2 bytes (module-specific behavior)
-    start = 0
-    if len(tee_tcb_svn) > 1 and tee_tcb_svn[1] > 0:
-        start = 2
-
+    start = 2 if tee_tcb_svn[1] > 0 else 0
     return all(tee_tcb_svn[i] >= tdx_tcb_components[i].svn for i in range(start, len(tee_tcb_svn)))
 
 
 def get_matching_tcb_level(
-    tcb_levels: list[TcbLevel],
-    tee_tcb_svn: bytes,
-    pck_cert_pce_svn: int,
-    pck_cert_cpu_svn: bytes,
-) -> TcbLevel | None:
-    """
-    Find the matching TCB level for the given SVN values.
-
-    TCB levels are ordered from newest to oldest. Returns the first
-    level where all three checks pass.
-
-    Args:
-        tcb_levels: List of TCB levels from TCB Info
-        tee_tcb_svn: TEE TCB SVN from quote body
-        pck_cert_pce_svn: PCE SVN from PCK certificate
-        pck_cert_cpu_svn: CPU SVN from PCK certificate
-
-    Returns:
-        Matching TcbLevel or None if no match found
-    """
+    tcb_levels: Sequence[TcbLevel], tee_tcb_svn: bytes, pck_cert_pce_svn: int, pck_cert_cpu_svn_components: bytes
+) -> TcbLevel:
+    """The first level, in published order, that the PCK TCB, PCE SVN and TEE TCB SVN all reach."""
     for level in tcb_levels:
         if (
-            is_cpu_svn_higher_or_equal(pck_cert_cpu_svn, level.tcb.sgx_tcb_components)
+            is_cpu_svn_higher_or_equal(pck_cert_cpu_svn_components, level.tcb.sgx_tcb_components)
             and pck_cert_pce_svn >= level.tcb.pce_svn
             and is_tdx_tcb_svn_higher_or_equal(tee_tcb_svn, level.tcb.tdx_tcb_components)
         ):
             return level
-
-    return None
-
-
-def get_matching_qe_tcb_level(
-    tcb_levels: list[TcbLevel],
-    isv_svn: int,
-) -> TcbLevel | None:
-    """
-    Find the matching TCB level for the QE ISV SVN.
-
-    TCB levels are ordered from newest to oldest. Returns the first
-    level where the report's ISV SVN >= the level's ISV SVN.
-
-    Args:
-        tcb_levels: List of TCB levels from QE Identity
-        isv_svn: ISV SVN from QE report
-
-    Returns:
-        Matching TcbLevel or None if no match found
-    """
-    for level in tcb_levels:
-        # QE TCB levels use isvsvn in the tcb structure
-        # The level matches if report's ISV SVN >= level's ISV SVN
-        if level.tcb.isv_svn is not None and isv_svn >= level.tcb.isv_svn:
-            return level
-
-    return None
+    raise CollateralError("no matching TCB level found")
 
 
-def validate_tcb_status(
-    tcb_info: TcbInfo,
-    tee_tcb_svn: bytes,
-    pck_extensions: PckExtensions,
-    strict_mode: bool = False,
-) -> TcbLevel:
-    """
-    Validate TCB status against Intel's published levels.
-
-    Performs the following checks:
-    1. Cross-validates FMSPC and PCE_ID between PCK cert and TCB Info
-    2. Finds matching TCB level for platform SVN values
-    3. Checks TCB status (REVOKED and OUT_OF_DATE always rejected)
-
-    Args:
-        tcb_info: Parsed TCB Info from Intel PCS
-        tee_tcb_svn: TEE TCB SVN from quote body
-        pck_extensions: PCK certificate extensions
-        strict_mode: If True, reject SW_HARDENING_NEEDED and CONFIGURATION_NEEDED
-
-    Returns:
-        Matching TcbLevel
-
-    Raises:
-        CollateralError: If TCB status is not acceptable
-    """
-    # Cross-check FMSPC between PCK certificate and TCB Info
-    pck_fmspc = pck_extensions.fmspc.lower()
-    tcb_fmspc = tcb_info.fmspc.lower()
-    if pck_fmspc != tcb_fmspc:
-        raise CollateralError(f"FMSPC mismatch: PCK certificate has {pck_fmspc}, TCB Info has {tcb_fmspc}")
-
-    # Cross-check PCE_ID between PCK certificate and TCB Info
-    pck_pceid = pck_extensions.pceid.lower()
-    tcb_pceid = tcb_info.pce_id.lower()
-    if pck_pceid != tcb_pceid:
-        raise CollateralError(f"PCE_ID mismatch: PCK certificate has {pck_pceid}, TCB Info has {tcb_pceid}")
-
-    matching_level = get_matching_tcb_level(
-        tcb_levels=tcb_info.tcb_levels,
-        tee_tcb_svn=tee_tcb_svn,
-        pck_cert_pce_svn=pck_extensions.tcb.pce_svn,
-        pck_cert_cpu_svn=pck_extensions.tcb.cpu_svn,
-    )
-
-    if matching_level is None:
-        raise CollateralError("No matching TCB level found for the quote's SVN values")
-
-    # Check status - always reject REVOKED and OUT_OF_DATE
-    if matching_level.tcb_status == TcbStatus.REVOKED:
-        raise CollateralError("TCB status is REVOKED - platform is not trusted")
-
-    if matching_level.tcb_status == TcbStatus.OUT_OF_DATE:
-        raise CollateralError("TCB status is OUT_OF_DATE - platform needs update")
-
-    if matching_level.tcb_status == TcbStatus.OUT_OF_DATE_CONFIGURATION_NEEDED:
-        raise CollateralError("TCB status is OUT_OF_DATE_CONFIGURATION_NEEDED - platform needs update")
-
-    # In strict mode, also reject statuses that indicate security advisories
-    if strict_mode:
-        if matching_level.tcb_status == TcbStatus.SW_HARDENING_NEEDED:
-            advisories = ", ".join(matching_level.advisory_ids) or "none listed"
-            raise CollateralError(f"TCB status is SW_HARDENING_NEEDED (strict mode). Advisories: {advisories}")
-
-        if matching_level.tcb_status == TcbStatus.CONFIGURATION_NEEDED:
-            advisories = ", ".join(matching_level.advisory_ids) or "none listed"
-            raise CollateralError(f"TCB status is CONFIGURATION_NEEDED (strict mode). Advisories: {advisories}")
-
-        if matching_level.tcb_status == TcbStatus.CONFIGURATION_AND_SW_HARDENING_NEEDED:
-            advisories = ", ".join(matching_level.advisory_ids) or "none listed"
+def get_matching_tdx_module_tcb_level(identities: Sequence[TdxModuleIdentity], tee_tcb_svn: bytes) -> TcbLevel:
+    """The first level of the module identity ``TDX_<major>`` (the second TEE TCB SVN byte, hex) that the module's
+    ISV SVN (the first byte) reaches. A TEE TCB SVN too short to carry both bytes is an error, never a lookup of
+    a module id derived from a missing byte."""
+    if len(tee_tcb_svn) < TDX_MODULE_VERSION_BYTES:
+        raise CollateralError(
+            f"TEE TCB SVN of {len(tee_tcb_svn)} bytes is too short to name a TDX module version "
+            f"(expected at least {TDX_MODULE_VERSION_BYTES})"
+        )
+    major = tee_tcb_svn[1:2]
+    module_id = TDX_MODULE_ID_PREFIX + major.hex()
+    isv_svn = tee_tcb_svn[0]
+    for identity in identities:
+        if identity.id == module_id:
+            for level in identity.tcb_levels:
+                if isv_svn >= level.tcb.isv_svn:
+                    return level
             raise CollateralError(
-                f"TCB status is CONFIGURATION_AND_SW_HARDENING_NEEDED (strict mode). Advisories: {advisories}"
+                f"could not find a TDX Module Identity TCB Level matching the TDX Module's ISVSVN ({isv_svn})"
             )
-
-    return matching_level
-
-
-def get_tdx_module_identity(
-    tcb_info: TcbInfo,
-    tee_tcb_svn: bytes,
-) -> TdxModuleIdentity:
-    """
-    Find the matching TDX module identity based on TEE_TCB_SVN.
-
-    The module ID is derived from TEE_TCB_SVN[1] (major version):
-    - TEE_TCB_SVN[1] = 0x03 -> Module ID = "TDX_03"
-    - TEE_TCB_SVN[1] = 0x01 -> Module ID = "TDX_01"
-
-    Args:
-        tcb_info: Parsed TCB Info from Intel PCS
-        tee_tcb_svn: TEE TCB SVN from quote body (16 bytes)
-
-    Returns:
-        Matching TdxModuleIdentity
-
-    Raises:
-        CollateralError: If no module identities in TCB Info, tee_tcb_svn is
-            malformed, or module version is unknown
-    """
-    if not tcb_info.tdx_module_identities:
-        raise CollateralError("TCB Info has no TDX module identities")
-
-    if len(tee_tcb_svn) < 2:
-        raise CollateralError(f"TEE_TCB_SVN is too short ({len(tee_tcb_svn)} bytes, expected >= 2)")
-
-    # Extract major version and form module ID
-    # TEE_TCB_SVN[0] = minor SVN, TEE_TCB_SVN[1] = major SVN
-    major_version = tee_tcb_svn[1]
-    module_id = f"TDX_{major_version:02d}"
-
-    # Find matching module identity
-    for module_identity in tcb_info.tdx_module_identities:
-        if module_identity.id == module_id:
-            return module_identity
-
-    known_ids = [m.id for m in tcb_info.tdx_module_identities]
-    raise CollateralError(f"Unknown TDX module version {module_id}. Known module identities: {known_ids}")
-
-
-def validate_tdx_module_identity(
-    tcb_info: TcbInfo,
-    tee_tcb_svn: bytes,
-    mr_signer_seam: bytes,
-    seam_attributes: bytes,
-) -> None:
-    """
-    Validate TDX module identity against Intel's published identities.
-
-    This validates:
-    - MR_SIGNER_SEAM matches the expected module signer
-    - SEAM_ATTRIBUTES match under the attribute mask
-    - Module-specific TCB level matches the minor version (TEE_TCB_SVN[0])
-
-    Args:
-        tcb_info: Parsed TCB Info from Intel PCS
-        tee_tcb_svn: TEE TCB SVN from quote body (16 bytes)
-        mr_signer_seam: MR_SIGNER_SEAM from quote body (48 bytes)
-        seam_attributes: SEAM_ATTRIBUTES from quote body (8 bytes)
-
-    Raises:
-        CollateralError: If module identity validation fails
-    """
-    module_identity = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-
-    # Verify MR_SIGNER_SEAM matches
-    if mr_signer_seam != module_identity.mrsigner:
-        raise CollateralError(
-            f"TDX module MR_SIGNER_SEAM does not match expected value. "
-            f"Got {mr_signer_seam.hex()}, expected {module_identity.mrsigner.hex()}"
-        )
-
-    # Verify SEAM_ATTRIBUTES match under mask
-    # Pad seam_attributes to match mask length if needed
-    mask = module_identity.attributes_mask
-    attrs = seam_attributes
-
-    # Handle length mismatch by padding with zeros
-    if len(attrs) < len(mask):
-        attrs = attrs + b"\x00" * (len(mask) - len(attrs))
-    if len(mask) < len(attrs):
-        mask = mask + b"\x00" * (len(attrs) - len(mask))
-
-    report_attrs_masked = bytes(a & b for a, b in zip(attrs, mask, strict=False))
-    expected_attrs_masked = bytes(a & b for a, b in zip(module_identity.attributes, mask, strict=False))
-    if report_attrs_masked != expected_attrs_masked:
-        raise CollateralError(
-            f"TDX module SEAM_ATTRIBUTES do not match expected value under mask. "
-            f"Got {seam_attributes.hex()}, expected {module_identity.attributes.hex()} "
-            f"(mask {module_identity.attributes_mask.hex()})"
-        )
-
-    # Find matching module-specific TCB level
-    # TEE_TCB_SVN[0] = minor SVN, TEE_TCB_SVN[1] = major SVN
-    # The minor version is used for module TCB matching
-    minor_version = tee_tcb_svn[0]
-
-    for level in module_identity.tcb_levels:
-        # Module TCB levels should have isv_svn (minor version) set
-        if level.tcb.isv_svn is not None and minor_version >= level.tcb.isv_svn:
-            # Check status - reject insecure statuses consistently with
-            # validate_tcb_status and validate_qe_identity
-            if level.tcb_status == TcbStatus.REVOKED:
-                raise CollateralError(f"TDX module TCB status is REVOKED for version {tee_tcb_svn[1]}.{minor_version}")
-            if level.tcb_status == TcbStatus.OUT_OF_DATE:
-                raise CollateralError(
-                    f"TDX module TCB status is OUT_OF_DATE for version {tee_tcb_svn[1]}.{minor_version}"
-                )
-            if level.tcb_status == TcbStatus.OUT_OF_DATE_CONFIGURATION_NEEDED:
-                raise CollateralError(
-                    f"TDX module TCB status is OUT_OF_DATE_CONFIGURATION_NEEDED "
-                    f"for version {tee_tcb_svn[1]}.{minor_version}"
-                )
-            return
-
-    # No matching TCB level found - this is an error
     raise CollateralError(
-        f"Could not find a TDX Module Identity TCB Level matching the TDX Module's ISVSVN ({minor_version})"
+        f"could not find a TDX Module Identity ({module_id!r}) matching the given TEE TDX version ({major.hex()!r})"
     )
 
 
-def validate_qe_identity(
-    qe_identity: EnclaveIdentity,
-    qe_report_isv_svn: int,
-    qe_report_mrsigner: bytes,
-    qe_report_miscselect: bytes,
-    qe_report_attributes: bytes,
-    qe_report_isvprodid: int,
-) -> TcbLevel:
-    """
-    Validate QE identity against Intel's published identity.
-
-    This performs comprehensive validation of the Quoting Enclave:
-    - MRSIGNER must match exactly
-    - MISCSELECT must match under mask
-    - Attributes must match under mask
-    - ISV ProdID must match exactly
-    - ISV SVN must meet minimum threshold for a TCB level
-
-    Args:
-        qe_identity: Parsed QE Identity from Intel PCS
-        qe_report_isv_svn: ISV SVN from QE report
-        qe_report_mrsigner: MRSIGNER from QE report (32 bytes)
-        qe_report_miscselect: MISCSELECT from QE report (4 bytes)
-        qe_report_attributes: Attributes from QE report (16 bytes)
-        qe_report_isvprodid: ISV ProdID from QE report
-
-    Returns:
-        Matching TcbLevel
-
-    Raises:
-        CollateralError: If QE identity validation fails
-    """
-    # Verify MRSIGNER matches exactly
-    if qe_report_mrsigner != qe_identity.mrsigner:
-        raise CollateralError(
-            f"QE report MRSIGNER does not match expected value. "
-            f"Got {qe_report_mrsigner.hex()}, expected {qe_identity.mrsigner.hex()}"
-        )
-
-    # Verify MISCSELECT matches under mask
-    # (qe_report_miscselect & mask) == (qe_identity.miscselect & mask)
-    report_miscselect_masked = bytes(
-        a & b for a, b in zip(qe_report_miscselect, qe_identity.miscselect_mask, strict=False)
+def check_tcb_info_tcb_status(tcb_info: TcbInfo, body: TdQuoteBody, pck_extensions: PckExtensions) -> TcbLevel:
+    """The platform's TCB level, and when the TDX module version is set its module level too, must be up to date."""
+    level = get_matching_tcb_level(
+        tcb_info.tcb_levels, body.tee_tcb_svn, pck_extensions.tcb.pce_svn, pck_extensions.tcb.cpu_svn_components
     )
-    expected_miscselect_masked = bytes(
-        a & b for a, b in zip(qe_identity.miscselect, qe_identity.miscselect_mask, strict=False)
-    )
-    if report_miscselect_masked != expected_miscselect_masked:
+    if body.tee_tcb_svn[1] > 0:
+        module_level = get_matching_tdx_module_tcb_level(tcb_info.tdx_module_identities, body.tee_tcb_svn)
+        if module_level.tcb_status != TcbStatus.UP_TO_DATE:
+            raise CollateralError(f"TDX Module TCB Status is not 'UpToDate', found {_status_text(module_level)}")
+    if level.tcb_status != TcbStatus.UP_TO_DATE:
+        raise CollateralError(f"TCB Status is not 'UpToDate', found {_status_text(level)}")
+    return level
+
+
+def _status_text(level: TcbLevel) -> str:
+    return repr(level.tcb_status.value if level.tcb_status is not None else "")
+
+
+def verify_td_quote_body(body: TdQuoteBody, tcb_info: TcbInfo, pck_extensions: PckExtensions) -> TcbLevel:
+    """Appraise the TD quote body against the TCB Info.
+
+    The PCK certificate's FMSPC and PCE id equal the TCB Info's, the
+    quote's MRSIGNERSEAM equals the TDX module signer, the SEAM attributes
+    under the module's mask equal the module's attributes, and the TCB
+    status is up to date. Returns the matched platform TCB level.
+    """
+    if pck_extensions.fmspc != tcb_info.fmspc:
         raise CollateralError(
-            f"QE report MISCSELECT does not match expected value under mask. "
-            f"Got {qe_report_miscselect.hex()}, expected {qe_identity.miscselect.hex()} "
-            f"(mask {qe_identity.miscselect_mask.hex()})"
+            f"FMSPC from PCK Certificate({pck_extensions.fmspc!r}) is not equal to FMSPC value from Intel PCS's "
+            f"reported TDX TCB info({tcb_info.fmspc!r})"
         )
-
-    # Verify Attributes match under mask
-    # (qe_report_attributes & mask) == (qe_identity.attributes & mask)
-    report_attributes_masked = bytes(
-        a & b for a, b in zip(qe_report_attributes, qe_identity.attributes_mask, strict=False)
-    )
-    expected_attributes_masked = bytes(
-        a & b for a, b in zip(qe_identity.attributes, qe_identity.attributes_mask, strict=False)
-    )
-    if report_attributes_masked != expected_attributes_masked:
+    if pck_extensions.pceid != tcb_info.pce_id:
         raise CollateralError(
-            f"QE report Attributes do not match expected value under mask. "
-            f"Got {qe_report_attributes.hex()}, expected {qe_identity.attributes.hex()} "
-            f"(mask {qe_identity.attributes_mask.hex()})"
+            f"PCEID from PCK Certificate({pck_extensions.pceid!r}) is not equal to PCEID from Intel PCS's reported "
+            f"TDX TCB info({tcb_info.pce_id!r})"
         )
-
-    # Verify ISV ProdID matches exactly
-    if qe_report_isvprodid != qe_identity.isv_prod_id:
+    module = tcb_info.tdx_module
+    if module.mrsigner != body.mr_signer_seam:
         raise CollateralError(
-            f"QE report ISV ProdID does not match expected value. "
-            f"Got {qe_report_isvprodid}, expected {qe_identity.isv_prod_id}"
+            f"MRSIGNERSEAM value from TD Quote Body({body.mr_signer_seam.hex()!r}) is not equal to TdxModule.Mrsigner "
+            f"field in Intel PCS's reported TDX TCB info({module.mrsigner.hex()!r})"
         )
-
-    # Find matching TCB level
-    matching_level = get_matching_qe_tcb_level(
-        tcb_levels=qe_identity.tcb_levels,
-        isv_svn=qe_report_isv_svn,
-    )
-
-    if matching_level is None:
-        raise CollateralError(f"No matching QE TCB level found for ISV SVN {qe_report_isv_svn}")
-
-    # Check status
-    if matching_level.tcb_status == TcbStatus.REVOKED:
-        raise CollateralError("QE TCB status is REVOKED")
-
-    if matching_level.tcb_status == TcbStatus.OUT_OF_DATE:
-        raise CollateralError("QE TCB status is OUT_OF_DATE")
-
-    if matching_level.tcb_status == TcbStatus.OUT_OF_DATE_CONFIGURATION_NEEDED:
-        raise CollateralError("QE TCB status is OUT_OF_DATE_CONFIGURATION_NEEDED")
-
-    return matching_level
-
-
-def check_collateral_freshness(
-    collateral: TdxCollateral,
-    min_tcb_evaluation_data_number: int,
-) -> None:
-    """
-    Check that collateral is not expired and meets freshness requirements.
-
-    This performs the following checks:
-    1. TCB Info has not expired (now < next_update)
-    2. QE Identity has not expired (now < next_update)
-    3. Both TCB Info and QE Identity must have tcbEvaluationDataNumber >= threshold
-
-    The tcbEvaluationDataNumber is a monotonically increasing number that
-    Intel updates when new TCB recovery (TCB-R) events occur. The minimum
-    threshold ensures we don't accept collateral issued before critical
-    security updates.
-
-    See: https://www.intel.com/content/www/us/en/developer/topic-technology/software-security-guidance/trusted-computing-base-recovery-attestation.html
-
-    Args:
-        collateral: TDX collateral to check
-        min_tcb_evaluation_data_number: Minimum tcbEvaluationDataNumber threshold.
-            Collateral with a lower number is rejected.
-
-    Raises:
-        CollateralError: If collateral is expired or too old
-    """
-    now = datetime.now(UTC)
-
-    tcb_next_update = collateral.tcb_info.tcb_info.next_update
-    if now > tcb_next_update:
-        raise CollateralError(f"TCB Info has expired (next update was {tcb_next_update})")
-
-    qe_next_update = collateral.qe_identity.enclave_identity.next_update
-    if now > qe_next_update:
-        raise CollateralError(f"QE Identity has expired (next update was {qe_next_update})")
-
-    # Check tcbEvaluationDataNumber threshold
-    tcb_eval_num = collateral.tcb_info.tcb_info.tcb_evaluation_data_number
-    if tcb_eval_num < min_tcb_evaluation_data_number:
+    if len(module.attributes_mask) != len(body.seam_attributes):
         raise CollateralError(
-            f"TCB Info tcbEvaluationDataNumber ({tcb_eval_num}) is below "
-            f"minimum required ({min_tcb_evaluation_data_number}). "
-            f"Collateral may be outdated."
+            f"size of SeamAttributes from TD Quote Body({len(body.seam_attributes)}) is not equal to size of "
+            f"TdxModule.AttributesMask in Intel PCS's reported TDX TCB info({len(module.attributes_mask)})"
         )
-
-    qe_eval_num = collateral.qe_identity.enclave_identity.tcb_evaluation_data_number
-    if qe_eval_num < min_tcb_evaluation_data_number:
+    masked = apply_mask(module.attributes_mask, body.seam_attributes)
+    if module.attributes != masked:
         raise CollateralError(
-            f"QE Identity tcbEvaluationDataNumber ({qe_eval_num}) is below "
-            f"minimum required ({min_tcb_evaluation_data_number}). "
-            f"Collateral may be outdated."
+            f"AttributesMask value({masked.hex()!r}) is not equal to TdxModule.Attributes field in Intel PCS's "
+            f"reported TDX TCB info({module.attributes.hex()!r})"
         )
-
-
-def validate_certificate_revocation(
-    collateral: TdxCollateral,
-    pck_cert: x509.Certificate,
-    intermediate_cert: x509.Certificate | None = None,
-) -> None:
-    """
-    Validate that certificates in the attestation chain have not been revoked.
-
-    Per Intel DCAP spec Section 2.3, checks:
-    1. PCK (leaf) certificate against the PCK CRL from Intel PCS, which must
-       be the CRL of the CA that issued the PCK certificate
-    2. Intermediate CA certificate against the Intel SGX Root CA CRL
-    3. TCB Info signing certificate against the Intel SGX Root CA CRL
-    4. QE Identity signing certificate against the Intel SGX Root CA CRL
-
-    Args:
-        collateral: TDX collateral containing CRLs and issuer chains
-        pck_cert: PCK certificate to check
-        intermediate_cert: Intermediate CA certificate to check (optional)
-
-    Raises:
-        CollateralError: If any certificate is revoked or CRL check fails
-
-    TODO: Use cryptography.x509.verification integrated CRL checking when available.
-          As of cryptography 46.0.3, PolicyBuilder doesn't support CRL stores.
-          Track: https://github.com/pyca/cryptography/issues
-    """
-    if collateral.pck_crl is None:
-        raise CollateralError("Cannot check certificate revocation: PCK CRL not available in collateral")
-
-    # --- Check PCK (leaf) certificate against PCK CRL ---
-    # The CRL must be the one for the CA that issued the PCK certificate; the
-    # other CA's CRL would never list this certificate's serial number.
-    pck_ca_type = _determine_pck_ca_type(pck_cert)
-    if collateral.pck_crl.ca_type != pck_ca_type:
-        raise CollateralError(
-            f"PCK CRL is for the {collateral.pck_crl.ca_type} CA, but the PCK certificate was issued by the "
-            f"{pck_ca_type} CA"
-        )
-    pck_crl = collateral.pck_crl.crl
-
-    # Check PCK CRL freshness
-    now = datetime.now(UTC)
-    pck_crl_next_update = pck_crl.next_update_utc
-    if pck_crl_next_update is not None and now > pck_crl_next_update:
-        raise CollateralError(f"PCK CRL has expired (next update was {pck_crl_next_update})")
-
-    # Check if PCK certificate is revoked
-    pck_serial = pck_cert.serial_number
-    revoked_pck = pck_crl.get_revoked_certificate_by_serial_number(pck_serial)
-
-    if revoked_pck is not None:
-        revocation_date = revoked_pck.revocation_date_utc
-        raise CollateralError(
-            f"PCK certificate has been revoked. Serial: {pck_serial:x}, Revocation date: {revocation_date}"
-        )
-
-    # --- Check certificates against Root CA CRL ---
-    # The Root CRL lists revoked intermediate CAs (Platform CA, Processor CA,
-    # TCB Signing CA, etc.) issued by Intel SGX Root CA.
-    if collateral.root_crl is not None:
-        root_crl = collateral.root_crl.crl
-
-        # Check Root CRL freshness (once, shared across all checks below)
-        root_crl_next_update = root_crl.next_update_utc
-        if root_crl_next_update is not None and now > root_crl_next_update:
-            raise CollateralError(f"Intel SGX Root CA CRL has expired (next update was {root_crl_next_update})")
-
-        # Check intermediate CA certificate (from PCK cert chain)
-        if intermediate_cert is not None:
-            _check_cert_against_crl(root_crl, intermediate_cert, "Intermediate CA")
-
-        # Check TCB Info signing certificate (per DCAP spec Section 2.3:
-        # "Check if verification collaterals are on the CRL")
-        if collateral.tcb_info_issuer_chain:
-            _check_cert_against_crl(root_crl, collateral.tcb_info_issuer_chain[0], "TCB Info signing")
-
-        # Check QE Identity signing certificate
-        if collateral.qe_identity_issuer_chain:
-            _check_cert_against_crl(root_crl, collateral.qe_identity_issuer_chain[0], "QE Identity signing")
-
-    elif intermediate_cert is not None or collateral.tcb_info_issuer_chain or collateral.qe_identity_issuer_chain:
-        raise CollateralError("Cannot check certificate revocation: Root CRL not available in collateral")
-
-
-def _check_cert_against_crl(
-    crl: x509.CertificateRevocationList,
-    cert: x509.Certificate,
-    cert_name: str,
-) -> None:
-    """
-    Check if a certificate has been revoked according to a CRL.
-
-    Args:
-        crl: Certificate Revocation List to check against
-        cert: Certificate to check
-        cert_name: Human-readable name for error messages
-
-    Raises:
-        CollateralError: If the certificate has been revoked
-    """
-    serial = cert.serial_number
-    revoked = crl.get_revoked_certificate_by_serial_number(serial)
-    if revoked is not None:
-        revocation_date = revoked.revocation_date_utc
-        raise CollateralError(
-            f"{cert_name} certificate has been revoked. Serial: {serial:x}, Revocation date: {revocation_date}"
-        )
-
-
-@dataclass
-class CollateralValidationResult:
-    """
-    Result of collateral validation.
-
-    Attributes:
-        collateral: The fetched TDX collateral
-        tcb_level: The matching TCB level for the platform
-        pck_extensions: Extracted PCK certificate extensions
-    """
-
-    collateral: TdxCollateral
-    tcb_level: TcbLevel
-    pck_extensions: PckExtensions
-
-
-def validate_collateral(
-    quote: QuoteV4,
-    pck_chain: PCKCertificateChain,
-    collateral: TdxCollateral,
-    min_tcb_evaluation_data_number: int = DEFAULT_MIN_TCB_EVALUATION_DATA_NUMBER,
-) -> CollateralValidationResult:
-    """
-    Validate all collateral for a TDX quote.
-
-    This function orchestrates the complete collateral validation flow:
-    1. Extract PCK extensions (FMSPC, TCB components)
-    2. Check collateral freshness
-    3. Validate certificate revocation
-    4. Validate TCB status
-    5. Validate TDX module identity
-    6. Validate QE identity
-
-    Args:
-        quote: Parsed TDX QuoteV4
-        pck_chain: Extracted PCK certificate chain
-        collateral: The loaded collateral (TCB Info, QE Identity, CRLs)
-        min_tcb_evaluation_data_number: Minimum required tcbEvaluationDataNumber
-
-    Returns:
-        CollateralValidationResult with validated collateral and TCB level
-
-    Raises:
-        CollateralError: If any collateral validation step fails
-    """
-
-    # Step 1: Extract PCK extensions
     try:
-        pck_extensions = extract_pck_extensions(pck_chain.pck_cert)
-    except PckExtensionError as e:
-        raise CollateralError(f"Failed to extract PCK extensions: {e}") from e
+        return check_tcb_info_tcb_status(tcb_info, body, pck_extensions)
+    except CollateralError as err:
+        raise CollateralError(f"TDX TCB info reported by Intel PCS failed TCB status check: {err}") from err
 
-    # Step 2: Check collateral freshness
-    check_collateral_freshness(collateral, min_tcb_evaluation_data_number)
 
-    # Step 3: Validate certificate revocation
-    validate_certificate_revocation(collateral, pck_chain.pck_cert, pck_chain.intermediate_cert)
+def check_qe_tcb_status(tcb_levels: Sequence[TcbLevel], isv_svn: int) -> None:
+    """The first level whose ISV SVN the QE reaches must be up to date; no such level is out of date."""
+    for level in tcb_levels:
+        if level.tcb.isv_svn <= isv_svn:
+            if level.tcb_status != TcbStatus.UP_TO_DATE:
+                raise CollateralError(f"TCB Status is not 'UpToDate', found {_status_text(level)}")
+            return
+    raise CollateralError("unable to find latest status of TCB, it is now OutOfDate")
 
-    # Step 4: Validate TCB status
-    tcb_level = validate_tcb_status(
-        collateral.tcb_info.tcb_info,
-        quote.td_quote_body.tee_tcb_svn,
-        pck_extensions,
-    )
 
-    # Step 5: Validate TDX module identity
-    validate_tdx_module_identity(
-        collateral.tcb_info.tcb_info,
-        quote.td_quote_body.tee_tcb_svn,
-        quote.td_quote_body.mr_signer_seam,
-        quote.td_quote_body.seam_attributes,
-    )
-
-    # Step 6: Validate QE identity
-    qe_report = quote.signed_data.certification_data.qe_report_data
-    if qe_report is None:
-        raise CollateralError("Quote missing QE report certification data")
-    qe_parsed = qe_report.qe_report_parsed
-    miscselect_bytes = qe_parsed.misc_select.to_bytes(4, byteorder="little")
-    validate_qe_identity(
-        collateral.qe_identity.enclave_identity,
-        qe_parsed.isv_svn,
-        qe_parsed.mr_signer,
-        miscselect_bytes,
-        qe_parsed.attributes,
-        qe_parsed.isv_prod_id,
-    )
-
-    return CollateralValidationResult(
-        collateral=collateral,
-        tcb_level=tcb_level,
-        pck_extensions=pck_extensions,
-    )
+def verify_qe_report(report: QeReport, identity: EnclaveIdentity) -> None:
+    """Appraise the QE report against the QE Identity: MISCSELECT and attributes under their masks, MRSIGNER, the
+    ISV product id, and an up-to-date TCB level for the ISV SVN."""
+    if len(identity.miscselect_mask) != MISCSELECT_SIZE:
+        raise CollateralError(
+            f"MISCSELECTMask field size({len(identity.miscselect_mask)}) in Intel PCS's reported QE Identity is not "
+            f"equal to expected size({MISCSELECT_SIZE})"
+        )
+    if len(identity.miscselect) != MISCSELECT_SIZE:
+        raise CollateralError(
+            f"MISCSELECT field size({len(identity.miscselect)}) in Intel PCS's reported QE Identity is not equal to "
+            f"expected size({MISCSELECT_SIZE})"
+        )
+    mask = int.from_bytes(identity.miscselect_mask, "little")
+    expected = int.from_bytes(identity.miscselect, "little")
+    masked_miscselect = report.misc_select & mask
+    if masked_miscselect != expected:
+        raise CollateralError(
+            f"MISCSELECT value({expected}) from Intel PCS's reported QE Identity is not equal to MISCSELECTMask "
+            f"value({masked_miscselect})"
+        )
+    if len(identity.attributes_mask) != len(report.attributes):
+        raise CollateralError(
+            f"size of AttributesMask value({len(identity.attributes_mask)}) in Intel PCS's reported QE Identity is "
+            f"not equal to size of SeamAttributes value({len(report.attributes)}) in QE Report"
+        )
+    masked_attributes = apply_mask(identity.attributes_mask, report.attributes)
+    if identity.attributes != masked_attributes:
+        raise CollateralError(
+            f"AttributesMask value({masked_attributes.hex()!r}) is not equal to Attributes value"
+            f"({identity.attributes.hex()!r}) in Intel PCS's reported QE Identity"
+        )
+    if identity.mrsigner != report.mr_signer:
+        raise CollateralError(
+            f"MRSIGNER value({report.mr_signer.hex()!r}) in QE Report is not equal to MRSIGNER value"
+            f"({identity.mrsigner.hex()!r}) in Intel PCS's reported QE Identity"
+        )
+    if report.isv_prod_id != identity.isv_prod_id:
+        raise CollateralError(
+            f"ISV PRODID value({report.isv_prod_id}) in QE Report is not equal to ISV PRODID value"
+            f"({identity.isv_prod_id}) in Intel PCS's reported QE Identity"
+        )
+    try:
+        check_qe_tcb_status(identity.tcb_levels, report.isv_svn)
+    except CollateralError as err:
+        raise CollateralError(f"QE Identity reported by Intel PCS failed TCB status check: {err}") from err

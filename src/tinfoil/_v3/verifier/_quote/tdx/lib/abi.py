@@ -56,7 +56,8 @@ SHA256_HASH_SIZE = 0x20  # 32 bytes
 CERT_DATA_HEADER_SIZE = 6  # 2 bytes type + 4 bytes size
 PCK_CERT_CHAIN_COUNT = 3  # leaf, intermediate, root
 
-# Intel QE Vendor ID: 939a7233-f79c-4ca9-940a-0db3957f0607
+# Intel QE Vendor ID: 939a7233-f79c-4ca9-940a-0db3957f0607. Parsing does not
+# require it: the expected vendor id is a policy field that validation compares.
 INTEL_QE_VENDOR_ID = bytes.fromhex("939a7233f79c4ca9940a0db3957f0607")
 
 # The smallest quote the parser accepts: header, body, the signed-data size,
@@ -197,14 +198,6 @@ class TdxHeader:
     qe_vendor_id: bytes  # 16 bytes - Intel: 939a7233-f79c-4ca9-940a-0db3957f0607
     user_data: bytes  # 20 bytes - Custom data from QE
 
-    def __str__(self) -> str:
-        return (
-            f"TdxHeader(version={self.version}, "
-            f"ak_type={self.attestation_key_type}, "
-            f"tee_type=0x{self.tee_type:x}, "
-            f"qe_vendor_id={self.qe_vendor_id.hex()})"
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class TdQuoteBody:
@@ -228,24 +221,6 @@ class TdQuoteBody:
     rtmrs: tuple[bytes, ...]  # 4 x 48 bytes - Runtime measurement registers
     report_data: bytes  # 64 bytes - Custom data (TLS key FP + HPKE key)
 
-    def __str__(self) -> str:
-        if len(self.rtmrs) == RTMR_COUNT:
-            rtmr_lines = "".join(f"  rtmr{i}={self.rtmrs[i].hex()},\n" for i in range(RTMR_COUNT))
-        else:
-            rtmr_lines = f"  rtmrs=({len(self.rtmrs)} entries),\n"
-        return (
-            f"TdQuoteBody(\n"
-            f"  mr_td={self.mr_td.hex()},\n"
-            f"{rtmr_lines}"
-            f"  mr_seam={self.mr_seam.hex()},\n"
-            f"  report_data={self.report_data.hex()}\n"
-            f")"
-        )
-
-    def get_measurements(self) -> list[bytes]:
-        """Return the 5 TDX measurements: [MRTD, RTMR0, RTMR1, RTMR2, RTMR3]."""
-        return [self.mr_td, *self.rtmrs]
-
 
 @dataclass(frozen=True, slots=True)
 class QeReport:
@@ -264,14 +239,6 @@ class QeReport:
     isv_prod_id: int  # 2 bytes - Product ID
     isv_svn: int  # 2 bytes - Security Version Number
     report_data: bytes  # 64 bytes - Contains hash of attestation key
-
-    def __str__(self) -> str:
-        return (
-            f"QeReport(mr_enclave={self.mr_enclave.hex()}, "
-            f"mr_signer={self.mr_signer.hex()}, "
-            f"isv_prod_id={self.isv_prod_id}, "
-            f"isv_svn={self.isv_svn})"
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,13 +303,6 @@ class SignedData:
     attestation_key: bytes  # 64 bytes - Raw ECDSA P-256 public key
     certification_data: CertificationData
 
-    def __str__(self) -> str:
-        return (
-            f"SignedData(signature={self.signature[:8].hex()}..., "
-            f"attestation_key={self.attestation_key[:8].hex()}..., "
-            f"cert_type={self.certification_data.cert_type})"
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class QuoteV4:
@@ -358,24 +318,6 @@ class QuoteV4:
     signed_data_size: int
     signed_data: SignedData
     extra_bytes: bytes = b""  # Any trailing bytes after signed data
-
-    def __str__(self) -> str:
-        return (
-            f"QuoteV4(\n"
-            f"  header={self.header},\n"
-            f"  td_quote_body={self.td_quote_body},\n"
-            f"  signed_data_size={self.signed_data_size},\n"
-            f"  signed_data={self.signed_data}\n"
-            f")"
-        )
-
-    def get_measurements(self) -> list[bytes]:
-        """Return the 5 TDX measurements: [MRTD, RTMR0, RTMR1, RTMR2, RTMR3]."""
-        return self.td_quote_body.get_measurements()
-
-    def get_report_data(self) -> bytes:
-        """Return the 64-byte report data containing TLS key FP and HPKE key."""
-        return self.td_quote_body.report_data
 
 
 # =============================================================================
@@ -695,11 +637,6 @@ def _validate_header(header: TdxHeader) -> None:
     if header.tee_type != TEE_TDX:
         raise TdxQuoteParseError(f"Invalid TEE type: 0x{header.tee_type:x}. Expected 0x{TEE_TDX:x} (TDX).")
 
-    if header.qe_vendor_id != INTEL_QE_VENDOR_ID:
-        raise TdxQuoteParseError(
-            f"Unknown QE vendor ID: {header.qe_vendor_id.hex()}. Expected Intel QE: {INTEL_QE_VENDOR_ID.hex()}"
-        )
-
 
 def parse_quote(data: bytes) -> QuoteV4:
     """
@@ -717,12 +654,6 @@ def parse_quote(data: bytes) -> QuoteV4:
 
     Raises:
         TdxQuoteParseError: If parsing fails or quote format is unsupported
-
-    Example:
-        >>> raw_quote = base64.b64decode(attestation_doc)
-        >>> decompressed = gzip.decompress(raw_quote)
-        >>> quote = parse_quote(decompressed)
-        >>> measurements = quote.get_measurements()
     """
     if len(data) < QUOTE_MIN_SIZE:
         raise TdxQuoteParseError(f"Quote too short: {len(data)} bytes, minimum {QUOTE_MIN_SIZE}")
