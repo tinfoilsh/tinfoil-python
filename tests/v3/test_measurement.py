@@ -60,7 +60,9 @@ def test_parse_expected() -> None:
 
 def test_expected_pins_every_register() -> None:
     tdx = TDX(mrtd=register(1), rtmr0=register(2), rtmr1=register(3), rtmr2=register(4), rtmr3=register(5))
-    assert tdx.expected() == ExpectedTDX(mrtd=tdx.mrtd, rtmr0=tdx.rtmr0, rtmr1=tdx.rtmr1, rtmr2=tdx.rtmr2, rtmr3=tdx.rtmr3)
+    assert tdx.expected() == ExpectedTDX(
+        mrtd=tdx.mrtd, rtmr0=tdx.rtmr0, rtmr1=tdx.rtmr1, rtmr2=tdx.rtmr2, rtmr3=tdx.rtmr3
+    )
     sev = SEVSNP(launch=register(1))
     assert sev.expected() == ExpectedSEVSNP(launch=sev.launch)
 
@@ -68,7 +70,10 @@ def test_expected_pins_every_register() -> None:
 def test_str() -> None:
     value = register(0xAB)
     assert str(SEVSNP(launch=value)) == "SEV-SNP\nLaunch " + value.hex()
-    assert str(ExpectedTDX(rtmr1=value)) == "TDX\nMRTD   any\nRTMR0  any\nRTMR1  " + value.hex() + "\nRTMR2  any\nRTMR3  any"
+    assert (
+        str(ExpectedTDX(rtmr1=value))
+        == "TDX\nMRTD   any\nRTMR0  any\nRTMR1  " + value.hex() + "\nRTMR2  any\nRTMR3  any"
+    )
 
 
 def test_registers_must_be_the_register_size() -> None:

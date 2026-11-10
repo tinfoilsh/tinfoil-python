@@ -58,6 +58,8 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     if "fixture" in metafunc.fixturenames:
         fixtures = load_fixtures()
         if not fixtures:
-            metafunc.parametrize("fixture", [pytest.param(None, marks=pytest.mark.skip(reason="conformance vectors not found"))])
+            metafunc.parametrize(
+                "fixture", [pytest.param(None, marks=pytest.mark.skip(reason="conformance vectors not found"))]
+            )
             return
         metafunc.parametrize("fixture", [data for _, data in fixtures], ids=[name for name, _ in fixtures])

@@ -1260,7 +1260,9 @@ dependencies = [
     { name = "pyopenssl" },
     { name = "pyyaml" },
     { name = "requests" },
+    { name = "rfc3161-client" },
     { name = "sigstore" },
+    { name = "sigstore-models" },
     { name = "tinfoil-ehbp" },
     { name = "urllib3" },
 ]
@@ -1285,7 +1287,9 @@ requires-dist = [
     { name = "pyopenssl", specifier = ">=25.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests", specifier = ">=2.31.0" },
+    { name = "rfc3161-client", specifier = ">=1.0.7" },
     { name = "sigstore", specifier = ">=4.3.0" },
+    { name = "sigstore-models", specifier = ">=0.0.6" },
     { name = "tinfoil-ehbp", specifier = ">=0.3.0" },
     { name = "urllib3", specifier = ">=2.8.0" },
 ]

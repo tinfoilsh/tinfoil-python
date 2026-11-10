@@ -28,7 +28,9 @@ def b64(value: bytes) -> str:
     return base64.b64encode(value).decode()
 
 
-def cpu_entry(entry_id: str = "cpu-endorsement", format_: str = collateral.AMD_VCEK_V1_FORMAT, data: str | None = None) -> dict[str, Any]:
+def cpu_entry(
+    entry_id: str = "cpu-endorsement", format_: str = collateral.AMD_VCEK_V1_FORMAT, data: str | None = None
+) -> dict[str, Any]:
     return {
         "id": entry_id,
         "role": entry.ROLE_ENDORSEMENT,
@@ -53,8 +55,12 @@ def build_raw(
             {"id": doc.CRYPTO_MATERIAL_ID_TLS, "format": doc.KEY_SPKI_FP_SHA256_V1_FORMAT, "data": TLS_KEY.hex()},
             {"id": doc.CRYPTO_MATERIAL_ID_HPKE, "format": doc.KEY_X25519_HPKE_V1_FORMAT, "data": HPKE_KEY.hex()},
         ]
-    crypto_bytes = json.dumps({"format": doc.CRYPTO_MATERIAL_V1_FORMAT, "items": crypto_items}, separators=(",", ":")).encode()
-    device_bytes = json.dumps({"format": doc.DEVICE_EVIDENCE_V1_FORMAT, "items": device_items or []}, separators=(",", ":")).encode()
+    crypto_bytes = json.dumps(
+        {"format": doc.CRYPTO_MATERIAL_V1_FORMAT, "items": crypto_items}, separators=(",", ":")
+    ).encode()
+    device_bytes = json.dumps(
+        {"format": doc.DEVICE_EVIDENCE_V1_FORMAT, "items": device_items or []}, separators=(",", ":")
+    ).encode()
     crypto_hash = hashlib.sha256(crypto_bytes).digest()
     device_hash = hashlib.sha256(device_bytes).digest()
     report_data = doc.compute_report_data(nonce, crypto_hash, device_hash)
@@ -89,7 +95,10 @@ def build(nonce: bytes, **kwargs: Any) -> tuple[dict[str, Any], bytes]:
 
 
 def mutate_section(doc_bytes: bytes, field: str, mutate: Callable[[bytes], bytes]) -> bytes:
-    """Decode an endorsed section, apply ``mutate`` to its bytes and re-encode it without updating the endorsed hashes."""
+    """Decode an endorsed section, apply ``mutate`` to its bytes and re-encode it.
+
+    The endorsed hashes are left as they were, so the result is a document whose section no longer matches its hash.
+    """
     loose = json.loads(doc_bytes)
     section = base64.b64decode(loose[field])
     loose[field] = b64(mutate(section))

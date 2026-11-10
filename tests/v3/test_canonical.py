@@ -86,7 +86,7 @@ def test_decode_base64(value: str, want: bytes) -> None:
     ],
 )
 def test_decode_base64_rejects(value: str) -> None:
-    with pytest.raises(EncodingError, match="decoding field|field is not canonical base64"):
+    with pytest.raises(EncodingError, match=r"decoding field|field is not canonical base64"):
         decode_base64("field", value)
 
 
