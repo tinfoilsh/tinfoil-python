@@ -3,8 +3,6 @@ identity that a verified bundle recovers. It imports none of them, so that each 
 
 from __future__ import annotations
 
-import re
-
 from tinfoil._v3.verifier._document.collateral.runtime import RUNTIME_REPO
 from tinfoil._v3.verifier._endorsement.reference import (
     FRESHNESS_WITNESS_REPO,
@@ -93,8 +91,3 @@ def authenticated_artifact(
         subject_name=statement.subjects[0].name,
         digest=digest.lower(),
     )
-
-
-def tag_ref_pattern(tag: str) -> re.Pattern[str]:
-    """An anchored pattern for ``refs/tags/<tag>`` with the tag escaped."""
-    return re.compile(r"\A" + _TAG_REF_PREFIX + re.escape(tag) + r"\Z")
