@@ -215,14 +215,6 @@ class TestParseHeader:
         with pytest.raises(TdxQuoteParseError, match="Header too short"):
             _parse_header(short_header)
 
-    def test_header_str_representation(self):
-        """Test TdxHeader string representation."""
-        header = _parse_header(build_header())
-        str_repr = str(header)
-
-        assert "version=4" in str_repr
-        assert "tee_type=0x81" in str_repr
-
 
 # =============================================================================
 # TD Quote Body Parsing Tests
@@ -268,29 +260,6 @@ class TestParseTdQuoteBody:
 
         with pytest.raises(TdxQuoteParseError, match="TD quote body too short"):
             _parse_td_quote_body(short_body)
-
-    def test_get_measurements(self):
-        """Test get_measurements returns correct order."""
-        body_bytes = build_td_quote_body()
-        body = _parse_td_quote_body(body_bytes)
-
-        measurements = body.get_measurements()
-
-        assert len(measurements) == 5
-        assert measurements[0] == body.mr_td  # MRTD
-        assert measurements[1] == body.rtmrs[0]  # RTMR0
-        assert measurements[2] == body.rtmrs[1]  # RTMR1
-        assert measurements[3] == body.rtmrs[2]  # RTMR2
-        assert measurements[4] == body.rtmrs[3]  # RTMR3
-
-    def test_body_str_representation(self):
-        """Test TdQuoteBody string representation."""
-        body = _parse_td_quote_body(build_td_quote_body())
-        str_repr = str(body)
-
-        assert "mr_td=" in str_repr
-        assert "rtmr0=" in str_repr
-        assert "rtmr1=" in str_repr
 
 
 # =============================================================================
@@ -354,7 +323,6 @@ class TestParseQuote:
         assert isinstance(quote, QuoteV4)
         assert quote.header.version == QUOTE_VERSION_V4
         assert quote.header.tee_type == TEE_TDX
-        assert len(quote.get_measurements()) == 5
         assert quote.signed_data.certification_data.cert_type == CERT_DATA_TYPE_QE_REPORT
 
     def test_parse_quote_extracts_measurements(self):
@@ -375,12 +343,8 @@ class TestParseQuote:
         quote_bytes = build_quote(body=body)
         quote = parse_quote(quote_bytes)
 
-        measurements = quote.get_measurements()
-        assert measurements[0] == mr_td
-        assert measurements[1] == rtmr0
-        assert measurements[2] == rtmr1
-        assert measurements[3] == rtmr2
-        assert measurements[4] == rtmr3
+        assert quote.td_quote_body.mr_td == mr_td
+        assert quote.td_quote_body.rtmrs == (rtmr0, rtmr1, rtmr2, rtmr3)
 
     def test_parse_quote_extracts_report_data(self):
         """Test that report data is correctly extracted."""
@@ -389,7 +353,7 @@ class TestParseQuote:
         quote_bytes = build_quote(body=body)
         quote = parse_quote(quote_bytes)
 
-        assert quote.get_report_data() == report_data
+        assert quote.td_quote_body.report_data == report_data
 
     def test_parse_quote_too_short(self):
         """Test that short quote raises error."""
@@ -516,14 +480,6 @@ class TestSignedData:
         quote = parse_quote(quote_bytes)
 
         assert quote.signed_data.attestation_key == attestation_key
-
-    def test_signed_data_str_representation(self):
-        """Test SignedData string representation."""
-        quote = parse_quote(build_quote())
-        str_repr = str(quote.signed_data)
-
-        assert "signature=" in str_repr
-        assert "attestation_key=" in str_repr
 
 
 # =============================================================================

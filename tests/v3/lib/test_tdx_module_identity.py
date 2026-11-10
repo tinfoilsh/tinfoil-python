@@ -1,225 +1,72 @@
-"""Unit tests for TDX module identity matching against synthetic TEE_TCB_SVN values."""
+"""TDX module identity matching against synthetic TEE_TCB_SVN values."""
 
 from __future__ import annotations
-
-from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from tinfoil._v3.verifier._quote.tdx.lib.collateral import (
     CollateralError,
     Tcb,
-    TcbComponent,
-    TcbInfo,
     TcbLevel,
     TcbStatus,
     TdxModuleIdentity,
-    get_tdx_module_identity,
-    validate_tdx_module_identity,
+    get_matching_tdx_module_tcb_level,
 )
 
 
+def identity(module_id: str, isv_svn: int = 3, status: TcbStatus | None = TcbStatus.UP_TO_DATE) -> TdxModuleIdentity:
+    return TdxModuleIdentity(
+        id=module_id,
+        mrsigner=bytes(48),
+        attributes=bytes(8),
+        attributes_mask=bytes([0xFF]) * 8,
+        tcb_levels=(TcbLevel(tcb=Tcb(isv_svn=isv_svn), tcb_status=status),),
+    )
+
+
+def svn(minor: int, major: int) -> bytes:
+    """TEE_TCB_SVN: byte 0 is the module's ISV SVN, byte 1 its major version; the rest are other components."""
+    return bytes([minor, major]) + bytes(14)
+
+
 class TestModuleIdentityMatching:
-    """Module-identity matching on synthetic tee_tcb_svn byte patterns."""
+    def test_major_version_selects_the_identity_in_hex(self) -> None:
+        identities = (identity("TDX_01"), identity("TDX_03"), identity("TDX_0a"))
+        assert get_matching_tdx_module_tcb_level(identities, svn(3, 3)) == identities[1].tcb_levels[0]
+        assert get_matching_tdx_module_tcb_level(identities, svn(3, 1)) == identities[0].tcb_levels[0]
+        assert get_matching_tdx_module_tcb_level(identities, svn(3, 10)) == identities[2].tcb_levels[0]
+        assert get_matching_tdx_module_tcb_level((identity("TDX_ff"),), svn(3, 255)) is not None
 
-    def _create_tcb_info_with_modules(
-        self,
-        module_ids: list[str],
-        module_mrsigner: bytes = b"\xaa" * 48,
-        *,
-        attributes: bytes = b"\x00" * 8,
-        attributes_mask: bytes = b"\xff" * 8,
-        isv_svn: int = 3,
-        tcb_status: TcbStatus = TcbStatus.UP_TO_DATE,
-    ) -> TcbInfo:
-        """Create TCB Info whose module identities share one signer, attribute set and single TCB level."""
-        module_identities = [
-            TdxModuleIdentity(
-                id=module_id,
-                mrsigner=module_mrsigner,
-                attributes=attributes,
-                attributes_mask=attributes_mask,
-                tcb_levels=[
-                    TcbLevel(
-                        tcb=Tcb(
-                            sgx_tcb_components=[TcbComponent(svn=0)] * 16,
-                            pce_svn=0,
-                            tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-                            isv_svn=isv_svn,
-                        ),
-                        tcb_date="2024-01-01T00:00:00Z",
-                        tcb_status=tcb_status,
-                        advisory_ids=[],
-                    ),
-                ],
-            )
-            for module_id in module_ids
-        ]
+    def test_decimal_ids_do_not_match(self) -> None:
+        with pytest.raises(CollateralError, match="could not find a TDX Module Identity \\('TDX_0a'\\)"):
+            get_matching_tdx_module_tcb_level((identity("TDX_10"),), svn(3, 10))
 
-        return TcbInfo(
-            id="TDX",
-            version=3,
-            issue_date=datetime.now(UTC),
-            next_update=datetime.now(UTC) + timedelta(days=30),
-            fmspc="00a06f000000",
-            pce_id="0000",
-            tcb_type=0,
-            tcb_evaluation_data_number=17,
-            tdx_module=None,
-            tdx_module_identities=module_identities,
-            tcb_levels=[],
+    def test_unknown_major_version(self) -> None:
+        with pytest.raises(CollateralError, match="'TDX_02'"):
+            get_matching_tdx_module_tcb_level((identity("TDX_01"), identity("TDX_03")), svn(3, 2))
+        with pytest.raises(CollateralError, match="'TDX_03'"):
+            get_matching_tdx_module_tcb_level((), svn(3, 3))
+
+    def test_minor_version_selects_the_first_reachable_level(self) -> None:
+        levels = (
+            TcbLevel(tcb=Tcb(isv_svn=5), tcb_status=TcbStatus.UP_TO_DATE),
+            TcbLevel(tcb=Tcb(isv_svn=3), tcb_status=TcbStatus.OUT_OF_DATE),
         )
+        module = TdxModuleIdentity(id="TDX_03", tcb_levels=levels)
+        assert get_matching_tdx_module_tcb_level((module,), svn(5, 3)) == levels[0]
+        assert get_matching_tdx_module_tcb_level((module,), svn(9, 3)) == levels[0]
+        assert get_matching_tdx_module_tcb_level((module,), svn(4, 3)) == levels[1]
+        with pytest.raises(CollateralError, match="TCB Level matching the TDX Module's ISVSVN \\(2\\)"):
+            get_matching_tdx_module_tcb_level((module,), svn(2, 3))
 
-    # --- TEE_TCB_SVN byte layout tests ---
-    # TEE_TCB_SVN is 16 bytes where:
-    # - Byte 0 (index 0) = minor SVN (used for module TCB level matching)
-    # - Byte 1 (index 1) = major SVN (used to derive module ID: TDX_{major:02d})
-    # - Bytes 2-15 = other TCB components
+    def test_first_identity_with_the_id_decides(self) -> None:
+        """A second identity with the same id is never consulted, even when the first has no reachable level."""
+        identities = (identity("TDX_03", isv_svn=5), identity("TDX_03", isv_svn=0))
+        with pytest.raises(CollateralError, match="ISVSVN \\(1\\)"):
+            get_matching_tdx_module_tcb_level(identities, svn(1, 3))
 
-    def test_tee_tcb_svn_major_version_3_matches_tdx_03(self):
-        """Test TEE_TCB_SVN with major=3 matches TDX_03 module."""
-        tcb_info = self._create_tcb_info_with_modules(["TDX_01", "TDX_03", "TDX_05"])
-
-        # TEE_TCB_SVN: minor=5, major=3 (TDX module version 3)
-        tee_tcb_svn = bytes([5, 3] + [0] * 14)
-
-        result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-        assert result is not None
-        assert result.id == "TDX_03"
-
-    def test_tee_tcb_svn_major_version_1_matches_tdx_01(self):
-        """Test TEE_TCB_SVN with major=1 matches TDX_01 module."""
-        tcb_info = self._create_tcb_info_with_modules(["TDX_01", "TDX_03"])
-
-        # TEE_TCB_SVN: minor=2, major=1 (TDX module version 1)
-        tee_tcb_svn = bytes([2, 1] + [0] * 14)
-
-        result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-        assert result is not None
-        assert result.id == "TDX_01"
-
-    def test_tee_tcb_svn_major_version_5_matches_tdx_05(self):
-        """Test TEE_TCB_SVN with major=5 matches TDX_05 module."""
-        tcb_info = self._create_tcb_info_with_modules(["TDX_03", "TDX_05"])
-
-        # TEE_TCB_SVN: minor=0, major=5 (TDX module version 5)
-        tee_tcb_svn = bytes([0, 5] + [0] * 14)
-
-        result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-        assert result is not None
-        assert result.id == "TDX_05"
-
-    def test_tee_tcb_svn_unknown_major_version_raises(self):
-        """Test TEE_TCB_SVN with unknown major version raises error."""
-        tcb_info = self._create_tcb_info_with_modules(["TDX_01", "TDX_03"])
-
-        # TEE_TCB_SVN: minor=0, major=99 (no TDX_99 module exists)
-        tee_tcb_svn = bytes([0, 99] + [0] * 14)
-
-        with pytest.raises(CollateralError, match="Unknown TDX module version TDX_99"):
-            get_tdx_module_identity(tcb_info, tee_tcb_svn)
-
-    def test_tee_tcb_svn_major_version_0_matches_tdx_00(self):
-        """Test TEE_TCB_SVN with major=0 matches TDX_00 if present."""
-        tcb_info = self._create_tcb_info_with_modules(["TDX_00", "TDX_01"])
-
-        # TEE_TCB_SVN: minor=1, major=0 (TDX module version 0)
-        tee_tcb_svn = bytes([1, 0] + [0] * 14)
-
-        result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-        assert result is not None
-        assert result.id == "TDX_00"
-
-    def test_tee_tcb_svn_too_short_raises(self):
-        """Test TEE_TCB_SVN with < 2 bytes raises error."""
-        tcb_info = self._create_tcb_info_with_modules(["TDX_03"])
-
-        # Only 1 byte - not enough to extract major version
-        tee_tcb_svn = bytes([5])
-
-        with pytest.raises(CollateralError, match="TEE_TCB_SVN is too short"):
-            get_tdx_module_identity(tcb_info, tee_tcb_svn)
-
-    def test_validate_module_identity_passes(self):
-        """Module identity validation passes on a matching signer, attributes and minor SVN."""
-        module_mrsigner = b"\xaa" * 48
-        tcb_info = self._create_tcb_info_with_modules(
-            ["TDX_03"],
-            module_mrsigner=module_mrsigner,
-        )
-
-        tee_tcb_svn = bytes([5, 3] + [0] * 14)
-        mr_signer_seam = module_mrsigner
-        seam_attributes = b"\x00" * 8
-
-        validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
-
-    def test_validate_module_identity_minor_svn_too_low_raises_error(self):
-        """Test that minor SVN below threshold raises CollateralError."""
-        module_mrsigner = b"\xaa" * 48
-
-        tcb_info = self._create_tcb_info_with_modules(["TDX_03"], module_mrsigner=module_mrsigner, isv_svn=5)
-
-        # TEE_TCB_SVN: minor=2, major=3 - minor too low (< 5)
-        tee_tcb_svn = bytes([2, 3] + [0] * 14)
-        mr_signer_seam = module_mrsigner
-        seam_attributes = b"\x00" * 8
-
-        with pytest.raises(CollateralError, match="Could not find a TDX Module Identity TCB Level"):
-            validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
-
-    def test_validate_module_identity_mrsigner_mismatch_fails(self):
-        """Test that MR_SIGNER_SEAM mismatch raises error."""
-        expected_mrsigner = b"\xaa" * 48
-        tcb_info = self._create_tcb_info_with_modules(
-            ["TDX_03"],
-            module_mrsigner=expected_mrsigner,
-        )
-
-        # TEE_TCB_SVN: minor=5, major=3
-        tee_tcb_svn = bytes([5, 3] + [0] * 14)
-        mr_signer_seam = b"\xbb" * 48  # Wrong!
-        seam_attributes = b"\x00" * 8
-
-        with pytest.raises(CollateralError, match="MR_SIGNER_SEAM does not match"):
-            validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
-
-    def test_validate_module_identity_attributes_mismatch_fails(self):
-        """Test that SEAM_ATTRIBUTES mismatch under mask raises error."""
-        module_mrsigner = b"\xaa" * 48
-
-        tcb_info = self._create_tcb_info_with_modules(
-            ["TDX_03"], module_mrsigner=module_mrsigner, attributes=b"\x01" * 8
-        )
-
-        tee_tcb_svn = bytes([5, 3] + [0] * 14)
-        mr_signer_seam = module_mrsigner
-        seam_attributes = b"\x00" * 8  # Wrong! Expected 0x01
-
-        with pytest.raises(CollateralError, match="SEAM_ATTRIBUTES do not match"):
-            validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
-
-    def test_validate_module_identity_revoked_status_fails(self):
-        """Test that REVOKED module TCB status raises error."""
-        module_mrsigner = b"\xaa" * 48
-
-        tcb_info = self._create_tcb_info_with_modules(
-            ["TDX_03"], module_mrsigner=module_mrsigner, tcb_status=TcbStatus.REVOKED
-        )
-
-        tee_tcb_svn = bytes([5, 3] + [0] * 14)
-        mr_signer_seam = module_mrsigner
-        seam_attributes = b"\x00" * 8
-
-        with pytest.raises(CollateralError, match="REVOKED"):
-            validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
-
-    def test_tee_tcb_svn_minor_and_major_select_module(self):
-        """A TEE_TCB_SVN with minor 5 and major 3 selects TDX_03."""
-        tcb_info = self._create_tcb_info_with_modules(["TDX_03"])
-
-        tee_tcb_svn = bytes([5, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-
-        result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
-        assert result is not None
-        assert result.id == "TDX_03"
+    def test_returns_the_level_with_its_status(self) -> None:
+        level = get_matching_tdx_module_tcb_level((identity("TDX_03", status=TcbStatus.OUT_OF_DATE),), svn(3, 3))
+        assert level.tcb_status == TcbStatus.OUT_OF_DATE
+        level = get_matching_tdx_module_tcb_level((identity("TDX_03", status=None),), svn(3, 3))
+        assert level.tcb_status is None

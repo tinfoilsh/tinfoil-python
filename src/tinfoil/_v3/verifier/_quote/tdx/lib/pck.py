@@ -1,54 +1,45 @@
-"""
-PCK Certificate Extension Parsing for Intel TDX attestation.
+"""The Intel SGX extension of a PCK certificate: PPID, TCB components, PCE id and FMSPC.
 
-This module extracts Intel SGX-specific extensions from PCK (Provisioning
-Certification Key) certificates. These extensions contain critical information
-for TCB (Trusted Computing Base) validation:
+The extension (OID 1.2.840.113741.1.13.1) is a SEQUENCE of attribute pairs,
+each a SEQUENCE of an OID and a value:
 
-- FMSPC: Firmware/Microcode Security Patch Cluster (6 bytes)
-- PCEID: PCE ID (2 bytes)
-- TCB: TCB components including PCE SVN and CPU SVN
+    1.2.840.113741.1.13.1.1        PPID, 16-byte OCTET STRING
+    1.2.840.113741.1.13.1.2        TCB, a SEQUENCE of 18 attribute pairs
+    1.2.840.113741.1.13.1.2.1-16   TCB components 1-16, INTEGER 0-255
+    1.2.840.113741.1.13.1.2.17     PCE SVN, INTEGER 0-65535
+    1.2.840.113741.1.13.1.2.18     CPU SVN, 16-byte OCTET STRING
+    1.2.840.113741.1.13.1.3        PCE id, 2-byte OCTET STRING
+    1.2.840.113741.1.13.1.4        FMSPC, 6-byte OCTET STRING
 
-Intel SGX Extension OID hierarchy:
-    1.2.840.113741.1.13.1       - SGX Extension (parent)
-    1.2.840.113741.1.13.1.1     - PPID
-    1.2.840.113741.1.13.1.2     - TCB
-    1.2.840.113741.1.13.1.2.1-16 - TCB Components
-    1.2.840.113741.1.13.1.2.17  - PCE SVN
-    1.2.840.113741.1.13.1.2.18  - CPU SVN
-    1.2.840.113741.1.13.1.3     - PCEID
-    1.2.840.113741.1.13.1.4     - FMSPC
+Values that are absent keep their zero value rather than failing here: a
+missing FMSPC selects no TCB Info, a missing PPID is no identity and a
+missing TCB matches no TCB level, so each surfaces where it is used.
+Attribute pairs with other OIDs are ignored.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 
-from cryptography import x509
-from pyasn1.codec.der import decoder as der_decoder
+from tinfoil._v3.verifier._x509 import der
+from tinfoil._v3.verifier._x509.certificate import Certificate, X509Error, extensions
 
-# Intel SGX OID base
 _INTEL_SGX_OID_BASE = "1.2.840.113741.1.13.1"
 
-# Intel SGX Extension OIDs
-OID_SGX_EXTENSION = x509.ObjectIdentifier(_INTEL_SGX_OID_BASE)
-OID_PPID = x509.ObjectIdentifier(f"{_INTEL_SGX_OID_BASE}.1")
-OID_TCB = x509.ObjectIdentifier(f"{_INTEL_SGX_OID_BASE}.2")
-OID_PCEID = x509.ObjectIdentifier(f"{_INTEL_SGX_OID_BASE}.3")
-OID_FMSPC = x509.ObjectIdentifier(f"{_INTEL_SGX_OID_BASE}.4")
+OID_SGX_EXTENSION = _INTEL_SGX_OID_BASE
+OID_PPID = f"{_INTEL_SGX_OID_BASE}.1"
+OID_TCB = f"{_INTEL_SGX_OID_BASE}.2"
+OID_PCEID = f"{_INTEL_SGX_OID_BASE}.3"
+OID_FMSPC = f"{_INTEL_SGX_OID_BASE}.4"
+OID_PCE_SVN = f"{_INTEL_SGX_OID_BASE}.2.17"
+OID_CPU_SVN = f"{_INTEL_SGX_OID_BASE}.2.18"
 
-# TCB sub-OIDs
-OID_PCE_SVN = x509.ObjectIdentifier(f"{_INTEL_SGX_OID_BASE}.2.17")
-OID_CPU_SVN = x509.ObjectIdentifier(f"{_INTEL_SGX_OID_BASE}.2.18")
-
-# TCB component OID → index mapping (1-indexed OID to 0-indexed array position)
+# Component OID (1-indexed) to its position in the component array.
 _TCB_COMPONENT_OID_INDEX = {f"{_INTEL_SGX_OID_BASE}.2.{i}": i - 1 for i in range(1, 17)}
 
-# Size constants of the PCK certificate profile
 PCK_CERT_EXTENSION_COUNT = 6
 SGX_EXTENSION_MIN_SIZE = 4
-TCB_EXTENSION_SIZE = 18  # 16 components + PCE SVN + CPU SVN
+TCB_EXTENSION_SIZE = 18
 PPID_SIZE = 16
 CPU_SVN_SIZE = 16
 FMSPC_SIZE = 6
@@ -56,207 +47,157 @@ PCEID_SIZE = 2
 TCB_COMPONENTS_COUNT = 16
 
 
-class PckExtensionError(Exception):
-    """Raised when PCK certificate extension parsing fails."""
+class PckExtensionError(ValueError):
+    """A PCK certificate whose SGX extension is missing or malformed."""
 
 
-@contextmanager
-def _asn1_errors(label: str):
-    """Wrap unexpected ASN.1 exceptions as PckExtensionError."""
-    try:
-        yield
-    except PckExtensionError:
-        raise
-    except Exception as e:
-        raise PckExtensionError(f"Unexpected ASN.1 structure in {label}: {e}") from e
-
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class PckCertTCB:
-    """
-    TCB (Trusted Computing Base) information from PCK certificate.
+    """The TCB attribute of a PCK certificate.
 
-    Attributes:
-        pce_svn: PCE Security Version Number
-        cpu_svn: CPU SVN as raw bytes (16 bytes)
-        tcb_components: Individual TCB component SVNs (16 values)
+    ``cpu_svn_components`` holds the 16 component SVNs once the TCB attribute
+    was seen, and is empty when the certificate carries no TCB attribute, so
+    that it can never equal a 16-entry TCB level by default.
     """
 
-    pce_svn: int
-    cpu_svn: bytes  # 16 bytes
-    tcb_components: list[int]  # 16 components
-
-    def __str__(self) -> str:
-        return f"PckCertTCB(pce_svn={self.pce_svn}, cpu_svn={self.cpu_svn.hex()}, components={self.tcb_components})"
+    pce_svn: int = 0
+    cpu_svn: bytes = b""
+    cpu_svn_components: bytes = b""
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class PckExtensions:
-    """
-    Intel SGX extensions extracted from a PCK certificate.
+    """The SGX extension values of a PCK certificate, hex values as lowercase strings."""
 
-    Attributes:
-        ppid: Platform/Product ID as hex string (16 bytes)
-        tcb: TCB information
-        pceid: PCE ID as hex string (2 bytes)
-        fmspc: Firmware/Microcode FMSPC as hex string (6 bytes)
-    """
-
-    ppid: str  # 16 bytes hex
-    tcb: PckCertTCB
-    pceid: str  # 2 bytes hex
-    fmspc: str  # 6 bytes hex
-
-    def __str__(self) -> str:
-        return f"PckExtensions(fmspc={self.fmspc}, pceid={self.pceid}, ppid={self.ppid[:8]}...)"
+    ppid: str = ""
+    tcb: PckCertTCB = PckCertTCB()
+    pceid: str = ""
+    fmspc: str = ""
 
 
-def extract_pck_extensions(cert: x509.Certificate) -> PckExtensions:
-    """
-    Extract Intel SGX extensions from a PCK certificate.
+def extract_pck_extensions(cert: Certificate) -> PckExtensions:
+    """Read the SGX extension of a PCK certificate.
 
-    Args:
-        cert: PCK leaf certificate from the quote
-
-    Returns:
-        PckExtensions containing FMSPC, PCEID, PPID, and TCB info
-
-    Raises:
-        PckExtensionError: If required extensions are missing or malformed
-    """
-    if len(cert.extensions) != PCK_CERT_EXTENSION_COUNT:
-        raise PckExtensionError(
-            f"PCK certificate has {len(cert.extensions)} extensions, expected {PCK_CERT_EXTENSION_COUNT}"
-        )
-
-    sgx_ext = None
-    for ext in cert.extensions:
-        if ext.oid == OID_SGX_EXTENSION:
-            sgx_ext = ext
-            break
-
-    if sgx_ext is None:
-        raise PckExtensionError(
-            f"PCK certificate does not contain Intel SGX extension (OID {OID_SGX_EXTENSION.dotted_string})"
-        )
-
-    return _parse_sgx_extension(sgx_ext.value.value)
-
-
-def _der_decode(data: bytes, label: str = "value"):
-    """Decode DER data using pyasn1, wrapping errors as PckExtensionError.
-
-    Rejects leftover bytes after the decoded value.
+    The certificate must carry exactly six extensions, one of them the SGX
+    extension, whose value must be a SEQUENCE of at least four attribute
+    pairs.
     """
     try:
-        result, remainder = der_decoder.decode(data)
-    except Exception as e:
-        raise PckExtensionError(f"Failed to decode ASN.1 {label}: {e}") from e
-    if remainder:
-        raise PckExtensionError(f"Unexpected leftover bytes after decoding {label}: {len(remainder)} bytes")
-    return result
+        exts = extensions(cert)
+    except X509Error as err:
+        raise PckExtensionError(f"PCK certificate extensions: {err}") from err
+    if len(exts) != PCK_CERT_EXTENSION_COUNT:
+        raise PckExtensionError(
+            f"PCK certificate extensions length found {len(exts)}. Expected {PCK_CERT_EXTENSION_COUNT}"
+        )
+    sgx = next((ext for ext in exts if ext.oid == OID_SGX_EXTENSION), None)
+    if sgx is None:
+        raise PckExtensionError(f"could not find SGX extension {OID_SGX_EXTENSION} in the PCK certificate")
+    try:
+        return _parse_sgx_extension(sgx.value)
+    except der.DerError as err:
+        raise PckExtensionError(f"could not parse SGX extension present in the PCK certificate: {err}") from err
 
 
-def _octet_hex(component, name: str, expected_size: int) -> str:
-    """Extract bytes from a decoded ASN.1 value, validate size, return hex."""
-    raw = bytes(component)
-    if len(raw) != expected_size:
-        raise PckExtensionError(f"{name} has wrong size: expected {expected_size}, got {len(raw)}")
-    return raw.hex()
-
-
-def _parse_sgx_extension(raw_value: bytes) -> PckExtensions:
-    """Parse the SGX extension: a SEQUENCE OF SEQUENCE(OID, value)."""
-    outer_seq = _der_decode(raw_value, "SGX extension")
-
-    ppid = None
-    tcb = None
-    pceid = None
-    fmspc = None
-
-    with _asn1_errors("SGX extension"):
-        if len(outer_seq) < SGX_EXTENSION_MIN_SIZE:
-            raise PckExtensionError(
-                f"SGX extension has {len(outer_seq)} elements, expected at least {SGX_EXTENSION_MIN_SIZE}"
-            )
-        for item in outer_seq:
-            if len(item) < 2:
-                raise PckExtensionError(f"Malformed SGX extension item: expected at least 2 fields, got {len(item)}")
-            oid_str = str(item[0])
-
-            if oid_str == OID_PPID.dotted_string:
-                ppid = _octet_hex(item[1], "PPID", PPID_SIZE)
-            elif oid_str == OID_TCB.dotted_string:
-                tcb = _parse_tcb(item[1])
-            elif oid_str == OID_PCEID.dotted_string:
-                pceid = _octet_hex(item[1], "PCEID", PCEID_SIZE)
-            elif oid_str == OID_FMSPC.dotted_string:
-                fmspc = _octet_hex(item[1], "FMSPC", FMSPC_SIZE)
-
-    if fmspc is None:
-        raise PckExtensionError("FMSPC not found in PCK certificate")
-    if pceid is None:
-        raise PckExtensionError("PCEID not found in PCK certificate")
-    if ppid is None:
-        raise PckExtensionError("PPID not found in PCK certificate")
-    if tcb is None:
-        raise PckExtensionError("TCB not found in PCK certificate")
-
+def _parse_sgx_extension(value: bytes) -> PckExtensions:
+    top = der.decode(value)
+    der.validate_tree(top)
+    items = der.expect_sequence(top, "SGX extension")
+    if len(items) < SGX_EXTENSION_MIN_SIZE:
+        raise PckExtensionError(
+            f"SGX Extension has length {len(items)}. It should have a minimum length of {SGX_EXTENSION_MIN_SIZE}"
+        )
+    ppid = pceid = fmspc = ""
+    tcb = PckCertTCB()
+    for item in items:
+        oid, _ = _attribute(item, "SGX extension")
+        if oid == OID_PPID:
+            ppid = _octet_string_attribute(item, "PPID", PPID_SIZE).hex()
+        elif oid == OID_TCB:
+            tcb = _parse_tcb(item)
+        elif oid == OID_PCEID:
+            pceid = _octet_string_attribute(item, "PCEID", PCEID_SIZE).hex()
+        elif oid == OID_FMSPC:
+            fmspc = _octet_string_attribute(item, "FMSPC", FMSPC_SIZE).hex()
     return PckExtensions(ppid=ppid, tcb=tcb, pceid=pceid, fmspc=fmspc)
 
 
-def _parse_tcb(value_component) -> PckCertTCB:
+def _attribute(item: der.Element, what: str) -> tuple[str, der.Element]:
+    """An attribute pair: a SEQUENCE whose first element is an OID and whose second is the value.
+
+    Elements after the value are tolerated, as in a structure that gained
+    fields over time.
     """
-    Parse the TCB extension: a SEQUENCE of (OID, value) pairs for
-    16 TCB components, PCE SVN, and CPU SVN.
+    parts = der.expect_sequence(item, f"{what} attribute")
+    if len(parts) < 2:
+        raise PckExtensionError(f"{what} attribute must hold an OID and a value")
+    return der.object_identifier(parts[0]), parts[1]
 
-    value_component is already a decoded pyasn1 Sequence from the parent decode.
+
+def _octet_string_attribute(item: der.Element, name: str, size: int) -> bytes:
+    """The value of an OCTET STRING attribute of exactly ``size`` bytes.
+
+    The pair is read as an extension record: the OID, an optional BOOLEAN,
+    then the OCTET STRING. A value of another length is accepted when it is
+    itself a DER OCTET STRING of the right size.
     """
-    tcb_seq = value_component
+    parts = der.expect_sequence(item, f"{name} attribute")
+    index = 1
+    if len(parts) > 1 and der.is_universal(parts[1], der.TAG_BOOLEAN):
+        der.boolean(parts[1])
+        index = 2
+    if len(parts) <= index:
+        raise PckExtensionError(f"{name} attribute has no value")
+    if not der.is_universal(parts[index], der.TAG_OCTET_STRING):
+        raise PckExtensionError(f"{name} attribute value is not an OCTET STRING")
+    value = der.octet_string(parts[index])
+    if len(value) == size:
+        return value
+    try:
+        inner = der.decode(value)
+    except der.DerError as err:
+        raise PckExtensionError(f"could not parse {name} extension as an octet string: {err}") from err
+    if not der.is_universal(inner, der.TAG_OCTET_STRING):
+        raise PckExtensionError(f"could not parse {name} extension as an octet string")
+    octet = der.octet_string(inner)
+    if len(octet) != size:
+        raise PckExtensionError(f"{name} extension's value size is {len(octet)}, expected {size}")
+    return octet
 
-    if len(tcb_seq) != TCB_EXTENSION_SIZE:
-        raise PckExtensionError(f"TCB extension has {len(tcb_seq)} elements, expected {TCB_EXTENSION_SIZE}")
 
-    tcb_components = [0] * TCB_COMPONENTS_COUNT
+def _parse_tcb(item: der.Element) -> PckCertTCB:
+    """The TCB attribute: a two-element SEQUENCE whose second element lists exactly 18 attribute pairs."""
+    parts = der.expect_sequence(item, "TCB extension")
+    if len(parts) != 2:
+        raise PckExtensionError(f"TCB extension when unmarshalled is of size {len(parts)}, expected 2")
+    entries = der.expect_sequence(parts[1], "TCB components")
+    if len(entries) != TCB_EXTENSION_SIZE:
+        raise PckExtensionError(f"TCB extension is of size {len(entries)}, expected {TCB_EXTENSION_SIZE}")
+    components = bytearray(TCB_COMPONENTS_COUNT)
     pce_svn = 0
-    cpu_svn = bytes(CPU_SVN_SIZE)
-    found_pce_svn = False
-    found_cpu_svn = False
-    found_components: set[int] = set()
+    cpu_svn = b""
+    for entry in entries:
+        oid, value = _attribute(entry, "TCB component")
+        index = _TCB_COMPONENT_OID_INDEX.get(oid)
+        if index is not None:
+            components[index] = _small_integer(value, f"sgxTcbComponent{index + 1}", 0xFF)
+        elif oid == OID_PCE_SVN:
+            pce_svn = _small_integer(value, "PCESvn", 0xFFFF)
+        elif oid == OID_CPU_SVN:
+            if not der.is_universal(value, der.TAG_OCTET_STRING):
+                raise PckExtensionError("CPUSVN component in TCB extension is not an OCTET STRING")
+            cpu_svn = der.octet_string(value)
+            if len(cpu_svn) != CPU_SVN_SIZE:
+                raise PckExtensionError(
+                    f"CPUSVN component in TCB extension is of size {len(cpu_svn)}, expected {CPU_SVN_SIZE}"
+                )
+    return PckCertTCB(pce_svn=pce_svn, cpu_svn=cpu_svn, cpu_svn_components=bytes(components))
 
-    with _asn1_errors("TCB extension"):
-        for item in tcb_seq:
-            if len(item) < 2:
-                raise PckExtensionError(f"Malformed TCB extension item: expected at least 2 fields, got {len(item)}")
-            oid_str = str(item[0])
 
-            if oid_str == OID_PCE_SVN.dotted_string:
-                val = int(item[1])
-                if val < 0 or val > 0xFFFF:
-                    raise PckExtensionError(f"PCE SVN value {val} out of uint16 range")
-                pce_svn = val
-                found_pce_svn = True
-            elif oid_str == OID_CPU_SVN.dotted_string:
-                raw = bytes(item[1])
-                if len(raw) != CPU_SVN_SIZE:
-                    raise PckExtensionError(f"CPU SVN has wrong size: expected {CPU_SVN_SIZE}, got {len(raw)}")
-                cpu_svn = raw
-                found_cpu_svn = True
-            elif (idx := _TCB_COMPONENT_OID_INDEX.get(oid_str)) is not None:
-                val = int(item[1])
-                if val < 0 or val > 0xFF:
-                    raise PckExtensionError(f"TCB component {idx + 1} value {val} out of byte range")
-                tcb_components[idx] = val
-                found_components.add(idx)
-            else:
-                raise PckExtensionError(f"Unrecognized OID in TCB extension: {oid_str}")
-
-    if not found_pce_svn:
-        raise PckExtensionError("PCE SVN not found in TCB extension")
-    if not found_cpu_svn:
-        raise PckExtensionError("CPU SVN not found in TCB extension")
-    if len(found_components) != TCB_COMPONENTS_COUNT:
-        missing = set(range(TCB_COMPONENTS_COUNT)) - found_components
-        raise PckExtensionError(f"Missing TCB components: {sorted(i + 1 for i in missing)}")
-
-    return PckCertTCB(pce_svn=pce_svn, cpu_svn=cpu_svn, tcb_components=tcb_components)
+def _small_integer(value: der.Element, field: str, maximum: int) -> int:
+    if not der.is_universal(value, der.TAG_INTEGER):
+        raise PckExtensionError(f"{field} extension is not an INTEGER")
+    number = der.integer(value)
+    if number < 0 or number > maximum:
+        raise PckExtensionError(f"int value for field {field} is out of range: {number}")
+    return number

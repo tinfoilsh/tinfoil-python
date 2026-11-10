@@ -1,468 +1,308 @@
-"""Unit tests for the TDX PCK chain and quote signature checks."""
+"""The PCK chain of a quote: PEM extraction, the certificate profile, chain verification with CRLs, and the quote
+signatures."""
 
 from __future__ import annotations
 
 import hashlib
 import struct
+from datetime import timedelta
 
 import pytest
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import Prehashed, decode_dss_signature
 
-from tinfoil._v3.verifier._quote.tdx.lib.abi import (
-    CERT_DATA_TYPE_PCK_CERT_CHAIN,
-    CERT_DATA_TYPE_QE_REPORT,
-    HEADER_SIZE,
-    QE_REPORT_SIZE,
-    TD_QUOTE_BODY_SIZE,
-    parse_quote,
-)
+from tests.v3 import pki
+from tests.v3 import tdx_builders as tb
+from tinfoil._v3.verifier._quote.tdx.lib.abi import parse_quote
 from tinfoil._v3.verifier._quote.tdx.lib.chain import (
+    INTERMEDIATE_CERT_PHRASE,
+    PCK_CERT_PHRASE,
+    ROOT_CERT_PHRASE,
     PCKCertificateChain,
     TdxVerificationError,
-    _bytes_to_p256_pubkey,
-    _signature_to_der,
+    bytes_to_p256_public_key,
+    common_name,
+    extract_ca_from_pck_cert,
     extract_pck_cert_chain,
-    get_intel_root_ca,
-    parse_pem_chain,
+    pem_certificates,
+    signature_to_der,
+    validate_certificate,
+    validate_crl,
+    verify_pck_certificate_chain,
     verify_qe_report_data_binding,
+    verify_qe_report_signature,
     verify_quote_signature,
 )
-from tinfoil._v3.verifier._trust import INTEL_SGX_ROOT_CA_PEM
-
-# =============================================================================
-# Test Fixtures - Cryptographic Key Generation
-# =============================================================================
-
-
-def generate_p256_keypair() -> tuple[ec.EllipticCurvePrivateKey, ec.EllipticCurvePublicKey]:
-    """Generate a P-256 key pair for testing."""
-    private_key = ec.generate_private_key(ec.SECP256R1())
-    public_key = private_key.public_key()
-    return private_key, public_key
-
-
-def public_key_to_raw_bytes(public_key: ec.EllipticCurvePublicKey) -> bytes:
-    """Convert P-256 public key to raw 64-byte format (X || Y)."""
-    # Get uncompressed point (0x04 || X || Y)
-    uncompressed = public_key.public_bytes(
-        encoding=serialization.Encoding.X962,
-        format=serialization.PublicFormat.UncompressedPoint,
-    )
-    # Strip the 0x04 prefix
-    return uncompressed[1:]
-
-
-def sign_message(private_key: ec.EllipticCurvePrivateKey, message: bytes) -> bytes:
-    """Sign a message and return raw R||S signature (64 bytes).
-
-    This hashes the message with SHA256 before signing.
-    """
-    # Sign with SHA256
-    der_signature = private_key.sign(message, ec.ECDSA(hashes.SHA256()))
-
-    # Convert DER to raw R||S
-    r, s = decode_dss_signature(der_signature)
-    return r.to_bytes(32, byteorder="big") + s.to_bytes(32, byteorder="big")
-
-
-def sign_prehashed(private_key: ec.EllipticCurvePrivateKey, digest: bytes) -> bytes:
-    """Sign a pre-hashed digest and return raw R||S signature (64 bytes).
-
-    Use this when the message has already been hashed with SHA256.
-    """
-    # Sign the pre-hashed digest
-    der_signature = private_key.sign(digest, ec.ECDSA(Prehashed(hashes.SHA256())))
-
-    # Convert DER to raw R||S
-    r, s = decode_dss_signature(der_signature)
-    return r.to_bytes(32, byteorder="big") + s.to_bytes(32, byteorder="big")
-
-
-# =============================================================================
-# Test Fixtures - Quote Building with Real Signatures
-# =============================================================================
-
-
-def build_header_bytes() -> bytes:
-    """Build a valid TDX header.
-
-    Note: Bytes 8-11 are reserved. Some older specs labeled these as
-    QE_SVN/PCE_SVN, but they are always zero in actual quotes. The real
-    SVN values come from PCK certificate extensions and QE Report.
-    """
-    header = b""
-    header += struct.pack("<H", 4)  # version
-    header += struct.pack("<H", 2)  # attestation_key_type
-    header += struct.pack("<I", 0x81)  # tee_type
-    header += b"\x00\x00\x00\x00"  # reserved (4 bytes)
-    header += bytes.fromhex("939a7233f79c4ca9940a0db3957f0607")  # qe_vendor_id
-    header += b"\x00" * 20  # user_data
-    assert len(header) == HEADER_SIZE
-    return header
-
-
-def build_body_bytes() -> bytes:
-    """Build a valid TdQuoteBody."""
-    body = b""
-    body += b"\x03" + b"\x00" * 15  # tee_tcb_svn
-    body += b"\xaa" * 48  # mr_seam
-    body += b"\x00" * 48  # mr_signer_seam
-    body += b"\x00" * 8  # seam_attributes
-    body += b"\x00\x00\x00\x10\x00\x00\x00\x00"  # td_attributes
-    body += b"\xe7\x02\x06\x00\x00\x00\x00\x00"  # xfam
-    body += b"\x11" * 48  # mr_td
-    body += b"\x00" * 48  # mr_config_id
-    body += b"\x00" * 48  # mr_owner
-    body += b"\x00" * 48  # mr_owner_config
-    body += b"\x22" * 48  # rtmr0
-    body += b"\x33" * 48  # rtmr1
-    body += b"\x44" * 48  # rtmr2
-    body += b"\x00" * 48  # rtmr3
-    body += b"\xab" * 32 + b"\xcd" * 32  # report_data
-    assert len(body) == TD_QUOTE_BODY_SIZE
-    return body
-
-
-def build_qe_report_bytes(report_data: bytes | None = None) -> bytes:
-    """Build a QE report with specified report_data."""
-    if report_data is None:
-        report_data = b"\x00" * 64
-
-    report = b""
-    report += b"\x00" * 16  # cpu_svn
-    report += struct.pack("<I", 0)  # misc_select
-    report += b"\x00" * 28  # reserved
-    report += b"\x00" * 16  # attributes
-    report += b"\xee" * 32  # mr_enclave
-    report += b"\x00" * 32  # reserved
-    report += b"\xff" * 32  # mr_signer
-    report += b"\x00" * 96  # reserved
-    report += struct.pack("<H", 1)  # isv_prod_id
-    report += struct.pack("<H", 2)  # isv_svn
-    report += b"\x00" * 60  # reserved
-    report += report_data[:64].ljust(64, b"\x00")  # report_data
-    assert len(report) == QE_REPORT_SIZE
-    return report
-
-
-def build_signed_quote_with_keys() -> tuple[bytes, ec.EllipticCurvePrivateKey, ec.EllipticCurvePrivateKey]:
-    """
-    Build a quote with real cryptographic signatures.
-
-    Returns:
-        tuple: (raw_quote_bytes, attestation_private_key, qe_private_key)
-    """
-    # Generate key pairs
-    attest_priv, attest_pub = generate_p256_keypair()
-    qe_priv, _qe_pub = generate_p256_keypair()
-
-    # Build header and body
-    header = build_header_bytes()
-    body = build_body_bytes()
-
-    # Sign header || body with attestation key (signature is over the hash)
-    message = header + body
-    message_hash = hashlib.sha256(message).digest()
-    quote_signature = sign_prehashed(attest_priv, message_hash)
-
-    # Build QE auth data
-    qe_auth_data = b"\x88" * 32
-
-    # Compute expected QE report data: SHA256(attestation_key || auth_data)
-    attestation_key_raw = public_key_to_raw_bytes(attest_pub)
-    qe_report_data_hash = hashlib.sha256(attestation_key_raw + qe_auth_data).digest()
-    qe_report_data = qe_report_data_hash + b"\x00" * 32  # Pad to 64 bytes
-
-    # Build QE report
-    qe_report = build_qe_report_bytes(qe_report_data)
-
-    # Sign QE report with QE key
-    qe_signature = sign_message(qe_priv, qe_report)
-
-    # Build PCK cert chain (self-signed certs for testing); the leaf carries the QE key that signed the report
-    pck_cert_pem = _generate_self_signed_cert_pem("PCK Leaf", qe_priv)
-    intermediate_cert_pem = _generate_self_signed_cert_pem("Intermediate CA")
-    root_cert_pem = INTEL_SGX_ROOT_CA_PEM  # Use real Intel root for chain validation tests
-
-    cert_chain_pem = pck_cert_pem + intermediate_cert_pem + root_cert_pem
-
-    # Build signed data
-    signed_data = _build_signed_data_bytes(
-        signature=quote_signature,
-        attestation_key=attestation_key_raw,
-        qe_report=qe_report,
-        qe_signature=qe_signature,
-        qe_auth_data=qe_auth_data,
-        cert_chain_pem=cert_chain_pem,
-    )
-
-    # Assemble quote
-    quote_bytes = header + body + struct.pack("<I", len(signed_data)) + signed_data
-
-    return quote_bytes, attest_priv, qe_priv
-
-
-def _build_signed_data_bytes(
-    signature: bytes,
-    attestation_key: bytes,
-    qe_report: bytes,
-    qe_signature: bytes,
-    qe_auth_data: bytes,
-    cert_chain_pem: bytes,
-) -> bytes:
-    """Build the signed data section of the quote."""
-    # PCK cert chain (type 5)
-    pck_chain = struct.pack("<H", CERT_DATA_TYPE_PCK_CERT_CHAIN)
-    pck_chain += struct.pack("<I", len(cert_chain_pem))
-    pck_chain += cert_chain_pem
-
-    # QE report certification data content
-    qe_cert_content = qe_report
-    qe_cert_content += qe_signature
-    qe_cert_content += struct.pack("<H", len(qe_auth_data))
-    qe_cert_content += qe_auth_data
-    qe_cert_content += pck_chain
-
-    # Outer certification data (type 6)
-    cert_data = struct.pack("<H", CERT_DATA_TYPE_QE_REPORT)
-    cert_data += struct.pack("<I", len(qe_cert_content))
-    cert_data += qe_cert_content
-
-    return signature + attestation_key + cert_data
-
-
-def _generate_self_signed_cert_pem(cn: str, private_key: ec.EllipticCurvePrivateKey | None = None) -> bytes:
-    """Generate a self-signed certificate for testing, over ``private_key`` or a fresh one."""
-    import datetime
-
-    from cryptography.x509.oid import NameOID
-
-    if private_key is None:
-        private_key = ec.generate_private_key(ec.SECP256R1())
-
-    subject = issuer = x509.Name(
-        [
-            x509.NameAttribute(NameOID.COMMON_NAME, cn),
-        ]
-    )
-
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(private_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.UTC))
-        .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=365))
-        .sign(private_key, hashes.SHA256())
-    )
-
-    return cert.public_bytes(serialization.Encoding.PEM)
-
-
-# =============================================================================
-# Helper Function Tests
-# =============================================================================
-
-
-class TestBytesToP256PubKey:
-    """Test _bytes_to_p256_pubkey helper."""
-
-    def test_valid_key(self):
-        """Test converting valid key bytes."""
-        _, public_key = generate_p256_keypair()
-        raw_bytes = public_key_to_raw_bytes(public_key)
-
-        result = _bytes_to_p256_pubkey(raw_bytes)
-        assert isinstance(result, ec.EllipticCurvePublicKey)
-
-    def test_wrong_size(self):
-        """Test that wrong size raises error."""
-        with pytest.raises(TdxVerificationError, match="expected 64"):
-            _bytes_to_p256_pubkey(b"\x00" * 63)
-
-
-class TestSignatureToDer:
-    """Test _signature_to_der helper."""
-
-    def test_valid_signature(self):
-        """Test converting valid signature."""
-        private_key, _ = generate_p256_keypair()
-        raw_sig = sign_message(private_key, b"test message")
-
-        der_sig = _signature_to_der(raw_sig)
-        assert isinstance(der_sig, bytes)
-        assert len(der_sig) > 64  # DER is longer due to encoding
-
-    def test_wrong_size(self):
-        """Test that wrong size raises error."""
-        with pytest.raises(TdxVerificationError, match="expected 64"):
-            _signature_to_der(b"\x00" * 63)
-
-
-class TestParsePemChain:
-    """Test parse_pem_chain helper."""
-
-    def test_parse_single_cert(self):
-        """Test parsing single certificate."""
-        cert_pem = _generate_self_signed_cert_pem("Test")
-        certs = parse_pem_chain(cert_pem)
-        assert len(certs) == 1
-
-    def test_parse_multiple_certs(self):
-        """Test parsing multiple concatenated certificates."""
-        cert1 = _generate_self_signed_cert_pem("Cert1")
-        cert2 = _generate_self_signed_cert_pem("Cert2")
-        cert3 = _generate_self_signed_cert_pem("Cert3")
-
-        chain = cert1 + cert2 + cert3
-        certs = parse_pem_chain(chain)
-        assert len(certs) == 3
-
-    def test_parse_with_whitespace(self):
-        """Test parsing with leading/trailing whitespace."""
-        cert_pem = b"\n\n" + _generate_self_signed_cert_pem("Test") + b"\n\n"
-        certs = parse_pem_chain(cert_pem)
-        assert len(certs) == 1
-
-
-# =============================================================================
-# Quote Signature Verification Tests
-# =============================================================================
-
-
-class TestVerifyQuoteSignature:
-    """Test quote signature verification."""
-
-    def test_valid_signature(self):
-        """Test verification of valid quote signature."""
-        raw_quote, _attest_priv, _ = build_signed_quote_with_keys()
-        quote = parse_quote(raw_quote)
-
-        # Should not raise
-        verify_quote_signature(quote, raw_quote)
-
-    def test_tampered_body(self):
-        """Test that tampered body fails verification."""
-        raw_quote, _, _ = build_signed_quote_with_keys()
-
-        # Tamper with the body
-        buffer = bytearray(raw_quote)
-        buffer[100] ^= 0xFF  # Flip a byte in the body
-        tampered = bytes(buffer)
-
-        quote = parse_quote(tampered)
-
-        with pytest.raises(TdxVerificationError, match="signature verification failed"):
-            verify_quote_signature(quote, tampered)
-
-
-# =============================================================================
-# QE Report Data Binding Tests
-# =============================================================================
-
-
-class TestVerifyQeReportDataBinding:
-    """Test QE report data binding verification."""
-
-    def test_valid_binding(self):
-        """Test verification of valid binding."""
-        raw_quote, _, _ = build_signed_quote_with_keys()
-        quote = parse_quote(raw_quote)
-
-        # Should not raise
-        verify_qe_report_data_binding(quote)
-
-    def test_tampered_auth_data(self):
-        """Test that wrong auth data fails binding check."""
-        # Build quote with specific auth data
-        attest_priv, attest_pub = generate_p256_keypair()
-
-        header = build_header_bytes()
-        body = build_body_bytes()
-        message_hash = hashlib.sha256(header + body).digest()
-        quote_signature = sign_prehashed(attest_priv, message_hash)
-
-        attestation_key_raw = public_key_to_raw_bytes(attest_pub)
-
-        # Use correct auth data for hash calculation
-        correct_auth_data = b"\x88" * 32
-        qe_report_data_hash = hashlib.sha256(attestation_key_raw + correct_auth_data).digest()
-        qe_report_data = qe_report_data_hash + b"\x00" * 32
-
-        qe_report = build_qe_report_bytes(qe_report_data)
-        qe_priv, _ = generate_p256_keypair()
-        qe_signature = sign_message(qe_priv, qe_report)
-
-        # But embed WRONG auth data in the quote
-        wrong_auth_data = b"\x99" * 32  # Different!
-
-        cert_chain = (
-            _generate_self_signed_cert_pem("PCK") + _generate_self_signed_cert_pem("Int") + INTEL_SGX_ROOT_CA_PEM
+from tinfoil._v3.verifier._x509.crl import parse_revocation_list
+
+SCENARIO = tb.Scenario()
+ROOT = pki.load(SCENARIO.intel.root.der)
+
+
+def crls(
+    scenario: tb.Scenario = SCENARIO, *, pck_revoked: list[int] | None = None, root_revoked: list[int] | None = None
+):
+    pck = parse_revocation_list(
+        pki.crl(
+            scenario.intel.platform_ca,
+            this_update=tb.NOW - timedelta(days=1),
+            next_update=tb.NOW + timedelta(days=1),
+            revoked=pck_revoked,
         )
-
-        signed_data = _build_signed_data_bytes(
-            signature=quote_signature,
-            attestation_key=attestation_key_raw,
-            qe_report=qe_report,
-            qe_signature=qe_signature,
-            qe_auth_data=wrong_auth_data,  # Wrong!
-            cert_chain_pem=cert_chain,
+    )
+    root = parse_revocation_list(
+        pki.crl(
+            scenario.intel.root,
+            this_update=tb.NOW - timedelta(days=1),
+            next_update=tb.NOW + timedelta(days=1),
+            revoked=root_revoked,
         )
-
-        raw_quote = header + body + struct.pack("<I", len(signed_data)) + signed_data
-        quote = parse_quote(raw_quote)
-
-        with pytest.raises(TdxVerificationError, match="binding verification failed"):
-            verify_qe_report_data_binding(quote)
+    )
+    return root, pck
 
 
-# =============================================================================
-# Intel Root CA Tests
-# =============================================================================
+# --- PEM chains -----------------------------------------------------------------------
 
 
-class TestIntelRootCA:
-    """Test Intel Root CA certificate."""
+class TestPemCertificates:
+    def test_exact_count(self) -> None:
+        chain = SCENARIO.chain_pem()
+        certs = pem_certificates(chain, 3, "chain")
+        assert [common_name(c.subject) for c in certs] == [PCK_CERT_PHRASE, INTERMEDIATE_CERT_PHRASE, ROOT_CERT_PHRASE]
+        with pytest.raises(TdxVerificationError, match="should contain 2 PEM certificates, found 3"):
+            pem_certificates(chain, 2, "chain")
 
-    def test_load_intel_root_ca(self):
-        """Test that Intel Root CA loads correctly."""
-        cert = get_intel_root_ca()
+    def test_trailing_nul(self) -> None:
+        chain = SCENARIO.chain_pem()
+        assert len(pem_certificates(chain + b"\x00", 3, "chain", allow_trailing_nul=True)) == 3
+        with pytest.raises(TdxVerificationError, match="could not parse PEM"):
+            pem_certificates(chain + b"\x00", 3, "chain")
+        with pytest.raises(TdxVerificationError, match="could not parse PEM"):
+            pem_certificates(chain + b"\x00\x00", 3, "chain", allow_trailing_nul=True)
 
-        assert isinstance(cert, x509.Certificate)
-        assert "Intel SGX Root CA" in cert.subject.rfc4514_string()
+    def test_nothing_may_follow_the_last_end_line(self) -> None:
+        chain = SCENARIO.chain_pem()
+        assert len(pem_certificates(chain.rstrip(b"\n"), 3, "chain")) == 3
+        assert len(pem_certificates(chain.replace(b"\n", b"\r\n"), 3, "chain")) == 3
+        for suffix in (b"\n", b"\r\n", b" \n", b"text\n"):
+            with pytest.raises(TdxVerificationError):
+                pem_certificates(chain + suffix, 3, "chain")
 
-    def test_intel_root_ca_is_ecdsa(self):
-        """Test that Intel Root CA uses ECDSA."""
-        cert = get_intel_root_ca()
-        public_key = cert.public_key()
+    def test_text_around_the_blocks_rejects(self) -> None:
+        chain = SCENARIO.chain_pem()
+        with pytest.raises(TdxVerificationError, match="could not parse PEM"):
+            pem_certificates(b"prefix\n" + chain, 3, "chain")
+        with pytest.raises(TdxVerificationError, match="not ASCII"):
+            pem_certificates(b"\xff" + chain, 3, "chain")
 
-        assert isinstance(public_key, ec.EllipticCurvePublicKey)
-
-
-# =============================================================================
-# PCK Chain Extraction Tests
-# =============================================================================
+    def test_block_of_another_label_rejects(self) -> None:
+        chain = SCENARIO.chain_pem().replace(b"CERTIFICATE", b"X509 CRL", 2)
+        with pytest.raises(TdxVerificationError, match="could not parse PEM"):
+            pem_certificates(chain, 3, "chain")
 
 
 class TestExtractPckCertChain:
-    """Test PCK certificate chain extraction."""
-
-    def test_extract_chain(self):
-        """Test extracting certificate chain from quote."""
-        raw_quote, _, _ = build_signed_quote_with_keys()
-        quote = parse_quote(raw_quote)
-
-        chain = extract_pck_cert_chain(quote)
-
+    def test_extracts_three_certificates(self) -> None:
+        chain = extract_pck_cert_chain(parse_quote(SCENARIO.quote()))
         assert isinstance(chain, PCKCertificateChain)
-        assert chain.pck_cert is not None
-        assert chain.intermediate_cert is not None
-        assert chain.root_cert is not None
+        assert common_name(chain.pck_cert.subject) == PCK_CERT_PHRASE
+        assert common_name(chain.intermediate_cert.subject) == INTERMEDIATE_CERT_PHRASE
+        assert common_name(chain.root_cert.subject) == ROOT_CERT_PHRASE
+
+    def test_empty_chain_rejects(self) -> None:
+        with pytest.raises(TdxVerificationError, match="chain is empty"):
+            extract_pck_cert_chain(parse_quote(tb.quote_bytes(SCENARIO.pck_key, b"")))
+
+    def test_two_certificates_reject(self) -> None:
+        pem = SCENARIO.intel.pem(SCENARIO.pck()) + SCENARIO.intel.pem(SCENARIO.intel.platform_ca)
+        with pytest.raises(TdxVerificationError, match="should contain 3"):
+            extract_pck_cert_chain(parse_quote(tb.quote_bytes(SCENARIO.pck_key, pem)))
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+# --- the certificate profile -----------------------------------------------------------
+
+
+class TestValidateCertificate:
+    def test_profile(self) -> None:
+        chain = extract_pck_cert_chain(parse_quote(SCENARIO.quote()))
+        validate_certificate(chain.root_cert, chain.root_cert, ROOT_CERT_PHRASE)
+        validate_certificate(chain.intermediate_cert, chain.root_cert, INTERMEDIATE_CERT_PHRASE)
+        validate_certificate(chain.pck_cert, chain.intermediate_cert, PCK_CERT_PHRASE)
+
+    def test_subject_phrase(self) -> None:
+        chain = extract_pck_cert_chain(parse_quote(SCENARIO.quote()))
+        with pytest.raises(TdxVerificationError, match="not expected in certificate's subject name"):
+            validate_certificate(chain.pck_cert, chain.intermediate_cert, INTERMEDIATE_CERT_PHRASE)
+
+    def test_issuer_must_equal_parent_subject(self) -> None:
+        chain = extract_pck_cert_chain(parse_quote(SCENARIO.quote()))
+        with pytest.raises(TdxVerificationError, match="issuer name"):
+            validate_certificate(chain.pck_cert, chain.root_cert, PCK_CERT_PHRASE)
+
+    def test_signature_must_come_from_the_parent(self) -> None:
+        other = tb.intel_pki()
+        chain = extract_pck_cert_chain(parse_quote(SCENARIO.quote()))
+        with pytest.raises(TdxVerificationError, match="signature verification using parent certificate failed"):
+            validate_certificate(chain.intermediate_cert, pki.load(other.root.der), INTERMEDIATE_CERT_PHRASE)
+
+    def test_parent_must_be_a_certificate_authority(self) -> None:
+        leaf = pki.certificate(ROOT_CERT_PHRASE, pki.p256(), key_usage=pki.SIGNING_USAGE)
+        with pytest.raises(TdxVerificationError, match="not a certificate authority"):
+            validate_certificate(pki.load(leaf.der), pki.load(leaf.der), ROOT_CERT_PHRASE)
+
+    def test_key_must_be_p256(self) -> None:
+        root = pki.certificate(ROOT_CERT_PHRASE, pki.p384(), ca=True, key_usage=pki.CA_USAGE)
+        with pytest.raises(TdxVerificationError, match="Expected ECDSA-SHA256"):
+            validate_certificate(pki.load(root.der), pki.load(root.der), ROOT_CERT_PHRASE)
+        ed = pki.certificate(ROOT_CERT_PHRASE, pki.ed25519_key(), ca=True, key_usage=pki.CA_USAGE)
+        with pytest.raises(TdxVerificationError, match="Expected ECDSA-SHA256"):
+            validate_certificate(pki.load(ed.der), pki.load(ed.der), ROOT_CERT_PHRASE)
+
+
+def test_extract_ca_from_pck_cert() -> None:
+    chain = extract_pck_cert_chain(parse_quote(SCENARIO.quote()))
+    assert extract_ca_from_pck_cert(chain.pck_cert) == "platform"
+    processor = tb.Scenario(intel=tb.intel_pki(platform_ca_cn=tb.PROCESSOR_CA_CN))
+    assert extract_ca_from_pck_cert(pki.load(processor.pck().der)) == "processor"
+    other = tb.Scenario(intel=tb.intel_pki(platform_ca_cn="Intel SGX PCK Platform CA v2"))
+    with pytest.raises(TdxVerificationError, match="could not find CA"):
+        extract_ca_from_pck_cert(pki.load(other.pck().der))
+
+
+def test_common_name_is_the_last_string_valued_attribute() -> None:
+    assert common_name(ROOT.subject) == ROOT_CERT_PHRASE
+    assert common_name(x509.Name([])) == ""
+    assert (
+        common_name(
+            x509.Name(
+                [x509.NameAttribute(x509.NameOID.COMMON_NAME, "a"), x509.NameAttribute(x509.NameOID.COMMON_NAME, "b")]
+            )
+        )
+        == "b"
+    )
+
+
+# --- chain verification ----------------------------------------------------------------------
+
+
+class TestVerifyPckCertificateChain:
+    def chain(self, scenario: tb.Scenario = SCENARIO) -> PCKCertificateChain:
+        return extract_pck_cert_chain(parse_quote(scenario.quote()))
+
+    def test_verifies(self) -> None:
+        root_crl, pck_crl = crls()
+        verify_pck_certificate_chain(self.chain(), [ROOT], root_crl, pck_crl, tb.NOW)
+
+    def test_requires_a_trusted_root(self) -> None:
+        root_crl, pck_crl = crls()
+        other = pki.load(tb.intel_pki().root.der)
+        with pytest.raises(TdxVerificationError, match="error verifying PCK Certificate"):
+            verify_pck_certificate_chain(self.chain(), [other], root_crl, pck_crl, tb.NOW)
+        with pytest.raises(TdxVerificationError, match="no trusted roots"):
+            verify_pck_certificate_chain(self.chain(), [], root_crl, pck_crl, tb.NOW)
+
+    def test_validity_at_the_verification_time(self) -> None:
+        root_crl, pck_crl = crls()
+        with pytest.raises(TdxVerificationError, match="not valid at"):
+            verify_pck_certificate_chain(self.chain(), [ROOT], root_crl, pck_crl, tb.NOW + timedelta(days=400))
+
+    def test_revocation(self) -> None:
+        root_crl, pck_crl = crls(pck_revoked=[4])
+        with pytest.raises(TdxVerificationError, match=r"PCK Leaf certificate .* was revoked"):
+            verify_pck_certificate_chain(self.chain(), [ROOT], root_crl, pck_crl, tb.NOW)
+        root_crl, pck_crl = crls(root_revoked=[2])
+        with pytest.raises(TdxVerificationError, match=r"intermediate certificate .* was revoked"):
+            verify_pck_certificate_chain(self.chain(), [ROOT], root_crl, pck_crl, tb.NOW)
+
+    def test_crls_must_be_issued_by_the_chain(self) -> None:
+        other = tb.Scenario()
+        root_crl, pck_crl = crls()
+        other_root, other_pck = crls(other)
+        with pytest.raises(TdxVerificationError, match="root CA CRL verification failed"):
+            verify_pck_certificate_chain(self.chain(), [ROOT], other_root, pck_crl, tb.NOW)
+        with pytest.raises(TdxVerificationError, match="PCK CRL verification failed"):
+            verify_pck_certificate_chain(self.chain(), [ROOT], root_crl, other_pck, tb.NOW)
+
+    def test_pck_crl_must_be_the_issuing_cas(self) -> None:
+        """A CRL that the root signed but that names the issuing CA's name fails: the issuer is the signer."""
+        root_crl, _ = crls()
+        with pytest.raises(TdxVerificationError, match="PCK CRL verification failed"):
+            verify_pck_certificate_chain(self.chain(), [ROOT], root_crl, root_crl, tb.NOW)
+
+    def test_crl_window(self) -> None:
+        _, pck_crl = crls()
+        with pytest.raises(TdxVerificationError, match="not current at"):
+            validate_crl(pck_crl, pki.load(SCENARIO.intel.platform_ca.der), tb.NOW + timedelta(days=2))
+        assert validate_crl(pck_crl, pki.load(SCENARIO.intel.platform_ca.der), tb.NOW).crl is pck_crl
+
+    def test_crl_issuer_must_be_a_certificate_authority(self) -> None:
+        signing = pki.load(SCENARIO.intel.tcb_signing.der)
+        crl = parse_revocation_list(pki.crl(SCENARIO.intel.tcb_signing))
+        with pytest.raises(TdxVerificationError, match="not a certificate authority"):
+            validate_crl(crl, signing, tb.NOW)
+
+
+# --- quote signatures --------------------------------------------------------------------------
+
+
+class TestQuoteSignatures:
+    def test_valid(self) -> None:
+        raw = SCENARIO.quote()
+        quote = parse_quote(raw)
+        verify_quote_signature(quote, raw)
+        verify_qe_report_signature(quote, pki.load(SCENARIO.pck().der))
+        verify_qe_report_data_binding(quote)
+
+    def test_tampered_body(self) -> None:
+        raw = bytearray(SCENARIO.quote())
+        raw[100] ^= 0xFF
+        with pytest.raises(TdxVerificationError, match="unable to verify message digest"):
+            verify_quote_signature(parse_quote(bytes(raw)), bytes(raw))
+
+    def test_qe_report_signed_by_another_key(self) -> None:
+        quote = parse_quote(SCENARIO.quote())
+        other = pki.load(tb.pck_certificate(SCENARIO.intel.platform_ca).der)
+        with pytest.raises(TdxVerificationError, match="QE report's signature verification"):
+            verify_qe_report_signature(quote, other)
+
+    def test_qe_report_signature_needs_an_ec_key(self) -> None:
+        quote = parse_quote(SCENARIO.quote())
+        rsa_cert = pki.load(pki.certificate("rsa", pki.rsa_key()).der)
+        with pytest.raises(TdxVerificationError, match="not of type ecdsa"):
+            verify_qe_report_signature(quote, rsa_cert)
+
+    def test_binding_covers_the_auth_data(self) -> None:
+        attestation = pki.p256()
+        header, body = tb.header_bytes(), tb.body_bytes()
+        digest = hashlib.sha256(header + body).digest()
+        bound = hashlib.sha256(tb.raw_public_key(attestation) + b"\x88" * 32).digest() + bytes(32)
+        report = tb.qe_report_bytes(bound)
+        raw = tb.quote_bytes(
+            SCENARIO.pck_key,
+            SCENARIO.chain_pem(),
+            attestation_key=attestation,
+            qe_report=report,
+            qe_auth_data=b"\x99" * 32,
+        )
+        with pytest.raises(TdxVerificationError, match="QE Report Data does not match"):
+            verify_qe_report_data_binding(parse_quote(raw))
+        assert digest
+
+
+class TestHelpers:
+    def test_bytes_to_p256_public_key(self) -> None:
+        key = pki.p256()
+        assert isinstance(bytes_to_p256_public_key(tb.raw_public_key(key)), ec.EllipticCurvePublicKey)
+        with pytest.raises(TdxVerificationError, match="unexpected size"):
+            bytes_to_p256_public_key(bytes(63))
+        with pytest.raises(TdxVerificationError, match="attestation key in the quote is invalid"):
+            bytes_to_p256_public_key(bytes(64))
+
+    def test_signature_to_der(self) -> None:
+        raw = tb.raw_signature(pki.p256(), b"message")
+        der = signature_to_der(raw)
+        assert der[0] == 0x30
+        assert len(der) > 64
+        with pytest.raises(TdxVerificationError, match="Expected 64"):
+            signature_to_der(bytes(63))
+        assert struct.unpack("<H", b"\x40\x00")[0] == 64
