@@ -204,6 +204,11 @@ def test_assemble_checks_its_byte_arguments() -> None:
         sev.assemble(policy, verified, report.measurement, bytes(63))
     with pytest.raises(sev.SevPolicyError, match="decoding platform identity"):
         sev.assemble(policy, replace(verified, identity="zz"), report.measurement, report.report_data)
+    # The identity is the whole CHIP_ID; a bare Turin hwID is not enough.
+    with pytest.raises(
+        sev.SevPolicyError, match="decoding platform identity: platform identity must be 64 bytes, got 8"
+    ):
+        sev.assemble(policy, replace(verified, identity=fx.BOX2_TURIN_ID[:16]), report.measurement, report.report_data)
 
 
 def test_config_bound_enforces_config_and_platform_constraints() -> None:

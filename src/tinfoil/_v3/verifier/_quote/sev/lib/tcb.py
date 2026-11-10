@@ -40,6 +40,8 @@ class _Level:
     """The position of the level's low bit in the packed value."""
     width: int = 8
     """The number of bits that the packed value reserves for the level."""
+    maximum: int = _MAX_LEVEL
+    """The greatest level that packing accepts, at most the field's width allows."""
 
     @property
     def mask(self) -> int:
@@ -78,7 +80,7 @@ _LAYOUTS: dict[int, _Layout] = {
             _Level("spl6", "Spl6", 32),
             _Level("spl7", "Spl7", 40),
             _Level("snp_spl", "SnpSpl", 48),
-            _Level("ucode_spl", "UcodeSpl", 56),
+            _Level("ucode_spl", "UcodeSpl", 56, maximum=0xFF),
         ),
         undefined_levels_error="FmcSpl is not defined for TCB struct version 0",
     ),
@@ -89,22 +91,18 @@ _LAYOUTS: dict[int, _Layout] = {
             _Level("bl_spl", "BlSpl", 8),
             _Level("tee_spl", "TeeSpl", 16),
             _Level("snp_spl", "SnpSpl", 24),
-            _Level("ucode_spl", "UcodeSpl", 56),
+            _Level("ucode_spl", "UcodeSpl", 56, maximum=0xFF),
         ),
         undefined_levels_error="reserved Turin TCB components must be zero",
     ),
 }
 
-_LEVELS_CHECKED: tuple[_Level, ...] = (
-    *(level for level in _LAYOUTS[TCB_STRUCT_VERSION_0].levels[-2::-1]),
-    _LAYOUTS[TCB_STRUCT_VERSION_1].levels[0],
+_ALL_LEVELS: tuple[_Level, ...] = tuple(
+    {level.field: level for layout in _LAYOUTS.values() for level in layout.levels}.values()
 )
-"""Every level but the microcode level, in the order that packing range-checks them."""
+"""Every level of any layout once, for the range checks and the comparison, which do not use the position."""
 
-_ALL_FIELDS: tuple[str, ...] = tuple(
-    dict.fromkeys(level.field for layout in _LAYOUTS.values() for level in layout.levels)
-)
-"""Every level field of any layout, in the order that the comparison applies."""
+_ALL_FIELDS: tuple[str, ...] = tuple(level.field for level in _ALL_LEVELS)
 
 
 def tcb_struct_version(product_line: str) -> int:
@@ -168,12 +166,12 @@ class TCBParts:
     fmc_spl: int = 0
 
     def to_version_struct(self) -> TCBVersionStruct:
-        """Pack the levels; levels above 127 (other than the microcode level) and levels that the layout does not
-        carry are errors."""
-        for level in _LEVELS_CHECKED:
+        """Pack the levels; a level outside 0 to 127 (0 to 255 for the microcode level) and a non-zero level that
+        the layout does not carry are errors."""
+        for level in _ALL_LEVELS:
             value: int = getattr(self, level.field)
-            if value > _MAX_LEVEL:
-                raise TcbError(f"{level.label} TCB part is {value}. Expect 0-{_MAX_LEVEL}")
+            if not 0 <= value <= level.maximum:
+                raise TcbError(f"{level.label} TCB part is {value}. Expect 0-{level.maximum}")
         layout = _LAYOUTS.get(self.version)
         if layout is None:
             raise TcbError(f"unsupported TCB struct version: {self.version}")

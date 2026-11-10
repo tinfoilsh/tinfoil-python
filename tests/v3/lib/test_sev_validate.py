@@ -146,6 +146,7 @@ class TestValidatePlatformInfo:
             ("ciphertext_hiding_dram_enabled", "required ciphertext hiding in DRAM not enforced"),
             ("alias_check_complete", "required memory alias check hasn't been completed"),
             ("iommu_write_safe", "required IOMMU write-safe hardware mitigation is not present"),
+            ("tio_enabled", "required feature SEV-TIO not enabled"),
         ],
     )
     def test_missing_required_features(self, field: str, message: str) -> None:

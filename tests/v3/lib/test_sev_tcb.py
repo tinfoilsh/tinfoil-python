@@ -47,6 +47,14 @@ def test_packing_rejects_levels_outside_the_layout() -> None:
     with pytest.raises(tcb.TcbError, match=r"SnpSpl TCB part is 128\. Expect 0-127"):
         tcb.TCBParts(snp_spl=128).to_version_struct()
     assert tcb.TCBParts(ucode_spl=255).to_version_struct().tcb == 255 << 56
+    with pytest.raises(tcb.TcbError, match=r"UcodeSpl TCB part is 256\. Expect 0-255"):
+        tcb.TCBParts(ucode_spl=256).to_version_struct()
+    with pytest.raises(tcb.TcbError, match=r"BlSpl TCB part is -1\. Expect 0-127"):
+        tcb.TCBParts(bl_spl=-1).to_version_struct()
+    with pytest.raises(tcb.TcbError, match=r"UcodeSpl TCB part is -1\. Expect 0-255"):
+        tcb.TCBParts(version=1, ucode_spl=-1).to_version_struct()
+    with pytest.raises(tcb.TcbError, match=r"FmcSpl TCB part is 128\. Expect 0-127"):
+        tcb.TCBParts(version=1, fmc_spl=128).to_version_struct()
     with pytest.raises(tcb.TcbError, match="FmcSpl is not defined for TCB struct version 0"):
         tcb.TCBParts(fmc_spl=1).to_version_struct()
     with pytest.raises(tcb.TcbError, match="reserved Turin TCB components must be zero"):

@@ -260,8 +260,8 @@ def validate_version(report: Report, options: ValidationOptions) -> None:
 
 
 def validate_platform_info(platform_info: int, required: SnpPlatformInfo | None) -> None:
-    """Check PLATFORM_INFO against the maximum acceptable one: SMT, TSME and TIO may not be on unless allowed; ECC,
-    RAPL disabling, ciphertext hiding, the alias check and the IOMMU write-safe fix must be on when required."""
+    """Check PLATFORM_INFO against the required one: SMT and TSME may not be on unless allowed; ECC, RAPL disabling,
+    ciphertext hiding, the alias check and the IOMMU write-safe fix must be on when required; TIO must match."""
     if required is None:
         return
     try:
@@ -284,6 +284,8 @@ def validate_platform_info(platform_info: int, required: SnpPlatformInfo | None)
         raise ValidationError("required IOMMU write-safe hardware mitigation is not present")
     if info.tio_enabled and not required.tio_enabled:
         raise ValidationError("unauthorized feature SEV-TIO enabled")
+    if required.tio_enabled and not info.tio_enabled:
+        raise ValidationError("required feature SEV-TIO not enabled")
 
 
 def validate_mitigation_vectors(report: Report, options: ValidationOptions) -> None:

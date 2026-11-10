@@ -12,6 +12,7 @@ from tinfoil._v3.verifier._quote.sev.authenticate import (
     reject_masked_chip_id,
 )
 from tinfoil._v3.verifier._quote.sev.lib.abi import (
+    CHIP_ID_SIZE,
     PRODUCT_GENOA,
     PRODUCT_TURIN,
     AbiError,
@@ -58,7 +59,7 @@ def assemble(policy: SEVSNPPolicy, quote: Quote, launch: bytes, report_data: byt
     """Combine the policy with the launch measurement, REPORT_DATA and the authenticated CHIP_ID.
 
     ``launch`` is 48 bytes and ``report_data`` 64; the CHIP_ID comes from
-    ``quote.identity``.
+    ``quote.identity``, which must be its full 64 bytes as hex.
     """
     options = _options(policy, quote.product_line)
     if len(launch) != LAUNCH_SIZE:
@@ -66,7 +67,7 @@ def assemble(policy: SEVSNPPolicy, quote: Quote, launch: bytes, report_data: byt
     if len(report_data) != REPORT_DATA_SIZE:
         raise SevPolicyError(f"report data must be {REPORT_DATA_SIZE} bytes, got {len(report_data)}")
     try:
-        chip_id = _decode_hex("platform identity", quote.identity, len(quote.identity) // 2)
+        chip_id = _decode_hex("platform identity", quote.identity, CHIP_ID_SIZE)
     except SevPolicyError as err:
         raise SevPolicyError(f"decoding platform identity: {err}") from err
     options = replace(options, measurement=bytes(launch), report_data=bytes(report_data), chip_id=chip_id)
