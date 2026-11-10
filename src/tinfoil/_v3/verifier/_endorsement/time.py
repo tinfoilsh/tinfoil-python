@@ -22,7 +22,11 @@ class TimePolicy:
 
     def verify(self, at: datetime) -> None:
         """Reject an approval time before ``earliest`` ("too old") or after ``latest`` ("in the future")."""
-        raise NotImplementedError
+        require_aware(at)
+        if at < self.earliest:
+            raise TimePolicyError("approval is too old")
+        if at > self.latest:
+            raise TimePolicyError("timestamp is in the future")
 
 
 def new_time_policy(
@@ -34,4 +38,20 @@ def new_time_policy(
     DEFAULT_FUTURE_SKEW; a negative age or skew is an error, and a zero one
     is honoured.
     """
-    raise NotImplementedError
+    if max_age is None:
+        max_age = DEFAULT_MAX_AGE
+    if future_skew is None:
+        future_skew = DEFAULT_FUTURE_SKEW
+    if not isinstance(now, datetime) or not _is_aware(now) or max_age < timedelta(0) or future_skew < timedelta(0):
+        raise TimePolicyError("clock and nonnegative age and skew are required")
+    return TimePolicy(earliest=now - max_age, latest=now + future_skew)
+
+
+def require_aware(at: datetime) -> None:
+    """Reject a naive datetime: every time that the verifier compares carries a zone."""
+    if not _is_aware(at):
+        raise TimePolicyError("time must be timezone-aware")
+
+
+def _is_aware(at: datetime) -> bool:
+    return at.tzinfo is not None and at.utcoffset() is not None
