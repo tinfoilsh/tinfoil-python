@@ -31,7 +31,7 @@ from tinfoil._v3.verifier._policy import (
     parse,
     satisfies,
 )
-from tinfoil._v3.verifier._policy.sev import GuestPolicy, SNPPlatform
+from tinfoil._v3.verifier._policy.sev import GuestPolicy, SNPPlatform, validate_policy_version
 
 FIXTURE = Path(__file__).parent / "testdata" / "platform-endorsements.json"
 
@@ -385,6 +385,37 @@ def test_sevsnp_policy_validate_encoded_fields(name: str, changes: dict[str, Any
     bad = replace(valid_sevsnp_policy(), **changes)
     with pytest.raises(PolicyError):
         bad.validate()
+
+
+@pytest.mark.parametrize(
+    ("version", "match"),
+    [
+        ("1.55", ""),
+        ("0.0", ""),
+        ("255.255", ""),
+        ("256.0", r"minimum_api_version major: value out of range"),
+        ("0.256", r"minimum_api_version minor: value out of range"),
+        ("1" * 10_000 + ".0", r"minimum_api_version major: value out of range"),
+        ("0." + "9" * 10_000, r"minimum_api_version minor: value out of range"),
+        ("1", r'minimum_api_version "1" is not maj.min'),
+        ("1.", r"is not maj.min"),
+        (".1", r"is not maj.min"),
+        ("1.2.3", r"is not maj.min"),
+        ("-1.0", r"is not maj.min"),
+        ("1.0 ", r"is not maj.min"),
+        ("１.0", r"is not maj.min"),
+    ],
+)
+def test_validate_policy_version(version: str, match: str) -> None:
+    if match == "":
+        validate_policy_version("minimum_api_version", version)
+    else:
+        with pytest.raises(PolicyError, match=match):
+            validate_policy_version("minimum_api_version", version)
+
+
+def test_long_version_component_in_artifact() -> None:
+    raises_parse(mutated(set_sev("minimum_api_version", "1" * 10_000 + ".0")), r"major: value out of range")
 
 
 # --- TDXPolicy.validate ------------------------------------------------------

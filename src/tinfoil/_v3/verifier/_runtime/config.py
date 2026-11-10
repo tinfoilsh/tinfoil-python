@@ -57,6 +57,10 @@ def _read_cvm_version(data: bytes) -> str:
             raise RuntimeConfigError("config must contain exactly one YAML document")
     except yaml.YAMLError as err:
         raise RuntimeConfigError(f"{_PREFIX}: {err}") from err
+    except RecursionError as err:
+        # Composition recurses once per nesting level, so a document nested
+        # deeper than the interpreter allows is rejected rather than crashing.
+        raise RuntimeConfigError(f"{_PREFIX}: config is nested too deeply") from err
     if not isinstance(root, yaml.MappingNode):
         raise RuntimeConfigError(f"{_PREFIX}: config is not a mapping")
     value_node: object = None

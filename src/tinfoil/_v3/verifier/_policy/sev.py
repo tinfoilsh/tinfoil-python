@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from tinfoil._v3.verifier._policy.tdx import PolicyError, validate_policy_hex
+from tinfoil._v3.verifier._policy._common import PolicyError, validate_policy_hex
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,9 +147,11 @@ def validate_policy_version(name: str, version: str) -> None:
     major, dot, minor = version.partition(".")
     if dot == "" or not _decimal_digits(major) or not _decimal_digits(minor):
         raise PolicyError(f"{name} {_quote(version)} is not maj.min")
-    if int(major) > 255:
+    # A uint8 has at most three digits, so the length check keeps a
+    # pathologically long component away from the integer conversion.
+    if len(major) > 3 or int(major) > 255:
         raise PolicyError(f"{name} major: value out of range")
-    if int(minor) > 255:
+    if len(minor) > 3 or int(minor) > 255:
         raise PolicyError(f"{name} minor: value out of range")
 
 

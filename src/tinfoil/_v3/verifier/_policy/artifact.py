@@ -16,9 +16,10 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from tinfoil._v3.verifier import _json
+from tinfoil._v3.verifier._policy._common import PolicyError, validate_policy_hex
 from tinfoil._v3.verifier._policy.sev import TCB, GuestPolicy, SEVSNPPolicy, SNPPlatform
 from tinfoil._v3.verifier._policy.shape import Shape, Stack, format_shape, satisfies
-from tinfoil._v3.verifier._policy.tdx import PolicyError, TDXPolicy, validate_policy_hex
+from tinfoil._v3.verifier._policy.tdx import TDXPolicy
 
 ARTIFACT_FORMAT = "https://tinfoil.sh/predicate/platform-endorsements/v1"
 ARTIFACT_FORMAT_V2 = "https://tinfoil.sh/predicate/platform-endorsements/v2"

@@ -1,37 +1,10 @@
-"""The Intel TDX policy block, and the hex field checks that every policy block shares."""
+"""The Intel TDX policy block."""
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
-
-class PolicyError(ValueError):
-    """A policy artifact that cannot be fully enforced."""
-
-
-_HEX = re.compile(r"[0-9a-fA-F]*")
-
-
-def decode_hex(name: str, value: str, want_len: int) -> bytes:
-    """Decode a required hex policy value of an exact byte length, in either case."""
-    if not _HEX.fullmatch(value):
-        raise PolicyError(f"{name} is not hex: invalid byte in hex string")
-    if len(value) % 2:
-        raise PolicyError(f"{name} is not hex: odd length hex string")
-    decoded = bytes.fromhex(value)
-    if len(decoded) != want_len:
-        raise PolicyError(f"{name} must be {want_len} bytes, got {len(decoded)}")
-    return decoded
-
-
-def validate_policy_hex(name: str, value: str, byte_len: int) -> None:
-    """Require exactly ``2 * byte_len`` lowercase hex characters."""
-    if len(value) != 2 * byte_len:
-        raise PolicyError(f"{name} must be {2 * byte_len} hex chars, got {len(value)}")
-    if value != value.lower():
-        raise PolicyError(f"{name} must be lowercase hex")
-    decode_hex(name, value, byte_len)
+from tinfoil._v3.verifier._policy._common import PolicyError, validate_policy_hex
 
 
 @dataclass(frozen=True, slots=True)

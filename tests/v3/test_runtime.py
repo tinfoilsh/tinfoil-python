@@ -111,6 +111,11 @@ def nonzero_rtmr(m: Tree) -> None:
     m["igvm"]["tdx_launch"]["rtmr2"] = "ab" * MEASUREMENT_SIZE
 
 
+def nonzero_rtmr0(m: Tree) -> None:
+    # Format version 1 fixes MRTD alone, so RTMR0 must be zero like the others.
+    m["igvm"]["tdx_launch"]["rtmr0"] = "ab" * MEASUREMENT_SIZE
+
+
 def missing_rtmr(m: Tree) -> None:
     m["igvm"]["tdx_launch"]["rtmr3"] = ""
 
@@ -132,6 +137,7 @@ def uppercase_snp(m: Tree) -> None:
         missing_snp,
         missing_tdx,
         nonzero_rtmr,
+        nonzero_rtmr0,
         missing_rtmr,
         bad_mrtd,
         uppercase_snp,
@@ -347,6 +353,10 @@ def test_config_decode_rejects() -> None:
     raises_config(f"a:\n  cvm-version: 0.15.0@sha256:{DIGEST}\n".encode(), r"^cvm-version must pin")
     raises_config(b"cvm-version: [\n", r"^parsing config runtime pin: ")
     raises_config(b"\tcvm-version: x\n", r"^parsing config runtime pin: ")
+    # Nesting deeper than the interpreter's recursion allows is an error, not a crash.
+    for depth in (3_000, 20_000):
+        raises_config(b"a: " + b"[" * depth + b"]" * depth + b"\n" + GOOD.encode(), r"nested too deeply")
+        raises_config(b"a: " + b"{b: " * depth + b"1" + b"}" * depth + b"\n" + GOOD.encode(), r"nested too deeply")
     raises_config(b"cvm-version: \xff\n", r"^parsing config runtime pin: ")
 
 
