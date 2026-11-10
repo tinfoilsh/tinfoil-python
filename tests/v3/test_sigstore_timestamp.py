@@ -6,17 +6,28 @@ from __future__ import annotations
 import base64
 import dataclasses
 import hashlib
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from cryptography import x509
+from cryptography.x509.oid import ExtendedKeyUsageOID
 from rfc3161_client import VerificationError, VerifierBuilder, decode_timestamp_response
 
+from tests.v3 import pki
+from tests.v3.sigstore_world import World, b64
 from tests.v3.vectors import vector, vector_params
 from tinfoil._v3.verifier import _json
 from tinfoil._v3.verifier._sigstore import timestamp as ts
 from tinfoil._v3.verifier._sigstore.trusted_root import TrustedRoot, parse_trusted_root
+from tinfoil._v3.verifier._x509.certificate import (
+    OID_EKU_TIME_STAMPING,
+    X509Error,
+    issuer_name,
+    subject_name,
+    verify_chain,
+)
 
 
 def fixture_root(fixture: dict[str, Any]) -> TrustedRoot:
@@ -145,6 +156,57 @@ def test_library_claims() -> None:
         fixture = vector("rfc3161", fixture_id)
         response, data = fixture_inputs(fixture)
         assert not library_verifies(fixture_root(fixture), response, data), fixture_id
+
+
+def test_library_claims_every_handed_certificate_is_a_trust_anchor() -> None:
+    """``rfc3161-client`` accepts a token whose signer chains only to an intermediate in the set it is given and
+    never to the root: it treats every certificate it is handed as a trust anchor. The wrapper's own chain
+    verification from the signer to the authority's root is therefore the load-bearing check. Should a release
+    start enforcing the chain to a root, this test fails, and the wrapper's duplicate of that check can go."""
+    world = World()
+    life = timedelta(days=30)
+    rogue_ca = pki.certificate(
+        "rogue timestamp ca",
+        pki.p256(),
+        ca=True,
+        key_usage=pki.CA_USAGE,
+        not_before=world.now - life,
+        not_after=world.now + life,
+        serial=7,
+    )
+    rogue_signer = pki.certificate(
+        "rogue timestamp signer",
+        pki.p256(),
+        rogue_ca,
+        key_usage=pki.SIGNING_USAGE,
+        eku=[ExtendedKeyUsageOID.TIME_STAMPING],
+        eku_critical=True,
+        not_before=world.now - life,
+        not_after=world.now + life,
+        serial=8,
+    )
+    data = b"timestamped"
+    at = world.now - timedelta(hours=1)
+    # The world's own signer is accepted by both the library and the wrapper.
+    assert ts.verify_timestamp(world.trusted_root(), world.timestamp(data, at), data) == at
+    assert library_verifies(world.trusted_root(), world.timestamp(data, at), data)
+    # The rogue signer's token, under an authority whose chain names the rogue intermediate below the real root.
+    world.tsa_leaf = rogue_signer
+    response = world.timestamp(data, at)
+    record = json.loads(world.trusted_root_json())
+    record["timestampAuthorities"][0]["certChain"]["certificates"] = [
+        {"rawBytes": b64(der)} for der in (rogue_signer.der, rogue_ca.der, world.tsa_root.der)
+    ]
+    root = parse_trusted_root(json.dumps(record).encode())
+    (authority,) = root.timestamp_authorities
+    assert issuer_name(authority.chain[1]) != subject_name(authority.root), "the intermediate chains to no root"
+    assert library_verifies(root, response, data), "the library treats the handed intermediate as a trust anchor"
+    with pytest.raises(X509Error, match="no verified path"):
+        verify_chain(
+            authority.chain[0], [authority.chain[1]], [authority.root], at, extended_key_usage=OID_EKU_TIME_STAMPING
+        )
+    with pytest.raises(ts.TimestampError, match="no trusted timestamp authority"):
+        ts.verify_timestamp(root, response, data)
 
 
 def test_authorities_are_tried_in_order_and_windows_apply() -> None:
