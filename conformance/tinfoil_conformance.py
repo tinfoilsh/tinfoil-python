@@ -29,6 +29,9 @@ from datetime import UTC, datetime
 from typing import Any, BinaryIO, TextIO
 
 from tinfoil._v3.verifier._document import document
+from tinfoil._v3.verifier._endorsement.time import DEFAULT_FUTURE_SKEW, DEFAULT_MAX_AGE
+from tinfoil._v3.verifier._sigstore import timestamp as sigstore_timestamp
+from tinfoil._v3.verifier._sigstore import trusted_root as sigstore_trusted_root
 
 # Exit codes are the cross-SDK contract.
 EXIT_ACCEPTED = 0
@@ -61,7 +64,7 @@ ALL_STAGES = (
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
 )
-STAGES_SUPPORTED: tuple[str, ...] = (STAGE_CHECK_ENVELOPE,)
+STAGES_SUPPORTED: tuple[str, ...] = (STAGE_CHECK_ENVELOPE, STAGE_VERIFY_TIMESTAMP)
 
 ENVELOPE_REJECTED = "ENVELOPE_REJECTED"
 PROVENANCE_REJECTED = "PROVENANCE_REJECTED"
@@ -260,6 +263,8 @@ def _run_stage(stage: str, raw: Any) -> Result:
         return _malformed(stage)
     if stage == STAGE_CHECK_ENVELOPE:
         return _check_envelope(decoded)
+    if stage == STAGE_VERIFY_TIMESTAMP:
+        return _verify_timestamp(decoded)
     # Further stage handlers are added here as the modules that they drive land.
     return _unsupported(stage)
 
@@ -274,6 +279,37 @@ def _check_envelope(decoded: Input) -> Result:
     except (document.DocumentError, document.InvalidInputError):
         return _rejected(STAGE_CHECK_ENVELOPE, ENVELOPE_REJECTED)
     return Result({"stage": STAGE_CHECK_ENVELOPE, "accepted": True}, EXIT_ACCEPTED)
+
+
+def _verify_timestamp(decoded: Input) -> Result:
+    """An RFC 3161 response over the given input, against the trusted root's authorities, inside the appraisal window.
+
+    The response, the input and a non-zero verification time are required;
+    an injected trusted root that does not parse is malformed input. Every
+    verification failure, including a genTime outside the window, is a
+    provenance rejection.
+    """
+    if decoded.timestamp_response is None or decoded.timestamp_input is None or decoded.verification_time is None:
+        return _malformed(STAGE_VERIFY_TIMESTAMP)
+    try:
+        root = (
+            sigstore_trusted_root.parse_trusted_root(decoded.sigstore_trusted_root)
+            if decoded.sigstore_trusted_root is not None
+            else sigstore_trusted_root.embedded_trusted_root()
+        )
+    except sigstore_trusted_root.TrustedRootError:
+        return _malformed(STAGE_VERIFY_TIMESTAMP)
+    try:
+        gen_time = sigstore_timestamp.verify_timestamp(root, decoded.timestamp_response, decoded.timestamp_input)
+    except sigstore_timestamp.TimestampError:
+        return _rejected(STAGE_VERIFY_TIMESTAMP, PROVENANCE_REJECTED)
+    # The appraisal window of the stage: genTime may trail the clock by the
+    # verifier's maximum approval age and lead it by its future skew.
+    now = decoded.verification_time
+    if not now - DEFAULT_MAX_AGE <= gen_time <= now + DEFAULT_FUTURE_SKEW:
+        return _rejected(STAGE_VERIFY_TIMESTAMP, PROVENANCE_REJECTED)
+    outputs = {"timestamp": gen_time.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    return Result({"stage": STAGE_VERIFY_TIMESTAMP, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
 
 
 def main(argv: list[str], stdin: BinaryIO, stdout: TextIO, stderr: TextIO) -> int:
