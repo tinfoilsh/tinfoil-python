@@ -18,7 +18,6 @@ from tinfoil._v3.verifier._quote import quote, sev
 from tinfoil._v3.verifier._quote.sev import expectations
 from tinfoil._v3.verifier._quote.sev.authenticate import (
     SevAuthenticationError,
-    authenticate as authenticate_sev,
     decode_cert_chain,
     parse_crl,
     parse_report_bytes,
@@ -26,6 +25,9 @@ from tinfoil._v3.verifier._quote.sev.authenticate import (
     reject_masked_chip_id,
     trusted_roots,
     verify_signature,
+)
+from tinfoil._v3.verifier._quote.sev.authenticate import (
+    authenticate as authenticate_sev,
 )
 from tinfoil._v3.verifier._quote.sev.lib import abi, chain
 from tinfoil._v3.verifier._quote.sev.lib.abi import REPORT_SIZE, fms_to_cpuid1_eax, parse_report

@@ -16,10 +16,10 @@ from datetime import datetime
 from typing import TypeAlias, TypeVar
 
 from cryptography import x509
-from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
+from cryptography.utils import CryptographyDeprecationWarning
 
 from tinfoil._v3.verifier._x509 import der
 
