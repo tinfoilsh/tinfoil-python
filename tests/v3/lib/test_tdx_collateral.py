@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -151,7 +152,6 @@ SAMPLE_QE_IDENTITY_JSON = """
 }
 """
 
-# Byte versions for cache testing
 SAMPLE_TCB_INFO_RESPONSE = SAMPLE_TCB_INFO_JSON.encode()
 SAMPLE_QE_IDENTITY_RESPONSE = SAMPLE_QE_IDENTITY_JSON.encode()
 
@@ -179,6 +179,13 @@ SAMPLE_STALE_TCB_INFO_RESPONSE = SAMPLE_STALE_TCB_INFO_JSON.encode()
 # =============================================================================
 # Helper Functions
 # =============================================================================
+
+
+def _signed_object(body: str, key: str) -> str:
+    """The text of the top-level object member ``key`` of a sample response, as the signature would cover it."""
+    match = re.search(rf'"{key}":\s*(\{{.*\}})\s*,\s*"signature"', body, re.DOTALL)
+    assert match is not None
+    return match.group(1)
 
 
 def create_sample_pck_extensions() -> PckExtensions:
@@ -243,6 +250,45 @@ class TestParseTcbInfoResponse:
         with pytest.raises(CollateralError, match="must be 3"):
             parse_tcb_info_response(bad_json.encode())
 
+    def test_reject_duplicate_tcb_info_member(self):
+        """A second top-level "tcbInfo" member is rejected rather than overriding the signed one.
+
+        The signature covers the first object, so a forged duplicate must
+        never supply the values that appraisal reads.
+        """
+        forged = SAMPLE_TCB_INFO_JSON.replace('"tcbEvaluationDataNumber": 19', '"tcbEvaluationDataNumber": 99')
+        genuine_object = _signed_object(SAMPLE_TCB_INFO_JSON, "tcbInfo")
+        forged_object = _signed_object(forged, "tcbInfo")
+        body = f'{{"tcbInfo": {genuine_object}, "tcbInfo": {forged_object}, "signature": "abcd1234"}}'
+        with pytest.raises(CollateralError, match="duplicate"):
+            parse_tcb_info_response(body.encode())
+
+    def test_reject_duplicate_member_inside_tcb_info(self):
+        """A duplicate member nested inside tcbInfo is rejected too."""
+        body = SAMPLE_TCB_INFO_JSON.replace(
+            '"fmspc": "90c06f000000",', '"fmspc": "90c06f000000", "fmspc": "ffffffffffff",'
+        )
+        with pytest.raises(CollateralError, match="duplicate"):
+            parse_tcb_info_response(body.encode())
+
+    def test_reject_missing_tcb_status(self):
+        """A TCB level without a status is rejected instead of defaulting to up to date."""
+        body = SAMPLE_TCB_INFO_JSON.replace('"tcbStatus": "UpToDate"', '"tcbStatus_": "UpToDate"', 1)
+        with pytest.raises(CollateralError, match="missing 'tcbStatus'"):
+            parse_tcb_info_response(body.encode())
+
+    def test_reject_missing_required_member(self):
+        """A missing fmspc is an error, not an empty string."""
+        body = SAMPLE_TCB_INFO_JSON.replace('"fmspc": "90c06f000000",', "")
+        with pytest.raises(CollateralError, match="missing 'fmspc'"):
+            parse_tcb_info_response(body.encode())
+
+    def test_reject_wrong_member_type(self):
+        """A version that is not an integer is an error."""
+        body = SAMPLE_TCB_INFO_JSON.replace('"version": 3', '"version": "3"')
+        with pytest.raises(CollateralError, match="not a number"):
+            parse_tcb_info_response(body.encode())
+
 
 class TestParseQeIdentityResponse:
     """Test QE Identity parsing."""
@@ -268,6 +314,21 @@ class TestParseQeIdentityResponse:
         bad_json = SAMPLE_QE_IDENTITY_JSON.replace('"id": "TD_QE"', '"id": "QE"')
         with pytest.raises(CollateralError, match="must be 'TD_QE'"):
             parse_qe_identity_response(bad_json.encode())
+
+    def test_reject_duplicate_enclave_identity_member(self):
+        """A second top-level "enclaveIdentity" member is rejected rather than overriding the signed one."""
+        genuine_object = _signed_object(SAMPLE_QE_IDENTITY_JSON, "enclaveIdentity")
+        forged = SAMPLE_QE_IDENTITY_JSON.replace('"isvprodid": 2', '"isvprodid": 3')
+        forged_object = _signed_object(forged, "enclaveIdentity")
+        body = f'{{"enclaveIdentity": {genuine_object}, "enclaveIdentity": {forged_object}, "signature": "0665a932"}}'
+        with pytest.raises(CollateralError, match="duplicate"):
+            parse_qe_identity_response(body.encode())
+
+    def test_reject_missing_required_member(self):
+        """A missing mrsigner is an error, not an all-zero value."""
+        body = re.sub(r'"mrsigner": "[0-9A-F]+",\n', "", SAMPLE_QE_IDENTITY_JSON)
+        with pytest.raises(CollateralError, match="missing 'mrsigner'"):
+            parse_qe_identity_response(body.encode())
 
 
 # =============================================================================
@@ -461,7 +522,6 @@ class TestGetMatchingTcbLevel:
         """Test no matching level found."""
         tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
 
-        # Very low SVN values - won't match any level
         tee_tcb_svn = bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
         pce_svn = 1
         cpu_svn = bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
@@ -592,7 +652,6 @@ class TestValidateTcbStatus:
         """Test that no matching level raises error."""
         tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
 
-        # Create extensions with very low SVN values
         pck_ext = PckExtensions(
             ppid="00" * 16,
             tcb=PckCertTCB(
@@ -612,7 +671,6 @@ class TestValidateTcbStatus:
         """Test that FMSPC mismatch raises error."""
         tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
 
-        # Create extensions with different FMSPC
         pck_ext = PckExtensions(
             ppid="00" * 16,
             tcb=PckCertTCB(
@@ -632,7 +690,6 @@ class TestValidateTcbStatus:
         """Test that PCE_ID mismatch raises error."""
         tcb_info = parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode())
 
-        # Create extensions with different PCE_ID
         pck_ext = PckExtensions(
             ppid="00" * 16,
             tcb=PckCertTCB(
@@ -830,7 +887,6 @@ class TestTdxModuleIdentity:
         mr_signer_seam = b"\xaa" * 48
         seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
 
-        # Should not raise - validation succeeds
         validate_tdx_module_identity(tcb_info, tee_tcb_svn, mr_signer_seam, seam_attributes)
 
     def test_validate_module_identity_mrsigner_mismatch(self):
@@ -893,7 +949,7 @@ class TestCheckCollateralFreshness:
         with patch("tinfoil._v3.verifier._quote.tdx.lib.collateral.datetime") as mock_dt:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
-            # Should not raise (sample has tcbEvaluationDataNumber=18)
+            # The sample carries tcbEvaluationDataNumber=19, above the threshold
             check_collateral_freshness(collateral, min_tcb_evaluation_data_number=18)
 
     def test_expired_tcb_info_fails(self):
@@ -961,7 +1017,6 @@ class TestCheckCollateralFreshness:
 
     def test_qe_identity_evaluation_data_number_below_threshold(self):
         """Test failure when QE Identity tcbEvaluationDataNumber is below threshold."""
-        # Create TCB Info with high tcbEvaluationDataNumber
         high_eval_tcb_json = SAMPLE_TCB_INFO_JSON.replace(
             '"tcbEvaluationDataNumber": 19', '"tcbEvaluationDataNumber": 25'
         )
@@ -1020,7 +1075,7 @@ class TestTcbStatus:
 
 
 # =============================================================================
-# Caching Tests
+# Issuer Chain Tests
 # =============================================================================
 
 
@@ -1154,11 +1209,56 @@ class TestValidateCertificateRevocation:
         mock_crl.get_revoked_certificate_by_serial_number = get_revoked
         return mock_crl
 
-    def _create_mock_cert(self, serial: int) -> MagicMock:
-        """Create a mock certificate with given serial number."""
+    def _create_mock_cert(self, serial: int, issuer_cn: str = "Intel SGX PCK Platform CA") -> MagicMock:
+        """Create a mock certificate with the given serial number and issuer common name."""
+        mock_attr = MagicMock()
+        mock_attr.oid = NameOID.COMMON_NAME
+        mock_attr.value = issuer_cn
+
+        mock_issuer = MagicMock()
+        mock_issuer.__iter__ = MagicMock(return_value=iter([mock_attr]))
+
         mock_cert = MagicMock()
         mock_cert.serial_number = serial
+        mock_cert.issuer = mock_issuer
         return mock_cert
+
+    def _collateral_with_pck_crl(self, ca_type: str, revoked_serials: list[int]) -> TdxCollateral:
+        pck_crl = PckCrl(
+            crl=self._create_mock_crl(revoked_serials=revoked_serials),
+            ca_type=ca_type,
+            next_update=datetime.now(UTC) + timedelta(days=30),
+        )
+        return TdxCollateral(
+            tcb_info=parse_tcb_info_response(SAMPLE_TCB_INFO_JSON.encode()),
+            qe_identity=parse_qe_identity_response(SAMPLE_QE_IDENTITY_JSON.encode()),
+            tcb_info_raw=SAMPLE_TCB_INFO_JSON.encode(),
+            qe_identity_raw=SAMPLE_QE_IDENTITY_JSON.encode(),
+            pck_crl=pck_crl,
+        )
+
+    def test_pck_crl_for_other_ca_is_rejected(self):
+        """A processor-CA CRL cannot vouch for a PCK certificate that the platform CA issued, and vice versa."""
+        for crl_ca, issuer_cn in (
+            ("processor", "Intel SGX PCK Platform CA"),
+            ("platform", "Intel SGX PCK Processor CA"),
+        ):
+            collateral = self._collateral_with_pck_crl(crl_ca, revoked_serials=[])
+            pck_cert = self._create_mock_cert(serial=12345, issuer_cn=issuer_cn)
+            with pytest.raises(CollateralError, match=f"PCK CRL is for the {crl_ca} CA"):
+                validate_certificate_revocation(collateral, pck_cert)
+
+    def test_pck_crl_for_issuing_ca_is_accepted(self):
+        """The CRL of the CA that issued the PCK certificate passes the binding check."""
+        for ca, issuer_cn in (
+            ("platform", "Intel SGX PCK Platform CA"),
+            ("processor", "Intel SGX PCK Processor CA"),
+        ):
+            collateral = self._collateral_with_pck_crl(ca, revoked_serials=[])
+            validate_certificate_revocation(collateral, self._create_mock_cert(serial=12345, issuer_cn=issuer_cn))
+            collateral = self._collateral_with_pck_crl(ca, revoked_serials=[12345])
+            with pytest.raises(CollateralError, match="has been revoked"):
+                validate_certificate_revocation(collateral, self._create_mock_cert(serial=12345, issuer_cn=issuer_cn))
 
     def test_certificate_not_revoked(self):
         """Test that non-revoked certificate passes validation."""
@@ -1182,7 +1282,6 @@ class TestValidateCertificateRevocation:
 
         mock_cert = self._create_mock_cert(serial=12345)
 
-        # Should not raise
         validate_certificate_revocation(collateral, mock_cert)
 
     def test_certificate_revoked(self):
@@ -1287,7 +1386,6 @@ class TestValidateCertificateRevocation:
         mock_pck_cert = self._create_mock_cert(serial=12345)
         mock_intermediate_cert = self._create_mock_cert(serial=67890)
 
-        # Should not raise
         validate_certificate_revocation(collateral, mock_pck_cert, mock_intermediate_cert)
 
     def test_intermediate_cert_revoked(self):

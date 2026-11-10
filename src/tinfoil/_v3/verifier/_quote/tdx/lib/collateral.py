@@ -12,7 +12,6 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
 from urllib.parse import unquote
 
 from cryptography import x509
@@ -21,6 +20,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
+from tinfoil._v3.verifier import _json
 from tinfoil._v3.verifier._quote.tdx.lib.abi import QuoteV4
 from tinfoil._v3.verifier._quote.tdx.lib.chain import (
     CertificateChainError,
@@ -236,120 +236,226 @@ def _parse_datetime(dt_str: str) -> datetime:
     return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
 
 
-def _parse_tcb_component(data: dict[str, Any]) -> TcbComponent:
-    """Parse a TCB component from JSON."""
+# The Intel PCS JSON bodies are decoded with the strict parser, which rejects a
+# duplicate member name at every depth, so the values read here are the values
+# that the signature check covers. A member that appraisal relies on must be
+# present; only members that are informational, or whose absence can only make
+# appraisal fail, have a default.
+
+
+def _member(obj: _json.JsonObject, key: str, what: str) -> _json.JsonValue:
+    value = obj.get(key)
+    if value is None:
+        raise CollateralError(f"{what} is missing '{key}'")
+    return value
+
+
+def _object(value: _json.JsonValue, what: str) -> _json.JsonObject:
+    if not isinstance(value, _json.JsonObject):
+        raise CollateralError(f"{what} is not a JSON object")
+    return value
+
+
+def _string(obj: _json.JsonObject, key: str, what: str) -> str:
+    value = _member(obj, key, what)
+    if not isinstance(value, str):
+        raise CollateralError(f"{what} '{key}' is not a string")
+    return value
+
+
+def _optional_string(obj: _json.JsonObject, key: str, what: str) -> str:
+    value = obj.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise CollateralError(f"{what} '{key}' is not a string")
+    return value
+
+
+def _integer(obj: _json.JsonObject, key: str, what: str) -> int:
+    value = _member(obj, key, what)
+    if not isinstance(value, _json.JsonNumber):
+        raise CollateralError(f"{what} '{key}' is not a number")
+    try:
+        return value.to_int(bits=64, signed=True)
+    except _json.JsonError as e:
+        raise CollateralError(f"{what} '{key}' is not an integer: {e}") from e
+
+
+def _optional_integer(obj: _json.JsonObject, key: str, what: str) -> int | None:
+    if obj.get(key) is None:
+        return None
+    return _integer(obj, key, what)
+
+
+def _hex(obj: _json.JsonObject, key: str, what: str) -> bytes:
+    try:
+        return _parse_hex_bytes(_string(obj, key, what))
+    except ValueError as e:
+        raise CollateralError(f"{what} '{key}' is not hex: {e}") from e
+
+
+def _datetime(obj: _json.JsonObject, key: str, what: str) -> datetime:
+    try:
+        return _parse_datetime(_string(obj, key, what))
+    except ValueError as e:
+        raise CollateralError(f"{what} '{key}' is not a timestamp: {e}") from e
+
+
+def _array(obj: _json.JsonObject, key: str, what: str) -> tuple[_json.JsonValue, ...]:
+    value = _member(obj, key, what)
+    if not isinstance(value, tuple):
+        raise CollateralError(f"{what} '{key}' is not an array")
+    return value
+
+
+def _optional_array(obj: _json.JsonObject, key: str, what: str) -> tuple[_json.JsonValue, ...]:
+    if obj.get(key) is None:
+        return ()
+    return _array(obj, key, what)
+
+
+def _parse_tcb_component(value: _json.JsonValue) -> TcbComponent:
+    """Parse a TCB component from JSON; the SVN is required, category and type are informational."""
+    data = _object(value, "TCB component")
     return TcbComponent(
-        svn=data.get("svn", 0),
-        category=data.get("category", ""),
-        type=data.get("type", ""),
+        svn=_integer(data, "svn", "TCB component"),
+        category=_optional_string(data, "category", "TCB component"),
+        type=_optional_string(data, "type", "TCB component"),
     )
 
 
-def _parse_tcb(data: dict[str, Any]) -> Tcb:
-    """Parse TCB from JSON."""
-    sgx_components = [_parse_tcb_component(c) for c in data.get("sgxtcbcomponents", [])]
-    tdx_components = [_parse_tcb_component(c) for c in data.get("tdxtcbcomponents", [])]
+def _parse_tcb(data: _json.JsonObject) -> Tcb:
+    """Parse a full TCB from JSON.
 
-    # Pad to 16 components if needed
-    while len(sgx_components) < TCB_COMPONENT_COUNT:
-        sgx_components.append(TcbComponent(svn=0))
-    while len(tdx_components) < TCB_COMPONENT_COUNT:
-        tdx_components.append(TcbComponent(svn=0))
-
-    # Capture isvsvn if present (used by QE Identity TCB levels)
-    isv_svn = data.get("isvsvn")
+    The component lists are taken as published: a list that is not 16
+    entries long cannot match the 16-byte SVNs and fails appraisal.
+    """
+    sgx_components = [_parse_tcb_component(c) for c in _array(data, "sgxtcbcomponents", "TCB")]
+    tdx_components = [_parse_tcb_component(c) for c in _array(data, "tdxtcbcomponents", "TCB")]
 
     return Tcb(
-        sgx_tcb_components=sgx_components[:TCB_COMPONENT_COUNT],
-        pce_svn=data.get("pcesvn", 0),
-        tdx_tcb_components=tdx_components[:TCB_COMPONENT_COUNT],
-        isv_svn=isv_svn,
+        sgx_tcb_components=sgx_components,
+        pce_svn=_integer(data, "pcesvn", "TCB"),
+        tdx_tcb_components=tdx_components,
+        # Present only in QE Identity TCB levels
+        isv_svn=_optional_integer(data, "isvsvn", "TCB"),
     )
 
 
-def _parse_tcb_level(data: dict[str, Any]) -> TcbLevel:
-    """Parse a TCB level from JSON."""
-    tcb_data = data.get("tcb", {})
+def _parse_tcb_level(value: _json.JsonValue) -> TcbLevel:
+    """Parse a TCB level from JSON; the TCB, date and status are required."""
+    data = _object(value, "TCB level")
+    tcb_data = _object(_member(data, "tcb", "TCB level"), "TCB level 'tcb'")
 
     # Handle simple TCB (just isvsvn) vs full TCB
     if "sgxtcbcomponents" in tcb_data:
         tcb = _parse_tcb(tcb_data)
     else:
-        # Simple TCB with just isvsvn (used by QE Identity)
-        # Capture the isvsvn value for QE TCB level matching
-        isv_svn = tcb_data.get("isvsvn")
+        # Simple TCB with just isvsvn (used by QE Identity and TDX module identities)
         tcb = Tcb(
             sgx_tcb_components=[TcbComponent(svn=0)] * 16,
             pce_svn=0,
             tdx_tcb_components=[TcbComponent(svn=0)] * 16,
-            isv_svn=isv_svn,
+            isv_svn=_integer(tcb_data, "isvsvn", "TCB level 'tcb'"),
         )
+
+    status = _string(data, "tcbStatus", "TCB level")
+    try:
+        tcb_status = TcbStatus(status)
+    except ValueError as e:
+        raise CollateralError(f"TCB level has unknown tcbStatus {status!r}") from e
+
+    # Informational: only quoted in error messages
+    advisory_ids: list[str] = []
+    for advisory in _optional_array(data, "advisoryIDs", "TCB level"):
+        if not isinstance(advisory, str):
+            raise CollateralError("TCB level 'advisoryIDs' is not a list of strings")
+        advisory_ids.append(advisory)
 
     return TcbLevel(
         tcb=tcb,
-        tcb_date=data.get("tcbDate", ""),
-        tcb_status=TcbStatus(data.get("tcbStatus", "UpToDate")),
-        advisory_ids=data.get("advisoryIDs", []),
+        tcb_date=_string(data, "tcbDate", "TCB level"),
+        tcb_status=tcb_status,
+        advisory_ids=advisory_ids,
     )
 
 
-def _parse_tdx_module(data: dict[str, Any]) -> TdxModule:
+def _parse_tdx_module(value: _json.JsonValue) -> TdxModule:
     """Parse TDX module from JSON."""
+    data = _object(value, "tdxModule")
     return TdxModule(
-        mrsigner=_parse_hex_bytes(data.get("mrsigner", "00" * TDX_MRSIGNER_SIZE)),
-        attributes=_parse_hex_bytes(data.get("attributes", "")),
-        attributes_mask=_parse_hex_bytes(data.get("attributesMask", "")),
+        mrsigner=_hex(data, "mrsigner", "tdxModule"),
+        attributes=_hex(data, "attributes", "tdxModule"),
+        attributes_mask=_hex(data, "attributesMask", "tdxModule"),
     )
 
 
-def _parse_tdx_module_identity(data: dict[str, Any]) -> TdxModuleIdentity:
+def _parse_tdx_module_identity(value: _json.JsonValue) -> TdxModuleIdentity:
     """Parse TDX module identity from JSON."""
+    data = _object(value, "TDX module identity")
     return TdxModuleIdentity(
-        id=data.get("id", ""),
-        mrsigner=_parse_hex_bytes(data.get("mrsigner", "00" * TDX_MRSIGNER_SIZE)),
-        attributes=_parse_hex_bytes(data.get("attributes", "")),
-        attributes_mask=_parse_hex_bytes(data.get("attributesMask", "")),
-        tcb_levels=[_parse_tcb_level(level) for level in data.get("tcbLevels", [])],
+        id=_string(data, "id", "TDX module identity"),
+        mrsigner=_hex(data, "mrsigner", "TDX module identity"),
+        attributes=_hex(data, "attributes", "TDX module identity"),
+        attributes_mask=_hex(data, "attributesMask", "TDX module identity"),
+        tcb_levels=[_parse_tcb_level(level) for level in _array(data, "tcbLevels", "TDX module identity")],
     )
 
 
-def _parse_tcb_info(data: dict[str, Any]) -> TcbInfo:
-    """Parse TCB Info from JSON."""
+def _parse_tcb_info(data: _json.JsonObject) -> TcbInfo:
+    """Parse TCB Info from JSON.
+
+    ``tdxModule`` is informational and optional. ``tdxModuleIdentities``
+    defaults to none, which makes module identity appraisal fail.
+    """
     tdx_module = None
-    if "tdxModule" in data:
+    if data.get("tdxModule") is not None:
         tdx_module = _parse_tdx_module(data["tdxModule"])
 
     return TcbInfo(
-        id=data.get("id", ""),
-        version=data.get("version", 0),
-        issue_date=_parse_datetime(data.get("issueDate", "1970-01-01T00:00:00Z")),
-        next_update=_parse_datetime(data.get("nextUpdate", "1970-01-01T00:00:00Z")),
-        fmspc=data.get("fmspc", ""),
-        pce_id=data.get("pceId", ""),
-        tcb_type=data.get("tcbType", 0),
-        tcb_evaluation_data_number=data.get("tcbEvaluationDataNumber", 0),
+        id=_string(data, "id", "TCB Info"),
+        version=_integer(data, "version", "TCB Info"),
+        issue_date=_datetime(data, "issueDate", "TCB Info"),
+        next_update=_datetime(data, "nextUpdate", "TCB Info"),
+        fmspc=_string(data, "fmspc", "TCB Info"),
+        pce_id=_string(data, "pceId", "TCB Info"),
+        tcb_type=_integer(data, "tcbType", "TCB Info"),
+        tcb_evaluation_data_number=_integer(data, "tcbEvaluationDataNumber", "TCB Info"),
         tdx_module=tdx_module,
-        tdx_module_identities=[_parse_tdx_module_identity(m) for m in data.get("tdxModuleIdentities", [])],
-        tcb_levels=[_parse_tcb_level(level) for level in data.get("tcbLevels", [])],
+        tdx_module_identities=[
+            _parse_tdx_module_identity(m) for m in _optional_array(data, "tdxModuleIdentities", "TCB Info")
+        ],
+        tcb_levels=[_parse_tcb_level(level) for level in _array(data, "tcbLevels", "TCB Info")],
     )
 
 
-def _parse_enclave_identity(data: dict[str, Any]) -> EnclaveIdentity:
-    """Parse Enclave Identity from JSON."""
+def _parse_enclave_identity(data: _json.JsonObject) -> EnclaveIdentity:
+    """Parse Enclave Identity from JSON; every member is required."""
     return EnclaveIdentity(
-        id=data.get("id", ""),
-        version=data.get("version", 0),
-        issue_date=_parse_datetime(data.get("issueDate", "1970-01-01T00:00:00Z")),
-        next_update=_parse_datetime(data.get("nextUpdate", "1970-01-01T00:00:00Z")),
-        tcb_evaluation_data_number=data.get("tcbEvaluationDataNumber", 0),
-        miscselect=_parse_hex_bytes(data.get("miscselect", "00" * MISCSELECT_SIZE)),
-        miscselect_mask=_parse_hex_bytes(data.get("miscselectMask", "00" * MISCSELECT_SIZE)),
-        attributes=_parse_hex_bytes(data.get("attributes", "00" * QE_ATTRIBUTES_SIZE)),
-        attributes_mask=_parse_hex_bytes(data.get("attributesMask", "00" * QE_ATTRIBUTES_SIZE)),
-        mrsigner=_parse_hex_bytes(data.get("mrsigner", "00" * QE_MRSIGNER_SIZE)),
-        isv_prod_id=data.get("isvprodid", 0),
-        tcb_levels=[_parse_tcb_level(level) for level in data.get("tcbLevels", [])],
+        id=_string(data, "id", "QE Identity"),
+        version=_integer(data, "version", "QE Identity"),
+        issue_date=_datetime(data, "issueDate", "QE Identity"),
+        next_update=_datetime(data, "nextUpdate", "QE Identity"),
+        tcb_evaluation_data_number=_integer(data, "tcbEvaluationDataNumber", "QE Identity"),
+        miscselect=_hex(data, "miscselect", "QE Identity"),
+        miscselect_mask=_hex(data, "miscselectMask", "QE Identity"),
+        attributes=_hex(data, "attributes", "QE Identity"),
+        attributes_mask=_hex(data, "attributesMask", "QE Identity"),
+        mrsigner=_hex(data, "mrsigner", "QE Identity"),
+        isv_prod_id=_integer(data, "isvprodid", "QE Identity"),
+        tcb_levels=[_parse_tcb_level(level) for level in _array(data, "tcbLevels", "QE Identity")],
     )
+
+
+def _parse_response(response_bytes: bytes, data_name: str) -> _json.JsonObject:
+    """Strictly decode a PCS response body: invalid JSON, a non-object body and a duplicate member name at any
+    depth are rejected."""
+    try:
+        value = _json.strict_parse(response_bytes)
+    except _json.JsonError as e:
+        raise CollateralError(f"Failed to parse {data_name} JSON: {e}") from e
+    return _object(value, f"{data_name} response")
 
 
 def parse_tcb_info_response(response_bytes: bytes) -> TdxTcbInfo:
@@ -365,12 +471,13 @@ def parse_tcb_info_response(response_bytes: bytes) -> TdxTcbInfo:
     Raises:
         CollateralError: If parsing fails
     """
-    try:
-        data = json.loads(response_bytes)
-    except json.JSONDecodeError as e:
-        raise CollateralError(f"Failed to parse TCB Info JSON: {e}") from e
+    data = _parse_response(response_bytes, "TCB Info")
 
-    tcb_info = _parse_tcb_info(data.get("tcbInfo", {}))
+    try:
+        tcb_info = _parse_tcb_info(_object(_member(data, "tcbInfo", "TCB Info response"), "tcbInfo"))
+        signature = _string(data, "signature", "TCB Info response")
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
+        raise CollateralError(f"Failed to parse TCB Info: {e}") from e
 
     # Validate required fields
     if tcb_info.id != "TDX":
@@ -378,10 +485,7 @@ def parse_tcb_info_response(response_bytes: bytes) -> TdxTcbInfo:
     if tcb_info.version != 3:
         raise CollateralError(f"TCB Info version must be 3, got {tcb_info.version}")
 
-    return TdxTcbInfo(
-        tcb_info=tcb_info,
-        signature=data.get("signature", ""),
-    )
+    return TdxTcbInfo(tcb_info=tcb_info, signature=signature)
 
 
 def parse_qe_identity_response(response_bytes: bytes) -> QeIdentity:
@@ -397,12 +501,15 @@ def parse_qe_identity_response(response_bytes: bytes) -> QeIdentity:
     Raises:
         CollateralError: If parsing fails
     """
-    try:
-        data = json.loads(response_bytes)
-    except json.JSONDecodeError as e:
-        raise CollateralError(f"Failed to parse QE Identity JSON: {e}") from e
+    data = _parse_response(response_bytes, "QE Identity")
 
-    enclave_identity = _parse_enclave_identity(data.get("enclaveIdentity", {}))
+    try:
+        enclave_identity = _parse_enclave_identity(
+            _object(_member(data, "enclaveIdentity", "QE Identity response"), "enclaveIdentity")
+        )
+        signature = _string(data, "signature", "QE Identity response")
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
+        raise CollateralError(f"Failed to parse QE Identity: {e}") from e
 
     # Validate required fields
     if enclave_identity.id != "TD_QE":
@@ -410,10 +517,7 @@ def parse_qe_identity_response(response_bytes: bytes) -> QeIdentity:
     if enclave_identity.version != 2:
         raise CollateralError(f"QE Identity version must be 2, got {enclave_identity.version}")
 
-    return QeIdentity(
-        enclave_identity=enclave_identity,
-        signature=data.get("signature", ""),
-    )
+    return QeIdentity(enclave_identity=enclave_identity, signature=signature)
 
 
 def _parse_issuer_chain_header(header_value: str) -> list[x509.Certificate]:
@@ -1292,7 +1396,8 @@ def validate_certificate_revocation(
     Validate that certificates in the attestation chain have not been revoked.
 
     Per Intel DCAP spec Section 2.3, checks:
-    1. PCK (leaf) certificate against the PCK CRL from Intel PCS
+    1. PCK (leaf) certificate against the PCK CRL from Intel PCS, which must
+       be the CRL of the CA that issued the PCK certificate
     2. Intermediate CA certificate against the Intel SGX Root CA CRL
     3. TCB Info signing certificate against the Intel SGX Root CA CRL
     4. QE Identity signing certificate against the Intel SGX Root CA CRL
@@ -1313,6 +1418,14 @@ def validate_certificate_revocation(
         raise CollateralError("Cannot check certificate revocation: PCK CRL not available in collateral")
 
     # --- Check PCK (leaf) certificate against PCK CRL ---
+    # The CRL must be the one for the CA that issued the PCK certificate; the
+    # other CA's CRL would never list this certificate's serial number.
+    pck_ca_type = _determine_pck_ca_type(pck_cert)
+    if collateral.pck_crl.ca_type != pck_ca_type:
+        raise CollateralError(
+            f"PCK CRL is for the {collateral.pck_crl.ca_type} CA, but the PCK certificate was issued by the "
+            f"{pck_ca_type} CA"
+        )
     pck_crl = collateral.pck_crl.crl
 
     # Check PCK CRL freshness
