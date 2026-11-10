@@ -70,7 +70,30 @@ extend-exclude = [
     "src/tinfoil/github.py",
     "src/tinfoil/sigstore.py",
     "src/tinfoil/user_cache_secret.py",
-    "tests/test_*.py",
+    "tests/test_attestation_all_enclaves.py",
+    "tests/test_attestation_flow.py",
+    "tests/test_attestation_headers.py",
+    "tests/test_certificate_reverification.py",
+    "tests/test_collateral_tdx.py",
+    "tests/test_constructor_timeout.py",
+    "tests/test_ehbp_transport.py",
+    "tests/test_encrypted_proxy.py",
+    "tests/test_integration_async.py",
+    "tests/test_integration_audio.py",
+    "tests/test_integration_chat.py",
+    "tests/test_integration_http.py",
+    "tests/test_pck_extensions.py",
+    "tests/test_sev_attestation.py",
+    "tests/test_sev_validation.py",
+    "tests/test_tdx_abi.py",
+    "tests/test_tdx_attestation_flow.py",
+    "tests/test_tdx_multiplatform.py",
+    "tests/test_tdx_verify.py",
+    "tests/test_user_cache_secret.py",
+    "tests/test_validate_tdx.py",
+    "tests/test_verification_document.py",
+    "tests/test_verification_failures.py",
+    "tests/test_verification_failures_integration.py",
 ]
 
 [tool.ruff.lint]
@@ -104,7 +127,7 @@ python_version = "3.11"
 strict = true
 warn_unreachable = true
 mypy_path = ["conformance"]
-files = ["src/tinfoil/_v3", "conformance", "tests/conformance", "tests/v3"]
+files = ["src/tinfoil/_v3", "conformance", "tests/conformance", "tests/v3", "tests/test_surface.py"]
 
 # The SEV-SNP and TDX library code was moved from the 0.x tree and is typed
 # incrementally; its tests follow it. Everything else under _v3 is strict.

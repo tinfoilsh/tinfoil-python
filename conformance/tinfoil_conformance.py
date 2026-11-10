@@ -4,20 +4,29 @@ Test tooling, not part of the published package. Run from a source checkout:
 
     uv run python conformance/tinfoil_conformance.py <stage>     Input JSON on stdin, Output JSON on stdout
     uv run python conformance/tinfoil_conformance.py capabilities
+    uv run python conformance/tinfoil_conformance.py live-verify {"host": ..., "repo": ...} on stdin
+    uv run python conformance/tinfoil_conformance.py capture --host H --repo R [--id I] [--out F] [--nonce HEX]
 
 The exit code is the verdict that the suite reads; stdout is diagnostic. The
 contract is tinfoil-conformance ``docs/CONFORMANCE_ADAPTER_SPEC.md`` v1.2.0.
 
 Every v3 stage decodes its Input first, so malformed input is reported as such
 (exit 30) before anything else. The full-verify stage is one ``verify_v3_at``
-call on a verifier built with the injected roots, so the shared fixtures
-appraise exactly the code that production runs; the layer on its
-``VerificationError`` names the rejection. The block stages isolate a single
-layer by calling into the document, endorsement and quote modules that the
-verifier uses. A stage that this adapter does not implement exits 20
-(unsupported), never with a verdict. ``live-verify`` and ``capture`` take
-their own arguments, not an Input, and exit 20 without reading stdin until
-they are implemented.
+call on the public ``Verifier``, or on one built with the injected roots when
+the Input supplies any, so the shared fixtures appraise exactly the code that
+production runs; the layer on its ``VerificationError`` names the rejection.
+The block stages isolate a single layer by calling into the document,
+endorsement and quote modules that the verifier uses. A stage that this
+adapter does not implement exits 20 (unsupported), never with a verdict.
+
+``live-verify`` and ``capture`` are the integration lane: the only commands
+that open a connection. Both fetch a fresh nonce-bound document from the
+enclave and verify it through the public ``Verifier`` with the embedded roots
+and the current time. ``live-verify`` then dials the enclave again to check
+that the TLS key on the wire is the endorsed one, and reports the facts with
+``channel_binding``. ``capture`` freezes an accepted document as a fixture
+pinned to its capture time, so that it replays as an accept under the
+production roots.
 """
 
 from __future__ import annotations
@@ -26,25 +35,36 @@ import base64
 import binascii
 import json
 import re
+import socket
+import ssl
 import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, BinaryIO, TextIO
+from urllib.parse import urlsplit
 
-from tinfoil._v3.verifier import _measurement, _verifier
+import httpx
+
+from tinfoil._sdkinfo import attestation_headers
+from tinfoil._v3.verifier import (
+    NONCE_SIZE,
+    UsageError,
+    VerificationError,
+    Verifier,
+    _measurement,
+    _verifier,
+    connection_cert_fp,
+    random_nonce,
+)
+from tinfoil._v3.verifier import Verification as PublicVerification
 from tinfoil._v3.verifier._document import document
 from tinfoil._v3.verifier._document.collateral.collateral import NotFoundError
 from tinfoil._v3.verifier._endorsement import approval, provenance, reference
 from tinfoil._v3.verifier._endorsement import time as approval_time
-from tinfoil._v3.verifier._errors import (
-    LAYER_ENVELOPE,
-    LAYER_POLICY,
-    LAYER_PROVENANCE,
-    LAYER_QUOTE,
-    UsageError,
-    VerificationError,
-)
+from tinfoil._v3.verifier._errors import LAYER_ENVELOPE, LAYER_POLICY, LAYER_PROVENANCE, LAYER_QUOTE
 from tinfoil._v3.verifier._policy import ARTIFACT_FORMAT
 from tinfoil._v3.verifier._quote import quote
 from tinfoil._v3.verifier._sigstore import bundle as sigstore_bundle
@@ -96,6 +116,17 @@ STAGES_SUPPORTED: tuple[str, ...] = (
 # The measurement types of the wire contract.
 SEV_SNP_MEASUREMENT_TYPE = "https://tinfoil.sh/predicate/sev-snp-guest/v2"
 TDX_MEASUREMENT_TYPE = "https://tinfoil.sh/predicate/tdx-guest/v2"
+
+# The integration lane's wire facts.
+ATTESTATION_ENDPOINT = "/.well-known/tinfoil-attestation"
+CHANNEL_BINDING = "tls-spki"
+# Bounds on the document fetch: the whole fetch from the request to the last body byte (and each socket
+# operation within it), and the body that it may carry.
+FETCH_TIMEOUT = 30.0
+MAX_DOCUMENT_BYTES = 32 << 20
+# The TLS handshake that checks the channel binding.
+DIAL_TIMEOUT = 10.0
+DEFAULT_CAPTURE_ID = "real-frozen"
 
 ENVELOPE_REJECTED = "ENVELOPE_REJECTED"
 PROVENANCE_REJECTED = "PROVENANCE_REJECTED"
@@ -252,6 +283,8 @@ def _lower_hex(value: str, name: str) -> str:
 class Result:
     output: dict[str, Any]
     exit_code: int
+    diagnostic: str = ""
+    """Why a stage gave no verdict or a rejection, for stderr; the output carries only the code."""
 
 
 def capabilities() -> dict[str, Any]:
@@ -264,22 +297,28 @@ def capabilities() -> dict[str, Any]:
             "stages_supported": list(STAGES_SUPPORTED),
             "synthetic_roots": {"amd": True, "intel": True, "sigstore": True},
             "freshness_enforced": True,
-            "live_verify": False,
+            "live_verify": True,
             "channel_binding": "tls-spki",
         },
     }
 
 
-def _malformed(stage: str) -> Result:
-    return Result({"stage": stage, "accepted": False, "rejection": {"code": MALFORMED_INPUT}}, EXIT_MALFORMED)
+def _malformed(stage: str, diagnostic: str = "") -> Result:
+    return Result(
+        {"stage": stage, "accepted": False, "rejection": {"code": MALFORMED_INPUT}}, EXIT_MALFORMED, diagnostic
+    )
 
 
 def _unsupported(stage: str) -> Result:
     return Result({"stage": stage, "accepted": False}, EXIT_UNSUPPORTED)
 
 
-def _rejected(stage: str, code: str) -> Result:
-    return Result({"stage": stage, "accepted": False, "rejection": {"code": code}}, EXIT_REJECTED)
+def _rejected(stage: str, code: str, diagnostic: str = "") -> Result:
+    return Result({"stage": stage, "accepted": False, "rejection": {"code": code}}, EXIT_REJECTED, diagnostic)
+
+
+def _internal(stage: str, diagnostic: str) -> Result:
+    return Result({"stage": stage, "accepted": False}, EXIT_INTERNAL, diagnostic)
 
 
 def run(stage: str, raw: Any) -> Result:
@@ -291,11 +330,13 @@ def run(stage: str, raw: Any) -> Result:
     """
     try:
         return _run_stage(stage, raw)
-    except Exception:  # the exit code is the report
-        return Result({"stage": stage, "accepted": False}, EXIT_INTERNAL)
+    except Exception as err:  # the exit code is the report
+        return _internal(stage, f"{type(err).__name__}: {err}")
 
 
 def _run_stage(stage: str, raw: Any) -> Result:
+    if stage == STAGE_LIVE_VERIFY:
+        return _live_verify(raw)
     try:
         decoded = Input.from_json(raw)
     except MalformedInput:
@@ -320,21 +361,18 @@ def _run_stage(stage: str, raw: Any) -> Result:
 def _verify(decoded: Input) -> Result:
     """The whole flow through the verifier: envelope, provenance with freshness, quote, policy.
 
-    The verifier is built with the injected roots; one that cannot be built
-    (an unparseable Sigstore root) is malformed input, as is any usage
-    error of the call itself (an absent nonce). The layer of a
-    VerificationError names the rejection code. A document that verifies
-    but endorses no usable channel keys is useless to every real client, so
-    the stage requires both the TLS fingerprint and the HPKE key.
+    An Input without trust roots verifies through the public ``Verifier``,
+    exactly as an application does; one that injects a root builds the
+    verifier through the harness seam. A verifier that cannot be built (an
+    unparseable Sigstore root) is malformed input, as is any usage error of
+    the call itself (an absent nonce). The layer of a VerificationError
+    names the rejection code. A document that verifies but endorses no
+    usable channel keys is useless to every real client, so the stage
+    requires both the TLS fingerprint and the HPKE key.
     """
     stage = STAGE_VERIFY
-    overrides = _verifier.Overrides(
-        sigstore_root=decoded.sigstore_trusted_root,
-        amd_root_pem=decoded.amd_chain_pem,
-        intel_root_pem=decoded.intel_root_pem,
-    )
     try:
-        verifier = _verifier._build(overrides=overrides)
+        verifier = _verifier_for(decoded)
     except UsageError:
         return _malformed(stage)
     appraisal = decoded.verification_time or datetime.now(UTC)
@@ -343,22 +381,46 @@ def _verify(decoded: Input) -> Result:
     except UsageError:
         return _malformed(stage)
     except VerificationError as err:
-        code = _LAYER_CODES.get(err.layer)
-        if code is None:
-            return Result({"stage": stage, "accepted": False}, EXIT_INTERNAL)
-        return _rejected(stage, code)
+        return _verification_rejected(stage, err)
+    outputs = _accept_outputs(verified)
+    if outputs is None:
+        return _rejected(stage, ENVELOPE_REJECTED, "document endorses no TLS fingerprint or no HPKE key")
+    return Result({"stage": stage, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
+
+
+def _verifier_for(decoded: Input) -> Verifier:
+    """The production verifier, or one with the Input's injected roots in place of the embedded ones."""
+    if decoded.sigstore_trusted_root is None and decoded.amd_chain_pem is None and decoded.intel_root_pem is None:
+        return Verifier()
+    overrides = _verifier.Overrides(
+        sigstore_root=decoded.sigstore_trusted_root,
+        amd_root_pem=decoded.amd_chain_pem,
+        intel_root_pem=decoded.intel_root_pem,
+    )
+    return _verifier._build(overrides=overrides)
+
+
+def _verification_rejected(stage: str, err: VerificationError) -> Result:
+    """The rejection that a VerificationError's layer selects; a layer outside the contract gives no verdict."""
+    code = _LAYER_CODES.get(err.layer)
+    if code is None:
+        return _internal(stage, f"unknown verification layer {err.layer!r}: {err}")
+    return _rejected(stage, code, str(err))
+
+
+def _accept_outputs(verified: PublicVerification) -> dict[str, Any] | None:
+    """The accept facts of a verification, or None when it endorses no TLS fingerprint or no HPKE key."""
     tls_fp = verified.tls_public_key_fp
     hpke_key = verified.hpke_public_key
     if tls_fp is None or hpke_key is None:
-        return _rejected(stage, ENVELOPE_REJECTED)
-    outputs = {
+        return None
+    return {
         "code_digest": verified.code_digest,
         "code_measurement": _expected_of(verified.code_measurement),
         "enclave_measurement": _measurement_of(verified.enclave_measurement),
         "tls_public_key_fp": tls_fp,
         "hpke_public_key": hpke_key,
     }
-    return Result({"stage": stage, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
 
 
 def _expected_of(expected: _measurement.Expected) -> dict[str, Any]:
@@ -564,6 +626,246 @@ def _verify_timestamp(decoded: Input) -> Result:
     return Result({"stage": STAGE_VERIFY_TIMESTAMP, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
 
 
+# --- the integration lane -----------------------------------------------------------------------
+
+
+class FetchError(RuntimeError):
+    """The enclave did not serve a document: a failed request, a status outside 2xx, an oversized body, or a
+    response that did not complete within FETCH_TIMEOUT."""
+
+
+def _live_verify(raw: Any) -> Result:
+    """Verify a live enclave as an application does: a fresh nonce, the enclave's document, the public
+    ``Verifier`` with the embedded roots at the current time, then the TLS key on the wire against the endorsed
+    one.
+
+    The request is ``{"host": ..., "repo": ...}``, both non-empty strings
+    and the host a bare host with an optional port; anything else is
+    malformed input, found before any connection. A document that cannot
+    be fetched, or an enclave that cannot be dialed for the channel
+    binding, gives no verdict. The verifier's errors map as in the
+    full-verify stage. A document that endorses no usable channel keys is
+    an envelope rejection, and a live TLS key other than the endorsed one
+    is a policy rejection.
+    """
+    stage = STAGE_LIVE_VERIFY
+    request = _live_request(raw)
+    if request is None:
+        return _malformed(stage)
+    host, repo = request
+    try:
+        _authority(host)
+    except ValueError as err:
+        return _malformed(stage, str(err))
+    verifier = Verifier()
+    nonce = random_nonce()
+    try:
+        document_bytes = _fetch_document(host, nonce)
+    except (FetchError, httpx.HTTPError, OSError, ValueError) as err:
+        return _internal(stage, f"fetching attestation from {host}: {err}")
+    try:
+        verified = verifier.verify_v3(document_bytes, nonce, repo)
+    except UsageError as err:
+        return _malformed(stage, str(err))
+    except VerificationError as err:
+        return _verification_rejected(stage, err)
+    outputs = _accept_outputs(verified)
+    if outputs is None:
+        return _rejected(stage, ENVELOPE_REJECTED, "document endorses no TLS fingerprint or no HPKE key")
+    # Channel binding: the endorsed TLS key must be the key the live enclave presents on the wire.
+    try:
+        live = _live_tls_fingerprint(host)
+    except (OSError, ValueError) as err:
+        return _internal(stage, f"dialing {host} for channel binding: {err}")
+    endorsed = outputs["tls_public_key_fp"]
+    if live != endorsed:
+        return _rejected(stage, POLICY_REJECTED, f"channel binding: live TLS key {live} != endorsed {endorsed}")
+    outputs["channel_binding"] = CHANNEL_BINDING
+    return Result({"stage": stage, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
+
+
+def _live_request(raw: Any) -> tuple[str, str] | None:
+    """The host and repo of a live-verify request, or None when it is not one."""
+    if not isinstance(raw, Mapping):
+        return None
+    host, repo = raw.get("host"), raw.get("repo")
+    if not isinstance(host, str) or not isinstance(repo, str) or not host or not repo:
+        return None
+    return host, repo
+
+
+def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
+    """Fetch a live enclave's document and, only if the full-verify stage accepts it under the embedded roots at
+    the capture time, freeze it as a fixture pinned to that time.
+
+    ``--host`` (a bare host with an optional port) and ``--repo`` are
+    required; ``--id`` names the fixture, ``--out`` is the file to write
+    (stdout by default) and ``--nonce`` fixes the challenge as lowercase hex
+    (fresh and random by default). Invalid flags are found before any
+    connection. A document that the verifier does not accept is never
+    written; the exit code is the stage's.
+    """
+    options = _capture_options(args)
+    if options is None:
+        stderr.write(
+            "usage: tinfoil_conformance.py capture --host <enclave> --repo <owner/name>"
+            " [--id ..] [--out ..] [--nonce ..]\n"
+        )
+        return EXIT_MALFORMED
+    try:
+        nonce = _hex(options["nonce"], "nonce") if options["nonce"] else random_nonce()
+    except MalformedInput as err:
+        stderr.write(f"nonce: {err}\n")
+        return EXIT_MALFORMED
+    if len(nonce) != NONCE_SIZE:
+        stderr.write(f"nonce: must be {NONCE_SIZE} bytes, got {len(nonce)}\n")
+        return EXIT_MALFORMED
+    host = options["host"]
+    try:
+        _authority(host)
+    except ValueError as err:
+        stderr.write(f"host: {err}\n")
+        return EXIT_MALFORMED
+    try:
+        document_bytes = _fetch_document(host, nonce)
+    except (FetchError, httpx.HTTPError, OSError, ValueError) as err:
+        stderr.write(f"fetching attestation from {host}: {err}\n")
+        return EXIT_INTERNAL
+
+    # Pinned to the capture instant: the collateral is fresh now, and every replay reproduces this appraisal.
+    capture_unix = int(datetime.now(UTC).timestamp())
+    fixture_input = {
+        "schema_version": SCHEMA_VERSION,
+        "document_b64": base64.b64encode(document_bytes).decode(),
+        "nonce_hex": nonce.hex(),
+        "repo": options["repo"],
+        "verification_time_unix": capture_unix,
+    }
+    result = run(STAGE_VERIFY, fixture_input)
+    if result.exit_code != EXIT_ACCEPTED:
+        rejection = result.output.get("rejection") or {}
+        code = rejection.get("code", "unknown")
+        detail = f": {result.diagnostic}" if result.diagnostic else ""
+        stderr.write(f"refusing to freeze: verification did not accept (exit {result.exit_code}, {code}){detail}\n")
+        return result.exit_code
+
+    fixture = {
+        "id": options["id"],
+        "stage": STAGE_VERIFY,
+        "input": fixture_input,
+        "expected": {"accepted": True},
+    }
+    text = json.dumps(fixture, indent=2) + "\n"
+    if options["out"] == "":
+        stdout.write(text)
+    else:
+        Path(options["out"]).write_text(text, encoding="utf-8")
+        stderr.write(f"froze live v3 document -> {options['out']} (verified at capture time {capture_unix})\n")
+    return EXIT_ACCEPTED
+
+
+def _capture_options(args: list[str]) -> dict[str, str] | None:
+    """The capture flags as ``--name value`` or ``--name=value`` pairs; None for an unknown flag, a missing value
+    or an absent host or repo."""
+    options = {"host": "", "repo": "", "id": DEFAULT_CAPTURE_ID, "out": "", "nonce": ""}
+    remaining = list(args)
+    while remaining:
+        flag = remaining.pop(0)
+        if not flag.startswith("--"):
+            return None
+        name, separator, value = flag[2:].partition("=")
+        if name not in options:
+            return None
+        if not separator:
+            if not remaining:
+                return None
+            value = remaining.pop(0)
+        options[name] = value
+    if not options["host"] or not options["repo"]:
+        return None
+    return options
+
+
+def _authority(host: str) -> tuple[str, int]:
+    """The host name and port of ``host``, a bare host with an optional port: never a URL, a path or user
+    information. Raises ValueError for anything else."""
+    parts = urlsplit("//" + host)
+    if (
+        not host
+        or parts.netloc != host
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path
+        or parts.query
+        or parts.fragment
+        or not parts.hostname
+    ):
+        raise ValueError(f"invalid host {host!r}: want a host with an optional port")
+    try:
+        port = parts.port
+    except ValueError as err:
+        raise ValueError(f"invalid host {host!r}: want a host with an optional port") from err
+    return parts.hostname, 443 if port is None else port
+
+
+def _attestation_url(host: str, nonce: bytes) -> str:
+    """Where the document of ``host`` is fetched with ``nonce``."""
+    if len(nonce) != NONCE_SIZE:
+        raise ValueError(f"nonce must be {NONCE_SIZE} bytes, got {len(nonce)}")
+    _authority(host)
+    return f"https://{host}{ATTESTATION_ENDPOINT}?nonce={nonce.hex()}"
+
+
+def _fetch_document(host: str, nonce: bytes, *, transport: httpx.BaseTransport | None = None) -> bytes:
+    """The raw document that ``host`` serves for ``nonce``: one GET with the SDK identity headers, no redirects,
+    bounded in time and size. Parses nothing. Raises FetchError for a response that is not a document or that
+    does not complete within FETCH_TIMEOUT, ValueError for a host or nonce that cannot form the URL, and httpx's
+    errors for a request that fails.
+
+    FETCH_TIMEOUT bounds the fetch twice: the client applies it to each
+    socket operation, which catches a silent peer, and a deadline taken
+    before the request applies it to the whole exchange, which catches a
+    peer that keeps the connection alive by trickling bytes.
+    """
+    url = _attestation_url(host, nonce)
+    deadline = time.monotonic() + FETCH_TIMEOUT
+
+    def check_deadline() -> None:
+        if time.monotonic() > deadline:
+            raise FetchError(f"HTTP GET {url}: no complete document within {FETCH_TIMEOUT}s")
+
+    with (
+        httpx.Client(
+            transport=transport, timeout=FETCH_TIMEOUT, follow_redirects=False, headers=attestation_headers()
+        ) as client,
+        client.stream("GET", url) as response,
+    ):
+        check_deadline()
+        if not 200 <= response.status_code < 300:
+            raise FetchError(f"HTTP GET {url}: {response.status_code} {response.reason_phrase}")
+        body = bytearray()
+        for chunk in response.iter_bytes():
+            check_deadline()
+            body += chunk
+            if len(body) > MAX_DOCUMENT_BYTES:
+                raise FetchError(f"attestation document exceeds {MAX_DOCUMENT_BYTES} bytes")
+    return bytes(body)
+
+
+def _live_tls_fingerprint(host: str) -> str:
+    """The SPKI fingerprint of the leaf certificate that ``host`` presents on a fresh TLS connection. The chain
+    is not verified: trust comes from matching the endorsed fingerprint, not from the public PKI."""
+    hostname, port = _authority(host)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    with (
+        socket.create_connection((hostname, port), timeout=DIAL_TIMEOUT) as raw,
+        context.wrap_socket(raw, server_hostname=hostname) as connection,
+    ):
+        return connection_cert_fp(connection)
+
+
 def main(argv: list[str], stdin: BinaryIO, stdout: TextIO, stderr: TextIO) -> int:
     if not argv:
         stderr.write("usage: tinfoil_conformance.py <stage>|capabilities|live-verify|capture\n")
@@ -574,9 +876,8 @@ def main(argv: list[str], stdin: BinaryIO, stdout: TextIO, stderr: TextIO) -> in
         _write(stdout, capabilities())
         return EXIT_ACCEPTED
 
-    if command in (STAGE_LIVE_VERIFY, STAGE_CAPTURE):
-        _write(stdout, {"stage": command, "accepted": False})
-        return EXIT_UNSUPPORTED
+    if command == STAGE_CAPTURE:
+        return capture(argv[1:], stdout, stderr)
 
     try:
         raw = json.loads(stdin.read())
@@ -584,6 +885,8 @@ def main(argv: list[str], stdin: BinaryIO, stdout: TextIO, stderr: TextIO) -> in
         result = _malformed(command)
     else:
         result = run(command, raw)
+    if result.diagnostic:
+        stderr.write(result.diagnostic + "\n")
     _write(stdout, result.output)
     return result.exit_code
 
