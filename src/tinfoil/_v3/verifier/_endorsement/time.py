@@ -36,7 +36,8 @@ def new_time_policy(
 
     ``now`` must be timezone-aware; None selects DEFAULT_MAX_AGE or
     DEFAULT_FUTURE_SKEW; a negative age or skew is an error, and a zero one
-    is honoured.
+    is honoured. An age or skew that puts either edge of the window outside
+    the representable date range is an error.
     """
     if max_age is None:
         max_age = DEFAULT_MAX_AGE
@@ -44,7 +45,10 @@ def new_time_policy(
         future_skew = DEFAULT_FUTURE_SKEW
     if not isinstance(now, datetime) or not _is_aware(now) or max_age < timedelta(0) or future_skew < timedelta(0):
         raise TimePolicyError("clock and nonnegative age and skew are required")
-    return TimePolicy(earliest=now - max_age, latest=now + future_skew)
+    try:
+        return TimePolicy(earliest=now - max_age, latest=now + future_skew)
+    except OverflowError as err:
+        raise TimePolicyError("window is outside the representable date range") from err
 
 
 def require_aware(at: datetime) -> None:
