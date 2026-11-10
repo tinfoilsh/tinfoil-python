@@ -1207,7 +1207,8 @@ def test_public_signing_keys_are_the_embedded_p256_keys() -> None:
     keys = public_signing_keys()
     assert len(keys) == 1
     assert isinstance(keys[0], ec.EllipticCurvePublicKey)
-    assert key_hint(keys[0]) == "MCTbgXaVE0m57F5n4uOdFFIBlX6R6Gm4r3LxPiKQ0h0=" or key_hint(keys[0])
+    # Standard base64 of SHA-256 over the DER SubjectPublicKeyInfo of the embedded key.
+    assert key_hint(keys[0]) == "J4/dwixneOvUPEEizF3WGcRiLOpQvzk5Kd8ThACLK60="
     assert ApprovalVerifier(World().trusted_root(), keys).keys[0].hint == key_hint(keys[0])
 
 
@@ -1216,4 +1217,10 @@ def test_statement_helper_matches_the_decoder() -> None:
     world = World()
     payload = complete(world, config_core(NAME, "a" * 64), CONFIG_FRESHNESS_DOMAIN, world.now)
     assert parse_config_statement(payload).type == bm.IN_TOTO_STATEMENT_V1
-    assert statement([{"name": NAME, "digest": {"sha256": "a" * 64}}], CONFIG_PREDICATE_TYPE, {}) is not None
+    built = bm.parse_statement(
+        statement([{"name": NAME, "digest": {"sha256": "a" * 64}}], CONFIG_PREDICATE_TYPE, {"scope": ""})
+    )
+    assert built.type == bm.IN_TOTO_STATEMENT_V1
+    assert built.predicate_type == CONFIG_PREDICATE_TYPE
+    assert [(subject.name, dict(subject.digest)) for subject in built.subjects] == [(NAME, {"sha256": "a" * 64})]
+    assert _json.strict_parse(built.predicate) == _json.JsonObject({"scope": ""})
