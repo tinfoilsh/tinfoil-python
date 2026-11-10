@@ -232,7 +232,8 @@ def crl_distribution_point_uris(certificate: Certificate) -> tuple[str, ...]:
     a distribution point named relative to the CRL issuer and every other
     GeneralName form (including the X.400 and EDI party forms that have no
     URI) are skipped. A structure that is not a well-formed
-    CRLDistributionPoints is an X509Error.
+    CRLDistributionPoints, including a DistributionPoint whose optional
+    fields repeat or are out of order, is an X509Error.
     """
     ext = extension(certificate, OID_CRL_DISTRIBUTION_POINTS)
     if ext is None:
@@ -246,9 +247,15 @@ def _crl_distribution_point_uris(value: bytes) -> tuple[str, ...]:
         raise X509Error("CRLDistributionPoints must hold at least one DistributionPoint")
     out: list[str] = []
     for point in points:
+        previous = -1
         for field in der.expect_sequence(point, "DistributionPoint"):
             if field.tag_class != der.CLASS_CONTEXT or field.tag > 2:
                 raise X509Error("DistributionPoint has an unexpected field")
+            # The optional fields distributionPoint [0], reasons [1] and cRLIssuer [2] each appear at most once, in
+            # that order.
+            if field.tag <= previous:
+                raise X509Error("DistributionPoint fields are repeated or out of order")
+            previous = field.tag
             # distributionPoint [0] is explicit, wrapping the DistributionPointName choice.
             if field.tag != 0:
                 continue
