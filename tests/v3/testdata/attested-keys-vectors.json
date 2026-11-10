@@ -1,0 +1,44 @@
+[
+  {
+    "algorithm": "ecdsa-p256",
+    "item": {
+      "id": "workload-key",
+      "format": "https://tinfoil.sh/key/spki/v1",
+      "data": "3059301306072a8648ce3d020106082a8648ce3d030107034200046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+    },
+    "nonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "crypto_material": "eyJmb3JtYXQiOiJodHRwczovL3RpbmZvaWwuc2gvY3J5cHRvLW1hdGVyaWFsL3YxIiwiaXRlbXMiOlt7ImlkIjoid29ya2xvYWQta2V5IiwiZm9ybWF0IjoiaHR0cHM6Ly90aW5mb2lsLnNoL2tleS9zcGtpL3YxIiwiZGF0YSI6IjMwNTkzMDEzMDYwNzJhODY0OGNlM2QwMjAxMDYwODJhODY0OGNlM2QwMzAxMDcwMzQyMDAwNDZiMTdkMWYyZTEyYzQyNDdmOGJjZTZlNTYzYTQ0MGYyNzcwMzdkODEyZGViMzNhMGY0YTEzOTQ1ZDg5OGMyOTY0ZmUzNDJlMmZlMWE3ZjliOGVlN2ViNGE3YzBmOWUxNjJiY2UzMzU3NmIzMTVlY2VjYmI2NDA2ODM3YmY1MWY1In1dfQ==",
+    "device_evidence": "eyJmb3JtYXQiOiJodHRwczovL3RpbmZvaWwuc2gvZGV2aWNlLWV2aWRlbmNlL3YxIiwiaXRlbXMiOltdfQ==",
+    "crypto_material_hash": "004580594693e8f98ab0537d7e408f55f691bad5e55b0bd83f0bc32f2a05abc6",
+    "device_evidence_hash": "5e84f632e01293bff4596cf72c45de0f9e1037e5cda3232b850c478d1a6b592b",
+    "report_data": "e134a51739248a669e7d75a94c242d2b2b973684061d1885205cea0e1b40ec580000000000000000000000000000000000000000000000000000000000000000"
+  },
+  {
+    "algorithm": "ed25519",
+    "item": {
+      "id": "workload-key",
+      "format": "https://tinfoil.sh/key/spki/v1",
+      "data": "302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    },
+    "nonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "crypto_material": "eyJmb3JtYXQiOiJodHRwczovL3RpbmZvaWwuc2gvY3J5cHRvLW1hdGVyaWFsL3YxIiwiaXRlbXMiOlt7ImlkIjoid29ya2xvYWQta2V5IiwiZm9ybWF0IjoiaHR0cHM6Ly90aW5mb2lsLnNoL2tleS9zcGtpL3YxIiwiZGF0YSI6IjMwMmEzMDA1MDYwMzJiNjU3MDAzMjEwMGQ3NWE5ODAxODJiMTBhYjdkNTRiZmVkM2M5NjQwNzNhMGVlMTcyZjNkYWE2MjMyNWFmMDIxYTY4ZjcwNzUxMWEifV19",
+    "device_evidence": "eyJmb3JtYXQiOiJodHRwczovL3RpbmZvaWwuc2gvZGV2aWNlLWV2aWRlbmNlL3YxIiwiaXRlbXMiOltdfQ==",
+    "crypto_material_hash": "d8f98fff52635b917d390080f09f2b68eed1b410810f4965e3411b99b204f727",
+    "device_evidence_hash": "5e84f632e01293bff4596cf72c45de0f9e1037e5cda3232b850c478d1a6b592b",
+    "report_data": "471c373ed1a81ba6b4f9469e15b61277759d825f28a7415c3de5effb1c80a5e70000000000000000000000000000000000000000000000000000000000000000"
+  },
+  {
+    "algorithm": "x25519",
+    "item": {
+      "id": "workload-key",
+      "format": "https://tinfoil.sh/key/spki/v1",
+      "data": "302a300506032b656e0321008520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+    },
+    "nonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "crypto_material": "eyJmb3JtYXQiOiJodHRwczovL3RpbmZvaWwuc2gvY3J5cHRvLW1hdGVyaWFsL3YxIiwiaXRlbXMiOlt7ImlkIjoid29ya2xvYWQta2V5IiwiZm9ybWF0IjoiaHR0cHM6Ly90aW5mb2lsLnNoL2tleS9zcGtpL3YxIiwiZGF0YSI6IjMwMmEzMDA1MDYwMzJiNjU2ZTAzMjEwMDg1MjBmMDA5ODkzMGE3NTQ3NDhiN2RkY2I0M2VmNzVhMGRiZjNhMGQyNjM4MWFmNGViYTRhOThlYWE5YjRlNmEifV19",
+    "device_evidence": "eyJmb3JtYXQiOiJodHRwczovL3RpbmZvaWwuc2gvZGV2aWNlLWV2aWRlbmNlL3YxIiwiaXRlbXMiOltdfQ==",
+    "crypto_material_hash": "ed4444b3b58d22e8e2b8181ac2a16ffd396f5273acd783b6c36afbb34ee120c3",
+    "device_evidence_hash": "5e84f632e01293bff4596cf72c45de0f9e1037e5cda3232b850c478d1a6b592b",
+    "report_data": "4f4049335c395580da60f8d34aacb770dc4aa3acba2d71a370c92da0d09debe20000000000000000000000000000000000000000000000000000000000000000"
+  }
+]

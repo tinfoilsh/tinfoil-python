@@ -169,7 +169,8 @@ def test_vector(fixture: dict[str, Any]) -> None:
     if expected["accepted"]:
         assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
         assert result.output["accepted"] is True
-        facts = result.output["outputs"]
+        # A stage that yields no facts, such as the envelope check, omits outputs.
+        facts = result.output.get("outputs") or {}
         for key in _FACTS:
             if key in expected:
                 assert facts.get(key) == expected[key], key

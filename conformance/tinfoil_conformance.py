@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, BinaryIO, TextIO
 
+from tinfoil._v3.verifier._document import document
+
 # Exit codes are the cross-SDK contract.
 EXIT_ACCEPTED = 0
 EXIT_INTERNAL = 1
@@ -59,7 +61,7 @@ ALL_STAGES = (
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
 )
-STAGES_SUPPORTED: tuple[str, ...] = ()
+STAGES_SUPPORTED: tuple[str, ...] = (STAGE_CHECK_ENVELOPE,)
 
 ENVELOPE_REJECTED = "ENVELOPE_REJECTED"
 PROVENANCE_REJECTED = "PROVENANCE_REJECTED"
@@ -234,6 +236,10 @@ def _unsupported(stage: str) -> Result:
     return Result({"stage": stage, "accepted": False}, EXIT_UNSUPPORTED)
 
 
+def _rejected(stage: str, code: str) -> Result:
+    return Result({"stage": stage, "accepted": False, "rejection": {"code": code}}, EXIT_REJECTED)
+
+
 def run(stage: str, raw: Any) -> Result:
     """Execute one stage on a parsed Input JSON value.
 
@@ -249,11 +255,25 @@ def run(stage: str, raw: Any) -> Result:
 
 def _run_stage(stage: str, raw: Any) -> Result:
     try:
-        Input.from_json(raw)
+        decoded = Input.from_json(raw)
     except MalformedInput:
         return _malformed(stage)
-    # Stage handlers are added here as the modules that they drive land.
+    if stage == STAGE_CHECK_ENVELOPE:
+        return _check_envelope(decoded)
+    # Further stage handlers are added here as the modules that they drive land.
     return _unsupported(stage)
+
+
+def _check_envelope(decoded: Input) -> Result:
+    """Strict parse plus the nonce, endorsed-hash and REPORT_DATA bindings.
+
+    A document or nonce that is absent is rejected like any other that fails.
+    """
+    try:
+        document.parse(decoded.document or b"", decoded.nonce or b"")
+    except (document.DocumentError, document.InvalidInputError):
+        return _rejected(STAGE_CHECK_ENVELOPE, ENVELOPE_REJECTED)
+    return Result({"stage": STAGE_CHECK_ENVELOPE, "accepted": True}, EXIT_ACCEPTED)
 
 
 def main(argv: list[str], stdin: BinaryIO, stdout: TextIO, stderr: TextIO) -> int:

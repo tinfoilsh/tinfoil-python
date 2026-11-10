@@ -92,7 +92,7 @@ python_version = "3.11"
 strict = true
 warn_unreachable = true
 mypy_path = ["conformance"]
-files = ["conformance", "tests/conformance"]
+files = ["src/tinfoil/_v3", "conformance", "tests/conformance", "tests/v3"]
 
 [tool.uv]
 exclude-newer = "4 days"
