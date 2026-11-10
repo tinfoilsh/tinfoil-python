@@ -34,8 +34,8 @@ from tinfoil._v3.verifier._document.collateral.collateral import NotFoundError
 from tinfoil._v3.verifier._endorsement import approval, provenance, reference
 from tinfoil._v3.verifier._endorsement import time as approval_time
 from tinfoil._v3.verifier._policy import ARTIFACT_FORMAT
-from tinfoil._v3.verifier._sigstore import bundle as sigstore_bundle
 from tinfoil._v3.verifier._quote import quote
+from tinfoil._v3.verifier._sigstore import bundle as sigstore_bundle
 from tinfoil._v3.verifier._sigstore import timestamp as sigstore_timestamp
 from tinfoil._v3.verifier._sigstore import trusted_root as sigstore_trusted_root
 from tinfoil._v3.verifier._x509 import certificate as x509_certificate
