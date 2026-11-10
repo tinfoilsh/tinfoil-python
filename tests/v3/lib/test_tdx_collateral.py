@@ -7,6 +7,10 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.x509.oid import NameOID
 
 from tinfoil._v3.verifier._quote.tdx.lib.collateral import (
@@ -41,7 +45,7 @@ from tinfoil._v3.verifier._quote.tdx.lib.collateral import (
 from tinfoil._v3.verifier._quote.tdx.lib.pck import PckCertTCB, PckExtensions
 
 # =============================================================================
-# Sample Data - Based on Real Intel PCS Responses
+# Sample Data - Synthetic Intel PCS Responses
 # =============================================================================
 
 SAMPLE_TCB_INFO_JSON = """
@@ -287,6 +291,12 @@ class TestParseTcbInfoResponse:
         """A version that is not an integer is an error."""
         body = SAMPLE_TCB_INFO_JSON.replace('"version": 3', '"version": "3"')
         with pytest.raises(CollateralError, match="not a number"):
+            parse_tcb_info_response(body.encode())
+
+    def test_reject_negative_svn(self):
+        """A negative SVN would satisfy every "at least" comparison, so it is rejected at parse time."""
+        body = SAMPLE_TCB_INFO_JSON.replace('{"svn": 3}, {"svn": 3}', '{"svn": -3}, {"svn": 3}', 1)
+        with pytest.raises(CollateralError, match="non-negative integer"):
             parse_tcb_info_response(body.encode())
 
 
@@ -860,8 +870,6 @@ class TestTdxModuleIdentity:
         """Test finding module identity by TEE_TCB_SVN."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
-        # Major version 3 should match TDX_03
         tee_tcb_svn = bytes([5, 3] + [0] * 14)  # minor=5, major=3
         result = get_tdx_module_identity(tcb_info, tee_tcb_svn)
         assert result is not None
@@ -871,8 +879,6 @@ class TestTdxModuleIdentity:
         """Test unknown module version raises error."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
-        # Major version 5 should not match any (only TDX_03 exists)
         tee_tcb_svn = bytes([0, 5] + [0] * 14)  # minor=0, major=5
         with pytest.raises(CollateralError, match="Unknown TDX module version TDX_05"):
             get_tdx_module_identity(tcb_info, tee_tcb_svn)
@@ -881,8 +887,6 @@ class TestTdxModuleIdentity:
         """Test successful module identity validation."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
-        # minor=5 (used for TCB level matching), major=3 (used to find TDX_03)
         tee_tcb_svn = bytes([5, 3] + [0] * 14)
         mr_signer_seam = b"\xaa" * 48
         seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
@@ -893,7 +897,6 @@ class TestTdxModuleIdentity:
         """Test module identity validation fails with MR_SIGNER_SEAM mismatch."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
         tee_tcb_svn = bytes([5, 3] + [0] * 14)  # minor=5, major=3
         mr_signer_seam = b"\xbb" * 48  # Wrong MR_SIGNER_SEAM
         seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
@@ -905,8 +908,6 @@ class TestTdxModuleIdentity:
         """Test validation raises when module version is unknown."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
-        # Major version 5 doesn't exist in module identities (only TDX_03)
         tee_tcb_svn = bytes([0, 5] + [0] * 14)  # minor=0, major=5
         mr_signer_seam = b"\xaa" * 48
         seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
@@ -918,9 +919,6 @@ class TestTdxModuleIdentity:
         """Test validation raises when minor version is too low for any TCB level."""
         tcb_info = self._create_tcb_info_with_module_identities()
 
-        # TEE_TCB_SVN[0]=minor, TEE_TCB_SVN[1]=major
-        # Module identity TDX_03 has TCB level with isv_svn=3
-        # minor=2 < 3, so no TCB level should match
         tee_tcb_svn = bytes([2, 3] + [0] * 14)  # minor=2, major=3
         mr_signer_seam = b"\xaa" * 48
         seam_attributes = b"\x00\x00\x00\x00\x00\x00\x00\x00"
@@ -1148,6 +1146,62 @@ class TestCollateralSignatureVerification:
                 signing_cert=MagicMock(),
                 data_name="Test",
             )
+
+    @staticmethod
+    def _signing_certificate() -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Intel SGX TCB Signing")])
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(1)
+            .not_valid_before(datetime.now(UTC) - timedelta(days=1))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=1))
+            .sign(key, hashes.SHA256())
+        )
+        return key, certificate
+
+    @staticmethod
+    def _sign(key: ec.EllipticCurvePrivateKey, signed: bytes) -> str:
+        r, s = decode_dss_signature(key.sign(signed, ec.ECDSA(hashes.SHA256())))
+        return (r.to_bytes(32, "big") + s.to_bytes(32, "big")).hex()
+
+    def test_signature_covers_the_top_level_member(self):
+        """The signed object is the top-level member's exact bytes, however the body is laid out around it."""
+        key, certificate = self._signing_certificate()
+        genuine = '{"id": "TDX", "version": 3}'
+        signature = self._sign(key, genuine.encode())
+        for body in (
+            f'{{"tcbInfo":{genuine},"signature":"{signature}"}}',
+            f'{{ "tcbInfo" : {genuine} ,\n  "signature": "{signature}" }}',
+            f'{{"signature": "{signature}",\n\t"tcbInfo":\n{genuine}\n}}',
+            f'{{"other": {{"tcbInfo": 1}}, "tcbInfo":{genuine}, "signature":"{signature}"}}',
+        ):
+            _verify_collateral_signature(body.encode(), "tcbInfo", signature, certificate, "TCB Info")
+
+    def test_nested_copy_does_not_stand_in_for_the_top_level_member(self):
+        """A signed copy of the object nested elsewhere does not vouch for a forged top-level object."""
+        key, certificate = self._signing_certificate()
+        genuine = '{"id": "TDX", "version": 3}'
+        forged = '{"id": "TDX", "version": 4}'
+        signature = self._sign(key, genuine.encode())
+        body = f'{{"a":{{"tcbInfo":{genuine}}},"tcbInfo":{forged},"signature":"{signature}"}}'
+        with pytest.raises(CollateralError, match="signature does not match"):
+            _verify_collateral_signature(body.encode(), "tcbInfo", signature, certificate, "TCB Info")
+
+    def test_duplicate_top_level_member_is_rejected(self):
+        """Two top-level members of the signed name are an error even before the signature is checked."""
+        _, certificate = self._signing_certificate()
+        body = b'{"tcbInfo": {"a": 1}, "tcbInfo": {"a": 2}, "signature": "00"}'
+        with pytest.raises(CollateralError, match="duplicate top-level member"):
+            _verify_collateral_signature(body, "tcbInfo", "00" * 64, certificate, "TCB Info")
+
+    def test_non_object_member_is_rejected(self):
+        _, certificate = self._signing_certificate()
+        with pytest.raises(CollateralError, match="is not an object"):
+            _verify_collateral_signature(b'{"tcbInfo": [1], "signature": "00"}', "tcbInfo", "00" * 64, certificate, "T")
 
 
 # =============================================================================

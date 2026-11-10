@@ -273,13 +273,19 @@ def _optional_string(obj: _json.JsonObject, key: str, what: str) -> str:
 
 
 def _integer(obj: _json.JsonObject, key: str, what: str) -> int:
+    """A required non-negative integer member.
+
+    Every integer in the PCS documents (versions, SVNs, evaluation numbers,
+    product ids) is unsigned; a negative SVN would make the "at least"
+    comparisons trivially true.
+    """
     value = _member(obj, key, what)
     if not isinstance(value, _json.JsonNumber):
         raise CollateralError(f"{what} '{key}' is not a number")
     try:
-        return value.to_int(bits=64, signed=True)
+        return value.to_int(bits=64, signed=False)
     except _json.JsonError as e:
-        raise CollateralError(f"{what} '{key}' is not an integer: {e}") from e
+        raise CollateralError(f"{what} '{key}' is not a non-negative integer: {e}") from e
 
 
 def _optional_integer(obj: _json.JsonObject, key: str, what: str) -> int | None:
@@ -550,6 +556,70 @@ def _parse_issuer_chain_header(header_value: str) -> list[x509.Certificate]:
     return certs
 
 
+_JSON_WHITESPACE = " \t\n\r"
+
+
+def _top_level_member_bytes(json_str: str, key: str) -> str:
+    """The raw text of the value of ``key`` in the top-level object of ``json_str``.
+
+    The top-level object is walked member by member with the standard
+    decoder, so a member of the same name nested inside another value is
+    never mistaken for the top-level one, and the span returned is exactly
+    the bytes between the member's colon and its separator, which is what
+    the collateral signature covers. The value must be an object. Only the
+    top-level object is walked; a repeated top-level name is an error here
+    as well as in the strict parser.
+    """
+    decoder = json.JSONDecoder()
+    pos = _skip_whitespace(json_str, 0)
+    if pos >= len(json_str) or json_str[pos] != "{":
+        raise ValueError("body is not a JSON object")
+    pos += 1
+    found: str | None = None
+    while True:
+        pos = _skip_whitespace(json_str, pos)
+        if pos >= len(json_str):
+            raise ValueError("unterminated top-level object")
+        if json_str[pos] == "}":
+            break
+        try:
+            name, pos = decoder.raw_decode(json_str, pos)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"malformed member name: {e}") from e
+        if not isinstance(name, str):
+            raise ValueError("member name is not a string")
+        pos = _skip_whitespace(json_str, pos)
+        if pos >= len(json_str) or json_str[pos] != ":":
+            raise ValueError(f"member {name!r} has no value")
+        value_start = _skip_whitespace(json_str, pos + 1)
+        try:
+            _, value_end = decoder.raw_decode(json_str, value_start)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"malformed value of member {name!r}: {e}") from e
+        if name == key:
+            if found is not None:
+                raise ValueError(f"duplicate top-level member {key!r}")
+            if json_str[value_start] != "{":
+                raise ValueError(f"'{key}' is not an object")
+            found = json_str[value_start:value_end]
+        pos = _skip_whitespace(json_str, value_end)
+        if pos >= len(json_str):
+            raise ValueError("unterminated top-level object")
+        if json_str[pos] == ",":
+            pos += 1
+        elif json_str[pos] != "}":
+            raise ValueError(f"unexpected character after member {name!r}")
+    if found is None:
+        raise ValueError(f"does not contain '{key}' key")
+    return found
+
+
+def _skip_whitespace(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos] in _JSON_WHITESPACE:
+        pos += 1
+    return pos
+
+
 def _verify_collateral_signature(
     json_bytes: bytes,
     json_key: str,
@@ -574,49 +644,18 @@ def _verify_collateral_signature(
     Raises:
         CollateralError: If signature verification fails
     """
-    # Extract the raw JSON string for the signed object
-    # We need to find the exact bytes of the inner JSON object as it appears
-    # in the response (including whitespace), since the signature is over
-    # the exact byte representation.
-    #
-    # The format is: {"tcbInfo":{...},"signature":"..."}
-    # We need to extract the exact "{...}" for tcbInfo
+    # The signature covers the exact bytes of the inner object as they appear
+    # in the response, whitespace included, so the object is located by
+    # walking the top-level members rather than by searching the text.
     try:
         json_str = json_bytes.decode("utf-8")
     except UnicodeDecodeError as e:
         raise CollateralError(f"Failed to decode {data_name} JSON: {e}") from e
 
-    # Find the start of the inner object.
-    # Only match at the top-level (must be preceded by '{' or ',' ignoring whitespace).
-    key_pattern = f'"{json_key}":'
-    key_pos = json_str.find(key_pattern)
-    if key_pos == -1:
-        raise CollateralError(f"{data_name} JSON does not contain '{json_key}' key")
-
-    # Verify the match is at the top level (preceded by '{' or ',' outside strings)
-    prefix = json_str[:key_pos].rstrip()
-    if not prefix or prefix[-1] not in ("{", ","):
-        raise CollateralError(f"{data_name} JSON key '{json_key}' found in unexpected position")
-
-    # Find the start of the object value (skip whitespace after colon)
-    obj_start = key_pos + len(key_pattern)
-    while obj_start < len(json_str) and json_str[obj_start] in " \t\n\r":
-        obj_start += 1
-
-    if obj_start >= len(json_str) or json_str[obj_start] != "{":
-        raise CollateralError(f"{data_name} '{json_key}' is not an object")
-
-    # Use the stdlib JSON decoder to find the extent of the nested object.
-    # raw_decode parses from the given index and returns the end position,
-    # correctly handling string escaping, nesting, and all JSON edge cases.
     try:
-        decoder = json.JSONDecoder()
-        _, obj_end = decoder.raw_decode(json_str, obj_start)
-    except json.JSONDecodeError as e:
-        raise CollateralError(f"{data_name} JSON has malformed '{json_key}' object: {e}") from e
-
-    # Extract the signed data (exact bytes as they appear in the response)
-    signed_json = json_str[obj_start:obj_end].encode("utf-8")
+        signed_json = _top_level_member_bytes(json_str, json_key).encode("utf-8")
+    except ValueError as e:
+        raise CollateralError(f"{data_name} JSON: {e}") from e
 
     # Parse signature (hex-encoded raw R||S format, 64 bytes = 128 hex chars)
     try:
