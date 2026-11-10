@@ -254,9 +254,6 @@ def test_config_bound_enforces_config_and_platform_constraints() -> None:
         sev.validate(legacy, with_report(verified, replace(report, guest_svn=svn)))
     with pytest.raises(sev.SevPolicyError, match="GUEST_SVN"):
         sev.validate(legacy, with_report(verified, replace(report, guest_svn=guest_svn_floor - 1)))
-    # Assembled expectations do not alias the platform policy.
-    replace(resolved, guest_policy=replace(resolved.guest_policy, debug=True))
-    sev.validate(expected, verified)
 
 
 def test_strict_equality_rejects_what_the_maximum_masks_allow() -> None:

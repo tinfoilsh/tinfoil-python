@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from tests.v3.vectors import vector, vector_group
+from tests.v3.vectors import find_vector, vector, vector_group
 from tinfoil._v3.verifier._document import document
 from tinfoil._v3.verifier._policy import ARTIFACT_FORMAT, Artifact, SEVSNPPolicy, parse
 from tinfoil._v3.verifier._quote.sev.lib.abi import (
@@ -70,7 +70,9 @@ def _case(fixture: dict[str, Any]) -> VectorCase:
 def sev_vector_params() -> list[Any]:
     """Every SEV quote vector: the quote-sev group, both frozen-time fixtures and the embedded-roots SEV fixture."""
     fixtures = vector_group("quote-sev") + vector_group("frozen-time")
-    fixtures += [f for f in vector_group("embedded-roots") if f["id"] == "embedded-sev-rejects-synthetic"]
+    embedded = vector_group("embedded-roots")
+    if embedded:
+        fixtures.append(find_vector(embedded, "embedded-roots", "embedded-sev-rejects-synthetic"))
     if not fixtures:
         return [pytest.param(None, id="vectors-absent", marks=pytest.mark.skip(reason="conformance vectors not found"))]
     return [pytest.param(fixture, id=fixture["id"]) for fixture in fixtures]

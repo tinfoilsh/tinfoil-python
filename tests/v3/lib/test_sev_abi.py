@@ -133,11 +133,17 @@ class TestParseReport:
         with pytest.raises(abi.AbiError, match="stepping 0x10 does not fit four bits"):
             abi.parse_report(bytes(raw))
 
-    def test_mitigation_vectors_are_read_for_every_version(self) -> None:
+    @pytest.mark.parametrize("version", range(abi.MIN_SUPPORTED_REPORT_VERSION, abi.MAX_SUPPORTED_REPORT_VERSION + 1))
+    def test_mitigation_vectors_are_read_for_every_version(self, version: int) -> None:
         raw = bytearray(happy_report_bytes())
+        raw[0] = version
+        if version < abi.REPORT_VERSION_3:
+            raw[0x188:0x18B] = bytes(3)  # the CPUID bytes are reserved below version 3
         raw[0x1F8] = 0x03
         raw[0x200] = 0x01
+        abi.validate_report_format(bytes(raw))
         report = abi.parse_report(bytes(raw))
+        assert report.version == version
         assert (report.launch_mit_vector, report.current_mit_vector) == (3, 1)
 
     def test_unknown_signature_algorithms_leave_the_tail_unchecked(self) -> None:

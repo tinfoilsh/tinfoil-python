@@ -3,6 +3,7 @@ signature, on the synthetic vectors' material and minted certificates."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -176,71 +177,124 @@ def test_amd_location_and_common_name() -> None:
         chain.validate_amd_location(doubled, "subject")
 
 
-def test_extension_decoding_rules() -> None:
-    assert chain.vcek_certificate_extensions(mint_vcek(genoa_extensions())).hwid == bytes(64)
-    # A wrapped hardware id is accepted at the layout's size and rejected at any other.
-    wrapped = genoa_extensions(**{chain.OID_HWID: b"\x04\x40" + bytes(64)})
-    assert chain.vcek_certificate_extensions(mint_vcek(wrapped)).hwid == bytes(64)
-    short = genoa_extensions(**{chain.OID_HWID: b"\x04\x08" + bytes(8)})
-    with pytest.raises(chain.ChainError, match="HWID size is 8, expected 64"):
-        chain.vcek_certificate_extensions(mint_vcek(short))
-    with pytest.raises(chain.ChainError, match="missing HWID extension"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_HWID: None})))
-    with pytest.raises(chain.ChainError, match="no extension for field UcodeSpl"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_UCODE_SPL: None})))
-    with pytest.raises(chain.ChainError, match="FmcSpl extension is not valid for TCB struct version 0"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_FMC_SPL: INTEGER_ZERO})))
-    with pytest.raises(chain.ChainError, match="unexpected CSP_ID in VCEK certificate"):
-        chain.vcek_certificate_extensions(
-            mint_vcek(genoa_extensions(**{chain.OID_HWID: None, chain.OID_CSP_ID: b"\x16\x01x"}))
-        )
-    with pytest.raises(chain.ChainError, match="has both HWID"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_CSP_ID: b"\x16\x01x"})))
-    with pytest.raises(chain.ChainError, match="not tagged as an IA5String: 12"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_PRODUCT_NAME_1: b"\x0c\x01x"})))
-    with pytest.raises(chain.ChainError, match="could not parse extension ProductName1 as an IA5String"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_PRODUCT_NAME_1: b"\x16\x01\x80"})))
-    with pytest.raises(chain.ChainError, match="could not parse extension BlSpl as an integer"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_BL_SPL: b"\x02\x02\x00\x01"})))
-    with pytest.raises(chain.ChainError, match="could not parse extension BlSpl as an integer"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_BL_SPL: b"\x02\x01\x00\x00"})))
-    with pytest.raises(chain.ChainError, match="isn't a uint8: 256"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_BL_SPL: b"\x02\x02\x01\x00"})))
-    with pytest.raises(chain.ChainError, match="isn't a uint8: -1"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_BL_SPL: b"\x02\x01\xff"})))
-    with pytest.raises(chain.ChainError, match=r"SnpSpl TCB part is 128\. Expect 0-127"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_SNP_SPL: b"\x02\x02\x00\x80"})))
-    assert (
-        chain.vcek_certificate_extensions(
-            mint_vcek(genoa_extensions(**{chain.OID_UCODE_SPL: b"\x02\x02\x00\xff"}))
-        ).tcb.tcb
-        == 0xFF << 56
-    )
-    with pytest.raises(chain.ChainError, match="unsupported TCB structVersion 2"):
-        chain.vcek_certificate_extensions(mint_vcek(genoa_extensions(**{chain.OID_STRUCT_VERSION: b"\x02\x01\x02"})))
-    turin = genoa_extensions(
+def turin_extensions(**overrides: bytes | None) -> list[x509.ExtensionType]:
+    """The version 1 KDS extension set: the Turin name, an 8-byte hardware id and the FMC level in place of Spl4."""
+    return genoa_extensions(
         **{
             chain.OID_STRUCT_VERSION: b"\x02\x01\x01",
             chain.OID_PRODUCT_NAME_1: b"\x16\x08Turin-B1",
             chain.OID_HWID: bytes(8),
             chain.OID_FMC_SPL: INTEGER_ZERO,
             chain.OID_SPL4: None,
+            **overrides,
         }
     )
-    assert chain.vcek_certificate_extensions(mint_vcek(turin)).tcb.version == 1
-    with pytest.raises(chain.ChainError, match="Spl4 extension is not valid for TCB struct version 1"):
-        chain.vcek_certificate_extensions(mint_vcek([*turin, kds(chain.OID_SPL4, INTEGER_ZERO)]))
-    with pytest.raises(chain.ChainError, match="reserved Turin TCB components must be zero"):
-        chain.vcek_certificate_extensions(
-            mint_vcek(
-                [e for e in turin if e.oid.dotted_string != chain.OID_SPL5] + [kds(chain.OID_SPL5, b"\x02\x01\x01")]
-            )
-        )
-    # The authority key identifier that the issuing ASK imparts is tolerated.
-    aki = x509.AuthorityKeyIdentifier(
-        key_identifier=b"\x01" * 20, authority_cert_issuer=None, authority_cert_serial_number=None
-    )
-    assert chain.vcek_certificate_extensions(mint_vcek([*genoa_extensions(), aki])).struct_version == 0
+
+
+AUTHORITY_KEY_IDENTIFIER = x509.AuthorityKeyIdentifier(
+    key_identifier=b"\x01" * 20, authority_cert_issuer=None, authority_cert_serial_number=None
+)
+"""The one non-KDS extension that an issuing ASK imparts, which decoding tolerates."""
+
+REJECTED_EXTENSION_SETS = [
+    pytest.param(
+        genoa_extensions(**{chain.OID_HWID: b"\x04\x08" + bytes(8)}),
+        "HWID size is 8, expected 64",
+        id="wrapped-hwid-of-another-layout-size",
+    ),
+    pytest.param(genoa_extensions(**{chain.OID_HWID: None}), "missing HWID extension", id="missing-hwid"),
+    pytest.param(
+        genoa_extensions(**{chain.OID_UCODE_SPL: None}), "no extension for field UcodeSpl", id="missing-level"
+    ),
+    pytest.param(
+        genoa_extensions(**{chain.OID_FMC_SPL: INTEGER_ZERO}),
+        "FmcSpl extension is not valid for TCB struct version 0",
+        id="fmc-level-in-version-0",
+    ),
+    pytest.param(
+        genoa_extensions(**{chain.OID_HWID: None, chain.OID_CSP_ID: b"\x16\x01x"}),
+        "unexpected CSP_ID in VCEK certificate",
+        id="csp-id-in-place-of-hwid",
+    ),
+    pytest.param(genoa_extensions(**{chain.OID_CSP_ID: b"\x16\x01x"}), "has both HWID", id="csp-id-beside-hwid"),
+    pytest.param(
+        genoa_extensions(**{chain.OID_PRODUCT_NAME_1: b"\x0c\x01x"}),
+        "not tagged as an IA5String: 12",
+        id="product-name-tagged-utf8string",
+    ),
+    pytest.param(
+        genoa_extensions(**{chain.OID_PRODUCT_NAME_1: b"\x16\x01\x80"}),
+        "could not parse extension ProductName1 as an IA5String",
+        id="product-name-outside-ascii",
+    ),
+    pytest.param(
+        genoa_extensions(**{chain.OID_BL_SPL: b"\x02\x02\x00\x01"}),
+        "could not parse extension BlSpl as an integer",
+        id="level-non-minimal-integer",
+    ),
+    pytest.param(
+        genoa_extensions(**{chain.OID_BL_SPL: b"\x02\x01\x00\x00"}),
+        "could not parse extension BlSpl as an integer",
+        id="level-with-trailing-byte",
+    ),
+    pytest.param(genoa_extensions(**{chain.OID_BL_SPL: b"\x02\x02\x01\x00"}), "isn't a uint8: 256", id="level-256"),
+    pytest.param(genoa_extensions(**{chain.OID_BL_SPL: b"\x02\x01\xff"}), "isn't a uint8: -1", id="level-negative"),
+    pytest.param(
+        genoa_extensions(**{chain.OID_SNP_SPL: b"\x02\x02\x00\x80"}),
+        r"SnpSpl TCB part is 128\. Expect 0-127",
+        id="level-above-127",
+    ),
+    pytest.param(
+        genoa_extensions(**{chain.OID_STRUCT_VERSION: b"\x02\x01\x02"}),
+        "unsupported TCB structVersion 2",
+        id="struct-version-2",
+    ),
+    pytest.param(
+        turin_extensions(**{chain.OID_SPL4: INTEGER_ZERO}),
+        "Spl4 extension is not valid for TCB struct version 1",
+        id="spl4-in-version-1",
+    ),
+    pytest.param(
+        turin_extensions(**{chain.OID_SPL5: b"\x02\x01\x01"}),
+        "reserved Turin TCB components must be zero",
+        id="non-zero-reserved-turin-level",
+    ),
+]
+"""One VCEK extension set per decoding rule, with the error that it must produce."""
+
+ACCEPTED_EXTENSION_SETS = [
+    pytest.param(genoa_extensions(), lambda e: e.hwid == bytes(64), id="version-0"),
+    pytest.param(
+        genoa_extensions(**{chain.OID_HWID: b"\x04\x40" + bytes(64)}),
+        lambda e: e.hwid == bytes(64),
+        id="wrapped-hwid-of-the-layout-size",
+    ),
+    pytest.param(
+        genoa_extensions(**{chain.OID_UCODE_SPL: b"\x02\x02\x00\xff"}),
+        lambda e: e.tcb.tcb == 0xFF << 56,
+        id="microcode-level-255",
+    ),
+    pytest.param(turin_extensions(), lambda e: e.tcb.version == 1, id="version-1"),
+    pytest.param(
+        [*genoa_extensions(), AUTHORITY_KEY_IDENTIFIER],
+        lambda e: e.struct_version == 0,
+        id="authority-key-identifier-tolerated",
+    ),
+]
+"""VCEK extension sets that decode, each with the fact about the decoding that must hold."""
+
+
+@pytest.mark.parametrize(("extensions", "message"), REJECTED_EXTENSION_SETS)
+def test_extension_decoding_rejects(extensions: list[x509.ExtensionType], message: str) -> None:
+    with pytest.raises(chain.ChainError, match=message):
+        chain.vcek_certificate_extensions(mint_vcek(extensions))
+
+
+@pytest.mark.parametrize(("extensions", "holds"), ACCEPTED_EXTENSION_SETS)
+def test_extension_decoding_accepts(
+    extensions: list[x509.ExtensionType], holds: Callable[[chain.VcekExtensions], bool]
+) -> None:
+    assert holds(chain.vcek_certificate_extensions(mint_vcek(extensions)))
 
 
 def test_chain_verification_at_the_appraisal_time() -> None:
