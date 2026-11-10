@@ -87,12 +87,46 @@ def test_malformed_input_is_reported_first(raw: Any) -> None:
         assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": "MALFORMED_INPUT"}}
 
 
-@pytest.mark.parametrize("stage", [adapter.STAGE_CHECK_ENVELOPE, adapter.STAGE_AUTHENTICATE_QUOTE])
+@pytest.mark.parametrize(
+    "stage", [adapter.STAGE_VERIFY, adapter.STAGE_CHECK_ENVELOPE, adapter.STAGE_AUTHENTICATE_QUOTE]
+)
 def test_document_stages_treat_an_unparseable_sigstore_root_as_malformed(stage: str) -> None:
     # "e30=" is "{}": well-formed base64 and JSON that is not a trusted-root document.
     result = adapter.run(stage, {**_WELL_FORMED, "sigstore_trusted_root_json_b64": "e30="})
     assert result.exit_code == adapter.EXIT_MALFORMED
     assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": "MALFORMED_INPUT"}}
+
+
+def test_verify_stage_reports_usage_errors_as_malformed_and_rejections_by_layer() -> None:
+    """The full stage: a nonce the verifier cannot use is the adapter's mistake; a document that does not parse is an
+    envelope rejection; a document without reference values is a provenance rejection."""
+    stage = adapter.STAGE_VERIFY
+    result = adapter.run(stage, {**_WELL_FORMED, "nonce_hex": "ab"})
+    assert result.exit_code == adapter.EXIT_MALFORMED
+    result = adapter.run(stage, {**_WELL_FORMED, "nonce_hex": ""})
+    assert result.exit_code == adapter.EXIT_MALFORMED
+    result = adapter.run(stage, _WELL_FORMED)
+    assert result.exit_code == adapter.EXIT_REJECTED
+    assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": "ENVELOPE_REJECTED"}}
+    result = adapter.run(stage, {**_WELL_FORMED, "document_b64": ""})
+    assert result.output["rejection"] == {"code": "ENVELOPE_REJECTED"}
+    from tests.v3 import document_builder
+
+    _, raw = document_builder.build(document_builder.test_nonce(), collateral_entries=[])
+    bound = {**_WELL_FORMED, "document_b64": _b64(raw), "nonce_hex": document_builder.test_nonce().hex()}
+    result = adapter.run(stage, bound)
+    assert result.exit_code == adapter.EXIT_REJECTED
+    assert result.output["rejection"] == {"code": "PROVENANCE_REJECTED"}
+    code = {
+        "id": "code",
+        "role": "reference-values",
+        "format": "https://tinfoil.sh/collateral/sigstore-code/v1",
+        "subjects": [],
+        "data": {"repo": "", "tag": "", "digest": "digest", "sigstore_bundle": {}},
+    }
+    _, with_code = document_builder.build(document_builder.test_nonce(), collateral_entries=[code])
+    result = adapter.run(stage, {**bound, "document_b64": _b64(with_code), "repo": "not a reference"})
+    assert result.exit_code == adapter.EXIT_MALFORMED, "a repository pin the verifier rejects outright"
 
 
 def test_unknown_stage_is_unsupported() -> None:

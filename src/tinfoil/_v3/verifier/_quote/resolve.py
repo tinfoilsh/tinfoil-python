@@ -13,6 +13,12 @@ if TYPE_CHECKING:
 
 MR_CONFIG_ID_SIZE = 48
 
+
+class AssemblyError(ValueError):
+    """A policy that cannot be completed for the quote: an unendorsed machine, a pin conflict, an open register, a
+    quote that is not the document's own, or a policy that the platform cannot translate."""
+
+
 # The register names come from the dataclass so that a register added to it cannot be left out of the pin merge or
 # the completeness check; each label is the register's conventional upper-case name (MRTD, RTMR0, ...).
 _TDX_REGISTERS = tuple(field.name for field in fields(ExpectedTDX))
@@ -33,17 +39,9 @@ class ResolvedValues:
     platform_measurement_name: str | None = None
     """The resolved TDX platform configuration under the legacy contract; None otherwise."""
     host_data: str = ""
-    """The SEV-SNP HOST_DATA expectation, lowercase hex; "" leaves the policy's value."""
+    """The SEV-SNP HOST_DATA expectation, lowercase hex, which replaces the policy's value at assembly."""
     config_id: bytes = bytes(MR_CONFIG_ID_SIZE)
     """The TDX MR_CONFIG_ID expectation."""
-
-
-def assembly_error(message: str) -> ValueError:
-    """The assembly error of the quote package, looked up when raised so that the contracts stay importable on
-    their own."""
-    from tinfoil._v3.verifier._quote.quote import AssemblyError
-
-    return AssemblyError(message)
 
 
 def resolve_policy(endorsements: Artifact, quote: Authenticated) -> tuple[str, Policy]:
@@ -51,7 +49,7 @@ def resolve_policy(endorsements: Artifact, quote: Authenticated) -> tuple[str, P
     try:
         return endorsements.policy_for(quote.identity, quote.platform)
     except PolicyError as err:
-        raise assembly_error(str(err)) from err
+        raise AssemblyError(str(err)) from err
 
 
 def apply_pins(code: Expected, platform: str, pins: Expected | None) -> Expected:
@@ -61,17 +59,17 @@ def apply_pins(code: Expected, platform: str, pins: Expected | None) -> Expected
         return code
     if isinstance(pins, ExpectedSEVSNP):
         if not isinstance(code, ExpectedSEVSNP):
-            raise assembly_error(f"pinned registers are for {PLATFORM_SEV_SNP}, but the enclave is {platform}")
+            raise AssemblyError(f"pinned registers are for {PLATFORM_SEV_SNP}, but the enclave is {platform}")
         return ExpectedSEVSNP(launch=_fill(_LAUNCH_LABEL, code.launch, pins.launch))
     if isinstance(pins, ExpectedTDX):
         if not isinstance(code, ExpectedTDX):
-            raise assembly_error(f"pinned registers are for {PLATFORM_TDX}, but the enclave is {platform}")
+            raise AssemblyError(f"pinned registers are for {PLATFORM_TDX}, but the enclave is {platform}")
         merged = {
             name: _fill(label, getattr(code, name), getattr(pins, name))
             for name, label in zip(_TDX_REGISTERS, _TDX_LABELS, strict=True)
         }
         return ExpectedTDX(**merged)
-    raise assembly_error(f"unsupported pinned measurement {type(pins).__name__}")
+    raise AssemblyError(f"unsupported pinned measurement {type(pins).__name__}")
 
 
 def _fill(name: str, fixed: bytes | None, pin: bytes | None) -> bytes | None:
@@ -80,7 +78,7 @@ def _fill(name: str, fixed: bytes | None, pin: bytes | None) -> bytes | None:
     if fixed is None:
         return pin
     if fixed != pin:
-        raise assembly_error(f"pinned {name} does not match the signed release measurement")
+        raise AssemblyError(f"pinned {name} does not match the signed release measurement")
     return fixed
 
 
@@ -89,12 +87,12 @@ def complete(expected: Expected) -> Measurement:
     leaves a register unchecked."""
     if isinstance(expected, ExpectedSEVSNP):
         if expected.launch is None:
-            raise assembly_error(f"nothing fixes the expected {_LAUNCH_LABEL}")
+            raise AssemblyError(f"nothing fixes the expected {_LAUNCH_LABEL}")
         return SEVSNP(launch=expected.launch)
     if isinstance(expected, ExpectedTDX):
         values = {name: getattr(expected, name) for name in _TDX_REGISTERS}
         missing = [label for name, label in zip(_TDX_REGISTERS, _TDX_LABELS, strict=True) if values[name] is None]
         if missing:
-            raise assembly_error(f"nothing fixes the expected {', '.join(missing)}")
+            raise AssemblyError(f"nothing fixes the expected {', '.join(missing)}")
         return TDX(**values)
-    raise assembly_error(f"unsupported expected measurement {type(expected).__name__}")
+    raise AssemblyError(f"unsupported expected measurement {type(expected).__name__}")
