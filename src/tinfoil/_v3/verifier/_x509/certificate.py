@@ -39,6 +39,7 @@ PublicKey: TypeAlias = ec.EllipticCurvePublicKey | rsa.RSAPublicKey | ed25519.Ed
 
 OID_SUBJECT_ALT_NAME = "2.5.29.17"
 OID_BASIC_CONSTRAINTS = "2.5.29.19"
+OID_CRL_DISTRIBUTION_POINTS = "2.5.29.31"
 OID_KEY_USAGE = "2.5.29.15"
 OID_EXT_KEY_USAGE = "2.5.29.37"
 OID_SCT_LIST = "1.3.6.1.4.1.11129.2.4.2"
@@ -221,6 +222,59 @@ def _uri_sans(value: bytes) -> tuple[str, ...]:
             out.append(text)
         elif name.tag == _GENERAL_NAME_IP and len(name.content) not in (4, 16):
             raise X509Error("IP GeneralName must be 4 or 16 bytes")
+    return tuple(out)
+
+
+def crl_distribution_point_uris(certificate: Certificate) -> tuple[str, ...]:
+    """The URI names of the certificate's CRL distribution points, in order; empty when there is no extension.
+
+    Only a ``fullName`` holding a ``uniformResourceIdentifier`` contributes;
+    a distribution point named relative to the CRL issuer and every other
+    GeneralName form (including the X.400 and EDI party forms that have no
+    URI) are skipped. A structure that is not a well-formed
+    CRLDistributionPoints is an X509Error.
+    """
+    ext = extension(certificate, OID_CRL_DISTRIBUTION_POINTS)
+    if ext is None:
+        return ()
+    return _with_context("cRLDistributionPoints", lambda: _crl_distribution_point_uris(ext.value))
+
+
+def _crl_distribution_point_uris(value: bytes) -> tuple[str, ...]:
+    points = der.expect_sequence(der.decode(value), "CRLDistributionPoints")
+    if not points:
+        raise X509Error("CRLDistributionPoints must hold at least one DistributionPoint")
+    out: list[str] = []
+    for point in points:
+        for field in der.expect_sequence(point, "DistributionPoint"):
+            if field.tag_class != der.CLASS_CONTEXT or field.tag > 2:
+                raise X509Error("DistributionPoint has an unexpected field")
+            # distributionPoint [0] is explicit, wrapping the DistributionPointName choice.
+            if field.tag != 0:
+                continue
+            if not field.constructed:
+                raise X509Error("distributionPoint must be constructed")
+            choice = der.children(field)
+            if len(choice) != 1:
+                raise X509Error("distributionPoint must wrap one DistributionPointName")
+            name = choice[0]
+            if name.tag_class != der.CLASS_CONTEXT or name.tag > 1 or not name.constructed:
+                raise X509Error("DistributionPointName has an unexpected form")
+            # fullName [0] is implicit over GeneralNames, so its children are the GeneralName entries.
+            if name.tag != 0:
+                continue
+            for general_name in der.children(name):
+                if general_name.tag_class != der.CLASS_CONTEXT or general_name.tag > 8:
+                    raise X509Error("GeneralName has an unexpected tag")
+                if general_name.tag != _GENERAL_NAME_URI:
+                    continue
+                if general_name.constructed:
+                    raise X509Error("URI GeneralName must be primitive")
+                out.append(
+                    der.ia5_string(
+                        der.Element(der.CLASS_UNIVERSAL, False, der.TAG_IA5_STRING, general_name.content, b"")
+                    )
+                )
     return tuple(out)
 
 
