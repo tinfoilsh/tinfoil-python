@@ -1,6 +1,6 @@
 """The trust anchors that the verifier ships: generated constants, never fetched at run time.
 
-Regenerate with ``uv run python scripts/sync_trust.py <tinfoil-go checkout>``.
+Regenerate with ``uv run scripts/sync_trust.py``.
 """
 
 from tinfoil._v3.verifier._trust.amd_genoa import AMD_GENOA_CERT_CHAIN_PEM
