@@ -10,7 +10,7 @@ from tinfoil._v3.verifier._document.collateral.runtime import RUNTIME_REPO, Runt
 _DIGEST_SEPARATOR = "@sha256:"
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 _BINARY_TAG = "tag:yaml.org,2002:binary"
-_VALUE_TAGS = frozenset(f"tag:yaml.org,2002:{kind}" for kind in ("int", "float", "bool", "null"))
+_STR_TAG = "tag:yaml.org,2002:str"
 _PREFIX = "parsing config runtime pin"
 
 
@@ -41,11 +41,12 @@ def _read_cvm_version(data: bytes) -> str:
     The config must hold exactly one YAML document, a mapping. Any scalar
     value reads as its source text, so a null reads as text that carries no
     pin. The key is found without constructing the rest of the document, so
-    the other members are only required to be well-formed YAML, except that
-    the top-level mapping must not repeat a key: two keys are the same when
-    their source text is the same or, for numbers, booleans and nulls, when
-    their values are. A merge key at the top level, a non-scalar key, a
-    non-scalar value and a binary-tagged value are rejected.
+    the other members are only required to be well-formed YAML, except at
+    the top-level mapping: every key there must be a plain string (a scalar
+    that resolves to the string tag, so a quoted ``"5"`` passes and a bare
+    ``5``, ``true`` or ``~`` does not), and no key may repeat. A merge key
+    at the top level, a non-scalar value and a binary-tagged value are
+    rejected.
     """
     try:
         documents = yaml.compose_all(data, Loader=yaml.SafeLoader)
@@ -59,17 +60,19 @@ def _read_cvm_version(data: bytes) -> str:
     if not isinstance(root, yaml.MappingNode):
         raise RuntimeConfigError(f"{_PREFIX}: config is not a mapping")
     value_node: object = None
-    seen: set[object] = set()
+    seen: set[str] = set()
     for key_node, item_node in root.value:
         if not isinstance(key_node, yaml.ScalarNode):
             raise RuntimeConfigError(f"{_PREFIX}: mapping keys must be scalars")
         if key_node.tag == _MERGE_TAG:
             raise RuntimeConfigError(f"{_PREFIX}: merge keys are not supported")
-        identities = _key_identities(key_node)
-        if not seen.isdisjoint(identities):
-            raise RuntimeConfigError(f"{_PREFIX}: mapping key {key_node.value!r} already defined")
-        seen.update(identities)
-        if key_node.value == "cvm-version":
+        if key_node.tag != _STR_TAG or not isinstance(key_node.value, str):
+            raise RuntimeConfigError(f"{_PREFIX}: config keys must be plain strings")
+        key: str = key_node.value
+        if key in seen:
+            raise RuntimeConfigError(f"{_PREFIX}: mapping key {key!r} already defined")
+        seen.add(key)
+        if key == "cvm-version":
             value_node = item_node
     if value_node is None:
         return ""
@@ -81,17 +84,3 @@ def _read_cvm_version(data: bytes) -> str:
     if not isinstance(text, str):
         raise RuntimeConfigError(f"{_PREFIX}: cvm-version must be a scalar")
     return text
-
-
-def _key_identities(key: yaml.ScalarNode) -> set[object]:
-    """What a top-level key is compared by: its source text and, when it resolves to a number, boolean or null, the
-    value, so that differently spelled equal values collide."""
-    identities: set[object] = {("text", key.value)}
-    if key.tag in _VALUE_TAGS:
-        try:
-            value = yaml.constructor.SafeConstructor().construct_object(key)
-        except yaml.YAMLError:
-            return identities
-        if isinstance(value, int | float) or value is None:
-            identities.add(("value", value))
-    return identities

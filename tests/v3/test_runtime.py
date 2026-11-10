@@ -314,12 +314,13 @@ def raises_config(config: bytes, match: str) -> None:
 
 def test_config_decode_rejects() -> None:
     raises_config((GOOD + GOOD).encode(), r"^parsing config runtime pin: mapping key 'cvm-version' already defined")
-    # A top-level key repeats even when it is not one being read, and equal
-    # values spelled differently are the same key.
+    # A top-level key repeats even when it is not one being read.
     raises_config(("containers: []\ncontainers: []\n" + GOOD).encode(), r"mapping key 'containers' already defined")
-    raises_config(("true: 1\nTrue: 2\n" + GOOD).encode(), r"mapping key 'True' already defined")
-    raises_config(("1.0: 1\n1.00: 2\n" + GOOD).encode(), r"mapping key '1.00' already defined")
-    raises_config(("~: 1\nnull: 2\n" + GOOD).encode(), r"mapping key 'null' already defined")
+    # Every top-level key must be a plain string; a quoted scalar is one, a bare number, boolean or null is not.
+    for config in (b"5: x\n", b"1.0: x\n", b"true: x\n", b"~: x\n", b"null: x\n"):
+        raises_config(config + GOOD.encode(), r"^parsing config runtime pin: config keys must be plain strings")
+    assert runtime_from_config(('"5": x\n' + GOOD).encode()) == WANT
+    assert runtime_from_config(("'true': x\n" + GOOD).encode()) == WANT
     # Duplicates nested under a member that is not read pass.
     assert runtime_from_config(("other:\n  a: 1\n  a: 2\n" + GOOD).encode()) == WANT
     raises_config((GOOD + "---\n" + GOOD).encode(), r"^config must contain exactly one YAML document")
