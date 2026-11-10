@@ -188,6 +188,19 @@ def reject_masked_chip_id(report: Report) -> None:
         raise SevAuthenticationError("report masks CHIP_ID; masked platform identities are unsupported")
 
 
+def reject_zero_chip_id(report: Report) -> None:
+    """Reject a report whose CHIP_ID is all zero while SIGNER_INFO does not mask it.
+
+    Firmware zeroes CHIP_ID only when the host masks it, which
+    ``reject_masked_chip_id`` already rejects, so an unmasked zero CHIP_ID
+    is not a platform identity. Accepting it would skip the binding of the
+    report to the VCEK's hardware id, since an all-zero value never names a
+    certified chip, and would turn 64 zero bytes into the machine identity.
+    """
+    if not any(report.chip_id):
+        raise SevAuthenticationError("report CHIP_ID is all zero without the mask flag set")
+
+
 def parse_crl(crl_der: bytes, now: datetime) -> RevocationList:
     """Parse the AMD CRL and check that ``now`` lies within its validity window (both ends inclusive)."""
     try:
@@ -246,8 +259,8 @@ def authenticate(evidence: Evidence, now: datetime, options: Options | None = No
     PEM decodes; the CRL is non-empty, parses and ``now`` is within its
     window; the report has the exact size and parses; the product is read
     from the report and its roots selected; the signature chain verifies;
-    CHIP_ID is not masked; the identity is derived; the measurement is 48
-    bytes.
+    CHIP_ID is neither masked nor all zero; the identity is derived; the
+    measurement is 48 bytes.
 
     The ASK and ARK that the document carries are checked for shape only:
     trust comes from the pinned roots, so they are not used.
@@ -268,6 +281,7 @@ def authenticate(evidence: Evidence, now: datetime, options: Options | None = No
     roots = trusted_roots(product_line, options.test_only_root_pem if options is not None else None)
     chain = verify_signature(report, evidence, roots, crl, now)
     reject_masked_chip_id(report)
+    reject_zero_chip_id(report)
     try:
         machine = identity(report.chip_id)
     except ValueError as err:
