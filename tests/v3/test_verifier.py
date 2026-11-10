@@ -558,6 +558,86 @@ def test_embedded_trust_rejects_invalid_or_unused_inputs() -> None:
         rejected_at(rejected.value, LAYER_PROVENANCE)
 
 
+def _refs(**fields: Any) -> EmbeddedReferences:
+    """Embedded references with fields of any type, for the type checks."""
+    return EmbeddedReferences(**fields)
+
+
+def _config(**fields: Any) -> EmbeddedConfig:
+    return EmbeddedConfig(**fields)
+
+
+def _reference(base: EmbeddedConfigReference, **changes: Any) -> EmbeddedConfigReference:
+    return dataclasses.replace(base, **changes)
+
+
+def test_option_fields_of_the_wrong_type_are_usage_errors() -> None:
+    """A caller's type mistake in a registry id or an embedded reference field is a UsageError, never an attribute
+    or type error from the code that reads the field."""
+    inputs = vf.embedded_inputs()
+    assert isinstance(inputs.config, EmbeddedConfig)
+    runtime = runtime_from_config(inputs.config.data)
+    digest = hashlib.sha256(inputs.config.data).hexdigest()
+    reference = EmbeddedConfigReference(name=vf.EMBEDDED_CONFIG_NAME, digest=digest, runtime=runtime)
+    config_text = inputs.config.data.decode()
+    cases: list[tuple[dict[str, Any], str]] = [
+        ({"config_registry_ids": [5]}, "config registry IDs must be strings"),
+        ({"config_registry_ids": [PRIVATE_REGISTRY_ID, None]}, "config registry IDs must be strings"),
+        ({"config_registry_ids": 5}, "config registry IDs must be a sequence"),
+        ({"embedded_references": _refs(runtime="{}")}, "embedded runtime manifest must be bytes"),
+        ({"embedded_references": _refs(platform="{}")}, "embedded platform artifact must be bytes"),
+        ({"embedded_references": _refs(config=_config(data=config_text))}, "embedded config data must be bytes"),
+        ({"embedded_references": _refs(config=_config(data=None))}, "embedded config data must be bytes"),
+        (
+            {"embedded_references": _refs(config=_config(data=inputs.config.data, name=None))},
+            "embedded config name must be a string",
+        ),
+        (
+            {"embedded_references": _refs(config=_reference(reference, digest=None))},
+            "embedded config digest must be a string",
+        ),
+        (
+            {"embedded_references": _refs(config=_reference(reference, name=None))},
+            "embedded config name must be a string",
+        ),
+        (
+            {
+                "embedded_references": _refs(
+                    config=_reference(reference, runtime=(runtime.repo, runtime.tag, runtime.digest))
+                )
+            },
+            "embedded config runtime must be a RuntimeReference",
+        ),
+    ]
+    for options, message in cases:
+        with pytest.raises(UsageError, match=message):
+            Verifier(**options)
+    # A bytes-like value of another kind is accepted and copied: a later change to the caller's buffer does not
+    # reach the verifier's policy.
+    manifest = bytearray(inputs.runtime or b"")
+    platform = bytearray(inputs.platform or b"")
+    config = bytearray(inputs.config.data)
+    v = Verifier(
+        embedded_references=_refs(
+            config=_config(data=memoryview(config), name=vf.EMBEDDED_CONFIG_NAME),
+            runtime=manifest,
+            platform=memoryview(platform),
+        )
+    )
+    embedded = trust_of(v).embedded
+    assert embedded.runtime == inputs.runtime
+    assert embedded.platform == inputs.platform
+    assert embedded.config.digest == digest
+    manifest[:] = b"{}" + bytes(len(manifest) - 2)
+    platform[:] = bytes(len(platform))
+    config[:] = bytes(len(config))
+    assert embedded.runtime == inputs.runtime
+    assert embedded.platform == inputs.platform
+    assert embedded.config.digest == digest
+    assert isinstance(embedded.runtime, bytes)
+    assert isinstance(embedded.platform, bytes)
+
+
 # --- endorsed configs over the synthetic world ------------------------------------------------
 
 

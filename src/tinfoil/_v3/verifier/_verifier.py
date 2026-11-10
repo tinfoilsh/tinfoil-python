@@ -279,10 +279,16 @@ def _trust_policy(
     freshness_keys = None if freshness_signing_keys is None else tuple(freshness_signing_keys)
     if freshness_keys is not None and len(freshness_keys) == 0:
         raise UsageError("freshness signing keys must not be empty")
-    registry_ids = None if config_registry_ids is None else tuple(config_registry_ids)
-    if registry_ids is not None:
+    registry_ids: tuple[str, ...] | None = None
+    if config_registry_ids is not None:
+        try:
+            registry_ids = tuple(config_registry_ids)
+        except TypeError as err:
+            raise UsageError("config registry IDs must be a sequence of strings") from err
         if len(registry_ids) == 0:
             raise UsageError("config registry IDs must not be empty")
+        if not all(isinstance(registry_id, str) for registry_id in registry_ids):
+            raise UsageError("config registry IDs must be strings")
         try:
             ConfigPolicy(registry_ids=registry_ids).validate_pins()
         except ApprovalError as err:
