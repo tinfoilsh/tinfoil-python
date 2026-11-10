@@ -210,7 +210,8 @@ class Verifier:
 
         An empty ``repo``, or None, which means the same, pins no
         repository and passes this check: v3 collateral then accepts
-        configs authorized by the configured registry trust. It can still
+        configs authorized by the verifier's configured config trust (the public or caller registry,
+        caller signing keys, an authorizer, or an embedded config). It can still
         fail once the document is in hand. v2 collateral requires a
         repository pin, so ``verify_v3`` raises UsageError for an empty
         ``repo`` on a v2 document; and v3 collateral also requires the repo
@@ -227,7 +228,8 @@ class Verifier:
         ``repo`` pins the expected repository or registry project as
         ``org/project[@revision][@sha256:digest]``. An empty ``repo``, or
         None, which means the same, pins no repository: v3 collateral then
-        accepts configs authorized by the configured registry trust, and
+        accepts configs authorized by the verifier's configured config trust (the public or caller registry,
+        caller signing keys, an authorizer, or an embedded config), and
         v2 collateral, which requires a repository pin, is a UsageError. An
         embedded config instead authorizes its exact caller-supplied bytes.
         A config authorizer requires an empty ``repo`` and owns config

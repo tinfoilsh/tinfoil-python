@@ -37,7 +37,7 @@ import urllib.request
 from tinfoil.verifier import Verification, Verifier, random_nonce
 
 
-def fetch_and_verify(host: str, repo: str) -> Verification:
+def fetch_and_verify(host: str, repo: str | None) -> Verification:
     nonce = random_nonce()
     url = f"https://{host}/.well-known/tinfoil-attestation?nonce={nonce.hex()}"
     with urllib.request.urlopen(url, timeout=10) as response:
@@ -230,7 +230,7 @@ subclasses that call for different responses:
 from tinfoil.verifier import LAYER_PROVENANCE, UsageError, VerificationError, Verifier
 
 
-def classify(document: bytes, nonce: bytes, repo: str) -> str:
+def classify(document: bytes, nonce: bytes, repo: str | None) -> str:
     try:
         Verifier().verify_v3(document, nonce, repo)
     except UsageError as err:
