@@ -25,6 +25,8 @@ dependencies = [
     "urllib3>=2.8.0",
     "certifi>=2026.10.19",
     "pyyaml>=6.0.3",
+    "sigstore-models>=0.0.6",
+    "rfc3161-client>=1.0.7",
 ]
 
 [dependency-groups]
@@ -51,6 +53,7 @@ pythonpath = ["conformance"]
 [tool.ruff]
 target-version = "py311"
 line-length = 120
+src = [".", "src", "conformance"]
 extend-exclude = [
     "*.md",
     "example.py",
@@ -61,7 +64,7 @@ extend-exclude = [
     "src/tinfoil/github.py",
     "src/tinfoil/sigstore.py",
     "src/tinfoil/user_cache_secret.py",
-    "tests/*.py",
+    "tests/test_*.py",
 ]
 
 [tool.ruff.lint]
@@ -85,7 +88,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S"]
+"tests/**" = [
+    "S",
+    "RUF001", "RUF002", "RUF003",  # tests probe non-ASCII digits and letters on purpose
+]
 
 [tool.mypy]
 python_version = "3.11"

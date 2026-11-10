@@ -227,9 +227,16 @@ def test_decode_manifest_ignores_unknown_members() -> None:
 
 def test_decode_manifest_rejects_duplicate_members() -> None:
     base = base_text()
-    raises_decode(b'{"root":"one","root":"two",' + base[1:], r'^parsing runtime manifest: .*duplicate object member name "root"')
-    raises_decode(b'{"version":"v0.15.0",' + base[1:], r'^parsing runtime manifest: .*duplicate object member name "version"')
-    raises_decode(base.replace(b'"mrtd":', b'"mrtd":"x","mrtd":'), r'^parsing runtime manifest: .*duplicate object member name "mrtd"')
+    raises_decode(
+        b'{"root":"one","root":"two",' + base[1:], r'^parsing runtime manifest: .*duplicate object member name "root"'
+    )
+    raises_decode(
+        b'{"version":"v0.15.0",' + base[1:], r'^parsing runtime manifest: .*duplicate object member name "version"'
+    )
+    raises_decode(
+        base.replace(b'"mrtd":', b'"mrtd":"x","mrtd":'),
+        r'^parsing runtime manifest: .*duplicate object member name "mrtd"',
+    )
 
 
 @pytest.mark.parametrize(
@@ -250,7 +257,9 @@ def test_decode_manifest_igvm_and_version() -> None:
     raises_decode(b'{"version":"v0.15.0"}', r"^runtime manifest format is unsupported")
     base = base_text()
     raises_decode(base.replace(b'"version":"v0.15.0"', b'"version":null'), r"^runtime manifest version must be a full")
-    raises_decode(base.replace(b'"version":"v0.15.0"', b'"version":1'), r"^parsing runtime manifest: .*JSON number into string")
+    raises_decode(
+        base.replace(b'"version":"v0.15.0"', b'"version":1'), r"^parsing runtime manifest: .*JSON number into string"
+    )
     for version in (b'"0.15.0"', b'"v0.15"'):
         raises_decode(base.replace(b'"version":"v0.15.0"', b'"version":' + version), r"must be a full semantic version")
 
@@ -344,8 +353,12 @@ def test_config_decode_rejects() -> None:
         raises_config(config, r"^cvm-version must pin a runtime manifest SHA-256 digest")
     for config in (b"cvm-version: [a]\n", b"cvm-version: {a: b}\n"):
         raises_config(config, r"^parsing config runtime pin: cvm-version must be a scalar")
-    raises_config(f"cvm-version: !!binary {DIGEST}\n".encode(), r"^parsing config runtime pin: cvm-version must not be binary")
-    raises_config(f"base: &b\n  cvm-version: 0.15.0@sha256:{DIGEST}\n<<: *b\n".encode(), r"merge keys are not supported")
+    raises_config(
+        f"cvm-version: !!binary {DIGEST}\n".encode(), r"^parsing config runtime pin: cvm-version must not be binary"
+    )
+    raises_config(
+        f"base: &b\n  cvm-version: 0.15.0@sha256:{DIGEST}\n<<: *b\n".encode(), r"merge keys are not supported"
+    )
     raises_config(f"? [a]\n: b\n{GOOD}".encode(), r"^parsing config runtime pin: mapping keys must be scalars")
     # The text "15" becomes tag "v15", which is not a full semantic version.
     raises_config(f"cvm-version: 15@sha256:{DIGEST}\n".encode(), r"^runtime tag must be a full semantic version")

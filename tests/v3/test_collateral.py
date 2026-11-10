@@ -24,8 +24,19 @@ from tinfoil._v3.verifier._document.collateral.collateral import (
     NotFoundError,
     Set,
 )
-from tinfoil._v3.verifier._document.collateral.config import CONFIG_ENDORSEMENT_V1_FORMAT, CONFIG_ENDORSEMENT_V2_FORMAT, CONFIG_ID, CONFIG_V1_FORMAT
-from tinfoil._v3.verifier._document.collateral.runtime import PLATFORM_ID, RUNTIME_ID, RUNTIME_REPO, RUNTIME_V1_FORMAT, RuntimeReference
+from tinfoil._v3.verifier._document.collateral.config import (
+    CONFIG_ENDORSEMENT_V1_FORMAT,
+    CONFIG_ENDORSEMENT_V2_FORMAT,
+    CONFIG_ID,
+    CONFIG_V1_FORMAT,
+)
+from tinfoil._v3.verifier._document.collateral.runtime import (
+    PLATFORM_ID,
+    RUNTIME_ID,
+    RUNTIME_REPO,
+    RUNTIME_V1_FORMAT,
+    RuntimeReference,
+)
 from tinfoil._v3.verifier._document.collateral.sev import AMDCRL, AMDVCEK
 from tinfoil._v3.verifier._document.collateral.sigstore import Freshness
 from tinfoil._v3.verifier._document.collateral.tdx import IntelPCS, PCSResponse
@@ -81,10 +92,17 @@ def test_decode_sev_collateral() -> None:
 def test_decode_tdx_collateral() -> None:
     url = "https://api.trustedservices.intel.com/tdx/certification/v4/qe/identity"
     body = b'{"enclaveIdentity":{}}'
-    pcs = {"responses": [{"url": url, "headers": {"Sgx-Enclave-Identity-Issuer-Chain": ["chain"]}, "body_base64": b64(body)}]}
+    pcs = {
+        "responses": [
+            {"url": url, "headers": {"Sgx-Enclave-Identity-Issuer-Chain": ["chain"]}, "body_base64": b64(body)}
+        ]
+    }
     got = decode(cpu("pcs", INTEL_PCS_V1_FORMAT, pcs)).cpu
-    assert got.intel_pcs == IntelPCS(responses=(PCSResponse(url=url, headers={"Sgx-Enclave-Identity-Issuer-Chain": ("chain",)}, body=body),))
-    assert got.amd_vcek is None and got.amd_crl is None
+    assert got.intel_pcs == IntelPCS(
+        responses=(PCSResponse(url=url, headers={"Sgx-Enclave-Identity-Issuer-Chain": ("chain",)}, body=body),)
+    )
+    assert got.amd_vcek is None
+    assert got.amd_crl is None
     # No responses at all is a valid, empty capture.
     assert decode(cpu("pcs", INTEL_PCS_V1_FORMAT, {})).cpu.intel_pcs == IntelPCS(responses=())
 
@@ -95,7 +113,8 @@ def test_decode_empty() -> None:
     assert got.sigstore_code is None
     assert got.sigstore_platform is None
     assert got.freshness == {}
-    assert got.config is None and got.runtime is None
+    assert got.config is None
+    assert got.runtime is None
 
 
 def test_decode_requires_cpu_subject() -> None:
@@ -109,24 +128,50 @@ def test_decode_requires_cpu_subject() -> None:
 @pytest.mark.parametrize(
     ("items", "message"),
     [
-        ([{"role": entry.ROLE_ENDORSEMENT, "format": AMD_CRL_V1_FORMAT, "data": {}}], "collateral entry 0 is incomplete"),
+        (
+            [{"role": entry.ROLE_ENDORSEMENT, "format": AMD_CRL_V1_FORMAT, "data": {}}],
+            "collateral entry 0 is incomplete",
+        ),
         (
             [
-                {"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "https://tinfoil.sh/collateral/unknown/v9", "data": {}},
+                {
+                    "id": "crl",
+                    "role": entry.ROLE_ENDORSEMENT,
+                    "format": "https://tinfoil.sh/collateral/unknown/v9",
+                    "data": {},
+                },
                 {"id": "x", "role": entry.ROLE_ENDORSEMENT, "data": {}},
             ],
             "collateral entry 1 is incomplete",
         ),
         (
-            [{"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u", "data": {}}, {"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u", "data": {}}],
+            [
+                {"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u", "data": {}},
+                {"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u", "data": {}},
+            ],
             "duplicate collateral entry id 'crl'",
         ),
-        ([{"id": "crl", "role": "unknown", "format": "u", "data": {}}], "collateral entry 'crl' has unknown role 'unknown'"),
+        (
+            [{"id": "crl", "role": "unknown", "format": "u", "data": {}}],
+            "collateral entry 'crl' has unknown role 'unknown'",
+        ),
         # Unknown formats are not decoded, but their data must still be an object.
-        ([{"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u"}], "collateral entry 'crl' data is not a valid JSON object"),
-        ([{"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u", "data": None}], "collateral entry 'crl' data is not a valid JSON object"),
-        ([{"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u", "data": []}], "collateral entry 'crl' data is not a valid JSON object"),
-        ([{"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u", "data": "x"}], "collateral entry 'crl' data is not a valid JSON object"),
+        (
+            [{"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u"}],
+            "collateral entry 'crl' data is not a valid JSON object",
+        ),
+        (
+            [{"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u", "data": None}],
+            "collateral entry 'crl' data is not a valid JSON object",
+        ),
+        (
+            [{"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u", "data": []}],
+            "collateral entry 'crl' data is not a valid JSON object",
+        ),
+        (
+            [{"id": "crl", "role": entry.ROLE_ENDORSEMENT, "format": "u", "data": "x"}],
+            "collateral entry 'crl' data is not a valid JSON object",
+        ),
     ],
 )
 def test_decode_rejects_malformed_entry_list(items: list[dict[str, Any]], message: str) -> None:
@@ -151,16 +196,29 @@ def test_decode_rejects_malformed_entry_members() -> None:
     ("items", "message"),
     [
         ([cpu("pcs", INTEL_PCS_V1_FORMAT, {"unknown": 1})], "parsing intel-pcs collateral entry 'pcs'"),
-        ([cpu("vcek", AMD_VCEK_V1_FORMAT, {"unknown": 1}, subjects=["gpu0"])], "parsing amd-vcek collateral entry 'vcek'"),
         (
-            [cpu("cpu-endorsement", AMD_VCEK_V1_FORMAT, {"vcek_der_base64": b64("vcek der") + "\n", "cert_chain_pem": "chain"}), sev_entries()[1]],
+            [cpu("vcek", AMD_VCEK_V1_FORMAT, {"unknown": 1}, subjects=["gpu0"])],
+            "parsing amd-vcek collateral entry 'vcek'",
+        ),
+        (
+            [
+                cpu(
+                    "cpu-endorsement",
+                    AMD_VCEK_V1_FORMAT,
+                    {"vcek_der_base64": b64("vcek der") + "\n", "cert_chain_pem": "chain"},
+                ),
+                sev_entries()[1],
+            ],
             "amd-vcek collateral entry 'cpu-endorsement': vcek_der_base64 is not canonical base64",
         ),
         (
             [sev_entries()[0], cpu("cpu-crl", AMD_CRL_V1_FORMAT, {"crl_der_base64": b64("crl der") + "\r\n"})],
             "amd-crl collateral entry 'cpu-crl': crl_der_base64 is not canonical base64",
         ),
-        ([cpu("cpu-crl", AMD_CRL_V1_FORMAT, {"crl_der_base64": "not base64!"})], "amd-crl collateral entry 'cpu-crl': decoding crl_der_base64"),
+        (
+            [cpu("cpu-crl", AMD_CRL_V1_FORMAT, {"crl_der_base64": "not base64!"})],
+            "amd-crl collateral entry 'cpu-crl': decoding crl_der_base64",
+        ),
         (
             [
                 cpu(
@@ -168,17 +226,32 @@ def test_decode_rejects_malformed_entry_members() -> None:
                     INTEL_PCS_V1_FORMAT,
                     {
                         "responses": [
-                            {"url": "https://api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc=90c06f000000", "body_base64": b64('{"tcbInfo":{}}')},
-                            {"url": "https://example.com/never-requested", "body_base64": b64('{"unused":true}')[:4] + "\n" + b64('{"unused":true}')[4:]},
+                            {
+                                "url": "https://api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc=90c06f000000",
+                                "body_base64": b64('{"tcbInfo":{}}'),
+                            },
+                            {
+                                "url": "https://example.com/never-requested",
+                                "body_base64": b64('{"unused":true}')[:4] + "\n" + b64('{"unused":true}')[4:],
+                            },
                         ]
                     },
                 )
             ],
             "intel-pcs collateral entry 'pcs' response 1: body_base64 is not canonical base64",
         ),
-        ([cpu("pcs", INTEL_PCS_V1_FORMAT, {"responses": [{"url": "u", "headers": {"h": "x"}, "body_base64": ""}]})], "parsing intel-pcs"),
-        ([ref("code", SIGSTORE_CODE_V1_FORMAT, {"repo": "org/code", "unknown": 1})], f"parsing {SIGSTORE_CODE_V1_FORMAT} collateral entry 'code'"),
-        ([ref(FRESHNESS_ID_CODE, SIGSTORE_FRESHNESS_V1_FORMAT, {"unknown": 1})], f"parsing {SIGSTORE_FRESHNESS_V1_FORMAT} collateral entry 'code-freshness'"),
+        (
+            [cpu("pcs", INTEL_PCS_V1_FORMAT, {"responses": [{"url": "u", "headers": {"h": "x"}, "body_base64": ""}]})],
+            "parsing intel-pcs",
+        ),
+        (
+            [ref("code", SIGSTORE_CODE_V1_FORMAT, {"repo": "org/code", "unknown": 1})],
+            f"parsing {SIGSTORE_CODE_V1_FORMAT} collateral entry 'code'",
+        ),
+        (
+            [ref(FRESHNESS_ID_CODE, SIGSTORE_FRESHNESS_V1_FORMAT, {"unknown": 1})],
+            f"parsing {SIGSTORE_FRESHNESS_V1_FORMAT} collateral entry 'code-freshness'",
+        ),
     ],
 )
 def test_decode_rejects_malformed_known_formats(items: list[dict[str, Any]], message: str) -> None:
@@ -189,7 +262,12 @@ def test_decode_ignores_unknown_formats() -> None:
     # Unknown formats, and known formats under a role that they do not serve,
     # are never decoded: only the structural checks apply to them.
     for item in (
-        {"id": "future", "role": entry.ROLE_ENDORSEMENT, "format": "https://tinfoil.sh/collateral/unknown/v9", "data": {"x": 1}},
+        {
+            "id": "future",
+            "role": entry.ROLE_ENDORSEMENT,
+            "format": "https://tinfoil.sh/collateral/unknown/v9",
+            "data": {"x": 1},
+        },
         {"id": "misrole", "role": entry.ROLE_REFERENCE_VALUES, "format": AMD_VCEK_V1_FORMAT, "data": {"unknown": 1}},
     ):
         assert decode(item).cpu == CPUEndorsements(), item["id"]
@@ -216,11 +294,16 @@ def test_decode_selects_first_entry_per_purpose() -> None:
         sigstore("platform-1", SIGSTORE_PLATFORM_V1_FORMAT, "org/first-platform"),
         sigstore("platform-2", SIGSTORE_PLATFORM_V1_FORMAT, "org/second-platform"),
     )
-    assert got.cpu.amd_vcek is not None and got.cpu.amd_vcek.vcek_der == b"first vcek"
-    assert got.cpu.amd_crl is not None and got.cpu.amd_crl.crl_der == b"first crl"
-    assert got.cpu.intel_pcs is not None and got.cpu.intel_pcs.responses[0].url == "https://first.example"
-    assert got.sigstore_code is not None and got.sigstore_code.repo == "org/first"
-    assert got.sigstore_platform is not None and got.sigstore_platform.repo == "org/first-platform"
+    assert got.cpu.amd_vcek is not None
+    assert got.cpu.amd_vcek.vcek_der == b"first vcek"
+    assert got.cpu.amd_crl is not None
+    assert got.cpu.amd_crl.crl_der == b"first crl"
+    assert got.cpu.intel_pcs is not None
+    assert got.cpu.intel_pcs.responses[0].url == "https://first.example"
+    assert got.sigstore_code is not None
+    assert got.sigstore_code.repo == "org/first"
+    assert got.sigstore_platform is not None
+    assert got.sigstore_platform.repo == "org/first-platform"
 
 
 def test_decode_keys_freshness_by_id() -> None:
@@ -231,7 +314,8 @@ def test_decode_keys_freshness_by_id() -> None:
     assert set(got.freshness) == {FRESHNESS_ID_CODE, FRESHNESS_ID_PLATFORM}
     code = got.freshness[FRESHNESS_ID_CODE]
     assert code.format == SIGSTORE_FRESHNESS_V1_FORMAT
-    assert isinstance(code.bundle, JsonObject) and list(code.bundle) == ["a"]
+    assert isinstance(code.bundle, JsonObject)
+    assert list(code.bundle) == ["a"]
     assert isinstance(got.freshness[FRESHNESS_ID_PLATFORM], Freshness)
 
 
@@ -239,20 +323,37 @@ def test_decode_keys_freshness_by_id() -> None:
     ("format_", "data", "message"),
     [
         (SIGSTORE_CODE_V1_FORMAT, {"repo": "o/r", "tag": "v1", "digest": "ab"}, "is missing sigstore_bundle"),
-        (SIGSTORE_CODE_V1_FORMAT, {"repo": "o/r", "tag": "v1", "digest": "ab", "sigstore_bundle": None}, "is missing sigstore_bundle"),
+        (
+            SIGSTORE_CODE_V1_FORMAT,
+            {"repo": "o/r", "tag": "v1", "digest": "ab", "sigstore_bundle": None},
+            "is missing sigstore_bundle",
+        ),
         (SIGSTORE_PLATFORM_V1_FORMAT, {"repo": "o/r", "tag": "v1", "sigstore_bundle": {}}, "is missing digest"),
-        (SIGSTORE_CODE_V1_FORMAT, {"repo": "o/r", "tag": "v1", "digest": "", "sigstore_bundle": {}}, "is missing digest"),
+        (
+            SIGSTORE_CODE_V1_FORMAT,
+            {"repo": "o/r", "tag": "v1", "digest": "", "sigstore_bundle": {}},
+            "is missing digest",
+        ),
         (SIGSTORE_FRESHNESS_V1_FORMAT, {}, "is missing sigstore_bundle"),
         (SIGSTORE_FRESHNESS_V1_FORMAT, {"sigstore_bundle": None}, "is missing sigstore_bundle"),
     ],
 )
 def test_decode_requires_sigstore_bundle_and_digest(format_: str, data: dict[str, Any], message: str) -> None:
-    """A reference must carry what verification needs: a bundle and a digest. Whether a present bundle verifies is provenance's job, and the tag is an optional hint."""
+    """A reference must carry what verification needs: a bundle and a digest.
+
+    Whether a present bundle verifies is provenance's job, and the tag is an optional hint.
+    """
     raises_decode(ref("ref", format_, data), match=message)
 
 
 def test_decode_accepts_empty_tag_and_repo_and_unverified_bundles() -> None:
-    decode(ref("ref", SIGSTORE_CODE_V1_FORMAT, {"repo": "", "tag": "", "digest": "ab", "sigstore_bundle": {"mediaType": "x"}}))
+    decode(
+        ref(
+            "ref",
+            SIGSTORE_CODE_V1_FORMAT,
+            {"repo": "", "tag": "", "digest": "ab", "sigstore_bundle": {"mediaType": "x"}},
+        )
+    )
     decode(ref("ref", SIGSTORE_FRESHNESS_V1_FORMAT, {"sigstore_bundle": {}}))
 
 
@@ -278,7 +379,13 @@ def test_runtime_reference() -> None:
 def test_runtime() -> None:
     reference = RuntimeReference(repo=RUNTIME_REPO, tag="v0.15.0", digest="ab" * 32)
     manifest = b'{"version":"v0.15.0"}'
-    data = {"repo": reference.repo, "tag": reference.tag, "digest": reference.digest, "manifest_base64": b64(manifest), "sigstore_bundle": {}}
+    data = {
+        "repo": reference.repo,
+        "tag": reference.tag,
+        "digest": reference.digest,
+        "manifest_base64": b64(manifest),
+        "sigstore_bundle": {},
+    }
     item = ref(RUNTIME_ID, RUNTIME_V1_FORMAT, data)
     got = decode(item).runtime
     assert got is not None
@@ -287,14 +394,23 @@ def test_runtime() -> None:
     assert isinstance(got.bundle, JsonObject)
     raises_decode(item, {**item, "id": "other-runtime"}, match="conflicting collateral")
     raises_decode({**item, "role": entry.ROLE_ENDORSEMENT}, match="conflicting collateral")
-    raises_decode(ref(RUNTIME_ID, RUNTIME_V1_FORMAT, {**data, "sigstore_bundle": None}), match="sigstore_bundle must be an object")
-    raises_decode(ref(RUNTIME_ID, RUNTIME_V1_FORMAT, {**data, "manifest_base64": b64(manifest) + "\n"}), match="not canonical base64")
+    raises_decode(
+        ref(RUNTIME_ID, RUNTIME_V1_FORMAT, {**data, "sigstore_bundle": None}), match="sigstore_bundle must be an object"
+    )
+    raises_decode(
+        ref(RUNTIME_ID, RUNTIME_V1_FORMAT, {**data, "manifest_base64": b64(manifest) + "\n"}),
+        match="not canonical base64",
+    )
     raises_decode(ref(RUNTIME_ID, RUNTIME_V1_FORMAT, {**data, "tag": "0.15.0"}), match="full semantic version")
     assert isinstance(runtime.decode_runtime(entries_of(item)[0]), runtime.Runtime)
 
 
 def test_config_platform() -> None:
-    item = ref(PLATFORM_ID, SIGSTORE_PLATFORM_V1_FORMAT, {"repo": "tinfoilsh/cvmimage", "tag": "platform-v1.0.0", "digest": "ab", "sigstore_bundle": {}})
+    item = ref(
+        PLATFORM_ID,
+        SIGSTORE_PLATFORM_V1_FORMAT,
+        {"repo": "tinfoilsh/cvmimage", "tag": "platform-v1.0.0", "digest": "ab", "sigstore_bundle": {}},
+    )
     got = decode(item)
     platform = got.config_platform()
     assert platform.repo == "tinfoilsh/cvmimage"
@@ -319,7 +435,10 @@ def test_artifact_freshness_requires_reserved_profile() -> None:
         assert decode(item).freshness[entry_id].format == ARTIFACT_FRESHNESS_V1_FORMAT
         for mutated in ({**item, "id": "other"}, {**item, "role": entry.ROLE_ENDORSEMENT}, {**item, "data": {}}):
             raises_decode(mutated)
-    raises_decode(ref(FRESHNESS_ID_RUNTIME, SIGSTORE_FRESHNESS_V1_FORMAT, {"sigstore_bundle": {}}), match="conflicting artifact freshness collateral")
+    raises_decode(
+        ref(FRESHNESS_ID_RUNTIME, SIGSTORE_FRESHNESS_V1_FORMAT, {"sigstore_bundle": {}}),
+        match="conflicting artifact freshness collateral",
+    )
 
 
 # --- config -------------------------------------------------------------------
@@ -335,9 +454,18 @@ def test_plain_config_collateral() -> None:
     assert got.issuer is None
     raises_decode(item, item)
     raises_decode({**item, "format": CONFIG_ENDORSEMENT_V1_FORMAT}, match="endorsement_ref")
-    raises_decode(ref(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": "Y29uZmln", "sigstore_bundle": {}}), match="cannot contain an endorsement")
-    raises_decode(ref(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": "Y29uZmln", "sigstore_bundle": None}), match="cannot contain an endorsement")
-    raises_decode(ref(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": "Y29uZmln", "endorsement_ref": "x"}), match="cannot contain an endorsement")
+    raises_decode(
+        ref(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": "Y29uZmln", "sigstore_bundle": {}}),
+        match="cannot contain an endorsement",
+    )
+    raises_decode(
+        ref(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": "Y29uZmln", "sigstore_bundle": None}),
+        match="cannot contain an endorsement",
+    )
+    raises_decode(
+        ref(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": "Y29uZmln", "endorsement_ref": "x"}),
+        match="cannot contain an endorsement",
+    )
 
 
 def test_config_collateral_allows_optional_bytes() -> None:
@@ -345,7 +473,8 @@ def test_config_collateral_allows_optional_bytes() -> None:
     got = decode(ref(CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, data)).config
     assert got is not None
     assert got.reference == data["endorsement_ref"]
-    assert isinstance(got.bundle, JsonObject) and got.bundle["mediaType"] == "test"
+    assert isinstance(got.bundle, JsonObject)
+    assert got.bundle["mediaType"] == "test"
     assert got.config is None
     got = decode(ref(CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, {**data, "config_base64": b64("public config")})).config
     assert got is not None
@@ -365,7 +494,8 @@ def test_config_endorsement() -> None:
     assert got is not None
     assert got.reference == reference
     assert got.config == config_bytes
-    assert isinstance(got.bundle, JsonObject) and got.bundle["mediaType"] == "test"
+    assert isinstance(got.bundle, JsonObject)
+    assert got.bundle["mediaType"] == "test"
 
     cases: dict[str, list[dict[str, Any]]] = {
         "wrong role": [{**item, "role": entry.ROLE_ENDORSEMENT}],
@@ -373,9 +503,13 @@ def test_config_endorsement() -> None:
         "wrong id": [{**item, "id": "other"}],
         "duplicate": [item, item],
         "ambiguous format": [item, {**item, "id": "other"}],
-        "noncanonical base64": [ref(CONFIG_ID, CONFIG_ENDORSEMENT_V1_FORMAT, {**data, "config_base64": "\n" + data["config_base64"]})],
+        "noncanonical base64": [
+            ref(CONFIG_ID, CONFIG_ENDORSEMENT_V1_FORMAT, {**data, "config_base64": "\n" + data["config_base64"]})
+        ],
         "empty config": [ref(CONFIG_ID, CONFIG_ENDORSEMENT_V1_FORMAT, {**data, "config_base64": ""})],
-        "missing config": [ref(CONFIG_ID, CONFIG_ENDORSEMENT_V1_FORMAT, {k: v for k, v in data.items() if k != "config_base64"})],
+        "missing config": [
+            ref(CONFIG_ID, CONFIG_ENDORSEMENT_V1_FORMAT, {k: v for k, v in data.items() if k != "config_base64"})
+        ],
         "bad reference": [ref(CONFIG_ID, CONFIG_ENDORSEMENT_V1_FORMAT, {**data, "endorsement_ref": "sha256:bad"})],
         "unknown member": [ref(CONFIG_ID, CONFIG_ENDORSEMENT_V1_FORMAT, {"unknown": True, **data})],
         "missing bundle": [ref(CONFIG_ID, CONFIG_ENDORSEMENT_V1_FORMAT, {**data, "sigstore_bundle": None})],
@@ -390,12 +524,25 @@ def test_config_endorsement() -> None:
 
 
 def test_issuer_certificate_encoding_is_canonical() -> None:
-    data: dict[str, Any] = {"endorsement_ref": "sha256:" + "ab" * 32, "sigstore_bundle": {"mediaType": "test"}, "issuer_certificate_der": "Yg=="}
+    data: dict[str, Any] = {
+        "endorsement_ref": "sha256:" + "ab" * 32,
+        "sigstore_bundle": {"mediaType": "test"},
+        "issuer_certificate_der": "Yg==",
+    }
     got = decode(ref(CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, data)).config
-    assert got is not None and got.issuer == b"b"
+    assert got is not None
+    assert got.issuer == b"b"
     got = decode(ref(CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, {**data, "config_base64": "Y29uZmln"})).config
-    assert got is not None and got.config == b"config" and got.issuer == b"b"
+    assert got is not None
+    assert got.config == b"config"
+    assert got.issuer == b"b"
     for noncanonical in ("YR==", "YQ==\n"):
-        raises_decode(ref(CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, {**data, "issuer_certificate_der": noncanonical}), match="issuer_certificate_der")
+        raises_decode(
+            ref(CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, {**data, "issuer_certificate_der": noncanonical}),
+            match="issuer_certificate_der",
+        )
     raises_decode(ref(CONFIG_ID, CONFIG_ENDORSEMENT_V1_FORMAT, data), match="issuer certificates require v2")
-    assert isinstance(config.decode_config_endorsement(entries_of(ref(CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, data))[0]), config.ConfigEndorsement)
+    assert isinstance(
+        config.decode_config_endorsement(entries_of(ref(CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, data))[0]),
+        config.ConfigEndorsement,
+    )

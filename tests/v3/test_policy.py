@@ -510,7 +510,9 @@ def test_uint64_mitigation_vector_bounds() -> None:
 
 
 def test_uint32_guest_svn_overflow() -> None:
-    raises_parse(mutated(set_sev("minimum_guest_svn", 1 << 32)), r"parsing policy artifact: .*4294967296 overflows uint32")
+    raises_parse(
+        mutated(set_sev("minimum_guest_svn", 1 << 32)), r"parsing policy artifact: .*4294967296 overflows uint32"
+    )
 
 
 def test_int_cpus_literals() -> None:
@@ -608,7 +610,9 @@ def test_wrong_type_for_shape() -> None:
 
 def test_duplicate_members_in_nested_blocks() -> None:
     base = mutated(lambda tree: None)
-    raises_parse(base.replace(b'"debug":false', b'"debug":false,"debug":false'), r'duplicate object member name "debug"')
+    raises_parse(
+        base.replace(b'"debug":false', b'"debug":false,"debug":false'), r'duplicate object member name "debug"'
+    )
     raises_parse(base.replace(b'"bl_spl":', b'"bl_spl":0,"bl_spl":', 1), r'duplicate object member name "bl_spl"')
     raises_parse(base.replace(b'"cpus":', b'"cpus":1,"cpus":', 1), r'duplicate object member name "cpus"')
 
