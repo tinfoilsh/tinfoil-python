@@ -50,3 +50,17 @@ def test_pin_tls_key() -> None:
     assert fp in str(rejected.value)
     with pytest.raises(UsageError):
         pin_tls_key(fp)(Connection(None))  # type: ignore[arg-type]
+
+
+def test_pin_tls_key_rejects_a_malformed_fingerprint_when_built() -> None:
+    # The pin is checked once, so that a record without an endorsed TLS key, or a fingerprint in another form,
+    # cannot be mistaken for a mismatch on every connection.
+    issued = pki.certificate("leaf", pki.p256())
+    fp = cert_pubkey_fp(issued.der)
+    for bad in (None, b"", 42):
+        with pytest.raises(UsageError, match="lowercase hex string"):
+            pin_tls_key(bad)  # type: ignore[arg-type]
+    for malformed in ("", fp[:-2], fp + "00", fp.upper(), fp[:-1] + "g", "sha256:" + fp[7:]):
+        with pytest.raises(UsageError, match="32 bytes as lowercase hex"):
+            pin_tls_key(malformed)
+    pin_tls_key(fp)(Connection(issued.der))  # type: ignore[arg-type]

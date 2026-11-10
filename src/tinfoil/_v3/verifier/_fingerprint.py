@@ -12,6 +12,9 @@ from cryptography.hazmat.primitives import serialization
 
 from tinfoil._v3.verifier._errors import LAYER_POLICY, UsageError, VerificationError
 
+_FINGERPRINT_SIZE = hashlib.sha256().digest_size
+_LOWER_HEX = "0123456789abcdef"
+
 
 def cert_pubkey_fp(cert_der: bytes) -> str:
     """The SPKI SHA-256 fingerprint of a DER certificate's public key (any key type), lowercase hex: the form that
@@ -43,7 +46,15 @@ def connection_cert_fp(connection: ssl.SSLSocket | ssl.SSLObject) -> str:
 def pin_tls_key(fp: str) -> Callable[[ssl.SSLSocket | ssl.SSLObject], None]:
     """A check that accepts only a connection whose leaf certificate carries the public key fingerprint ``fp``, in
     the form ``Verification.tls_public_key_fp`` reports. It adds to the certificate checks that the TLS context
-    performs; it does not replace them. A mismatch is a VerificationError of the policy layer."""
+    performs; it does not replace them. A mismatch is a VerificationError of the policy layer.
+
+    ``fp`` must be a SHA-256 digest as lowercase hex; anything else, such as the None that
+    ``Verification.tls_public_key_fp`` reports when the document endorses no TLS key, is a UsageError here rather
+    than a mismatch on every connection."""
+    if not isinstance(fp, str):
+        raise UsageError(f"TLS key fingerprint must be a lowercase hex string, not {type(fp).__name__}")
+    if len(fp) != _FINGERPRINT_SIZE * 2 or fp.strip(_LOWER_HEX) != "":
+        raise UsageError(f"TLS key fingerprint must be {_FINGERPRINT_SIZE} bytes as lowercase hex")
 
     def check(connection: ssl.SSLSocket | ssl.SSLObject) -> None:
         got = connection_cert_fp(connection)
