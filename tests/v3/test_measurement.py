@@ -52,9 +52,9 @@ def test_parse_expected() -> None:
     assert parse_expected_sevsnp(sev.launch.hex()) == sev.expected()
     assert parse_expected_sevsnp("") == ExpectedSEVSNP()
 
-    with pytest.raises(ValueError, match="RTMR2: register must be 96 hex characters"):
+    with pytest.raises(ValueError, match="rtmr2: register must be 96 hex characters"):
         parse_expected_tdx("", "", "", "abcd", "")
-    with pytest.raises(ValueError, match="Launch: register is not hex"):
+    with pytest.raises(ValueError, match="launch: register is not hex"):
         parse_expected_sevsnp("zz" * REGISTER_SIZE)
 
 
@@ -69,20 +69,30 @@ def test_expected_pins_every_register() -> None:
 
 def test_str() -> None:
     value = register(0xAB)
-    assert str(SEVSNP(launch=value)) == "SEV-SNP\nLaunch " + value.hex()
+    assert str(SEVSNP(launch=value)) == "SEV-SNP\nlaunch " + value.hex()
     assert (
         str(ExpectedTDX(rtmr1=value))
-        == "TDX\nMRTD   any\nRTMR0  any\nRTMR1  " + value.hex() + "\nRTMR2  any\nRTMR3  any"
+        == "TDX\nmrtd   any\nrtmr0  any\nrtmr1  " + value.hex() + "\nrtmr2  any\nrtmr3  any"
     )
 
 
 def test_registers_must_be_the_register_size() -> None:
-    with pytest.raises(ValueError, match="Launch: register must be 48 bytes, got 2"):
+    with pytest.raises(ValueError, match="launch: register must be 48 bytes, got 2"):
         SEVSNP(launch=b"\xab\xcd")
-    with pytest.raises(ValueError, match="RTMR3: register must be 48 bytes, got 0"):
+    with pytest.raises(ValueError, match="rtmr3: register must be 48 bytes, got 0"):
         ExpectedTDX(rtmr3=b"")
-    with pytest.raises(ValueError, match="MRTD: register must be 48 bytes, got 49"):
+    with pytest.raises(ValueError, match="mrtd: register must be 48 bytes, got 49"):
         TDX(mrtd=bytes(49), rtmr0=register(0), rtmr1=register(0), rtmr2=register(0), rtmr3=register(0))
+
+
+def test_registers_must_be_bytes() -> None:
+    """A register of another type is a ValueError naming the type, never a TypeError from measuring its length."""
+    with pytest.raises(ValueError, match="launch: register must be bytes, not str"):
+        SEVSNP(launch="ab" * REGISTER_SIZE)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="rtmr0: register must be bytes, not int"):
+        ExpectedTDX(rtmr0=0)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="mrtd: register must be bytes, not bytearray"):
+        ExpectedTDX(mrtd=bytearray(REGISTER_SIZE))  # type: ignore[arg-type]
 
 
 def test_parse_register_rejects_whitespace_and_prefixes() -> None:
@@ -94,8 +104,8 @@ def test_parse_register_rejects_whitespace_and_prefixes() -> None:
 
 
 def test_measurements_require_every_register() -> None:
-    with pytest.raises(ValueError, match="Launch: register is required"):
+    with pytest.raises(ValueError, match="launch: register is required"):
         SEVSNP(launch=None)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="RTMR1: register is required"):
+    with pytest.raises(ValueError, match="rtmr1: register is required"):
         TDX(mrtd=register(0), rtmr0=register(0), rtmr1=None, rtmr2=register(0), rtmr3=register(0))  # type: ignore[arg-type]
     assert ExpectedSEVSNP(launch=None).launch is None

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final, Literal, TypeAlias
 
 from tinfoil._v3.verifier._document.document import (
     CRYPTO_MATERIAL_ID_HPKE,
@@ -17,21 +17,29 @@ from tinfoil._v3.verifier._document.document import (
 from tinfoil._v3.verifier._measurement import SEVSNP, Expected, ExpectedSEVSNP, Measurement
 from tinfoil._v3.verifier._policy import PLATFORM_SEV_SNP, PLATFORM_TDX
 
-# Why a set of reference values was accepted.
-SOURCE_ENDORSEMENT = "endorsement"
+ReferenceSource: TypeAlias = Literal["endorsement", "embedded", "policy"]
+"""Why a set of reference values was accepted; the ``SOURCE_*`` constants are its values."""
+
+SOURCE_ENDORSEMENT: Final[ReferenceSource] = "endorsement"
 """Authenticated against an endorsement that the document carries."""
-SOURCE_EMBEDDED = "embedded"
+SOURCE_EMBEDDED: Final[ReferenceSource] = "embedded"
 """Supplied by the caller as an embedded reference."""
-SOURCE_POLICY = "policy"
+SOURCE_POLICY: Final[ReferenceSource] = "policy"
 """Authorized by the caller's config authorizer."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ConfigVerification:
-    """The config bound to hardware. Caller-authorized configs have no endorsement reference, signing key hint or
-    approval time."""
+    """The config bound to hardware, and how it was accepted.
 
-    source: str
+    A string fact that was not established is ``""`` and a time that was
+    not established is None: a caller-authorized config has no endorsement
+    reference, signing key hint, registry id, approval time or signature
+    time, and an embedded one has only the name and digest that the caller
+    supplied.
+    """
+
+    source: ReferenceSource
     name: str = ""
     digest: str = ""
     reference: str = ""
@@ -44,10 +52,15 @@ class ConfigVerification:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ArtifactVerification:
-    """Accepted reference values and their authority. Embedded artifacts have no authenticated commit or approval
-    time."""
+    """Accepted reference values and their authority.
 
-    source: str
+    A string fact that was not established is ``""`` and a time that was
+    not established is None: an embedded artifact has no authenticated
+    commit, name or approval time, and an embedded platform artifact only
+    a digest.
+    """
+
+    source: ReferenceSource
     repo: str = ""
     tag: str = ""
     digest: str = ""
@@ -81,9 +94,10 @@ class Verification:
     """The facts proven during the verification of an attestation document, and metadata that the verifier adds
     about the verification itself.
 
-    Only the verifier creates one. Every field is immutable: the registers
-    are ``bytes``, the items are a tuple of frozen records and the times
-    are timezone-aware datetimes.
+    The verifier creates one from a verified document; a hand-built value
+    carries no proof. Every field is immutable: the registers are
+    ``bytes``, the items are a tuple of frozen records and the times are
+    timezone-aware datetimes.
     """
 
     code_digest: str
@@ -102,8 +116,10 @@ class Verification:
     freshness_expires_at: datetime | None = None
     """The earlier authenticated code/platform witness deadline. Cached verification must not authorize new
     requests at or after this time; re-verifying the same witness does not extend it. Config verification uses the
-    earliest config, platform or runtime approval deadline. Embedded components add no deadline; all-embedded
-    verification has none."""
+    earliest config, platform or runtime approval deadline. None means that no endorsed reference supplied an
+    approval deadline: embedded components add none, and neither does a caller-authorized config, so a verification
+    with every reference embedded, or with a caller-authorized config and an embedded runtime and platform, has
+    none. Renewal is then the caller's own policy; None is not a promise that the evidence stays valid."""
     config: ConfigVerification | None = None
     """The config bound to hardware; None for verification against a code release, which has no config."""
     runtime: ArtifactVerification | None = None
@@ -176,9 +192,11 @@ class Verification:
         }
         return out
 
-    def to_json(self) -> str:
-        """``to_dict`` serialized as JSON."""
-        return json.dumps(self.to_dict(), separators=(",", ":"))
+    def to_json(self, *, indent: int | None = None) -> str:
+        """``to_dict`` serialized as JSON: compact by default, or pretty-printed with ``indent`` spaces per level."""
+        if indent is None:
+            return json.dumps(self.to_dict(), separators=(",", ":"))
+        return json.dumps(self.to_dict(), indent=indent)
 
 
 def crypto_material_data(items: tuple[CryptoMaterialItem, ...], item_id: str, item_format: str) -> str | None:
@@ -222,6 +240,7 @@ __all__ = [
     "SOURCE_POLICY",
     "ArtifactVerification",
     "ConfigVerification",
+    "ReferenceSource",
     "SoftwareIdentity",
     "Verification",
     "VerificationMetadata",

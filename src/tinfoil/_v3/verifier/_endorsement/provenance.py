@@ -51,7 +51,7 @@ from tinfoil._v3.verifier._sigstore.trusted_root import (
     embedded_trusted_root,
     parse_trusted_root,
 )
-from tinfoil._v3.verifier._x509.certificate import PublicKey
+from tinfoil._v3.verifier._x509.certificate import AnyPublicKey
 
 MULTI_PLATFORM_PREDICATE_TYPE = "https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1"
 """The code-provenance predicate fixing a release's SEV-SNP launch measurement and its TDX RTMR1 and RTMR2."""
@@ -177,16 +177,16 @@ class ProvenanceClient:
         """Authenticate runtime collateral against a config's runtime pin; see ``runtime``."""
         return runtime_module.authenticate_runtime(self, material, expected)
 
-    def config_verifier(self, keys: Sequence[PublicKey]) -> ConfigVerifier:
+    def config_verifier(self, keys: Sequence[AnyPublicKey]) -> ConfigVerifier:
         """A verifier of key-signed config approvals under ``keys``."""
         return ConfigVerifier(self._root, keys)
 
-    def registry_verifier(self, keys: Sequence[PublicKey]) -> ConfigVerifier:
+    def registry_verifier(self, keys: Sequence[AnyPublicKey]) -> ConfigVerifier:
         """A verifier of config approvals whose root keys are ``keys``: certified (v2) registry endorsements and,
         for the public registry, key-signed ones."""
         return ConfigVerifier(self._root, keys, root_keys=keys)
 
-    def freshness_verifier(self, keys: Sequence[PublicKey]) -> FreshnessVerifier:
+    def freshness_verifier(self, keys: Sequence[AnyPublicKey]) -> FreshnessVerifier:
         """A verifier of artifact freshness approvals signed under ``keys``."""
         return FreshnessVerifier(self._root, keys)
 

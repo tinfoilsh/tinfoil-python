@@ -532,8 +532,7 @@ def test_config_collateral_allows_optional_bytes() -> None:
     got = decode(ref(CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, data)).config
     assert got is not None
     assert got.reference == data["endorsement_ref"]
-    assert isinstance(got.bundle, JsonObject)
-    assert got.bundle["mediaType"] == "test"
+    assert got.bundle == b'{"mediaType":"test"}'
     assert got.config is None
     got = decode(ref(CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, {**data, "config_base64": b64("public config")})).config
     assert got is not None
@@ -553,8 +552,7 @@ def test_config_endorsement() -> None:
     assert got is not None
     assert got.reference == reference
     assert got.config == config_bytes
-    assert isinstance(got.bundle, JsonObject)
-    assert got.bundle["mediaType"] == "test"
+    assert got.bundle == b'{"mediaType":"test"}', "the bundle is kept as the entry's JSON bytes"
 
     cases: dict[str, list[dict[str, Any]]] = {
         "wrong role": [{**item, "role": entry.ROLE_ENDORSEMENT}],

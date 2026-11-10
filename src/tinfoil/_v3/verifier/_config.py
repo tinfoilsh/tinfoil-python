@@ -7,8 +7,11 @@ import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from typing import TypeAlias
 
-from tinfoil._v3.verifier import _semver
+from cryptography.hazmat.primitives.asymmetric import ec
+
+from tinfoil._v3.verifier import _json, _semver
 from tinfoil._v3.verifier._canonical import decode_lower_hex
 from tinfoil._v3.verifier._document.collateral.collateral import (
     ARTIFACT_FRESHNESS_V1_FORMAT,
@@ -34,7 +37,7 @@ from tinfoil._v3.verifier._endorsement.approval import (
     parse_name,
 )
 from tinfoil._v3.verifier._endorsement.provenance import ProvenanceClient
-from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact, ReferenceError, parse_reference
+from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact, ReleaseReferenceError, parse_reference
 from tinfoil._v3.verifier._errors import LAYER_PROVENANCE, UsageError, VerificationError
 from tinfoil._v3.verifier._measurement import Expected
 from tinfoil._v3.verifier._policy import ARTIFACT_FORMAT_V2, Artifact
@@ -48,12 +51,39 @@ from tinfoil._v3.verifier._verification import (
     ArtifactVerification,
     ConfigVerification,
 )
-from tinfoil._v3.verifier._x509.certificate import PublicKey
+from tinfoil._v3.verifier._x509.certificate import X509Error, load_public_key_der, load_public_key_pem
+
+PublicKey: TypeAlias = ec.EllipticCurvePublicKey
+"""A config or freshness signing key: an ECDSA P-256 public key, the one key type that approvals are signed with.
+``load_public_key`` decodes one from PEM or DER."""
 
 ConfigAuthorizer = Callable[[ConfigEndorsement], None]
 """Caller policy over detached, untrusted config material; it must raise for config bytes that it does not
 authorize. It may be called concurrently. Runtime, platform and hardware checks still apply; approval does not
-authenticate a registry name or timestamp."""
+authenticate a registry name or timestamp. The decision is about ``config``; ``bundle`` is there for transparency,
+not for the authorizer to verify."""
+
+_P256 = ec.SECP256R1.name
+
+
+def load_public_key(pem_or_der: bytes | str) -> PublicKey:
+    """Decode a signing key for ``Verifier(config_signing_keys=...)`` or ``freshness_signing_keys``: a PEM
+    ``PUBLIC KEY`` block as text or bytes, or a DER SubjectPublicKeyInfo. Anything that is not an ECDSA P-256
+    public key, including a PEM with several blocks or DER that does not re-encode to itself, is a UsageError."""
+    try:
+        if isinstance(pem_or_der, str):
+            key = load_public_key_pem(pem_or_der)
+        elif isinstance(pem_or_der, bytes | bytearray | memoryview):
+            data = bytes(pem_or_der)
+            key = load_public_key_pem(data) if data.lstrip().startswith(b"-----") else load_public_key_der(data)
+        else:
+            raise UsageError(f"public key must be PEM text or bytes, or DER bytes, not {type(pem_or_der).__name__}")
+    except X509Error as err:
+        raise UsageError(str(err)) from err
+    if not isinstance(key, ec.EllipticCurvePublicKey) or key.curve.name != _P256:
+        raise UsageError("public key must be an ECDSA P-256 key")
+    return key
+
 
 _CONFIG_DIGEST_SIZE = 32
 
@@ -110,8 +140,8 @@ def requires_config_collateral(trust: TrustPolicy) -> bool:
 
 
 def freshness_expiration(max_age: timedelta, *approved_at: datetime | None) -> datetime | None:
-    """The deadline that the earliest authenticated approval time sets, or None when every component was embedded.
-    Uses authenticated witness times, never the local verification time."""
+    """The deadline that the earliest authenticated approval time sets, or None when no component supplied one, as
+    when every component was embedded. Uses authenticated witness times, never the local verification time."""
     known = [at for at in approved_at if at is not None]
     if not known:
         return None
@@ -133,7 +163,7 @@ def reference_pins(trust: TrustPolicy, ref: str) -> ConfigPolicy:
     if ref != "":
         try:
             parsed = parse_reference(ref)
-        except ReferenceError as err:
+        except ReleaseReferenceError as err:
             raise UsageError(str(err)) from err
         identity, revision, digest = "/" + parsed.repo, parsed.tag, parsed.digest
     embedded = trust.embedded.config
@@ -208,11 +238,12 @@ def _resolve_config(
     if config.bundle is None:
         raise ReferencesError("unsigned config requires a config authorizer")
     try:
+        bundle = _json.strict_parse(config.bundle)
         if config.issuer is not None and trust.config_keys is None:
-            approved = trust.config_verifier.verify_certified(config.config, config.bundle, config.issuer, pins)
+            approved = trust.config_verifier.verify_certified(config.config, bundle, config.issuer, pins)
         else:
-            approved = trust.config_verifier.verify(config.config, config.bundle, pins)
-    except ApprovalError as err:
+            approved = trust.config_verifier.verify(config.config, bundle, pins)
+    except (_json.JsonError, ApprovalError) as err:
         raise ReferencesError(f"verifying config approval: {err}") from err
     if config.reference != approved.reference:
         raise ReferencesError("config endorsement reference does not match the verified approval")
@@ -308,10 +339,12 @@ def _authenticate_artifact_freshness(
 __all__ = [
     "ConfigAuthorizer",
     "EndorsementResult",
+    "PublicKey",
     "ReferencesError",
     "TrustPolicy",
     "config_references",
     "freshness_expiration",
+    "load_public_key",
     "reference_pins",
     "requires_config_collateral",
 ]

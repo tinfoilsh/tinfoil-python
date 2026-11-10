@@ -23,7 +23,7 @@ FRESHNESS_WITNESS_REPO = "tinfoilsh/freshness-witness"
 PLATFORM_ENDORSEMENTS_REPO = "tinfoilsh/cvmimage"
 
 
-class ReferenceError(ValueError):
+class ReleaseReferenceError(ValueError):
     """A release reference or authenticated artifact that is malformed."""
 
 
@@ -51,7 +51,7 @@ def parse_reference(ref: str) -> Reference:
     """Validate ``owner/name[@tag][@sha256:digest]`` and return its parts."""
     match = REF_RE.fullmatch(ref)
     if match is None:
-        raise ReferenceError(f"invalid release reference {ref!r}: want owner/name[@tag][@sha256:digest]")
+        raise ReleaseReferenceError(f"invalid release reference {ref!r}: want owner/name[@tag][@sha256:digest]")
     return Reference(repo=match[1], tag=match[2] or "", digest=match[3] or "")
 
 
@@ -59,12 +59,12 @@ def validate_authenticated_artifact(artifact: AuthenticatedArtifact) -> None:
     """Check that every field is well formed: a repository slug, a non-empty tag, a lowercase 40-hex commit, a
     non-empty subject name and a lowercase SHA-256 digest."""
     if REPO_NAME_RE.fullmatch(artifact.repo) is None:
-        raise ReferenceError("authenticated artifact repository is invalid")
+        raise ReleaseReferenceError("authenticated artifact repository is invalid")
     if artifact.tag == "":
-        raise ReferenceError("authenticated artifact tag is empty")
+        raise ReleaseReferenceError("authenticated artifact tag is empty")
     if GIT_COMMIT_RE.fullmatch(artifact.commit) is None:
-        raise ReferenceError("authenticated artifact commit is malformed")
+        raise ReleaseReferenceError("authenticated artifact commit is malformed")
     if artifact.subject_name == "":
-        raise ReferenceError("authenticated artifact subject name is empty")
+        raise ReleaseReferenceError("authenticated artifact subject name is empty")
     if SHA256_DIGEST_RE.fullmatch(artifact.digest) is None:
-        raise ReferenceError("authenticated artifact digest is malformed")
+        raise ReleaseReferenceError("authenticated artifact digest is malformed")
