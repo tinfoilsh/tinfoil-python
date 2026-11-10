@@ -120,7 +120,7 @@ def test_new_defaults() -> None:
 
 
 def test_freshness_max_age() -> None:
-    # None keeps the default; every non-negative age is honoured, including zero, which accepts only a witness that
+    # None keeps the default; every non-negative age is honored, including zero, which accepts only a witness that
     # is no older than the verification instant.
     assert Verifier(freshness_max_age=None).freshness_max_age == DEFAULT_MAX_AGE
     assert Verifier(freshness_max_age=timedelta(0)).freshness_max_age == timedelta(0)

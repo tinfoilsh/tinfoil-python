@@ -75,14 +75,46 @@ EXPECTED_ALL = (
     "random_nonce",
 )
 
+# The exports that are plain values (a str or an int) and the ones that are functions, as the contract pins them;
+# every other export is a class or a type alias. Membership is checked against the values, not the names.
+CONSTANTS = (
+    "CRYPTO_MATERIAL_ID_HPKE",
+    "CRYPTO_MATERIAL_ID_TLS",
+    "KEY_SPKI_FP_SHA256_V1_FORMAT",
+    "KEY_SPKI_V1_FORMAT",
+    "KEY_X25519_HPKE_V1_FORMAT",
+    "LAYER_ENVELOPE",
+    "LAYER_POLICY",
+    "LAYER_PROVENANCE",
+    "LAYER_QUOTE",
+    "NONCE_SIZE",
+    "PUBLIC_REGISTRY_ID",
+    "REGISTER_SIZE",
+    "SOURCE_EMBEDDED",
+    "SOURCE_ENDORSEMENT",
+    "SOURCE_POLICY",
+)
+FUNCTIONS = (
+    "cert_pubkey_fp",
+    "connection_cert_fp",
+    "crypto_material_data",
+    "load_public_key",
+    "parse_expected_sevsnp",
+    "parse_expected_tdx",
+    "parse_reference",
+    "parse_register",
+    "pin_tls_key",
+    "random_nonce",
+)
+
 # Names that exist for the conformance harness or inside the package and must never be reachable from it.
 PRIVATE_NAMES = ("Overrides", "_build", "ResolvedReferences", "resolve_embedded", "TrustPolicy")
 
 # Exported aliases of builtin types, which carry no module of their own.
 BUILTIN_ALIASES = ("Layer", "Register")
 
-# Exported type aliases that are neither classes nor functions: a callable signature and a Literal.
-TYPE_ALIASES = ("ConfigAuthorizer", "ReferenceSource")
+# Exported type aliases that are neither classes nor functions: a callable signature, a Literal and two unions.
+TYPE_ALIASES = ("ConfigAuthorizer", "Expected", "Measurement", "ReferenceSource")
 
 # The exported key type is a class of the cryptography library, not of this package.
 FOREIGN_CLASSES = ("PublicKey",)
@@ -93,15 +125,41 @@ def surface() -> ModuleType:
     return importlib.import_module(MODULE)
 
 
-def _sort_key(name: str) -> tuple[int, str]:
-    """Constants, then classes, then functions, each alphabetically."""
+def _isort_key(name: str) -> tuple[int, str]:
+    """The linter's isort-style order for ``__all__``: SCREAMING_SNAKE_CASE names, then CamelCase, then the rest,
+    each alphabetically. It is a spelling rule, not a classification; ``SEVSNP`` and ``TDX`` are classes that it
+    sorts with the constants."""
     return (0 if name.isupper() else 1 if name[0].isupper() else 2, name)
+
+
+def _kind(value: object) -> str:
+    """What an export is, judged by its value: a function, a class, a constant (a str or an int), or else a type
+    alias (a union, a Literal or a Callable)."""
+    if inspect.isfunction(value):
+        return "function"
+    if inspect.isclass(value):
+        return "class"
+    if isinstance(value, str | int):
+        return "constant"
+    return "alias"
 
 
 def test_all_is_pinned_and_sorted(surface: ModuleType) -> None:
     assert tuple(surface.__all__) == EXPECTED_ALL
-    assert list(EXPECTED_ALL) == sorted(EXPECTED_ALL, key=_sort_key)
+    assert list(EXPECTED_ALL) == sorted(EXPECTED_ALL, key=_isort_key)
     assert len(set(EXPECTED_ALL)) == len(EXPECTED_ALL)
+
+
+def test_exports_are_classified_by_value(surface: ModuleType) -> None:
+    """The constants and functions of the contract are exactly the exports whose values are plain values and
+    functions; the type aliases are exactly the names listed; everything else is a class."""
+    kinds = {name: _kind(getattr(surface, name)) for name in EXPECTED_ALL}
+    assert [name for name, kind in kinds.items() if kind == "constant"] == list(CONSTANTS)
+    assert [name for name, kind in kinds.items() if kind == "function"] == list(FUNCTIONS)
+    assert [name for name, kind in kinds.items() if kind == "alias"] == sorted(TYPE_ALIASES)
+    classes = [name for name, kind in kinds.items() if kind == "class"]
+    assert set(classes).isdisjoint(CONSTANTS + FUNCTIONS + TYPE_ALIASES)
+    assert set(classes) >= set(BUILTIN_ALIASES) | set(FOREIGN_CLASSES)
 
 
 def test_every_name_of_the_contract_is_importable(surface: ModuleType) -> None:
@@ -111,7 +169,8 @@ def test_every_name_of_the_contract_is_importable(surface: ModuleType) -> None:
 
 
 def test_classes_and_functions_come_from_the_package(surface: ModuleType) -> None:
-    """A re-exported class or function is defined inside this package, not in a dependency."""
+    """A re-exported class or function is defined inside this package, not in a dependency, except the two aliases
+    of builtin types and the key type of the cryptography library."""
     for name in EXPECTED_ALL:
         value = getattr(surface, name)
         if name in BUILTIN_ALIASES:
@@ -119,10 +178,7 @@ def test_classes_and_functions_come_from_the_package(surface: ModuleType) -> Non
         elif name in FOREIGN_CLASSES:
             assert inspect.isclass(value), name
             assert value.__module__.startswith("cryptography."), name
-        elif name in TYPE_ALIASES:
-            assert not inspect.isclass(value), name
-            assert not inspect.isfunction(value), name
-        elif inspect.isclass(value) or inspect.isfunction(value):
+        elif _kind(value) in ("class", "function"):
             assert value.__module__.startswith(MODULE + "."), (name, value.__module__)
 
 
