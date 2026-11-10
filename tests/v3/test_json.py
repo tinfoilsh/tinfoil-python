@@ -101,13 +101,26 @@ def test_rejects_a_leading_byte_order_mark() -> None:
 
 
 def test_nesting_depth_is_bounded_and_reported_as_a_json_error() -> None:
-    # The interpreter's recursion limit bounds the depth; what matters is that
-    # a document beyond it rejects cleanly instead of escaping as a
-    # RecursionError, and that realistic nesting parses.
+    # Containers may nest MAX_DEPTH deep and no deeper. Interpreters whose own
+    # recursion limit is lower reject earlier; either way the error is the
+    # parser's, never a RecursionError.
     parse("[" * 100 + "]" * 100)
     parse('{"a":' * 100 + "1" + "}" * 100)
+    for text in ("[" * (_json.MAX_DEPTH + 1) + "]" * (_json.MAX_DEPTH + 1), "[" * 100_000 + "]" * 100_000):
+        with pytest.raises(JsonError, match="depth"):
+            parse(text)
+    try:
+        parse("[" * _json.MAX_DEPTH + "]" * _json.MAX_DEPTH)
+    except JsonError as err:
+        assert "depth" in str(err), "an interpreter below the limit still reports a depth error"
+
+
+def test_serialization_rejects_values_deeper_than_the_limit() -> None:
+    value: JsonValue = ()
+    for _ in range(_json.MAX_DEPTH):
+        value = (value,)
     with pytest.raises(JsonError, match="depth"):
-        parse("[" * 100_000 + "]" * 100_000)
+        canonicalize(value)
 
 
 def test_converts_arrays_nested_anywhere_to_tuples() -> None:

@@ -14,8 +14,8 @@ Parsing rules:
 - objects keep their member order and are immutable mappings; arrays are
   tuples.
 
-Nesting is bounded by the interpreter's recursion limit (about a thousand
-levels); a document that deep is rejected rather than accepted, which is the
+Nesting is bounded at MAX_DEPTH (10,000 containers), and on interpreters whose
+own recursion limit is lower, by that limit; a document that deep is rejected rather than accepted, which is the
 safe direction.
 
 Unknown-member rejection depends on the member set that each record decoder
@@ -156,20 +156,29 @@ def _reject_constant(name: str) -> JsonValue:
     raise JsonError(f"invalid JSON: {name} is not a number")
 
 
+MAX_DEPTH = 10_000
+"""The deepest container nesting that parsing and serialization accept."""
+
+
 def _checked(root: object) -> JsonValue:
-    """Convert the parser's output to JsonValue, rejecting lone surrogates in strings and member names."""
+    """Convert the parser's output to JsonValue, rejecting lone surrogates in strings and member names and
+    nesting deeper than MAX_DEPTH."""
     out = _convert(root)
-    stack: list[JsonValue] = [out]
+    stack: list[tuple[JsonValue, int]] = [(out, 1)]
     while stack:
-        value = stack.pop()
+        value, depth = stack.pop()
         if isinstance(value, str):
             _check_string(value)
         elif isinstance(value, tuple):
-            stack.extend(value)
+            if depth > MAX_DEPTH:
+                raise JsonError("exceeded max depth")
+            stack.extend((item, depth + 1) for item in value)
         elif isinstance(value, JsonObject):
+            if depth > MAX_DEPTH:
+                raise JsonError("exceeded max depth")
             for name, member in value.items():
                 _check_string(name)
-                stack.append(member)
+                stack.append((member, depth + 1))
     return out
 
 
@@ -281,9 +290,13 @@ def _write(out: list[str], root: JsonValue, *, canonical: bool) -> None:
         elif isinstance(value, JsonNumber):
             out.append(_canonical_number(value.raw) if canonical else _checked_raw(value.raw))
         elif isinstance(value, tuple):
+            if len(stack) >= MAX_DEPTH:
+                raise JsonError("exceeded max depth")
             out.append("[")
             stack.append(_array_items(value))
         elif isinstance(value, JsonObject):
+            if len(stack) >= MAX_DEPTH:
+                raise JsonError("exceeded max depth")
             out.append("{")
             items = list(value.items())
             if canonical:
