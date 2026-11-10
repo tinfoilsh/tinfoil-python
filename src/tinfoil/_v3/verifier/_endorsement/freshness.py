@@ -22,19 +22,16 @@ from tinfoil._v3.verifier._endorsement.time import (
     TimePolicyError,
     new_time_policy,
 )
-from tinfoil._v3.verifier._sigstore.bundle import Subject
+from tinfoil._v3.verifier._sigstore.bundle import IN_TOTO_STATEMENT_V1
 
 if TYPE_CHECKING:
     from tinfoil._v3.verifier._endorsement.provenance import ProvenanceClient
 
 FRESHNESS_PREDICATE_FORMAT = "https://tinfoil.sh/predicate/freshness-witness/v1"
-IN_TOTO_STATEMENT_V1 = "https://in-toto.io/Statement/v1"
 SHA256_DIGEST_PREFIX = "sha256:"
 MAX_FRESHNESS_AGE = DEFAULT_MAX_AGE
 MAX_FRESHNESS_FUTURE_SKEW = DEFAULT_FUTURE_SKEW
 
-_STATEMENT_MEMBERS = ("_type", "subject", "predicateType", "predicate")
-_SUBJECT_MEMBERS = ("name", "digest")
 _WITNESS_MEMBERS = ("format", "endorses")
 _ENDORSEMENT_MEMBERS = ("repo", "tag", "commit", "subject")
 _WITNESS_SUBJECT_MEMBERS = ("name", "digest")
@@ -65,15 +62,6 @@ class FreshnessWitness:
     endorses: WitnessEndorsement
 
 
-@dataclass(frozen=True, slots=True)
-class FreshnessStatement:
-    type: str
-    subjects: tuple[Subject, ...]
-    """The in-toto subjects: each a name and an algorithm-to-hex digest map."""
-    predicate_type: str
-    predicate: FreshnessWitness
-
-
 def authenticate_freshness(
     client: ProvenanceClient,
     bundle: _json.JsonValue,
@@ -87,9 +75,10 @@ def authenticate_freshness(
     selects the default age, a negative one rejects, the default skew
     applies); ``expected`` is well formed; the bundle verifies
     as a Fulcio bundle signed by the freshness-witness workflow over
-    ``expected.digest``; the statement is an in-toto v1 statement with the
-    witness predicate whose one subject and endorsement match
-    ``expected``; the log time lies within the window.
+    ``expected.digest``; the verified statement is an in-toto v1 statement
+    with the witness predicate type, whose one subject matches
+    ``expected``; the predicate bytes strictly decode as a witness that
+    matches ``expected``; the log time lies within the window.
     """
     if max_age is not None and max_age < timedelta(0):
         raise FreshnessError("freshness maximum age must not be negative")
@@ -102,16 +91,12 @@ def authenticate_freshness(
     except ReferenceError as err:
         raise FreshnessError(str(err)) from err
     try:
-        verified, _ = client.verify_bundle_with_identity(bundle, freshness_witness_identity(), expected.digest)
+        verified, statement = client.verify_bundle_with_identity(bundle, freshness_witness_identity(), expected.digest)
     except ProvenanceError as err:
         raise FreshnessError(f"verifying freshness witness bundle: {err}") from err
-    statement = parse_freshness_statement(verified.payload)
     if statement.type != IN_TOTO_STATEMENT_V1:
         raise FreshnessError(f"unexpected freshness statement type {statement.type!r}")
-    if (
-        statement.predicate_type != FRESHNESS_PREDICATE_FORMAT
-        or statement.predicate.format != FRESHNESS_PREDICATE_FORMAT
-    ):
+    if statement.predicate_type != FRESHNESS_PREDICATE_FORMAT:
         raise FreshnessError("unexpected freshness predicate format")
     if (
         len(statement.subjects) != 1
@@ -119,52 +104,38 @@ def authenticate_freshness(
         or statement.subjects[0].digest.get("sha256") != expected.digest
     ):
         raise FreshnessError("freshness statement subject does not match authenticated artifact")
-    validate_witness(statement.predicate, expected)
+    witness = parse_freshness_witness(statement.predicate)
+    if witness.format != FRESHNESS_PREDICATE_FORMAT:
+        raise FreshnessError("unexpected freshness predicate format")
+    validate_witness(witness, expected)
     logged_at = [verified.logged_at] if verified.logged_at is not None else []
     return validate_freshness_time(logged_at, policy)
 
 
-def parse_freshness_statement(payload: bytes) -> FreshnessStatement:
-    """Strictly decode the witness statement; unknown members reject."""
+def parse_freshness_witness(predicate: bytes) -> FreshnessWitness:
+    """Strictly decode the witness predicate, the ``predicate`` member of the statement exactly as signed.
+
+    Unknown members reject; a missing member decodes as empty, which the
+    matching against the artifact rejects later.
+    """
     try:
-        value = _json.strict_parse(payload)
-        record = _json.object_(value, "freshness statement", _STATEMENT_MEMBERS)
-        subjects: list[Subject] = []
-        for index, item in enumerate(_json.array(record, "subject") or ()):
-            subject = _json.object_(item, f"subject[{index}]", _SUBJECT_MEMBERS)
-            subjects.append(
-                Subject(name=_json.string(subject, "name"), digest=_json.mapping(subject, "digest", _digest_value))
-            )
-        witness = _json.struct(record, "predicate", _WITNESS_MEMBERS)
+        value = _json.strict_parse(predicate)
+        witness = _json.object_(value, "freshness witness", _WITNESS_MEMBERS)
         endorses = _json.struct(witness, "endorses", _ENDORSEMENT_MEMBERS)
         witness_subject = _json.struct(endorses, "subject", _WITNESS_SUBJECT_MEMBERS)
-        return FreshnessStatement(
-            type=_json.string(record, "_type"),
-            subjects=tuple(subjects),
-            predicate_type=_json.string(record, "predicateType"),
-            predicate=FreshnessWitness(
-                format=_json.string(witness, "format"),
-                endorses=WitnessEndorsement(
-                    repo=_json.string(endorses, "repo"),
-                    tag=_json.string(endorses, "tag"),
-                    commit=_json.string(endorses, "commit"),
-                    subject=WitnessSubject(
-                        name=_json.string(witness_subject, "name"), digest=_json.string(witness_subject, "digest")
-                    ),
+        return FreshnessWitness(
+            format=_json.string(witness, "format"),
+            endorses=WitnessEndorsement(
+                repo=_json.string(endorses, "repo"),
+                tag=_json.string(endorses, "tag"),
+                commit=_json.string(endorses, "commit"),
+                subject=WitnessSubject(
+                    name=_json.string(witness_subject, "name"), digest=_json.string(witness_subject, "digest")
                 ),
             ),
         )
     except _json.JsonError as err:
-        raise FreshnessError(f"parsing freshness statement: {err}") from err
-
-
-def _digest_value(value: _json.JsonValue, algorithm: str) -> str:
-    # A null digest value decodes as the empty string, like any null string member.
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        raise _json.JsonError(f"cannot unmarshal JSON value into string within digest {algorithm!r}")
-    return value
+        raise FreshnessError(f"parsing freshness witness: {err}") from err
 
 
 def validate_witness(witness: FreshnessWitness, expected: AuthenticatedArtifact) -> None:

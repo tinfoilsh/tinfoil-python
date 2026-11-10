@@ -23,7 +23,7 @@ from tinfoil._v3.verifier._endorsement.freshness import (
     WitnessEndorsement,
     WitnessSubject,
     authenticate_freshness,
-    parse_freshness_statement,
+    parse_freshness_witness,
     validate_freshness_time,
     validate_witness,
 )
@@ -105,9 +105,9 @@ def test_validate_freshness_time_takes_the_earliest_log_time() -> None:
     assert validate_freshness_time(day_old, new_time_policy(NOW, timedelta(days=30))) == day_old[0]
 
 
-def witness_payload(expected: AuthenticatedArtifact, **overrides: Any) -> bytes:
+def witness_predicate(expected: AuthenticatedArtifact) -> dict[str, Any]:
     witness = sample_witness(expected)
-    predicate = {
+    return {
         "format": witness.format,
         "endorses": {
             "repo": witness.endorses.repo,
@@ -116,35 +116,36 @@ def witness_payload(expected: AuthenticatedArtifact, **overrides: Any) -> bytes:
             "subject": {"name": witness.endorses.subject.name, "digest": witness.endorses.subject.digest},
         },
     }
+
+
+def witness_payload(expected: AuthenticatedArtifact, **overrides: Any) -> bytes:
     record: dict[str, Any] = {
         "_type": "https://in-toto.io/Statement/v1",
         "subject": [{"name": expected.subject_name, "digest": {"sha256": expected.digest}}],
         "predicateType": FRESHNESS_PREDICATE_FORMAT,
-        "predicate": predicate,
+        "predicate": witness_predicate(expected),
     }
     record.update(overrides)
     return json.dumps(record).encode()
 
 
-def test_parse_freshness_statement_is_strict() -> None:
-    parsed = parse_freshness_statement(witness_payload(sample_artifact()))
-    assert parsed.predicate == sample_witness()
-    assert parsed.subjects[0].name == "platform-endorsements.json"
-    assert parsed.subjects[0].digest["sha256"] == sample_artifact().digest
+def test_parse_freshness_witness_is_strict() -> None:
+    predicate = witness_predicate(sample_artifact())
+    assert parse_freshness_witness(json.dumps(predicate).encode()) == sample_witness()
     with pytest.raises(FreshnessError, match="unknown object member name"):
-        parse_freshness_statement(witness_payload(sample_artifact(), extra=1))
+        parse_freshness_witness(json.dumps({**predicate, "extra": 1}).encode())
     with pytest.raises(FreshnessError, match="unknown object member name"):
-        parse_freshness_statement(
-            witness_payload(sample_artifact(), predicate={"format": "f", "endorses": {"repo": "r", "note": 1}})
-        )
+        parse_freshness_witness(json.dumps({"format": "f", "endorses": {"repo": "r", "note": 1}}).encode())
     with pytest.raises(FreshnessError, match="duplicate"):
-        parse_freshness_statement(b'{"_type":"a","_type":"b"}')
+        parse_freshness_witness(b'{"format":"a","format":"b"}')
     with pytest.raises(FreshnessError, match="into string"):
-        parse_freshness_statement(witness_payload(sample_artifact(), subject=[{"name": "n", "digest": {"sha256": 1}}]))
+        parse_freshness_witness(json.dumps({**predicate, "format": 1}).encode())
+    with pytest.raises(FreshnessError, match="into freshness witness"):
+        parse_freshness_witness(b"[]")
     # Missing members decode as empty, which the matching rejects later.
-    empty = parse_freshness_statement(b"{}")
-    assert empty.subjects == ()
-    assert empty.predicate.endorses.subject.digest == ""
+    empty = parse_freshness_witness(b"{}")
+    assert empty.format == ""
+    assert empty.endorses.subject.digest == ""
 
 
 WITNESS = FulcioIdentity(
@@ -218,6 +219,10 @@ def test_authenticate_freshness_rejections() -> None:
     wrong_format = wrong_format.replace(b'"format": "' + FRESHNESS_PREDICATE_FORMAT.encode(), b'"format": "x', 1)
     with pytest.raises(FreshnessError, match="unexpected freshness predicate format"):
         authenticate_freshness(client, witness_bundle(wrong_format), expected, world.now)
+    # The predicate decodes strictly from the signed bytes: an unknown member rejects.
+    extra_member = witness_payload(expected, predicate={**witness_predicate(expected), "extra": 1})
+    with pytest.raises(FreshnessError, match=r"parsing freshness witness: .*unknown object member name"):
+        authenticate_freshness(client, witness_bundle(extra_member), expected, world.now)
     two_subjects = witness_payload(
         expected,
         subject=[
