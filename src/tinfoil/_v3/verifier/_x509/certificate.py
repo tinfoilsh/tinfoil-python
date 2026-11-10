@@ -25,6 +25,14 @@ from tinfoil._v3.verifier._x509 import der
 
 T = TypeVar("T")
 
+# Production AMD VCEK certificates carry serial number zero. The library warns
+# about it today and will reject it in a future release, which the
+# library-claims test pins; the warning is silenced once, here, rather than by
+# mutating the process-wide filters around every parse.
+warnings.filterwarnings(
+    "ignore", message=r"^Parsed a serial number which wasn't positive", category=CryptographyDeprecationWarning
+)
+
 Certificate: TypeAlias = x509.Certificate
 PublicKey: TypeAlias = ec.EllipticCurvePublicKey | rsa.RSAPublicKey | ed25519.Ed25519PublicKey
 """The key types that the verifier accepts for signatures: ECDSA (P-256, P-384), RSA and Ed25519."""
@@ -104,12 +112,7 @@ def parse_certificate(der_bytes: bytes) -> Certificate:
     """
     _with_context("certificate", lambda: _check_certificate_der(der_bytes))
     try:
-        # Production AMD VCEK certificates carry serial number zero; the library
-        # warns about it today and will reject it in a future release (pinned
-        # by the library-claims tests), so the warning is silenced here.
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="Parsed a serial number", category=CryptographyDeprecationWarning)
-            certificate = x509.load_der_x509_certificate(der_bytes)
+        certificate = x509.load_der_x509_certificate(der_bytes)
     except (ValueError, TypeError, UnsupportedAlgorithm) as err:
         raise X509Error(f"certificate: {err}") from err
     if certificate.public_bytes(serialization.Encoding.DER) != der_bytes:
