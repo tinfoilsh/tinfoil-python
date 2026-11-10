@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from tests.v3 import document_builder, pki
 from tests.v3 import verifier_fixtures as vf
@@ -25,6 +28,7 @@ from tinfoil._v3.verifier._config import (
     _authenticate_artifact_freshness,
     config_references,
     freshness_expiration,
+    load_public_key,
     reference_pins,
 )
 from tinfoil._v3.verifier._document.collateral.collateral import (
@@ -58,7 +62,7 @@ from tinfoil._v3.verifier._endorsement.approval import (
     public_signing_keys,
     runtime_name,
 )
-from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact
+from tinfoil._v3.verifier._endorsement.reference import AuthenticatedArtifact, Reference
 from tinfoil._v3.verifier._endorsement.time import DEFAULT_MAX_AGE
 from tinfoil._v3.verifier._errors import (
     LAYER_ENVELOPE,
@@ -66,6 +70,7 @@ from tinfoil._v3.verifier._errors import (
     LAYER_QUOTE,
     UsageError,
     VerificationError,
+    VerifyError,
 )
 from tinfoil._v3.verifier._measurement import SEVSNP, ExpectedSEVSNP, ExpectedTDX
 from tinfoil._v3.verifier._quote import ConfigReferenceValues
@@ -115,7 +120,7 @@ def test_new_defaults() -> None:
 
 
 def test_freshness_max_age() -> None:
-    # None keeps the default; every non-negative age is honoured, including zero, which accepts only a witness that
+    # None keeps the default; every non-negative age is honored, including zero, which accepts only a witness that
     # is no older than the verification instant.
     assert Verifier(freshness_max_age=None).freshness_max_age == DEFAULT_MAX_AGE
     assert Verifier(freshness_max_age=timedelta(0)).freshness_max_age == timedelta(0)
@@ -150,6 +155,22 @@ def test_verify_v3_rejects_bad_repo() -> None:
         v.verify_v3(raw, nonce, "not a repo reference")
 
 
+def test_v2_collateral_requires_a_repository_pin() -> None:
+    """v2 collateral is verified against a code release, so a document that carries it needs a repository pin: None
+    and "" both mean no pin and are a UsageError there, where v3 collateral would accept them."""
+    v = Verifier()
+    code = vf.reference_entry(
+        "code", SIGSTORE_CODE_V1_FORMAT, {"repo": "", "tag": "", "digest": "digest", "sigstore_bundle": {}}
+    )
+    raw, nonce, parsed = vf.embedded_document(None, code)
+    assert parsed.collateral_format() == FORMAT_V2
+    for repo in (None, ""):
+        with pytest.raises(UsageError, match="invalid release reference '': want owner/name"):
+            v.verify_v3(raw, nonce, repo)
+        with pytest.raises(UsageError, match="invalid release reference '': want owner/name"):
+            v.verify_v3_at(raw, nonce, repo, NOW)
+
+
 def test_verify_rejects_an_unbuilt_verifier() -> None:
     # A verifier that skipped its constructor carries neither a trust root nor a clock: a usage error rather than
     # an attribute error once a well-formed document is in hand.
@@ -174,24 +195,107 @@ def test_verify_v3_at_requires_an_aware_instant() -> None:
 
 
 def test_repo_must_be_a_string_before_any_layer_runs() -> None:
-    """A non-string repository reference is a UsageError from both entry points, raised before the envelope is
-    opened, rather than a provenance-layer verification error or a TypeError."""
+    """A repository reference that is neither a string nor None is a UsageError from every entry point, raised
+    before the envelope is opened, rather than a provenance-layer verification error or a TypeError."""
     v = Verifier()
-    for repo in (None, 123, b"org/repo"):
-        with pytest.raises(UsageError, match="repository reference must be a string"):
+    for repo in (123, b"org/repo", ["org/repo"]):
+        with pytest.raises(UsageError, match="repository reference must be a string or None"):
             v.check_repo_verifiability(repo)  # type: ignore[arg-type]
-        with pytest.raises(UsageError, match="repository reference must be a string"):
+        with pytest.raises(UsageError, match="repository reference must be a string or None"):
             v.verify_v3_at(b"not a document", bytes(NONCE_SIZE), repo, NOW)  # type: ignore[arg-type]
-        with pytest.raises(UsageError, match="repository reference must be a string"):
+        with pytest.raises(UsageError, match="repository reference must be a string or None"):
             v.verify_v3(b"not a document", bytes(NONCE_SIZE), repo)  # type: ignore[arg-type]
 
 
+def test_repo_none_means_no_pin() -> None:
+    """None and "" are the same repository pin: none. Both pass the verifiability check, both reach the envelope
+    layer, and a config authorizer, which accepts no pin, accepts both."""
+    v = Verifier()
+    v.check_repo_verifiability(None)
+    v.check_repo_verifiability("")
+    for repo in (None, ""):
+        with pytest.raises(VerificationError) as envelope:
+            v.verify_v3_at(b"not a document", bytes(NONCE_SIZE), repo, NOW)
+        rejected_at(envelope.value, LAYER_ENVELOPE)
+        with pytest.raises(VerificationError) as live:
+            v.verify_v3(b"not a document", bytes(NONCE_SIZE), repo)
+        rejected_at(live.value, LAYER_ENVELOPE)
+    authorizing = Verifier(config_authorizer=authorize_all)
+    authorizing.check_repo_verifiability(None)
+    with pytest.raises(UsageError, match="cannot authenticate repository"):
+        authorizing.check_repo_verifiability("org/project")
+
+
 def test_errors_name_their_layer() -> None:
-    assert str(VerificationError(LAYER_QUOTE, "report signature is invalid")) == (
-        "verification error: quote: report signature is invalid"
-    )
-    assert str(UsageError("verification time is required")) == "usage error: verification time is required"
+    err = VerificationError(LAYER_QUOTE, "report signature is invalid")
+    assert str(err) == "quote: report signature is invalid"
+    assert (err.layer, err.message) == (LAYER_QUOTE, "report signature is invalid")
+    usage = UsageError("verification time is required")
+    assert str(usage) == "verification time is required"
+    assert usage.message == "verification time is required"
     assert parse_reference("org/project@v1").tag == "v1"
+
+
+def test_usage_error_is_a_value_error() -> None:
+    """A UsageError is a ValueError as well as a VerifyError; a VerificationError is neither a ValueError nor a
+    UsageError, so the two stay distinguishable."""
+    assert issubclass(UsageError, ValueError)
+    assert issubclass(UsageError, VerifyError)
+    assert not issubclass(VerificationError, ValueError)
+    assert not issubclass(VerificationError, UsageError)
+    with pytest.raises(ValueError, match="nonce must be bytes"):
+        Verifier().verify_v3_at(b"", "nonce", "", NOW)  # type: ignore[arg-type]
+
+
+def test_parse_reference_rejects_with_a_usage_error() -> None:
+    assert parse_reference("org/project@v1@sha256:" + "ab" * 32) == Reference(
+        repo="org/project", tag="v1", digest="ab" * 32
+    )
+    with pytest.raises(UsageError, match="invalid release reference 'org'") as invalid:
+        parse_reference("org")
+    assert isinstance(invalid.value.__cause__, ValueError)
+    with pytest.raises(UsageError, match="release reference must be a string, not NoneType"):
+        parse_reference(None)  # type: ignore[arg-type]
+
+
+def test_repr_shows_the_policy() -> None:
+    assert repr(Verifier()) == (
+        f"Verifier(pinned_registers=None, freshness_max_age={DEFAULT_MAX_AGE!r}, caller_authorizes_config=False)"
+    )
+    pinned = ExpectedSEVSNP(launch=bytes(48))
+    v = Verifier(pinned_registers=pinned, freshness_max_age=timedelta(hours=1), config_authorizer=authorize_all)
+    assert repr(v) == (
+        f"Verifier(pinned_registers={pinned!r}, freshness_max_age={timedelta(hours=1)!r}, "
+        "caller_authorizes_config=True)"
+    )
+
+
+def test_load_public_key() -> None:
+    """PEM text, PEM bytes and SPKI DER of an ECDSA P-256 key decode to the same key; every other key type, a
+    malformed input and a PEM with several blocks are a UsageError."""
+    key = pki.p256()
+    pem = pki.public_pem(key)
+    want = pki.spki(key)
+    for encoded in (pem, pem.encode(), want):
+        loaded = load_public_key(encoded)
+        assert isinstance(loaded, ec.EllipticCurvePublicKey)
+        assert loaded.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo) == want
+    Verifier(config_signing_keys=[load_public_key(pem)], freshness_signing_keys=[load_public_key(want)])
+    for other in (pki.p384(), pki.rsa_key(), pki.ed25519_key()):
+        with pytest.raises(UsageError, match="ECDSA P-256"):
+            load_public_key(pki.public_pem(other))
+        with pytest.raises(UsageError, match="ECDSA P-256"):
+            load_public_key(pki.spki(other))
+    with pytest.raises(UsageError, match="exactly one PUBLIC KEY block"):
+        load_public_key(pem + pem)
+    with pytest.raises(UsageError, match="public key: text outside PEM blocks"):
+        load_public_key("not a key")
+    with pytest.raises(UsageError, match="public key"):
+        load_public_key(b"\x30\x00")
+    with pytest.raises(UsageError, match="public key"):
+        load_public_key(b"")
+    with pytest.raises(UsageError, match="not int"):
+        load_public_key(123)  # type: ignore[arg-type]
 
 
 # --- the pipeline ---------------------------------------------------------------------------
@@ -704,14 +808,21 @@ def test_endorsed_config_with_embedded_artifacts_retains_freshness_and_authority
     assert refs.config.registry_id == ""
     assert refs.freshness_expires_at == at + v.freshness_max_age
     rejected = ValueError("config is not authorized")
+    seen: list[ConfigEndorsement] = []
 
     def refuse(candidate: ConfigEndorsement) -> None:
+        seen.append(candidate)
         raise rejected
 
     with_trust(v, config_authorizer=refuse)
     with pytest.raises(VerificationError) as refused:
         config_references(trust_of(v), doc, "", world.now)
     assert refused.value.__cause__ is rejected, "a valid endorsement must not bypass caller policy"
+    (candidate,) = seen
+    assert candidate.config == config
+    assert candidate.reference == approved.reference
+    assert isinstance(candidate.bundle, bytes)
+    assert json.loads(candidate.bundle) == bundle, "the authorizer sees the entry's bundle as its JSON bytes"
     with_trust(v, config_authorizer=None)
     with pytest.raises(ReferencesError, match="too old"):
         config_references(trust_of(v), doc, "org/project", refs.freshness_expires_at + timedelta(seconds=1))

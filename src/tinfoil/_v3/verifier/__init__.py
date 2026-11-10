@@ -1,5 +1,8 @@
 """Offline verification of v3 attestation documents.
 
+Import it as ``tinfoil.verifier`` once the package is promoted; until then
+it lives under ``tinfoil._v3.verifier`` with the same surface.
+
 A ``Verifier`` appraises an attestation document that the caller fetched from
 an enclave: it parses the envelope and checks the nonce binding, authenticates
 the code or config reference values and their freshness witnesses against the
@@ -17,24 +20,26 @@ caller. The only clock it reads is the appraisal time of ``verify_v3``;
 
 Every rejection is a ``VerificationError`` tagged with the layer that
 rejected the document; a verifier built or called with invalid inputs raises
-a ``UsageError``. Both derive from ``VerifyError``.
+a ``UsageError``. Both derive from ``VerifyError``. The measurement parsers
+(``parse_register`` and the ``parse_expected_*`` helpers) and the measurement
+records raise a plain ``ValueError`` for a malformed register.
 
 Measurements are closed sets with one frozen record per platform:
 ``SEVSNP`` or ``TDX`` for what the hardware measured, ``ExpectedSEVSNP`` or
 ``ExpectedTDX`` for the registers a release or a caller expects. Registers are
-48-byte ``bytes`` values; ``parse_register`` and the ``parse_expected_*``
-helpers decode them from hex.
+48-byte ``bytes`` values (``Register``); ``parse_register`` and the
+``parse_expected_*`` helpers decode them from hex.
 
 ``cert_pubkey_fp``, ``connection_cert_fp`` and ``pin_tls_key`` compute and
 check the SPKI fingerprint form in which documents endorse TLS keys.
 
 The option types of the ``Verifier`` constructor are exported with it:
-``PublicKey`` is the union of key types that it accepts for config and
-freshness signing keys, and ``ConfigAuthorizer`` the signature of a
-caller's config policy.
+``PublicKey`` is the ECDSA P-256 key type that it accepts for config and
+freshness signing keys, ``load_public_key`` decodes one from PEM or DER, and
+``ConfigAuthorizer`` is the signature of a caller's config policy.
 """
 
-from tinfoil._v3.verifier._config import ConfigAuthorizer
+from tinfoil._v3.verifier._config import ConfigAuthorizer, PublicKey, load_public_key
 from tinfoil._v3.verifier._document.collateral.config import ConfigEndorsement
 from tinfoil._v3.verifier._document.collateral.runtime import RuntimeReference
 from tinfoil._v3.verifier._document.document import (
@@ -55,6 +60,7 @@ from tinfoil._v3.verifier._errors import (
     LAYER_POLICY,
     LAYER_PROVENANCE,
     LAYER_QUOTE,
+    Layer,
     UsageError,
     VerificationError,
     VerifyError,
@@ -68,6 +74,7 @@ from tinfoil._v3.verifier._measurement import (
     ExpectedSEVSNP,
     ExpectedTDX,
     Measurement,
+    Register,
     parse_expected_sevsnp,
     parse_expected_tdx,
     parse_register,
@@ -78,17 +85,13 @@ from tinfoil._v3.verifier._verification import (
     SOURCE_POLICY,
     ArtifactVerification,
     ConfigVerification,
+    ReferenceSource,
     SoftwareIdentity,
     Verification,
     VerificationMetadata,
     crypto_material_data,
 )
 from tinfoil._v3.verifier._verifier import Verifier, parse_reference
-from tinfoil._v3.verifier._x509.certificate import PublicKey
-
-Register = bytes
-"""A measurement register: exactly ``REGISTER_SIZE`` bytes. Its text form is lowercase hex; ``parse_register``
-decodes one and ``bytes.hex()`` encodes one."""
 
 __all__ = [
     "CRYPTO_MATERIAL_ID_HPKE",
@@ -119,9 +122,11 @@ __all__ = [
     "Expected",
     "ExpectedSEVSNP",
     "ExpectedTDX",
+    "Layer",
     "Measurement",
     "PublicKey",
     "Reference",
+    "ReferenceSource",
     "Register",
     "RuntimeReference",
     "SoftwareIdentity",
@@ -134,6 +139,7 @@ __all__ = [
     "cert_pubkey_fp",
     "connection_cert_fp",
     "crypto_material_data",
+    "load_public_key",
     "parse_expected_sevsnp",
     "parse_expected_tdx",
     "parse_reference",

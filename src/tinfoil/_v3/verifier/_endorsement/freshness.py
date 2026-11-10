@@ -12,7 +12,7 @@ from tinfoil._v3.verifier import _json
 from tinfoil._v3.verifier._endorsement._common import ProvenanceError, freshness_witness_identity
 from tinfoil._v3.verifier._endorsement.reference import (
     AuthenticatedArtifact,
-    ReferenceError,
+    ReleaseReferenceError,
     validate_authenticated_artifact,
 )
 from tinfoil._v3.verifier._endorsement.time import (
@@ -89,7 +89,7 @@ def authenticate_freshness(
         raise FreshnessError(str(err)) from err
     try:
         validate_authenticated_artifact(expected)
-    except ReferenceError as err:
+    except ReleaseReferenceError as err:
         raise FreshnessError(str(err)) from err
     try:
         verified, statement = client.verify_bundle_with_identity(bundle, freshness_witness_identity(), expected.digest)

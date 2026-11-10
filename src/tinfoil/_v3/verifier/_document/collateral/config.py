@@ -30,13 +30,18 @@ class ConfigEndorsement:
 
     Plain config collateral has no reference or bundle and requires caller
     authorization. A signed reference must match the independently verified
-    endorsement.
+    endorsement. A config authorizer decides on ``config``; nothing here has
+    been authenticated when it runs.
     """
 
     reference: str
+    """The endorsement reference, ``sha256:<hex>``; ``""`` for plain config collateral."""
     config: bytes | None
-    bundle: _json.JsonValue
+    """The exact config bytes; None when v2 endorsement collateral carries only the reference."""
+    bundle: bytes | None
+    """The entry's Sigstore bundle as JSON bytes; None for plain config collateral."""
     issuer: bytes | None
+    """The DER issuer certificate of a certified endorsement, or None."""
 
 
 _MEMBERS = ("endorsement_ref", "config_base64", "sigstore_bundle", "issuer_certificate_der")
@@ -46,7 +51,7 @@ def decode_config_endorsement(entry: Entry) -> ConfigEndorsement:
     data = unmarshal_data(entry, entry.format, _MEMBERS)
     reference = _json.string(data, "endorsement_ref")
     encoded_config = _json.string(data, "config_base64")
-    bundle = _json.raw(data, "sigstore_bundle")
+    raw_bundle = _json.raw(data, "sigstore_bundle")
     encoded_issuer = _json.string(data, "issuer_certificate_der")
 
     if encoded_issuer != "" and entry.format != CONFIG_ENDORSEMENT_V2_FORMAT:
@@ -58,9 +63,10 @@ def decode_config_endorsement(entry: Entry) -> ConfigEndorsement:
         if not reference.startswith("sha256:"):
             raise ConfigCollateralError("endorsement_ref must be a SHA-256 reference")
         decode_lower_hex("endorsement_ref", reference.removeprefix("sha256:"), 32)
-        if not isinstance(bundle, _json.JsonObject):
+        if not isinstance(raw_bundle, _json.JsonObject):
             raise ConfigCollateralError("sigstore_bundle must be an object")
 
+    bundle = None if raw_bundle is None else _json.serialize(raw_bundle)
     issuer = decode_base64("issuer_certificate_der", encoded_issuer) if encoded_issuer != "" else None
     if entry.format == CONFIG_ENDORSEMENT_V2_FORMAT and encoded_config == "":
         return ConfigEndorsement(reference=reference, config=None, bundle=bundle, issuer=issuer)

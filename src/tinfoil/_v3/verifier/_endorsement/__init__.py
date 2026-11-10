@@ -58,7 +58,7 @@ from tinfoil._v3.verifier._endorsement.reference import (
     TINFOIL_ORGANIZATION_ID,
     AuthenticatedArtifact,
     Reference,
-    ReferenceError,
+    ReleaseReferenceError,
     parse_reference,
 )
 from tinfoil._v3.verifier._endorsement.runtime import (
@@ -118,7 +118,7 @@ __all__ = [
     "ProvenanceClient",
     "ProvenanceError",
     "Reference",
-    "ReferenceError",
+    "ReleaseReferenceError",
     "RuntimeArtifact",
     "RuntimeProvenanceError",
     "TimePolicy",
