@@ -70,8 +70,8 @@ def resolve_embedded(refs: EmbeddedReferences) -> ResolvedReferences:
     ``EmbeddedConfig`` or an ``EmbeddedConfigReference``. Config bytes must
     be within the size bounds and carry a runtime pin; a config reference must have a
     well-formed name when it has one, a lowercase SHA-256 digest and a valid
-    runtime pin, and a manifest supplied beside it must be the one the
-    config pins. A manifest must decode; a platform artifact must parse
+    runtime pin whose repository, tag and digest are strings, and a
+    manifest supplied beside it must be the one the config pins. A manifest must decode; a platform artifact must parse
     with the v2 format. Every field must have its declared type, so that
     a caller's mistake is a UsageError and never an attribute or type
     error. Every failure is a UsageError.
@@ -112,6 +112,9 @@ def resolve_embedded(refs: EmbeddedReferences) -> ResolvedReferences:
             raise UsageError("embedded config digest must be a string")
         if not isinstance(reference.runtime, RuntimeReference):
             raise UsageError("embedded config runtime must be a RuntimeReference value")
+        for field in ("repo", "tag", "digest"):
+            if not isinstance(getattr(reference.runtime, field), str):
+                raise UsageError(f"embedded config runtime {field} must be a string")
     if reference is not None:
         try:
             if reference.name != "":

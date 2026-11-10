@@ -45,7 +45,7 @@ from tinfoil._v3.verifier._document.collateral.config import (
     CONFIG_V1_FORMAT,
     ConfigEndorsement,
 )
-from tinfoil._v3.verifier._document.collateral.runtime import PLATFORM_ID, RUNTIME_ID, RUNTIME_REPO
+from tinfoil._v3.verifier._document.collateral.runtime import PLATFORM_ID, RUNTIME_ID, RUNTIME_REPO, RuntimeReference
 from tinfoil._v3.verifier._document.document import NONCE_SIZE
 from tinfoil._v3.verifier._embedded import EmbeddedConfig, EmbeddedConfigReference, EmbeddedReferences
 from tinfoil._v3.verifier._endorsement.approval import (
@@ -584,6 +584,10 @@ def _reference(base: EmbeddedConfigReference, **changes: Any) -> EmbeddedConfigR
     return dataclasses.replace(base, **changes)
 
 
+def _runtime(base: RuntimeReference, **changes: Any) -> RuntimeReference:
+    return dataclasses.replace(base, **changes)
+
+
 def test_option_fields_of_the_wrong_type_are_usage_errors() -> None:
     """A caller's type mistake in a registry id or an embedded reference field is a UsageError, never an attribute
     or type error from the code that reads the field."""
@@ -620,6 +624,18 @@ def test_option_fields_of_the_wrong_type_are_usage_errors() -> None:
                 )
             },
             "embedded config runtime must be a RuntimeReference",
+        ),
+        (
+            {"embedded_references": _refs(config=_reference(reference, runtime=_runtime(runtime, repo=None)))},
+            "embedded config runtime repo must be a string",
+        ),
+        (
+            {"embedded_references": _refs(config=_reference(reference, runtime=_runtime(runtime, tag=(0, 15, 0))))},
+            "embedded config runtime tag must be a string",
+        ),
+        (
+            {"embedded_references": _refs(config=_reference(reference, runtime=_runtime(runtime, digest=b"\x00")))},
+            "embedded config runtime digest must be a string",
         ),
     ]
     for options, message in cases:
