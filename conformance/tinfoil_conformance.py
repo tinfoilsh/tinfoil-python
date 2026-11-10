@@ -25,10 +25,11 @@ import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, BinaryIO, TextIO
 
 from tinfoil._v3.verifier._document import document
+from tinfoil._v3.verifier._endorsement.time import DEFAULT_FUTURE_SKEW, DEFAULT_MAX_AGE
 from tinfoil._v3.verifier._sigstore import timestamp as sigstore_timestamp
 from tinfoil._v3.verifier._sigstore import trusted_root as sigstore_trusted_root
 
@@ -64,11 +65,6 @@ ALL_STAGES = (
     STAGE_VERIFY_TIMESTAMP,
 )
 STAGES_SUPPORTED: tuple[str, ...] = (STAGE_CHECK_ENVELOPE, STAGE_VERIFY_TIMESTAMP)
-
-# The appraisal window of the timestamp stage: genTime may trail the clock by
-# the maximum approval age and lead it by the future skew.
-TIMESTAMP_MAX_AGE = timedelta(days=7)
-TIMESTAMP_FUTURE_SKEW = timedelta(minutes=5)
 
 ENVELOPE_REJECTED = "ENVELOPE_REJECTED"
 PROVENANCE_REJECTED = "PROVENANCE_REJECTED"
@@ -307,8 +303,10 @@ def _verify_timestamp(decoded: Input) -> Result:
         gen_time = sigstore_timestamp.verify_timestamp(root, decoded.timestamp_response, decoded.timestamp_input)
     except sigstore_timestamp.TimestampError:
         return _rejected(STAGE_VERIFY_TIMESTAMP, PROVENANCE_REJECTED)
+    # The appraisal window of the stage: genTime may trail the clock by the
+    # verifier's maximum approval age and lead it by its future skew.
     now = decoded.verification_time
-    if not now - TIMESTAMP_MAX_AGE <= gen_time <= now + TIMESTAMP_FUTURE_SKEW:
+    if not now - DEFAULT_MAX_AGE <= gen_time <= now + DEFAULT_FUTURE_SKEW:
         return _rejected(STAGE_VERIFY_TIMESTAMP, PROVENANCE_REJECTED)
     outputs = {"timestamp": gen_time.strftime("%Y-%m-%dT%H:%M:%SZ")}
     return Result({"stage": STAGE_VERIFY_TIMESTAMP, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
