@@ -9,9 +9,13 @@ The exit code is the verdict that the suite reads; stdout is diagnostic. The
 contract is tinfoil-conformance ``docs/CONFORMANCE_ADAPTER_SPEC.md`` v1.2.0.
 
 Every v3 stage decodes its Input first, so malformed input is reported as such
-(exit 30) before anything else. A stage that this adapter does not implement
-yet exits 20 (unsupported), never with a verdict. Stages are wired in as the
-verifier modules that they drive land. ``live-verify`` and ``capture`` take
+(exit 30) before anything else. The full-verify stage is one ``verify_v3_at``
+call on a verifier built with the injected roots, so the shared fixtures
+appraise exactly the code that production runs; the layer on its
+``VerificationError`` names the rejection. The block stages isolate a single
+layer by calling into the document, endorsement and quote modules that the
+verifier uses. A stage that this adapter does not implement exits 20
+(unsupported), never with a verdict. ``live-verify`` and ``capture`` take
 their own arguments, not an Input, and exit 20 without reading stdin until
 they are implemented.
 """
@@ -28,11 +32,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, BinaryIO, TextIO
 
-from tinfoil._v3.verifier import _measurement
+from tinfoil._v3.verifier import _measurement, _verifier
 from tinfoil._v3.verifier._document import document
 from tinfoil._v3.verifier._document.collateral.collateral import NotFoundError
 from tinfoil._v3.verifier._endorsement import approval, provenance, reference
 from tinfoil._v3.verifier._endorsement import time as approval_time
+from tinfoil._v3.verifier._errors import (
+    LAYER_ENVELOPE,
+    LAYER_POLICY,
+    LAYER_PROVENANCE,
+    LAYER_QUOTE,
+    UsageError,
+    VerificationError,
+)
 from tinfoil._v3.verifier._policy import ARTIFACT_FORMAT
 from tinfoil._v3.verifier._quote import quote
 from tinfoil._v3.verifier._sigstore import bundle as sigstore_bundle
@@ -72,6 +84,7 @@ ALL_STAGES = (
     STAGE_VERIFY_TIMESTAMP,
 )
 STAGES_SUPPORTED: tuple[str, ...] = (
+    STAGE_VERIFY,
     STAGE_CHECK_ENVELOPE,
     STAGE_AUTHENTICATE_PROVENANCE,
     STAGE_ASSEMBLE_POLICY,
@@ -89,6 +102,14 @@ PROVENANCE_REJECTED = "PROVENANCE_REJECTED"
 QUOTE_REJECTED = "QUOTE_REJECTED"
 POLICY_REJECTED = "POLICY_REJECTED"
 MALFORMED_INPUT = "MALFORMED_INPUT"
+
+# The rejection code of each verification layer. A layer outside this map is a bug in the verifier.
+_LAYER_CODES = {
+    LAYER_ENVELOPE: ENVELOPE_REJECTED,
+    LAYER_PROVENANCE: PROVENANCE_REJECTED,
+    LAYER_QUOTE: QUOTE_REJECTED,
+    LAYER_POLICY: POLICY_REJECTED,
+}
 
 # Every member the Input schema defines; anything else is malformed.
 _INPUT_MEMBERS = frozenset(
@@ -279,6 +300,8 @@ def _run_stage(stage: str, raw: Any) -> Result:
         decoded = Input.from_json(raw)
     except MalformedInput:
         return _malformed(stage)
+    if stage == STAGE_VERIFY:
+        return _verify(decoded)
     if stage == STAGE_CHECK_ENVELOPE:
         return _check_envelope(decoded)
     if stage == STAGE_AUTHENTICATE_PROVENANCE:
@@ -291,8 +314,59 @@ def _run_stage(stage: str, raw: Any) -> Result:
         return _authenticate_quote(decoded)
     if stage == STAGE_VERIFY_TIMESTAMP:
         return _verify_timestamp(decoded)
-    # Further stage handlers are added here as the modules that they drive land.
     return _unsupported(stage)
+
+
+def _verify(decoded: Input) -> Result:
+    """The whole flow through the verifier: envelope, provenance with freshness, quote, policy.
+
+    The verifier is built with the injected roots; one that cannot be built
+    (an unparseable Sigstore root) is malformed input, as is any usage
+    error of the call itself (an absent nonce). The layer of a
+    VerificationError names the rejection code. A document that verifies
+    but endorses no usable channel keys is useless to every real client, so
+    the stage requires both the TLS fingerprint and the HPKE key.
+    """
+    stage = STAGE_VERIFY
+    overrides = _verifier.Overrides(
+        sigstore_root=decoded.sigstore_trusted_root,
+        amd_root_pem=decoded.amd_chain_pem,
+        intel_root_pem=decoded.intel_root_pem,
+    )
+    try:
+        verifier = _verifier._build(overrides=overrides)
+    except UsageError:
+        return _malformed(stage)
+    appraisal = decoded.verification_time or datetime.now(UTC)
+    try:
+        verified = verifier.verify_v3_at(decoded.document or b"", decoded.nonce or b"", decoded.repo, appraisal)
+    except UsageError:
+        return _malformed(stage)
+    except VerificationError as err:
+        code = _LAYER_CODES.get(err.layer)
+        if code is None:
+            return Result({"stage": stage, "accepted": False}, EXIT_INTERNAL)
+        return _rejected(stage, code)
+    tls_fp = verified.tls_public_key_fp
+    hpke_key = verified.hpke_public_key
+    if tls_fp is None or hpke_key is None:
+        return _rejected(stage, ENVELOPE_REJECTED)
+    outputs = {
+        "code_digest": verified.code_digest,
+        "code_measurement": _expected_of(verified.code_measurement),
+        "enclave_measurement": _measurement_of(verified.enclave_measurement),
+        "tls_public_key_fp": tls_fp,
+        "hpke_public_key": hpke_key,
+    }
+    return Result({"stage": stage, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
+
+
+def _expected_of(expected: _measurement.Expected) -> dict[str, Any]:
+    """Expected registers for the wire like ``_measurement_of``, with "" for a register left unconstrained."""
+    if isinstance(expected, _measurement.ExpectedSEVSNP):
+        return {"type": SEV_SNP_MEASUREMENT_TYPE, "registers": [_register(expected.launch)]}
+    registers = (expected.mrtd, expected.rtmr0, expected.rtmr1, expected.rtmr2, expected.rtmr3)
+    return {"type": TDX_MEASUREMENT_TYPE, "registers": [_register(register) for register in registers]}
 
 
 def _trusted_root(decoded: Input) -> sigstore_trusted_root.TrustedRoot:
