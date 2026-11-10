@@ -155,6 +155,22 @@ def test_verify_v3_rejects_bad_repo() -> None:
         v.verify_v3(raw, nonce, "not a repo reference")
 
 
+def test_v2_collateral_requires_a_repository_pin() -> None:
+    """v2 collateral is verified against a code release, so a document that carries it needs a repository pin: None
+    and "" both mean no pin and are a UsageError there, where v3 collateral would accept them."""
+    v = Verifier()
+    code = vf.reference_entry(
+        "code", SIGSTORE_CODE_V1_FORMAT, {"repo": "", "tag": "", "digest": "digest", "sigstore_bundle": {}}
+    )
+    raw, nonce, parsed = vf.embedded_document(None, code)
+    assert parsed.collateral_format() == FORMAT_V2
+    for repo in (None, ""):
+        with pytest.raises(UsageError, match="invalid release reference '': want owner/name"):
+            v.verify_v3(raw, nonce, repo)
+        with pytest.raises(UsageError, match="invalid release reference '': want owner/name"):
+            v.verify_v3_at(raw, nonce, repo, NOW)
+
+
 def test_verify_rejects_an_unbuilt_verifier() -> None:
     # A verifier that skipped its constructor carries neither a trust root nor a clock: a usage error rather than
     # an attribute error once a well-formed document is in hand.

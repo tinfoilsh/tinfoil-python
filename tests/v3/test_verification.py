@@ -138,8 +138,7 @@ def test_to_dict_lays_out_registers_as_hex_and_times_in_utc() -> None:
         "metadata": {"verifier": {"name": "tinfoil-python", "version": "1"}, "verified_at": "2026-08-06T12:00:00Z"},
     }
     assert json.loads(v.to_json()) == got
-    assert "\n" not in v.to_json(), "compact by default"
-    assert ": " not in v.to_json(), "compact by default"
+    assert v.to_json() == json.dumps(got, separators=(",", ":")), "compact by default"
     assert json.loads(v.to_json(indent=2)) == got
     assert v.to_json(indent=2) == json.dumps(got, indent=2)
 
