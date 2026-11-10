@@ -39,6 +39,7 @@ EXPECTED_ALL = (
     "SOURCE_POLICY",
     "TDX",
     "ArtifactVerification",
+    "ConfigAuthorizer",
     "ConfigEndorsement",
     "ConfigVerification",
     "CryptoMaterialItem",
@@ -49,6 +50,7 @@ EXPECTED_ALL = (
     "ExpectedSEVSNP",
     "ExpectedTDX",
     "Measurement",
+    "PublicKey",
     "Reference",
     "Register",
     "RuntimeReference",
@@ -75,6 +77,9 @@ PRIVATE_NAMES = ("Overrides", "_build", "ResolvedReferences", "resolve_embedded"
 
 # Exported aliases of builtin types, which carry no module of their own.
 BUILTIN_ALIASES = ("Register",)
+
+# Exported type aliases that are neither classes nor functions: a callable signature and a union of key types.
+TYPE_ALIASES = ("ConfigAuthorizer", "PublicKey")
 
 
 @pytest.fixture(scope="module")
@@ -105,6 +110,9 @@ def test_classes_and_functions_come_from_the_package(surface: ModuleType) -> Non
         value = getattr(surface, name)
         if name in BUILTIN_ALIASES:
             assert value.__module__ == "builtins", name
+        elif name in TYPE_ALIASES:
+            assert not inspect.isclass(value), name
+            assert not inspect.isfunction(value), name
         elif inspect.isclass(value) or inspect.isfunction(value):
             assert value.__module__.startswith(MODULE + "."), (name, value.__module__)
 
@@ -142,6 +150,7 @@ from {module} import (
     NONCE_SIZE,
     PUBLIC_REGISTRY_ID,
     REGISTER_SIZE,
+    ConfigAuthorizer,
     ConfigEndorsement,
     EmbeddedConfig,
     EmbeddedConfigReference,
@@ -150,6 +159,7 @@ from {module} import (
     ExpectedSEVSNP,
     ExpectedTDX,
     Measurement,
+    PublicKey,
     Reference,
     Register,
     RuntimeReference,
@@ -225,10 +235,20 @@ def main() -> None:
     )
     assert embedded.config is not None
     assert EmbeddedConfig(data=b"x", name="/org/project/v1").name
+    authorizer: ConfigAuthorizer = authorize
     try:
-        Verifier(config_authorizer=authorize, config_registry_ids=[PUBLIC_REGISTRY_ID])
+        Verifier(config_authorizer=authorizer, config_registry_ids=[PUBLIC_REGISTRY_ID])
     except UsageError as err:
         assert err.message
+    else:
+        fail("an authorizer and registry ids built a verifier")
+    keys: list[PublicKey] = []
+    try:
+        Verifier(config_signing_keys=keys)
+    except UsageError as err:
+        assert err.message
+    else:
+        fail("an empty key list built a verifier")
     try:
         verifier.verify_v3_at(b"", nonce, "org/repo", datetime.now(UTC))
     except VerificationError as err:

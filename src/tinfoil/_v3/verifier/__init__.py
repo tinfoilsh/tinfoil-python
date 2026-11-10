@@ -27,8 +27,14 @@ helpers decode them from hex.
 
 ``cert_pubkey_fp``, ``connection_cert_fp`` and ``pin_tls_key`` compute and
 check the SPKI fingerprint form in which documents endorse TLS keys.
+
+The option types of the ``Verifier`` constructor are exported with it:
+``PublicKey`` is the union of key types that it accepts for config and
+freshness signing keys, and ``ConfigAuthorizer`` the signature of a
+caller's config policy.
 """
 
+from tinfoil._v3.verifier._config import ConfigAuthorizer
 from tinfoil._v3.verifier._document.collateral.config import ConfigEndorsement
 from tinfoil._v3.verifier._document.collateral.runtime import RuntimeReference
 from tinfoil._v3.verifier._document.document import (
@@ -78,6 +84,7 @@ from tinfoil._v3.verifier._verification import (
     crypto_material_data,
 )
 from tinfoil._v3.verifier._verifier import Verifier, parse_reference
+from tinfoil._v3.verifier._x509.certificate import PublicKey
 
 Register = bytes
 """A measurement register: exactly ``REGISTER_SIZE`` bytes. Its text form is lowercase hex; ``parse_register``
@@ -102,6 +109,7 @@ __all__ = [
     "SOURCE_POLICY",
     "TDX",
     "ArtifactVerification",
+    "ConfigAuthorizer",
     "ConfigEndorsement",
     "ConfigVerification",
     "CryptoMaterialItem",
@@ -112,6 +120,7 @@ __all__ = [
     "ExpectedSEVSNP",
     "ExpectedTDX",
     "Measurement",
+    "PublicKey",
     "Reference",
     "Register",
     "RuntimeReference",
