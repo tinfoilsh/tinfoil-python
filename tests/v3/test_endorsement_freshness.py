@@ -247,6 +247,31 @@ def test_authenticate_freshness_rejections() -> None:
         )
 
 
+def test_subject_digest_must_match_as_signed() -> None:
+    """The bundle layer compares digests case-insensitively; the witness compares the signed string to the
+    artifact's lowercase digest exactly, so an uppercase or mixed-case subject digest is rejected."""
+    world = World()
+    client = ProvenanceClient(world.trusted_root())
+    expected = sample_artifact()
+    logged = world.now - timedelta(hours=1)
+
+    def bundle(subject_digest: str) -> Any:
+        payload = witness_payload(
+            expected, subject=[{"name": expected.subject_name, "digest": {"sha256": subject_digest}}]
+        )
+        return as_json(world.fulcio_bundle(payload, WITNESS, logged))
+
+    assert authenticate_freshness(client, bundle(expected.digest), expected, world.now) == logged
+    for digest in (expected.digest.upper(), expected.digest[:32].upper() + expected.digest[32:]):
+        with pytest.raises(FreshnessError, match="subject does not match authenticated artifact"):
+            authenticate_freshness(client, bundle(digest), expected, world.now)
+    # Another algorithm beside sha256 is tolerated, as the statement parser tolerates it.
+    both = witness_payload(
+        expected, subject=[{"name": expected.subject_name, "digest": {"sha512": "ab", "sha256": expected.digest}}]
+    )
+    assert authenticate_freshness(client, as_json(world.fulcio_bundle(both, WITNESS, logged)), expected, world.now)
+
+
 def test_production_witness_authenticates_the_real_code_artifact() -> None:
     fixture = vector("real-frozen", "real-sev-inference-tinfoil")
     client = ProvenanceClient.default()

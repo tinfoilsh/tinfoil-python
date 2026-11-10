@@ -30,6 +30,12 @@ def decode_lower_hex(name: str, value: str, want_len: int) -> bytes:
     return decoded
 
 
+def base64_length(size: int) -> int:
+    """The length of the canonical standard-base64 encoding of ``size`` bytes: four characters per started
+    three-byte group, with no line breaks."""
+    return 4 * ((size + 2) // 3)
+
+
 def decode_base64(name: str, value: str) -> bytes:
     """Decode a required standard-base64 field, rejecting every non-canonical encoding.
 

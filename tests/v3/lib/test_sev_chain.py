@@ -349,6 +349,55 @@ def test_ask_revocation() -> None:
         chain.check_ask_not_revoked(m.ask, leaf_as_root, parse_revocation_list(m.crl_der), m.case.now)
 
 
+def _context(tag: int, content: bytes, *, constructed: bool = True) -> bytes:
+    return bytes([0x80 | (0x20 if constructed else 0) | tag]) + der.encode_length(len(content)) + content
+
+
+def _sequence(*parts: bytes) -> bytes:
+    body = b"".join(parts)
+    return b"\x30" + der.encode_length(len(body)) + body
+
+
+def _ask_with_distribution_points(general_names: bytes) -> x509.Certificate:
+    """An ASK-shaped certificate whose one distribution point's fullName holds ``general_names`` (raw GeneralName
+    elements), built from the DER directly so that name forms the library cannot represent are reachable."""
+    value = _sequence(_sequence(_context(0, _context(0, general_names))))
+    extra: list[tuple[x509.ExtensionType, bool]] = [
+        (x509.UnrecognizedExtension(x509.ObjectIdentifier("2.5.29.31"), value), False)
+    ]
+    return parse_certificate(pki.certificate("SEV-Genoa", pki.rsa_key(), ca=True, pss=True, extra=extra).der)
+
+
+def test_crl_distribution_points_skip_name_forms_other_than_uri() -> None:
+    """A distribution point that names an x400Address or an ediPartyName beside the URI yields the URI alone, and
+    the revocation check still finds the product list; a malformed extension is a ChainError."""
+    m = material()
+    crl = parse_revocation_list(m.crl_der)
+    uri = _context(6, b"https://kdsintf.amd.com/vcek/v1/Genoa/crl", constructed=False)
+    x400 = _context(3, _sequence())
+    edi_party = _context(5, _context(1, b"\x0c\x01x"))
+    for names in (x400 + uri, edi_party + uri, uri + x400 + edi_party):
+        ask = _ask_with_distribution_points(names)
+        assert chain.crl_distribution_points(ask) == ("https://kdsintf.amd.com/vcek/v1/Genoa/crl",)
+        chain.check_ask_not_revoked(ask, m.ark, crl, m.case.now)
+    # Without a URI among the names there is no distribution point to match.
+    with pytest.raises(chain.ChainError, match="names no CRL distribution point"):
+        chain.check_ask_not_revoked(_ask_with_distribution_points(x400 + edi_party), m.ark, crl, m.case.now)
+    # A URI that is not IA5, a constructed URI and a GeneralName tag outside the choice are malformed.
+    for names in (
+        _context(6, "https://kdsintf.amd.com/vcek/v1/Genoa/crlé".encode(), constructed=False),
+        _context(6, uri),
+        _context(9, b"x", constructed=False),
+    ):
+        with pytest.raises(chain.ChainError, match="CRL distribution points"):
+            chain.crl_distribution_points(_ask_with_distribution_points(names))
+    # A URL that the URL parser rejects is no match rather than an error of another type.
+    unsplittable = _ask_with_distribution_points(_context(6, b"https://[::1/crl", constructed=False))
+    assert chain.crl_distribution_points(unsplittable) == ("https://[::1/crl",)
+    with pytest.raises(chain.ChainError, match="names no CRL distribution point"):
+        chain.check_ask_not_revoked(unsplittable, m.ark, crl, m.case.now)
+
+
 def test_report_signature() -> None:
     m = material()
     raw = m.case.document.cpu_evidence().report

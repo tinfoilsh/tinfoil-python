@@ -331,6 +331,78 @@ def test_uri_sans() -> None:
         c.uri_sans(c.parse_certificate(tampered))
 
 
+def _context(tag: int, content: bytes, *, constructed: bool = True) -> bytes:
+    return bytes([0x80 | (0x20 if constructed else 0) | tag]) + der.encode_length(len(content)) + content
+
+
+def _sequence(*parts: bytes) -> bytes:
+    body = b"".join(parts)
+    return b"\x30" + der.encode_length(len(body)) + body
+
+
+def _uri_name(text: bytes) -> bytes:
+    return _context(6, text, constructed=False)
+
+
+def with_distribution_points(*points: bytes) -> x509.Certificate:
+    """A certificate whose cRLDistributionPoints extension holds ``points`` (raw DistributionPoint SEQUENCEs),
+    built from the DER directly so that malformed layouts are reachable."""
+    extra: list[tuple[x509.ExtensionType, bool]] = [
+        (x509.UnrecognizedExtension(x509.ObjectIdentifier(c.OID_CRL_DISTRIBUTION_POINTS), _sequence(*points)), False)
+    ]
+    return c.parse_certificate(pki.certificate("cdp", pki.p256(), extra=extra).der)
+
+
+def test_crl_distribution_point_fields_are_unique_and_ordered() -> None:
+    """The optional fields of a DistributionPoint appear at most once each, as [0] distributionPoint, [1] reasons,
+    [2] cRLIssuer in that order; a repeated or reordered field is malformed."""
+    uri = "https://crl.example.test/a.crl"
+    full_name = _context(0, _context(0, _uri_name(uri.encode())))
+    reasons = _context(1, b"\x06\x40", constructed=False)
+    issuer = _context(2, _context(4, _sequence()))
+    assert c.crl_distribution_point_uris(with_distribution_points(_sequence(full_name))) == (uri,)
+    assert c.crl_distribution_point_uris(with_distribution_points(_sequence(full_name, reasons, issuer))) == (uri,)
+    assert c.crl_distribution_point_uris(with_distribution_points(_sequence(reasons, issuer))) == ()
+    for fields in (
+        (full_name, full_name),
+        (reasons, reasons),
+        (full_name, reasons, reasons),
+        (reasons, full_name),
+        (issuer, full_name),
+        (full_name, issuer, reasons),
+    ):
+        with pytest.raises(c.X509Error, match="DistributionPoint fields are repeated or out of order"):
+            c.crl_distribution_point_uris(with_distribution_points(_sequence(*fields)))
+    # A field beyond the three is still an unexpected field.
+    with pytest.raises(c.X509Error, match="unexpected field"):
+        c.crl_distribution_point_uris(with_distribution_points(_sequence(full_name, _context(3, b""))))
+
+
+def test_crl_distribution_point_uris_are_decoded_like_subject_alt_name_uris() -> None:
+    """A distribution point URI with an ASCII control character or a malformed percent escape is rejected with the
+    same error as the subjectAltName URI that carries it, and a constructed or non-IA5 URI is malformed."""
+    uri = "https://crl.example.test/a_b.crl"
+    assert c.crl_distribution_point_uris(
+        with_distribution_points(_sequence(_context(0, _context(0, _uri_name(uri.encode())))))
+    ) == (uri,)
+    san = pki.certificate("san", pki.p256(), sans=[x509.UniformResourceIdentifier(uri)])
+    for bad in (uri.replace("_", "\t"), uri.replace("a_b", "%zz"), uri.replace("_", "\x7f")):
+        with pytest.raises(c.X509Error, match="URI GeneralName is not a URL") as from_san:
+            c.uri_sans(c.parse_certificate(san.der.replace(uri.encode(), bad.encode())))
+        point = _sequence(_context(0, _context(0, _uri_name(bad.encode()))))
+        with pytest.raises(c.X509Error, match="URI GeneralName is not a URL") as from_point:
+            c.crl_distribution_point_uris(with_distribution_points(point))
+        assert str(from_san.value) == str(from_point.value)
+    with pytest.raises(c.X509Error, match="URI GeneralName must be primitive"):
+        c.crl_distribution_point_uris(
+            with_distribution_points(_sequence(_context(0, _context(0, _context(6, _uri_name(uri.encode()))))))
+        )
+    with pytest.raises(c.X509Error, match="cRLDistributionPoints: IA5String"):
+        c.crl_distribution_point_uris(
+            with_distribution_points(_sequence(_context(0, _context(0, _uri_name(uri.encode() + b"\xc3\xa9")))))
+        )
+
+
 def test_valid_at_is_inclusive_and_requires_an_aware_time() -> None:
     parsed = c.parse_certificate(pki.certificate("t", pki.p256()).der)
     assert c.valid_at(parsed, pki.NOT_BEFORE)

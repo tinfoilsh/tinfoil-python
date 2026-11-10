@@ -41,6 +41,7 @@ from tinfoil._v3.verifier._x509.certificate import (
     X509Error,
     can_issue_certificates,
     certificate_public_key,
+    crl_distribution_point_uris,
     extensions,
     parse_certificate,
     signature_algorithm,
@@ -315,19 +316,24 @@ def verify_vcek_chain(vcek: Certificate, ask: Certificate, ark: Certificate, now
 
 
 def crl_distribution_points(certificate: Certificate) -> tuple[str, ...]:
-    """The URIs named by the certificate's CRL distribution points, in order; empty without the extension."""
+    """The URIs named by the certificate's CRL distribution points, in order; empty without the extension.
+
+    The extension is read from the DER directly, so that a name form other
+    than a URI is skipped rather than failing the read, and a malformed
+    extension is a ChainError.
+    """
     try:
-        points = certificate.extensions.get_extension_for_class(x509.CRLDistributionPoints).value
-    except x509.ExtensionNotFound:
-        return ()
-    except ValueError as err:
+        return crl_distribution_point_uris(certificate)
+    except X509Error as err:
         raise ChainError(f"CRL distribution points: {err}") from err
-    return tuple(
-        name.value
-        for point in points
-        for name in (point.full_name or ())
-        if isinstance(name, x509.UniformResourceIdentifier)
-    )
+
+
+def _names_product_crl(url: str) -> bool:
+    """Whether ``url``'s path ends in the product revocation list suffix; a URL that does not split is no match."""
+    try:
+        return urlsplit(url).path.endswith(_CRL_PATH_SUFFIX)
+    except ValueError:
+        return False
 
 
 def check_ask_not_revoked(
@@ -339,7 +345,7 @@ def check_ask_not_revoked(
     The VCEK's own serial is not looked up: AMD supersedes VCEKs through
     the TCB rather than revoking them.
     """
-    if not any(urlsplit(url).path.endswith(_CRL_PATH_SUFFIX) for url in crl_distribution_points(ask)):
+    if not any(_names_product_crl(url) for url in crl_distribution_points(ask)):
         raise ChainError("ASK names no CRL distribution point for the product revocation list")
     if not can_issue_certificates(ark):
         raise ChainError("ARK is not a certificate authority")

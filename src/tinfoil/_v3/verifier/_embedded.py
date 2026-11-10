@@ -70,9 +70,14 @@ def resolve_embedded(refs: EmbeddedReferences) -> ResolvedReferences:
     ``EmbeddedConfig`` or an ``EmbeddedConfigReference``. Config bytes must
     be within the size bounds and carry a runtime pin; a config reference must have a
     well-formed name when it has one, a lowercase SHA-256 digest and a valid
-    runtime pin, and a manifest supplied beside it must be the one the
-    config pins. A manifest must decode; a platform artifact must parse
-    with the v2 format. Every failure is a UsageError.
+    runtime pin whose repository, tag and digest are strings, and a
+    manifest supplied beside it must be the one the config pins. A manifest must decode; a platform artifact must parse
+    with the v2 format. Every field must have its declared type, so that
+    a caller's mistake is a UsageError and never an attribute or type
+    error. Every failure is a UsageError.
+
+    The manifest and platform bytes are copied, so a caller cannot change
+    the policy through a mutable buffer after the verifier is built.
     """
     if refs.config is None and refs.runtime is None and refs.platform is None:
         raise UsageError("embedded references must contain at least one component")
@@ -81,9 +86,15 @@ def resolve_embedded(refs: EmbeddedReferences) -> ResolvedReferences:
             "embedded config must be an EmbeddedConfig or EmbeddedConfigReference value, "
             f"not {type(refs.config).__name__}"
         )
+    runtime_bytes = _bytes_or_none("embedded runtime manifest", refs.runtime)
+    platform_bytes = _bytes_or_none("embedded platform artifact", refs.platform)
     reference: EmbeddedConfigReference | None = None
     if isinstance(refs.config, EmbeddedConfig):
-        data = refs.config.data
+        if not isinstance(refs.config.data, bytes | bytearray | memoryview):
+            raise UsageError("embedded config data must be bytes")
+        if not isinstance(refs.config.name, str):
+            raise UsageError("embedded config name must be a string")
+        data = bytes(refs.config.data)
         if not 0 < len(data) <= MAX_CONFIG_SIZE:
             raise UsageError("embedded config size is outside allowed bounds")
         try:
@@ -95,6 +106,15 @@ def resolve_embedded(refs: EmbeddedReferences) -> ResolvedReferences:
         )
     elif refs.config is not None:
         reference = refs.config
+        if not isinstance(reference.name, str):
+            raise UsageError("embedded config name must be a string")
+        if not isinstance(reference.digest, str):
+            raise UsageError("embedded config digest must be a string")
+        if not isinstance(reference.runtime, RuntimeReference):
+            raise UsageError("embedded config runtime must be a RuntimeReference value")
+        for field in ("repo", "tag", "digest"):
+            if not isinstance(getattr(reference.runtime, field), str):
+                raise UsageError(f"embedded config runtime {field} must be a string")
     if reference is not None:
         try:
             if reference.name != "":
@@ -103,23 +123,32 @@ def resolve_embedded(refs: EmbeddedReferences) -> ResolvedReferences:
             reference.runtime.validate()
             # Both come from the caller, so a manifest the config does not pin is rejected here rather than at
             # verification.
-            if refs.runtime is not None:
-                parse_manifest(refs.runtime, reference.runtime)
+            if runtime_bytes is not None:
+                parse_manifest(runtime_bytes, reference.runtime)
         except (ApprovalError, EncodingError, RuntimeCollateralError, ManifestError) as err:
             raise UsageError(str(err)) from err
-    if refs.runtime is not None:
+    if runtime_bytes is not None:
         try:
-            decode_manifest(refs.runtime)
+            decode_manifest(runtime_bytes)
         except ManifestError as err:
             raise UsageError(str(err)) from err
-    if refs.platform is not None:
+    if platform_bytes is not None:
         try:
-            artifact = parse_policy_artifact(refs.platform)
+            artifact = parse_policy_artifact(platform_bytes)
         except PolicyError as err:
             raise UsageError(str(err)) from err
         if artifact.format != ARTIFACT_FORMAT_V2:
             raise UsageError("embedded platform requires platform-endorsements/v2")
-    return ResolvedReferences(config=reference, runtime=refs.runtime, platform=refs.platform)
+    return ResolvedReferences(config=reference, runtime=runtime_bytes, platform=platform_bytes)
+
+
+def _bytes_or_none(what: str, value: object) -> bytes | None:
+    """A private copy of a bytes-like value, None for None; anything else is a UsageError."""
+    if value is None:
+        return None
+    if not isinstance(value, bytes | bytearray | memoryview):
+        raise UsageError(f"{what} must be bytes")
+    return bytes(value)
 
 
 __all__ = [

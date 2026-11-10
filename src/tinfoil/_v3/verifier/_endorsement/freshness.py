@@ -22,7 +22,7 @@ from tinfoil._v3.verifier._endorsement.time import (
     TimePolicyError,
     new_time_policy,
 )
-from tinfoil._v3.verifier._sigstore.bundle import IN_TOTO_STATEMENT_V1
+from tinfoil._v3.verifier._sigstore.bundle import DIGEST_ALGORITHM, IN_TOTO_STATEMENT_V1
 
 if TYPE_CHECKING:
     from tinfoil._v3.verifier._endorsement.provenance import ProvenanceClient
@@ -76,9 +76,10 @@ def authenticate_freshness(
     applies); ``expected`` is well formed; the bundle verifies
     as a Fulcio bundle signed by the freshness-witness workflow over
     ``expected.digest``; the verified statement is an in-toto v1 statement
-    with the witness predicate type, whose one subject matches
-    ``expected``; the predicate bytes strictly decode as a witness that
-    matches ``expected``; the log time lies within the window.
+    with the witness predicate type, whose one subject names ``expected``
+    with its digest as signed, equal to ``expected.digest`` byte for byte;
+    the predicate bytes strictly decode as a witness that matches
+    ``expected``; the log time lies within the window.
     """
     if max_age is not None and max_age < timedelta(0):
         raise FreshnessError("freshness maximum age must not be negative")
@@ -98,10 +99,13 @@ def authenticate_freshness(
         raise FreshnessError(f"unexpected freshness statement type {statement.type!r}")
     if statement.predicate_type != FRESHNESS_PREDICATE_FORMAT:
         raise FreshnessError("unexpected freshness predicate format")
+    # The statement parser lowercases digests for the layers that compare bytes; the witness compares the digest
+    # string exactly as signed, which the parser keeps beside the normalized map.
+    subject = statement.subjects[0]
     if (
         len(statement.subjects) != 1
-        or statement.subjects[0].name != expected.subject_name
-        or statement.subjects[0].digest.get("sha256") != expected.digest
+        or subject.name != expected.subject_name
+        or subject.signed_digest.get(DIGEST_ALGORITHM) != expected.digest
     ):
         raise FreshnessError("freshness statement subject does not match authenticated artifact")
     witness = parse_freshness_witness(statement.predicate)
