@@ -58,7 +58,7 @@ class TestValidateXfam:
         validate_xfam(xfam)  # Should not raise
 
     def test_expected_xfam_value_passes(self):
-        """The expected XFAM value from Go passes validation."""
+        """The XFAM value of a production quote passes validation."""
         validate_xfam(EXPECTED_XFAM)  # Should not raise
 
     def test_missing_fixed1_bits_rejected(self):
@@ -105,7 +105,7 @@ class TestValidateTdAttributes:
         validate_td_attributes(td_attrs)  # Should not raise
 
     def test_expected_td_attributes_value_passes(self):
-        """The expected TD_ATTRIBUTES value from Go passes validation."""
+        """The TD_ATTRIBUTES value of a production quote passes validation."""
         validate_td_attributes(EXPECTED_TD_ATTRIBUTES)  # Should not raise
 
     def test_debug_bit_rejected_unconditionally(self):

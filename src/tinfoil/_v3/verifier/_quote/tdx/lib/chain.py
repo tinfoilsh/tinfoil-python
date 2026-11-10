@@ -139,7 +139,7 @@ def verify_intel_chain(
             raise CertificateChainError(f"{chain_name}: certificate expired (not after {cert.not_valid_after_utc})")
 
     # Step 3: Verify issuer certificates are CAs (BasicConstraints)
-    # Go's x509.Verify checks this implicitly; we must do it explicitly.
+    # A path builder would check this implicitly; the step-by-step chain check does it explicitly.
     for cert in certs[1:]:
         try:
             bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)

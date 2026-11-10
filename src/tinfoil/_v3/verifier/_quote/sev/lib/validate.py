@@ -230,7 +230,7 @@ def _validate_policy(report_policy: SnpPolicy, required: SnpPolicy):
     """
     Validate policy with security-aware checks.
 
-    Logic follows Go reference implementation:
+    Checks, in order:
     - Check ABI version compatibility
     - Reject unauthorized capabilities (report has them, required doesn't allow)
     - Reject missing required restrictions/features
@@ -320,7 +320,7 @@ def _validate_platform_info(report_info: SnpPlatformInfo, required: SnpPlatformI
     """
     Validate platform info with security-aware checks.
 
-    Logic follows Go reference implementation:
+    Checks, in order:
     - If report has a feature enabled that required doesn't allow -> FAIL
     - If report lacks a feature that required mandates -> FAIL
 

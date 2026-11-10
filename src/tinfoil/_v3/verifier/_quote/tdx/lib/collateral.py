@@ -1124,7 +1124,7 @@ def validate_tdx_module_identity(
                 )
             return
 
-    # No matching TCB level found - this is an error (matches Go behavior)
+    # No matching TCB level found - this is an error
     raise CollateralError(
         f"Could not find a TDX Module Identity TCB Level matching the TDX Module's ISVSVN ({minor_version})"
     )

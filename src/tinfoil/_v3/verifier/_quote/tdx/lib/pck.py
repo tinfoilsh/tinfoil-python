@@ -45,7 +45,7 @@ OID_CPU_SVN = x509.ObjectIdentifier(f"{_INTEL_SGX_OID_BASE}.2.18")
 # TCB component OID → index mapping (1-indexed OID to 0-indexed array position)
 _TCB_COMPONENT_OID_INDEX = {f"{_INTEL_SGX_OID_BASE}.2.{i}": i - 1 for i in range(1, 17)}
 
-# Size constants (match go-tdx-guest/pcs/pcs.go)
+# Size constants of the PCK certificate profile
 PCK_CERT_EXTENSION_COUNT = 6
 SGX_EXTENSION_MIN_SIZE = 4
 TCB_EXTENSION_SIZE = 18  # 16 components + PCE SVN + CPU SVN
@@ -146,7 +146,7 @@ def extract_pck_extensions(cert: x509.Certificate) -> PckExtensions:
 def _der_decode(data: bytes, label: str = "value"):
     """Decode DER data using pyasn1, wrapping errors as PckExtensionError.
 
-    Checks for leftover bytes after decoding (matches Go's asn1.Unmarshal behavior).
+    Rejects leftover bytes after the decoded value.
     """
     try:
         result, remainder = der_decoder.decode(data)

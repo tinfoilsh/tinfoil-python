@@ -74,7 +74,6 @@ TD_ATTRIBUTES_FIXED0 = TD_ATTRIBUTES_DEBUG_BIT | TD_ATTRIBUTES_SEPT_VE_DIS | TD_
 class HeaderOptions:
     """
     Validation options for TDX quote header fields.
-    Mirrors Go's validate.HeaderOptions struct.
 
     All fields are optional - set to None to skip the check.
     """
@@ -87,7 +86,6 @@ class HeaderOptions:
 class TdQuoteBodyOptions:
     """
     Validation options for TDX quote body fields.
-    Mirrors Go's validate.TdQuoteBodyOptions struct.
 
     All fields are optional - set to None to skip the check.
     """
@@ -122,7 +120,6 @@ class TdQuoteBodyOptions:
 class PolicyOptions:
     """
     Complete validation options for TDX quote policy validation.
-    Mirrors Go's validate.Options struct.
     """
 
     header: HeaderOptions = field(default_factory=HeaderOptions)
