@@ -90,7 +90,7 @@ class Verifier:
     performs no I/O: the document arrives as an argument, and every trust
     anchor it needs is embedded in this package or carried by the document
     itself. It holds no cache, so it never decides that an earlier answer is
-    still good enough; that judgement belongs to whatever fetches documents.
+    still good enough; that judgment belongs to whatever fetches documents.
 
     It does read the clock. ``verify_v3`` samples it once and judges
     everything time-bound against that instant: the freshness witnesses and

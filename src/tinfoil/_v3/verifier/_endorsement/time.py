@@ -36,7 +36,7 @@ def new_time_policy(
 
     ``now`` must be timezone-aware; None selects DEFAULT_MAX_AGE or
     DEFAULT_FUTURE_SKEW; a negative age or skew is an error, and a zero one
-    is honoured. An age or skew that puts either edge of the window outside
+    is honored. An age or skew that puts either edge of the window outside
     the representable date range is an error.
     """
     if max_age is None:

@@ -3,7 +3,7 @@
 A list is read as a complete revocation set: no CRL or entry extension is
 processed, so a critical one, or one that changes what the serial list
 means (a delta CRL indicator, an issuing distribution point, a certificate
-issuer on an entry), is rejected rather than silently honoured.
+issuer on an entry), is rejected rather than silently honored.
 """
 
 from __future__ import annotations

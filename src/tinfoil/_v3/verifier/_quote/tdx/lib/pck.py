@@ -169,7 +169,7 @@ def _parse_tcb(item: der.Element) -> PckCertTCB:
     """The TCB attribute: a two-element SEQUENCE whose second element lists exactly 18 attribute pairs."""
     parts = der.expect_sequence(item, "TCB extension")
     if len(parts) != 2:
-        raise PckExtensionError(f"TCB extension when unmarshalled is of size {len(parts)}, expected 2")
+        raise PckExtensionError(f"TCB extension when unmarshaled is of size {len(parts)}, expected 2")
     entries = der.expect_sequence(parts[1], "TCB components")
     if len(entries) != TCB_EXTENSION_SIZE:
         raise PckExtensionError(f"TCB extension is of size {len(entries)}, expected {TCB_EXTENSION_SIZE}")
