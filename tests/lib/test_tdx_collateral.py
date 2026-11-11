@@ -207,6 +207,21 @@ class TestParseTcbInfoResponse:
         with pytest.raises(CollateralError, match=f"TCB has no '{member}'"):
             parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[level(tcb={member: None})]))
 
+    @pytest.mark.parametrize("member", ["sgxtcbcomponents", "tdxtcbcomponents"])
+    def test_every_tcb_component_requires_an_svn(self, member: str) -> None:
+        """A component without an SVN would compare as zero, a requirement every quote meets."""
+        complete = [{"svn": 1} for _ in range(16)]
+        for components in (
+            [*complete[:15], {}],
+            [*complete[:15], {"svn": None}],
+            [*complete[:15], {"category": "BIOS"}],
+            [*complete[:15], None],
+        ):
+            with pytest.raises(CollateralError, match="TCB component has no 'svn'"):
+                parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[level(tcb={member: components})]))
+        parsed = parse_tcb_info_response(edited(tcb_info_body(), tcbLevels=[level(tcb={member: complete})]))
+        assert [c.svn for c in getattr(parsed.tcb_info.tcb_levels[0].tcb, member.replace("tcbc", "_tcb_c"))] == [1] * 16
+
     def test_platform_level_requires_a_tcb(self) -> None:
         for levels in ([{"tcbStatus": "UpToDate"}], [{"tcb": None, "tcbStatus": "UpToDate"}]):
             with pytest.raises(CollateralError, match="TCB level has no 'tcb'"):
@@ -449,6 +464,23 @@ class TestVerifyResponse:
             )
         with pytest.raises(CollateralError, match="unable to verify signing certificate"):
             verify_response("Intel SGX TCB Signing", root, signing, *args[:4], tb.NOW + timedelta(days=400))
+        no_signing = replace(
+            intel,
+            tcb_signing=pki.certificate(
+                tb.TCB_SIGNING_CN,
+                intel.tcb_signing.key,
+                intel.root,
+                key_usage=tb.ENCIPHERMENT_USAGE,
+                serial=3,
+                not_before=tb.NOW - timedelta(days=365),
+                not_after=tb.NOW + timedelta(days=365),
+            ),
+        )
+        unsigned = collateral(SCENARIO.with_(intel=no_signing))
+        with pytest.raises(CollateralError, match="signing certificate in the issuer chain may not sign data"):
+            verify_tcb_info(unsigned, ROOTS, tb.NOW)
+        with pytest.raises(CollateralError, match="signing certificate in the issuer chain may not sign data"):
+            verify_qe_identity(unsigned, ROOTS, tb.NOW)
         with pytest.raises(CollateralError, match="unable to decode signature string"):
             verify_response("Intel SGX TCB Signing", root, signing, c.tcb_info_body, "xy", *args[2:])
         with pytest.raises(CollateralError, match="unable to convert signature to DER"):

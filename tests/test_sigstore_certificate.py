@@ -229,6 +229,14 @@ def test_time_and_material_rejections() -> None:
     )
     with pytest.raises(sc.CertificateBundleError, match="too many tlog entries"):
         sc.verify_fulcio_bundle(root, too_many, identity, digest)
+    # A Rekor v1 proof's index is the leaf's position in the log shard, not the entry's index across shards: the
+    # production entry has both, they differ, and the proof must still verify at its own index.
+    assert entry.inclusion_proof is not None
+    assert entry.inclusion_proof.log_index != entry.log_index
+    moved_proof = dataclasses.replace(entry.inclusion_proof, log_index=entry.inclusion_proof.log_index + 1)
+    moved = dataclasses.replace(bundle, tlog_entries=(dataclasses.replace(entry, inclusion_proof=moved_proof),))
+    with pytest.raises(sc.CertificateBundleError, match="transparency log entry 0"):
+        sc.verify_fulcio_bundle(root, moved, identity, digest)
     early = dataclasses.replace(bundle, tlog_entries=(dataclasses.replace(entry, integrated_time=1),))
     with pytest.raises(sc.CertificateBundleError, match="integrated time outside certificate validity"):
         sc.verify_fulcio_bundle(root, early, identity, digest)

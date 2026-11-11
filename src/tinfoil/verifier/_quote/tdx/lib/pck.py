@@ -4,7 +4,7 @@ The extension (OID 1.2.840.113741.1.13.1) is a SEQUENCE of attribute pairs,
 each a SEQUENCE of an OID and a value:
 
     1.2.840.113741.1.13.1.1        PPID, 16-byte OCTET STRING
-    1.2.840.113741.1.13.1.2        TCB, a SEQUENCE of 18 attribute pairs
+    1.2.840.113741.1.13.1.2        TCB, a SEQUENCE of attribute pairs naming each of the 18 below once
     1.2.840.113741.1.13.1.2.1-16   TCB components 1-16, INTEGER 0-255
     1.2.840.113741.1.13.1.2.17     PCE SVN, INTEGER 0-65535
     1.2.840.113741.1.13.1.2.18     CPU SVN, 16-byte OCTET STRING
@@ -13,8 +13,10 @@ each a SEQUENCE of an OID and a value:
 
 Values that are absent keep their zero value rather than failing here: a
 missing FMSPC selects no TCB Info, a missing PPID is no identity and a
-missing TCB matches no TCB level, so each surfaces where it is used.
-Attribute pairs with other OIDs are ignored.
+missing TCB matches no TCB level, so each surfaces where it is used. A TCB
+attribute that is present must name each of its 18 attributes exactly once,
+so that no component or SVN is ever read as zero by default. Attribute
+pairs with other OIDs are ignored.
 """
 
 from __future__ import annotations
@@ -36,6 +38,8 @@ OID_CPU_SVN = f"{_INTEL_SGX_OID_BASE}.2.18"
 
 # Component OID (1-indexed) to its position in the component array.
 _TCB_COMPONENT_OID_INDEX = {f"{_INTEL_SGX_OID_BASE}.2.{i}": i - 1 for i in range(1, 17)}
+_TCB_ATTRIBUTE_OIDS = frozenset(_TCB_COMPONENT_OID_INDEX) | {OID_PCE_SVN, OID_CPU_SVN}
+"""The 18 attributes that a TCB attribute must name exactly once."""
 
 PCK_CERT_EXTENSION_COUNT = 6
 SGX_EXTENSION_MIN_SIZE = 4
@@ -166,18 +170,22 @@ def _octet_string_attribute(item: der.Element, name: str, size: int) -> bytes:
 
 
 def _parse_tcb(item: der.Element) -> PckCertTCB:
-    """The TCB attribute: a two-element SEQUENCE whose second element lists exactly 18 attribute pairs."""
+    """The TCB attribute: a two-element SEQUENCE whose second element lists attribute pairs that name each of the
+    16 components, the PCE SVN and the CPU SVN exactly once; pairs with other OIDs are ignored."""
     parts = der.expect_sequence(item, "TCB extension")
     if len(parts) != 2:
         raise PckExtensionError(f"TCB extension when unmarshaled is of size {len(parts)}, expected 2")
     entries = der.expect_sequence(parts[1], "TCB components")
-    if len(entries) != TCB_EXTENSION_SIZE:
-        raise PckExtensionError(f"TCB extension is of size {len(entries)}, expected {TCB_EXTENSION_SIZE}")
     components = bytearray(TCB_COMPONENTS_COUNT)
     pce_svn = 0
     cpu_svn = b""
+    seen: set[str] = set()
     for entry in entries:
         oid, value = _attribute(entry, "TCB component")
+        if oid in _TCB_ATTRIBUTE_OIDS:
+            if oid in seen:
+                raise PckExtensionError(f"TCB extension names {oid} more than once")
+            seen.add(oid)
         index = _TCB_COMPONENT_OID_INDEX.get(oid)
         if index is not None:
             components[index] = _small_integer(value, f"sgxTcbComponent{index + 1}", 0xFF)
@@ -191,6 +199,11 @@ def _parse_tcb(item: der.Element) -> PckCertTCB:
                 raise PckExtensionError(
                     f"CPUSVN component in TCB extension is of size {len(cpu_svn)}, expected {CPU_SVN_SIZE}"
                 )
+    if len(seen) != TCB_EXTENSION_SIZE:
+        missing = min(_TCB_ATTRIBUTE_OIDS - seen, key=lambda dotted: int(dotted.rsplit(".", 1)[1]))
+        raise PckExtensionError(
+            f"TCB extension names {len(seen)} of its {TCB_EXTENSION_SIZE} attributes, {missing} is missing"
+        )
     return PckCertTCB(pce_svn=pce_svn, cpu_svn=cpu_svn, cpu_svn_components=bytes(components))
 
 

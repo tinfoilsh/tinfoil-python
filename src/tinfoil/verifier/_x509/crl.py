@@ -8,7 +8,7 @@ issuer on an entry), is rejected rather than silently honored.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from cryptography import x509
@@ -65,13 +65,32 @@ class RevocationList:
         return value
 
 
+class _Proof:
+    """Evidence that ``verify_revocation_list`` ran; the only instance is this module's ``_VERIFIED``."""
+
+    __slots__ = ()
+
+
+_VERIFIED = _Proof()
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedRevocationList:
-    """A CRL whose issuer signature and validity window were checked; the only type that ``is_revoked`` accepts."""
+    """A CRL whose issuer signature and validity window were checked; the only type that ``is_revoked`` accepts.
+
+    Only ``verify_revocation_list`` builds one: the constructor requires
+    this module's private proof and raises ``TypeError`` for any other
+    value, so an unverified list cannot be passed off as verified.
+    """
 
     crl: RevocationList
     issuer: Certificate
     verified_at: datetime
+    _proof: _Proof = field(kw_only=True, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._proof is not _VERIFIED:
+            raise TypeError("VerifiedRevocationList is built only by verify_revocation_list")
 
 
 def parse_revocation_list(der_bytes: bytes) -> RevocationList:
@@ -177,7 +196,7 @@ def verify_revocation_list(crl: RevocationList, issuer: Certificate, at: datetim
             f"revocation list is not current at {at.isoformat()} "
             f"(thisUpdate {crl.this_update.isoformat()}, nextUpdate {crl.next_update.isoformat()})"
         )
-    return VerifiedRevocationList(crl=crl, issuer=issuer, verified_at=at)
+    return VerifiedRevocationList(crl=crl, issuer=issuer, verified_at=at, _proof=_VERIFIED)
 
 
 def is_revoked(crl: VerifiedRevocationList, serial: int) -> bool:

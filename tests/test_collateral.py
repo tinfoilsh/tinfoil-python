@@ -461,6 +461,9 @@ def test_runtime() -> None:
         match="not canonical base64",
     )
     raises_decode(ref(RUNTIME_ID, RUNTIME_V1_FORMAT, {**data, "tag": "0.15.0"}), match="full semantic version")
+    raises_decode(
+        ref(RUNTIME_ID, RUNTIME_V1_FORMAT, {**data, "manifest_base64": ""}), match="manifest_base64 must not be empty"
+    )
     assert isinstance(runtime.decode_runtime(entries_of(item)[0]), runtime.Runtime)
 
 

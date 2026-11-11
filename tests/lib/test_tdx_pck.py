@@ -159,7 +159,7 @@ class TestExtractPckExtensions:
         short = tb.sequence(
             tb.oid(f"{SGX}.2"), tb.sequence(*[tb.attribute(f"{SGX}.2.{i + 1}", tb.integer(0)) for i in range(17)])
         )
-        with pytest.raises(PckExtensionError, match="TCB extension is of size 17, expected 18"):
+        with pytest.raises(PckExtensionError, match=f"names 17 of its 18 attributes, {SGX}.2.18 is missing"):
             parse(tb.sgx_extension(tcb=short))
         assert entries
 
@@ -195,19 +195,41 @@ class TestExtractPckExtensions:
         with pytest.raises(PckExtensionError, match="not an OCTET STRING"):
             parse(tb.sgx_extension(tcb=wrong_type))
 
-    def test_unknown_tcb_entries_are_ignored_and_missing_ones_are_zero(self) -> None:
-        pairs = [tb.attribute(f"{SGX}.2.{i + 1}", tb.integer(7)) for i in range(15)]
+    def test_unknown_tcb_entries_are_ignored_but_do_not_stand_in(self) -> None:
+        # An entry with another OID neither counts toward the 18 nor replaces one of them.
+        pairs = [tb.attribute(f"{SGX}.2.{i + 1}", tb.integer(7)) for i in range(16)]
         pairs.append(tb.attribute(f"{SGX}.2.99", tb.octet_string(b"?")))
         pairs.append(tb.attribute(f"{SGX}.2.17", tb.integer(3)))
         pairs.append(tb.attribute(f"{SGX}.2.18", tb.octet_string(bytes(16))))
         ext = parse(tb.sgx_extension(tcb=tb.sequence(tb.oid(f"{SGX}.2"), tb.sequence(*pairs))))
-        assert ext.tcb.cpu_svn_components == bytes([7] * 15 + [0])
-        assert ext.tcb.pce_svn == 3
+        assert ext.tcb == PckCertTCB(pce_svn=3, cpu_svn=bytes(16), cpu_svn_components=bytes([7] * 16))
+        del pairs[15]  # component 16 is now absent, though the entry count is still 18
+        with pytest.raises(PckExtensionError, match=f"names 17 of its 18 attributes, {SGX}.2.16 is missing"):
+            parse(tb.sgx_extension(tcb=tb.sequence(tb.oid(f"{SGX}.2"), tb.sequence(*pairs))))
 
-    def test_absent_tcb_components_leave_the_components_empty(self) -> None:
-        pairs = [tb.attribute(f"{SGX}.2.99", tb.integer(i)) for i in range(18)]
-        ext = parse(tb.sgx_extension(tcb=tb.sequence(tb.oid(f"{SGX}.2"), tb.sequence(*pairs))))
-        assert ext.tcb == PckCertTCB(pce_svn=0, cpu_svn=b"", cpu_svn_components=bytes(16))
+    @pytest.mark.parametrize("missing", [1, 9, 16, 17, 18])
+    def test_every_tcb_attribute_is_required(self, missing: int) -> None:
+        # A missing component or SVN would otherwise read as zero: the lowest requirement any TCB level could set.
+        pairs = [tb.attribute(f"{SGX}.2.{i + 1}", tb.integer(7)) for i in range(16)]
+        pairs.append(tb.attribute(f"{SGX}.2.17", tb.integer(3)))
+        pairs.append(tb.attribute(f"{SGX}.2.18", tb.octet_string(bytes(16))))
+        del pairs[missing - 1]
+        with pytest.raises(PckExtensionError, match=f"names 17 of its 18 attributes, {SGX}.2.{missing} is missing"):
+            parse(tb.sgx_extension(tcb=tb.sequence(tb.oid(f"{SGX}.2"), tb.sequence(*pairs))))
+        # The other entries' values are read before the count is checked, so nothing unknown is required.
+        nothing_known = [tb.attribute(f"{SGX}.2.99", tb.integer(i)) for i in range(18)]
+        with pytest.raises(PckExtensionError, match=f"names 0 of its 18 attributes, {SGX}.2.1 is missing"):
+            parse(tb.sgx_extension(tcb=tb.sequence(tb.oid(f"{SGX}.2"), tb.sequence(*nothing_known))))
+
+    @pytest.mark.parametrize("duplicated", [1, 16, 17, 18])
+    def test_a_repeated_tcb_attribute_rejects(self, duplicated: int) -> None:
+        # The repeat replaces another entry, so the count stays 18; a later value must not overwrite an earlier one.
+        pairs = [tb.attribute(f"{SGX}.2.{i + 1}", tb.integer(7)) for i in range(16)]
+        pairs.append(tb.attribute(f"{SGX}.2.17", tb.integer(3)))
+        pairs.append(tb.attribute(f"{SGX}.2.18", tb.octet_string(bytes(16))))
+        pairs[(duplicated % 18)] = pairs[duplicated - 1]
+        with pytest.raises(PckExtensionError, match=f"names {SGX}.2.{duplicated} more than once"):
+            parse(tb.sgx_extension(tcb=tb.sequence(tb.oid(f"{SGX}.2"), tb.sequence(*pairs))))
 
     def test_nested_encodings_are_validated(self) -> None:
         non_minimal = tb.sgx_extension(extra=(tb.attribute(f"{SGX}.9", tb.tlv(0x02, b"\x00\x01")),))

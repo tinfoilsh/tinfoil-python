@@ -55,6 +55,8 @@ def decode_runtime(entry: Entry) -> Runtime:
     )
     reference.validate()
     manifest = decode_base64("manifest_base64", _json.string(data, "manifest_base64"))
+    if len(manifest) == 0:
+        raise RuntimeCollateralError("manifest_base64 must not be empty")
     bundle = _json.raw(data, "sigstore_bundle")
     if not isinstance(bundle, _json.JsonObject):
         raise RuntimeCollateralError("sigstore_bundle must be an object")

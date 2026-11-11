@@ -424,12 +424,22 @@ def signature_algorithm(element: der.Element) -> SignatureAlgorithm:
 
 
 def _check_pss_parameters(params: der.Element) -> None:
+    """RSASSA-PSS-params: the tagged fields in order, each at most once.
+
+    A trailerField, when present, must be 1. DER omits a default value,
+    but the AMD SEV-SNP certificate chains encode this one explicitly, so
+    it is accepted with its one legal value rather than rejected.
+    """
     fields = der.expect_sequence(params, "RSA-PSS parameters")
     hash_oid = mgf_hash = None
     salt = trailer = None
+    last_tag = -1
     for field in fields:
         if field.tag_class != der.CLASS_CONTEXT or not field.constructed:
             raise X509Error("RSA-PSS parameter is not tagged")
+        if field.tag <= last_tag:
+            raise X509Error("RSA-PSS parameters must be in tag order without repeats")
+        last_tag = field.tag
         inner = der.children(field)
         if len(inner) != 1:
             raise X509Error("RSA-PSS parameter must wrap one value")

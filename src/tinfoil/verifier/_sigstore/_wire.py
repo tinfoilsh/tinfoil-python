@@ -41,16 +41,20 @@ def check_member_names(value: _json.JsonValue) -> None:
 
     Protobuf JSON decoders accept each field under its original name as
     well as its JSON name; only the JSON (lowerCamelCase) names are accepted
-    here, so that one document has one spelling.
+    here, so that one document has one spelling. The walk keeps its own
+    stack, so a deeply nested document is checked rather than overflowing
+    the interpreter's.
     """
-    if isinstance(value, _json.JsonObject):
-        for name, member in value.items():
-            if "_" in name:
-                raise WireError(f"member name {name!r} is not the JSON field name")
-            check_member_names(member)
-    elif isinstance(value, tuple):
-        for item in value:
-            check_member_names(item)
+    stack: list[_json.JsonValue] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, _json.JsonObject):
+            for name, member in current.items():
+                if "_" in name:
+                    raise WireError(f"member name {name!r} is not the JSON field name")
+                stack.append(member)
+        elif isinstance(current, tuple):
+            stack.extend(current)
 
 
 def first_error(err: ValidationError) -> str:

@@ -561,6 +561,9 @@ def _verify_rekor_v1_entry(
         checkpoint = verify_checkpoint(proof.checkpoint, log)
         if checkpoint.tree_size != proof.tree_size or checkpoint.root_hash != proof.root_hash:
             raise CertificateBundleError("inclusion proof does not state the checkpoint's tree size and root hash")
+        # A Rekor v1 log is sharded: the proof's index is the leaf's position in the shard that the checkpoint
+        # covers, while the entry's index counts across shards, so the two are not compared. The proof
+        # authenticates its own index against the checkpoint; the promise, when present, authenticates the entry's.
         verify_merkle_inclusion(
             leaf_hash(entry.canonicalized_body),
             proof.log_index,

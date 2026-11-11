@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID
 
 from tests import der_tree, pki
+from tests import tdx_builders as tb
 from tinfoil.verifier._trust import (
     AMD_GENOA_CERT_CHAIN_PEM,
     AMD_TURIN_CERT_CHAIN_PEM,
@@ -484,6 +485,46 @@ def test_rsa_pss_parameters_are_pinned() -> None:
         c.verify_certificate_signature(c.parse_certificate(sha256_pss), c.parse_certificate(root.der))
 
 
+def _pss_params(*fields: bytes) -> der.Element:
+    """An RSA-PSS AlgorithmIdentifier whose parameters hold ``fields`` as given."""
+    return der.decode(tb.sequence(tb.oid(c.OID_RSA_PSS), tb.sequence(*fields)))
+
+
+def _tagged(tag: int, content: bytes) -> bytes:
+    return tb.tlv(0xA0 | tag, content)
+
+
+_PSS_HASH = _tagged(0, tb.sequence(tb.oid(c.OID_SHA384)))
+_PSS_MGF = _tagged(1, tb.sequence(tb.oid(c.OID_MGF1), tb.sequence(tb.oid(c.OID_SHA384))))
+_PSS_SALT = _tagged(2, tb.integer(48))
+
+
+def test_rsa_pss_parameters_are_strict_der() -> None:
+    assert c.signature_algorithm(_pss_params(_PSS_HASH, _PSS_MGF, _PSS_SALT)).oid == c.OID_RSA_PSS
+    # Out of order or repeated fields are not DER; a repeat could also override the field that was checked.
+    for fields in (
+        (_PSS_MGF, _PSS_HASH, _PSS_SALT),
+        (_PSS_HASH, _PSS_SALT, _PSS_MGF),
+        (_PSS_HASH, _PSS_HASH, _PSS_MGF, _PSS_SALT),
+        (_PSS_HASH, _PSS_MGF, _PSS_SALT, _tagged(2, tb.integer(20))),
+    ):
+        with pytest.raises(c.X509Error, match="must be in tag order without repeats"):
+            c.signature_algorithm(_pss_params(*fields))
+    # The trailer field has one legal value. DER would omit it as the default, but the AMD chains encode it, so an
+    # explicit 1 is accepted and anything else is not.
+    assert c.signature_algorithm(_pss_params(_PSS_HASH, _PSS_MGF, _PSS_SALT, _tagged(3, tb.integer(1)))).oid
+    with pytest.raises(c.X509Error, match="RSA-PSS trailer field must be 1"):
+        c.signature_algorithm(_pss_params(_PSS_HASH, _PSS_MGF, _PSS_SALT, _tagged(3, tb.integer(2))))
+    with pytest.raises(c.X509Error, match="must be in tag order without repeats"):
+        c.signature_algorithm(
+            _pss_params(_PSS_HASH, _PSS_MGF, _PSS_SALT, _tagged(3, tb.integer(1)), _tagged(3, tb.integer(1)))
+        )
+    with pytest.raises(c.X509Error, match="unknown RSA-PSS parameter"):
+        c.signature_algorithm(_pss_params(_PSS_HASH, _PSS_MGF, _PSS_SALT, _tagged(4, tb.integer(1))))
+    with pytest.raises(c.X509Error, match="RSA-PSS is supported only with SHA-384"):
+        c.signature_algorithm(_pss_params(_PSS_HASH, _PSS_MGF))
+
+
 def test_verify_chain_rejections() -> None:
     root, intermediate, leaf = pki.chain()
     parsed_leaf, parsed_mid, parsed_root = (c.parse_certificate(i.der) for i in (leaf, intermediate, root))
@@ -645,6 +686,26 @@ def test_crl_round_trip(kind: str) -> None:
     verified = crl_module.verify_revocation_list(parsed, c.parse_certificate(root.der), pki.AT)
     assert crl_module.is_revoked(verified, 42)
     assert not crl_module.is_revoked(verified, 43)
+
+
+def test_verified_revocation_list_is_built_only_by_verification() -> None:
+    # The type is what ``is_revoked`` accepts, so a list that skipped the issuer and window checks must not be
+    # constructible by hand.
+    root, _, _ = pki.chain()
+    parsed = crl_module.parse_revocation_list(pki.crl(root, revoked=[42]))
+    issuer = c.parse_certificate(root.der)
+    with pytest.raises(TypeError, match="_proof"):
+        crl_module.VerifiedRevocationList(crl=parsed, issuer=issuer, verified_at=pki.AT)  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="built only by verify_revocation_list"):
+        crl_module.VerifiedRevocationList(
+            crl=parsed,
+            issuer=issuer,
+            verified_at=pki.AT,
+            _proof=object(),  # type: ignore[arg-type]
+        )
+    verified = crl_module.verify_revocation_list(parsed, issuer, pki.AT)
+    assert (verified.crl, verified.issuer, verified.verified_at) == (parsed, issuer, pki.AT)
+    assert "_proof" not in repr(verified)
 
 
 def test_crl_library_claims() -> None:

@@ -106,6 +106,21 @@ def test_library_rejects_unknown_members_at_every_depth() -> None:
         parse(data)
 
 
+def test_member_name_check_walks_any_depth() -> None:
+    """The member-name walk keeps its own stack, so a document nested far beyond the interpreter's recursion limit
+    is checked and reported rather than overflowing."""
+    depth = 2_000
+    deep: _json.JsonValue = _json.JsonObject({"ok": _json.JsonNumber("1")})
+    for _ in range(depth):
+        deep = _json.JsonObject({"level": (deep,)})
+    _wire.check_member_names(deep)
+    bad: _json.JsonValue = _json.JsonObject({"log_id": _json.JsonNumber("1")})
+    for _ in range(depth):
+        bad = _json.JsonObject({"level": (bad,)})
+    with pytest.raises(_wire.WireError, match="'log_id' is not the JSON field name"):
+        _wire.check_member_names(bad)
+
+
 def test_library_requires_log_ids_and_validity() -> None:
     data = root_json()
     del data["tlogs"][0]["logId"]

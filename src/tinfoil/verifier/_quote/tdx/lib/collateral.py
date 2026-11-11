@@ -39,7 +39,7 @@ from tinfoil.verifier._quote.tdx.lib.chain import (
     validate_crl,
 )
 from tinfoil.verifier._quote.tdx.lib.pck import PckExtensions
-from tinfoil.verifier._x509.certificate import Certificate, X509Error, verify_chain
+from tinfoil.verifier._x509.certificate import Certificate, X509Error, can_sign_data, verify_chain
 from tinfoil.verifier._x509.crl import RevocationList
 
 TCB_INFO_ID = "TDX"
@@ -353,7 +353,10 @@ def parse_rfc3339(value: str) -> datetime:
 
 
 def _parse_tcb_component(value: _json.JsonValue) -> TcbComponent:
+    """A TCB component; ``svn`` is required, since the appraisal compares it, so a null component or one without
+    an SVN never reads as a requirement of zero."""
     data = _object(value, "TCB component")
+    _required(data, "svn", "TCB component")
     return TcbComponent(
         svn=_unsigned(data, "svn", "TCB component", 8),
         category=_string(data, "category", "TCB component"),
@@ -588,7 +591,7 @@ def verify_response(
 
     The issuer chain's root is self-consistent and named as the Intel root;
     the signing certificate is named ``signing_phrase``, issued by that
-    root, and chains to a trusted root at ``now``; the hex signature is a
+    root, may sign data, and chains to a trusted root at ``now``; the hex signature is a
     64-byte ECDSA P-256 signature over ``raw_body``; the root CRL is the
     issuer root's and does not list the signing certificate.
     """
@@ -600,6 +603,8 @@ def verify_response(
         validate_certificate(signing, root, signing_phrase)
     except TdxVerificationError as err:
         raise CollateralError(f"unable to validate signing certificate in the issuer chain: {err}") from err
+    if not can_sign_data(signing):
+        raise CollateralError("signing certificate in the issuer chain may not sign data")
     try:
         verify_chain(signing, [], trusted_roots, now, extended_key_usage=OID_EKU_SERVER_AUTH)
     except X509Error as err:
