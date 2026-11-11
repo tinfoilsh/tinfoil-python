@@ -11,7 +11,7 @@ from tinfoil._v3._enclave import Enclave
 from tinfoil._v3._errors import ConfigurationError, TinfoilError, network_error
 from tinfoil._v3._fetch import get_bounded, get_bounded_async
 from tinfoil._v3._transport import AsyncAttestedTransport, AttestedTransport
-from tinfoil._v3._types import DEFAULT_TIMEOUT, TimeoutTypes, VerificationCheck
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
 from tinfoil._v3.verifier import Verifier
 
 DEFAULT_ROUTER_REPO = "tinfoilsh/confidential-model-router"
@@ -27,7 +27,7 @@ client before it falls back."""
 MAX_ROUTER_BYTES = 32 << 20
 
 
-def fetch_routers(*, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None) -> list[str]:
+def fetch_routers(*, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None) -> list[str]:
     """The router list, bounded the same way an attestation fetch is: discovery runs before anything is verified,
     so an unresponsive or oversized reply must not stall client construction or exhaust memory. Raises
     NetworkError for a reply that is not a JSON array of strings."""
@@ -41,7 +41,9 @@ def fetch_routers(*, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | 
     return parse_routers(body)
 
 
-async def fetch_routers_async(*, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None) -> list[str]:
+async def fetch_routers_async(
+    *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
+) -> list[str]:
     """``fetch_routers`` on the event loop."""
     body = await get_bounded_async(
         DEFAULT_ROUTER_URL,
@@ -69,7 +71,7 @@ def discover(
     check: VerificationCheck | None,
     new_transport: Callable[[Enclave], AttestedTransport],
     *,
-    timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+    timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
 ) -> AttestedTransport:
     """The transport ``new_transport`` makes for the first router from Tinfoil's router list that verifies under
     ``verifier`` and passes ``check``, and otherwise for the fallback host, which it leaves to be verified on
@@ -108,7 +110,7 @@ async def discover_async(
     check: VerificationCheck | None,
     new_transport: Callable[[Enclave], AsyncAttestedTransport],
     *,
-    timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+    timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
 ) -> AsyncAttestedTransport:
     """``discover`` on the event loop. The task's cancellation ends discovery with it, without a fallback, and
     closes the candidate it was probing."""

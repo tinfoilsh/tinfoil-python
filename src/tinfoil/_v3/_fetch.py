@@ -11,7 +11,7 @@ import httpx
 
 from tinfoil._sdkinfo import attestation_headers
 from tinfoil._v3._errors import TinfoilError, configuration_error, network_error, wrap_network
-from tinfoil._v3._types import DEFAULT_TIMEOUT, TimeoutTypes
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes
 from tinfoil._v3.verifier import NONCE_SIZE
 
 ATTESTATION_ENDPOINT = "/.well-known/tinfoil-attestation"
@@ -69,7 +69,7 @@ def is_authority(value: str) -> bool:
 
 
 def fetch_document(
-    host: str, relay: str, nonce: bytes, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None
+    host: str, relay: str, nonce: bytes, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
 ) -> bytes:
     """The raw attestation document that ``host`` serves for the challenge ``nonce``, fetched directly or through
     ``relay`` when that is not empty.
@@ -95,7 +95,7 @@ def fetch_document(
 
 
 async def fetch_document_async(
-    host: str, relay: str, nonce: bytes, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None
+    host: str, relay: str, nonce: bytes, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
 ) -> bytes:
     """``fetch_document`` on the event loop."""
     return await get_bounded_async(

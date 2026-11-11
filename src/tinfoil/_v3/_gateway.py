@@ -58,7 +58,7 @@ from tinfoil._v3._transport import (
     RetiringTransport,
     UseClientDefault,
 )
-from tinfoil._v3._types import DEFAULT_TIMEOUT, TimeoutTypes, VerificationCheck
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
 from tinfoil._v3.verifier import Verification, Verifier, parse_reference
 
 DEFAULT_GATEWAY_URL = "https://inference-gateway.tinfoil.sh/v1/"
@@ -130,7 +130,7 @@ class ReplicaVerification:
     verification: Verification
 
 
-def fetch_catalog(host: str, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT) -> Catalog:
+def fetch_catalog(host: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
     """The catalog of the gateway at ``host``, keeping only models with replicas of a bare ``tinfoilsh/``
     repository, without a tag or digest. Raises NetworkError when it cannot be fetched or decoded."""
     body = get_bounded(
@@ -144,7 +144,7 @@ def fetch_catalog(host: str, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT) -> Cata
     return parse_catalog(body)
 
 
-async def fetch_catalog_async(host: str, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT) -> Catalog:
+async def fetch_catalog_async(host: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
     """``fetch_catalog`` on the event loop."""
     body = await get_bounded_async(
         f"https://{host}{CATALOG_PATH}",
@@ -708,7 +708,7 @@ class GatewayTransport(httpx.BaseTransport):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         _build: Callable[[_Replica], ReplicaTransport] | None = None,
     ) -> None:
         self._build = _build
@@ -922,7 +922,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         _build: Callable[[_Replica], AsyncReplicaTransport] | None = None,
     ) -> None:
         self._build = _build

@@ -12,7 +12,7 @@ from tinfoil._sdkinfo import sdk_version
 
 EXPECTED_ALL = (
     "DEFAULT_GATEWAY_URL",
-    "DEFAULT_TIMEOUT",
+    "DEFAULT_HTTP_TIMEOUT",
     "DEFAULT_TRANSPORT_MODE",
     "APIConnectionError",
     "APIError",

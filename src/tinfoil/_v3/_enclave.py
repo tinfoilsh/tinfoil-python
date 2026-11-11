@@ -18,7 +18,7 @@ from tinfoil._v3._errors import (
     from_verify,
 )
 from tinfoil._v3._fetch import fetch_document, fetch_document_async, is_authority
-from tinfoil._v3._types import DEFAULT_TIMEOUT, TimeoutTypes, VerificationCheck
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
 from tinfoil._v3.verifier import (
     CRYPTO_MATERIAL_ID_HPKE,
     CRYPTO_MATERIAL_ID_TLS,
@@ -103,7 +103,7 @@ class Enclave:
         self._fetch = _fetch
         self._fetch_async = _fetch_async
 
-    def verify(self, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None) -> Verification:
+    def verify(self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None) -> Verification:
         """Fetch and verify the enclave's attestation, retrying once after a network or attestation failure. The
         verification it returns is fresh and has passed the verification check. ``timeout`` bounds each network
         operation of the fetch; ``deadline``, a ``time.monotonic`` instant, bounds the whole of each attempt,
@@ -111,18 +111,20 @@ class Enclave:
         that completes after it is a NetworkError."""
         return self._verify(VERIFICATION_RETRIES, timeout, deadline)
 
-    def verify_once(self, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None) -> Verification:
+    def verify_once(
+        self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
+    ) -> Verification:
         """``verify`` without the retry, so a caller trying several enclaves moves on quickly."""
         return self._verify(CANDIDATE_VERIFICATION_RETRIES, timeout, deadline)
 
     async def verify_async(
-        self, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None
+        self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
     ) -> Verification:
         """``verify`` on the event loop."""
         return await self._verify_async(VERIFICATION_RETRIES, timeout, deadline)
 
     async def verify_once_async(
-        self, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None
+        self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
     ) -> Verification:
         """``verify_once`` on the event loop."""
         return await self._verify_async(CANDIDATE_VERIFICATION_RETRIES, timeout, deadline)

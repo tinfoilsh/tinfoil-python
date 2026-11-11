@@ -24,7 +24,13 @@ from tinfoil._v3._clients import (
 )
 from tinfoil._v3._errors import ConfigurationError
 from tinfoil._v3._gateway import Catalog, ModelPin
-from tinfoil._v3._types import DEFAULT_TIMEOUT, DEFAULT_TRANSPORT_MODE, TimeoutTypes, TransportMode, VerificationCheck
+from tinfoil._v3._types import (
+    DEFAULT_HTTP_TIMEOUT,
+    DEFAULT_TRANSPORT_MODE,
+    TimeoutTypes,
+    TransportMode,
+    VerificationCheck,
+)
 from tinfoil._v3.verifier import Verifier
 
 _C = TypeVar("_C", bound=openai.AsyncOpenAI)
@@ -84,11 +90,14 @@ class _AsyncAttestedOpenAI(openai.AsyncOpenAI):
 def _openai_options(
     kwargs: dict[str, Any], http_client: httpx.Client | httpx.AsyncClient, base_url: str
 ) -> dict[str, Any]:
-    """``kwargs`` with the attested HTTP client and its base URL, which the caller's options cannot replace."""
+    """``kwargs`` with the attested HTTP client and its base URL, which the caller's options cannot replace. The
+    per-request ``timeout`` keeps the ``openai`` package's own default unless the caller sets it: the attested
+    client's timeout, which ``http_timeout`` sets, is not adopted in its place."""
     supplied = kwargs.pop("http_client", None)
     if supplied is not None and supplied is not http_client:
         raise ConfigurationError(HTTP_CLIENT_FIXED)
     kwargs.pop("base_url", None)
+    kwargs.setdefault("timeout", openai.DEFAULT_TIMEOUT)
     return {**kwargs, "http_client": http_client, "base_url": base_url}
 
 
@@ -115,7 +124,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         _http_client: EnclaveHTTPClient | None = None,
         **openai_kwargs: Any,
     ) -> None:
@@ -174,7 +183,7 @@ class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         **openai_kwargs: Any,
     ) -> Self:
         http_client = await AsyncEnclaveHTTPClient.create(
@@ -220,7 +229,7 @@ class RouterOpenAIClient(_AttestedOpenAI):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         _http_client: RouterHTTPClient | None = None,
         **openai_kwargs: Any,
     ) -> None:
@@ -275,7 +284,7 @@ class AsyncRouterOpenAIClient(_AsyncAttestedOpenAI):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         **openai_kwargs: Any,
     ) -> Self:
         http_client = await AsyncRouterHTTPClient.create(
@@ -323,7 +332,7 @@ class GatewayOpenAIClient(_AttestedOpenAI):
         user_cache_secret: str | None = None,
         url: str | None = None,
         catalog: Callable[[], Catalog] | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         _http_client: GatewayHTTPClient | None = None,
         **openai_kwargs: Any,
     ) -> None:
@@ -384,7 +393,7 @@ class AsyncGatewayOpenAIClient(_AsyncAttestedOpenAI):
         user_cache_secret: str | None = None,
         url: str | None = None,
         catalog: Callable[[], Catalog] | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         **openai_kwargs: Any,
     ) -> Self:
         http_client = await AsyncGatewayHTTPClient.create(

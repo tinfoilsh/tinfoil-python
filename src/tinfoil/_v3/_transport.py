@@ -23,7 +23,7 @@ from tinfoil._v3._enclave import FRESHNESS_EXPIRED, Enclave, is_fresh
 from tinfoil._v3._errors import AttestationError, ConfigurationError
 from tinfoil._v3._keys import PeerLacksKeyError, key_rejection
 from tinfoil._v3._tls import NO_TLS, AsyncPinnedTransport, PinnedTransport
-from tinfoil._v3._types import DEFAULT_TIMEOUT, TimeoutTypes, TransportMode
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, TransportMode
 from tinfoil._v3.verifier import Verification
 
 CLIENT_CLOSED = "client is closed"
@@ -183,7 +183,7 @@ class AttestedTransport(httpx.BaseTransport):
     request triggers; ``ensure_verified`` and ``reverify`` take their own.
     """
 
-    def __init__(self, enclave: Enclave, mode: Mode, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT) -> None:
+    def __init__(self, enclave: Enclave, mode: Mode, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> None:
         self.enclave = enclave
         self.mode = mode
         self.timeout = timeout
@@ -298,7 +298,7 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
     """``AttestedTransport`` for ``httpx.AsyncClient``. A waiting caller's cancellation ends its own wait, not
     the shared verification."""
 
-    def __init__(self, enclave: Enclave, mode: AsyncMode, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT) -> None:
+    def __init__(self, enclave: Enclave, mode: AsyncMode, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> None:
         self.enclave = enclave
         self.mode = mode
         self.timeout = timeout

@@ -30,6 +30,7 @@ from tinfoil._v3._openai import (
     create_async_client,
     create_client,
 )
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT
 from tinfoil._v3.verifier import Verifier
 
 MODELS = b'{"object":"list","data":[]}'
@@ -144,6 +145,26 @@ class TestConstruction:
             "base_url is the route option, applied to the attested client"
         )
         client.close()
+
+    def test_http_timeout_leaves_the_per_request_default_alone(self, offline: Recorder) -> None:
+        """``http_timeout`` is the attested client's timeout; the library's own per-request default stays unless
+        the caller sets ``timeout``, so a short attestation timeout does not cut a streamed completion short."""
+        client = EnclaveOpenAIClient(
+            "enclave.example", "org/repo", transport_mode="ehbp", api_key="k", http_timeout=10.0
+        )
+        assert client.timeout == openai.DEFAULT_TIMEOUT
+        assert client.http_client.http_client.timeout == httpx.Timeout(10.0)
+        client.close()
+        explicit = EnclaveOpenAIClient(
+            "enclave.example", "org/repo", transport_mode="ehbp", api_key="k", http_timeout=10.0, timeout=2.0
+        )
+        assert explicit.timeout == 2.0
+        assert explicit.with_options(max_retries=0).timeout == 2.0, "a copy keeps the caller's timeout"
+        explicit.close()
+        default = EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp", api_key="k")
+        assert default.http_client.http_client.timeout == DEFAULT_HTTP_TIMEOUT
+        assert default.timeout == openai.DEFAULT_TIMEOUT
+        default.close()
 
     def test_copies_keep_the_attested_client(self, offline: Recorder) -> None:
         client = EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp", api_key="k", max_retries=0)

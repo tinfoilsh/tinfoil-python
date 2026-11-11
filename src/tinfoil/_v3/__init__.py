@@ -54,14 +54,20 @@ from tinfoil._v3._openai import (
     create_async_client,
     create_client,
 )
-from tinfoil._v3._types import DEFAULT_TIMEOUT, DEFAULT_TRANSPORT_MODE, TimeoutTypes, TransportMode, VerificationCheck
+from tinfoil._v3._types import (
+    DEFAULT_HTTP_TIMEOUT,
+    DEFAULT_TRANSPORT_MODE,
+    TimeoutTypes,
+    TransportMode,
+    VerificationCheck,
+)
 
 __version__ = sdk_version()
 """The version of this package, as installed."""
 
 __all__ = [
     "DEFAULT_GATEWAY_URL",
-    "DEFAULT_TIMEOUT",
+    "DEFAULT_HTTP_TIMEOUT",
     "DEFAULT_TRANSPORT_MODE",
     "APIConnectionError",
     "APIError",

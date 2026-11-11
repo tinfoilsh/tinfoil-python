@@ -48,7 +48,13 @@ from tinfoil._v3._transport import (
     async_mode_for,
     mode_for,
 )
-from tinfoil._v3._types import DEFAULT_TIMEOUT, DEFAULT_TRANSPORT_MODE, TimeoutTypes, TransportMode, VerificationCheck
+from tinfoil._v3._types import (
+    DEFAULT_HTTP_TIMEOUT,
+    DEFAULT_TRANSPORT_MODE,
+    TimeoutTypes,
+    TransportMode,
+    VerificationCheck,
+)
 from tinfoil._v3._url import origin_of, validate_base_url, validate_tls_base_url, with_trailing_slash
 from tinfoil._v3.verifier import Verification, Verifier
 
@@ -242,7 +248,8 @@ class EnclaveHTTPClient(_AttestedClient):
     ``user_cache_secret``, when set, is the default prompt-cache scope for
     the client's requests; only Tinfoil's router reads it. ``timeout`` is
     the ``httpx`` timeout of ``http_client`` and of the client's own
-    attestation fetches.
+    attestation fetches, which are bounded as a whole besides, at 30
+    seconds each; it defaults to ``DEFAULT_HTTP_TIMEOUT``.
 
     The options are checked before any network I/O; the enclave is then
     verified before the constructor returns. The client verifies again by
@@ -259,7 +266,7 @@ class EnclaveHTTPClient(_AttestedClient):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
         enclave, checked = _enclave_parts(host, repo, transport_mode, base_url, verifier, verification_check)
         keyed = AttestedTransport(enclave, mode_for(transport_mode), timeout=timeout)
@@ -291,7 +298,7 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
         enclave, checked = _enclave_parts(host, repo, transport_mode, base_url, verifier, verification_check)
         keyed = AsyncAttestedTransport(enclave, async_mode_for(transport_mode), timeout=timeout)
@@ -341,7 +348,7 @@ class RouterHTTPClient(_AttestedClient):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
         checked = _router_checks(transport_mode, base_url, verifier)
         mode = mode_for(transport_mode)
@@ -378,7 +385,7 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
         checked = _router_checks(transport_mode, base_url, verifier)
         mode = async_mode_for(transport_mode)
@@ -454,7 +461,7 @@ class GatewayHTTPClient:
         user_cache_secret: str | None = None,
         url: str | None = None,
         catalog: Callable[[], Catalog] | None = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
         base_url, relay = _gateway_url(url)
         self._transport = GatewayTransport(
@@ -544,7 +551,7 @@ class AsyncGatewayHTTPClient:
         user_cache_secret: str | None = None,
         url: str | None = None,
         catalog: Callable[[], Catalog] | None = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
         base_url, relay = _gateway_url(url)
         transport = AsyncGatewayTransport(
