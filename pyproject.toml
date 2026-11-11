@@ -16,12 +16,8 @@ dependencies = [
     "openai>=3.26.0",
     "httpx>=0.28",
     "tinfoil-ehbp>=0.5.0",
-    "requests>=2.31.0",
     "cryptography>=42.0.0",
-    "pyOpenSSL>=25.0.0",
-    "pyasn1>=0.4.0",
     "sigstore>=4.3.0",
-    "platformdirs>=4.2.0",
     "urllib3>=2.8.0",
     "certifi>=2026.10.19",
     "pyyaml>=6.0.3",
@@ -53,48 +49,10 @@ filterwarnings = [
     "ignore:^Parsed a serial number which wasn't positive:cryptography.utils.CryptographyDeprecationWarning",
 ]
 
-# Lint and type checks cover the code written for the v3 rewrite. The modules
-# that the rewrite replaces are excluded until they are removed, so that the
-# checks never force churn in code that is on its way out.
 [tool.ruff]
 target-version = "py311"
 line-length = 120
 src = [".", "src", "conformance"]
-extend-exclude = [
-    "*.md",
-    "example.py",
-    "src/tinfoil/__init__.py",
-    "src/tinfoil/_sdkinfo.py",
-    "src/tinfoil/attestation",
-    "src/tinfoil/client.py",
-    "src/tinfoil/github.py",
-    "src/tinfoil/sigstore.py",
-    "src/tinfoil/user_cache_secret.py",
-    "tests/test_attestation_all_enclaves.py",
-    "tests/test_attestation_flow.py",
-    "tests/test_attestation_headers.py",
-    "tests/test_certificate_reverification.py",
-    "tests/test_collateral_tdx.py",
-    "tests/test_constructor_timeout.py",
-    "tests/test_ehbp_transport.py",
-    "tests/test_encrypted_proxy.py",
-    "tests/test_integration_async.py",
-    "tests/test_integration_audio.py",
-    "tests/test_integration_chat.py",
-    "tests/test_integration_http.py",
-    "tests/test_pck_extensions.py",
-    "tests/test_sev_attestation.py",
-    "tests/test_sev_validation.py",
-    "tests/test_tdx_abi.py",
-    "tests/test_tdx_attestation_flow.py",
-    "tests/test_tdx_multiplatform.py",
-    "tests/test_tdx_verify.py",
-    "tests/test_user_cache_secret.py",
-    "tests/test_validate_tdx.py",
-    "tests/test_verification_document.py",
-    "tests/test_verification_failures.py",
-    "tests/test_verification_failures_integration.py",
-]
 
 [tool.ruff.lint]
 select = [
@@ -146,10 +104,6 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 check_untyped_defs = true
 warn_return_any = false
-
-[[tool.mypy.overrides]]
-module = ["pyasn1.*", "OpenSSL.*"]
-ignore_missing_imports = true
 
 [tool.uv]
 exclude-newer = "4 days"

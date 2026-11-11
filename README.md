@@ -43,6 +43,7 @@ from tinfoil import AsyncTinfoilAI
 
 client = AsyncTinfoilAI(api_key=os.environ["TINFOIL_API_KEY"])
 
+
 async def main() -> None:
     stream = await client.chat.completions.create(
         model="llama3-3-70b",
@@ -53,6 +54,7 @@ async def main() -> None:
         if chunk.choices and chunk.choices[0].delta.content is not None:
             print(chunk.choices[0].delta.content, end="", flush=True)
     print()
+
 
 asyncio.run(main())
 ```
