@@ -205,6 +205,11 @@ def test_vector(fixture: dict[str, Any]) -> None:
         # verdict is MALFORMED_INPUT may already be reported as such; any
         # other input must come back as a clean unsupported.
         if expects_malformed and result.exit_code == adapter.EXIT_MALFORMED:
+            assert result.output == {
+                "stage": stage,
+                "accepted": False,
+                "rejection": {"code": adapter.MALFORMED_INPUT},
+            }
             return
         assert result.exit_code == adapter.EXIT_UNSUPPORTED, result.output
         assert result.output == {"stage": stage, "accepted": False}

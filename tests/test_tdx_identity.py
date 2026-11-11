@@ -16,6 +16,10 @@ def test_identity_is_the_lowercase_hex_ppid() -> None:
     assert PPID_SIZE == 16
     assert identity(quote) == tb.PPID.hex()
     assert common_name(pck_leaf_certificate(quote).subject) == tb.PCK_CN
+    # A PPID with alphabetic nibbles tells lowercase hex from uppercase.
+    ppid = bytes([0xAB, 0xCD, 0xEF]) * 5 + b"\x0a"
+    with_letters = parse_quote(tb.Scenario(extension_value=tb.sgx_extension(ppid=ppid)).quote())
+    assert identity(with_letters) == "abcdef" * 5 + "0a"
 
 
 def test_identity_requires_a_sixteen_byte_ppid() -> None:

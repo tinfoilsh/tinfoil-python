@@ -42,7 +42,8 @@ def load_fixtures() -> list[tuple[str, dict[str, Any]]]:
         return []
     fixtures = []
     for path in sorted(root.rglob("*.json")):
-        if "_assets" in path.parts:
+        # Only an ``_assets`` directory under the root is excluded, not one that happens to be above it.
+        if "_assets" in path.relative_to(root).parts:
             continue
         with path.open("rb") as handle:
             data = json.load(handle)

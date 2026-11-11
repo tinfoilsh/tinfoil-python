@@ -44,7 +44,9 @@ def test_intel_sgx_root_is_self_signed() -> None:
     (root,) = x509.load_pem_x509_certificates(INTEL_SGX_ROOT_CA_PEM)
     assert _common_name(root) == "Intel SGX Root CA"
     root.verify_directly_issued_by(root)
-    assert isinstance(root.public_key(), ec.EllipticCurvePublicKey)
+    key = root.public_key()
+    assert isinstance(key, ec.EllipticCurvePublicKey)
+    assert isinstance(key.curve, ec.SECP256R1)
 
 
 def test_signing_keys_are_ecdsa_p256_public_keys() -> None:

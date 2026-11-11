@@ -284,6 +284,22 @@ class TestValidateReport:
         validate_report(
             report, exts, ValidationOptions(guest_policy=SnpPolicy(smt=True), chip_id=fx.GENOA_HWID, image_id=bytes(16))
         )
+        # Non-default identities, so that a check which compared against zeros rather than the report would fail.
+        identified = fx.make_report(image_id=b"I" * 16, report_id=b"R" * 32, report_id_ma=b"M" * 32)
+        validate_report(
+            identified,
+            exts,
+            ValidationOptions(
+                guest_policy=SnpPolicy(smt=True), image_id=b"I" * 16, report_id=b"R" * 32, report_id_ma=b"M" * 32
+            ),
+        )
+        for mismatched, label in (
+            (ValidationOptions(guest_policy=SnpPolicy(smt=True), image_id=b"J" * 16), "IMAGE_ID"),
+            (ValidationOptions(guest_policy=SnpPolicy(smt=True), report_id=b"S" * 32), "REPORT_ID"),
+            (ValidationOptions(guest_policy=SnpPolicy(smt=True), report_id_ma=b"N" * 32), "REPORT_ID_MA"),
+        ):
+            with pytest.raises(ValidationError, match=f"report field {label} is"):
+                validate_report(identified, exts, mismatched)
 
     def test_vmpl(self) -> None:
         exts = fx.genoa_extensions()

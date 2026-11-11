@@ -78,7 +78,8 @@ def edited(body: bytes, **members: Any) -> bytes:
 
 
 def collateral(scenario: tb.Scenario = SCENARIO) -> TdxCollateral:
-    return PCSReplay(scenario.responses(), tb.NOW).collateral(tb.FMSPC, "platform")
+    """The scenario's PCS responses replayed at its own clock."""
+    return PCSReplay(scenario.responses(), scenario.now).collateral(tb.FMSPC, "platform")
 
 
 # --- scalar helpers --------------------------------------------------------------------

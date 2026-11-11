@@ -1,8 +1,8 @@
 """Access to the conformance vectors for module-level tests.
 
 The vectors are located as the adapter tests locate them; a test that
-needs a group skips when the checkout is absent. A fixture that the checkout
-should hold but does not is a failure, never a skip.
+needs a group skips only when the checkout is absent. A group or a fixture
+that the checkout should hold but does not is a failure, never a skip.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from tinfoil.verifier._sigstore import bundle as bm
 
 
 def vector_group(name: str) -> list[dict[str, Any]]:
-    """Every fixture under ``vectors/v3/<name>``, sorted by file name; empty when the vectors are absent."""
+    """Every fixture under ``vectors/v3/<name>``, sorted by file name; empty only when the checkout is absent."""
     root = fixtures_root()
     if root is None:
         return []
@@ -31,6 +31,8 @@ def vector_group(name: str) -> list[dict[str, Any]]:
         with path.open("rb") as handle:
             data = json.load(handle)
         fixtures.append(data)
+    if not fixtures:
+        raise pytest.UsageError(f"vector group {name!r} under {root} holds no fixtures")
     return fixtures
 
 

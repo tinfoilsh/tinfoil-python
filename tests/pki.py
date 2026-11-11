@@ -111,12 +111,14 @@ def certificate(
     pss: bool = False,
     subject_name: x509.Name | None = None,
 ) -> Issued:
-    """Issue ``subject``'s certificate, self-signed when ``issuer`` is None."""
-    issuer_name = name(subject) if issuer is None else x509.load_der_x509_certificate(issuer.der).subject
+    """Issue ``subject``'s certificate, self-signed when ``issuer`` is None. ``subject_name`` replaces the name
+    built from ``subject``, for the issuer name of a self-signed certificate as well."""
+    effective_subject = name(subject) if subject_name is None else subject_name
+    issuer_name = effective_subject if issuer is None else x509.load_der_x509_certificate(issuer.der).subject
     signer = key if issuer is None else issuer.key
     builder = (
         x509.CertificateBuilder()
-        .subject_name(name(subject) if subject_name is None else subject_name)
+        .subject_name(effective_subject)
         .issuer_name(issuer_name)
         .public_key(key.public_key())
         .serial_number(serial)

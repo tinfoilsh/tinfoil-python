@@ -13,6 +13,7 @@ from tinfoil.verifier._measurement import SEVSNP, TDX, ExpectedSEVSNP, ExpectedT
 from tinfoil.verifier._verification import (
     SOURCE_EMBEDDED,
     SOURCE_ENDORSEMENT,
+    SOURCE_POLICY,
     ArtifactVerification,
     ConfigVerification,
     SoftwareIdentity,
@@ -162,10 +163,10 @@ def test_to_dict_leaves_out_what_was_not_established() -> None:
     # A caller-authorized config and an embedded runtime establish only a source and whatever the caller supplied:
     # the placeholders for the facts that an endorsement would have established are not emitted.
     got = record(
-        config=ConfigVerification(source=SOURCE_EMBEDDED, digest="cd" * 32),
+        config=ConfigVerification(source=SOURCE_POLICY, digest="cd" * 32),
         runtime=ArtifactVerification(source=SOURCE_EMBEDDED),
     ).to_dict()
-    assert got["config"] == {"source": "embedded", "digest": "cd" * 32}
+    assert got["config"] == {"source": "policy", "digest": "cd" * 32}
     assert got["runtime"] == {"source": "embedded"}
     assert json.loads(record(runtime=ArtifactVerification(source=SOURCE_EMBEDDED)).to_json())["runtime"] == {
         "source": "embedded"
