@@ -4,6 +4,7 @@ routes."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -13,7 +14,7 @@ import httpx
 import pytest
 
 from tests.client.helpers import EHBPServer, response, verification
-from tinfoil import _cachesecret, _ehbp, _fetch, _router
+from tinfoil import _cachesecret, _clients, _ehbp, _fetch, _router
 from tinfoil._chain import ENCLAVE_URL_HEADER
 from tinfoil._clients import (
     GATEWAY_URL_INVALID,
@@ -303,6 +304,44 @@ class TestRouterClient:
         with pytest.raises(ConfigurationError):
             RouterHTTPClient(**options)  # type: ignore[arg-type]
         assert network.requests == []
+
+    def test_resolves_the_cache_secret_before_discovery(
+        self, network: Network, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A secret that cannot be resolved fails the constructor before any router is probed, so no verified
+        candidate is left behind; once it resolves, discovery follows."""
+        order: list[str] = []
+        failure: ConfigurationError | None = ConfigurationError("secret file is readable by others")
+
+        def resolve(explicit: str | None) -> str:
+            order.append("resolve")
+            if failure is not None:
+                raise failure
+            return "s"
+
+        def discover(*_: object, **__: object) -> object:
+            order.append("discover")
+            raise NetworkError("discovery stopped")
+
+        async def discover_async(*_: object, **__: object) -> object:
+            order.append("discover")
+            raise NetworkError("discovery stopped")
+
+        monkeypatch.setattr(_cachesecret, "resolve", resolve)
+        monkeypatch.setattr(_clients, "discover", discover)
+        monkeypatch.setattr(_clients, "discover_async", discover_async)
+        with pytest.raises(ConfigurationError, match="readable by others"):
+            RouterHTTPClient(transport_mode="ehbp")
+        with pytest.raises(ConfigurationError, match="readable by others"):
+            asyncio.run(AsyncRouterHTTPClient.create(transport_mode="ehbp"))
+        assert order == ["resolve", "resolve"], "a secret that fails stops the constructor before discovery"
+        assert network.requests == []
+        failure = None
+        with pytest.raises(NetworkError, match="discovery stopped"):
+            RouterHTTPClient(transport_mode="ehbp")
+        with pytest.raises(NetworkError, match="discovery stopped"):
+            asyncio.run(AsyncRouterHTTPClient.create(transport_mode="ehbp"))
+        assert order == ["resolve", "resolve", "resolve", "discover", "resolve", "discover"]
 
     def test_proxy_names_the_mode_it_needs(self, network: Network) -> None:
         with pytest.raises(ConfigurationError, match='requires the "ehbp"'):

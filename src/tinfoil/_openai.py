@@ -38,6 +38,7 @@ from tinfoil.verifier import Verifier
 _C = TypeVar("_C", bound=openai.AsyncOpenAI)
 
 HTTP_CLIENT_FIXED = "http_client is the attested HTTP client's and cannot be replaced"
+BASE_URL_FIXED = "base_url is the attested HTTP client's and cannot be replaced; the gateway's is its url option"
 DROP_IN_OPTIONS = "{name} takes only the openai package's options; {keys} belong to {route}"
 REALTIME_UNAVAILABLE = "realtime is not available over an attested client"
 """The message of the ConfigurationError that accessing a realtime resource raises: its websocket would open
@@ -191,14 +192,17 @@ class _AsyncAttestedOpenAI(openai.AsyncOpenAI):
 def _openai_options(
     kwargs: Mapping[str, object], http_client: httpx.Client | httpx.AsyncClient, base_url: str
 ) -> dict[str, Any]:
-    """``kwargs`` with the attested HTTP client and its base URL, which the caller's options cannot replace. The
+    """``kwargs`` with the attested HTTP client and its base URL; an ``http_client`` or ``base_url`` in
+    ``kwargs`` is a ConfigurationError unless it is the attested client's own, which a copy passes back. The
     per-request ``timeout`` keeps the ``openai`` package's own default unless the caller sets it: the attested
     client's timeout, which ``http_timeout`` sets, is not adopted in its place."""
     options: dict[str, Any] = dict(kwargs)
     supplied = options.pop("http_client", None)
     if supplied is not None and supplied is not http_client:
         raise ConfigurationError(HTTP_CLIENT_FIXED)
-    options.pop("base_url", None)
+    supplied_url = options.pop("base_url", None)
+    if supplied_url is not None and str(supplied_url) != base_url:
+        raise ConfigurationError(BASE_URL_FIXED)
     options.setdefault("timeout", openai.DEFAULT_TIMEOUT)
     return {**options, "http_client": http_client, "base_url": base_url}
 
@@ -412,9 +416,10 @@ class GatewayOpenAIClient(_AttestedOpenAI):
     """An ``openai.OpenAI`` client whose requests go through a ``GatewayHTTPClient``, to the gateway's URL. The
     keyword options up to ``http_timeout`` are those of ``GatewayHTTPClient``, ``http_timeout`` being its
     ``timeout``; the remaining keyword arguments are ``OpenAIOptions``, the ``openai`` package's, except
-    ``http_client`` and ``base_url``, which the gateway client fixes. ``copy`` and ``with_options`` share the
-    gateway client, so closing a copy closes the original's too. The ``realtime`` resource, whose websocket
-    would bypass the gateway client, raises a ConfigurationError.
+    ``http_client`` and ``base_url``, which the gateway client fixes: a ``base_url`` other than the gateway's
+    is a ConfigurationError, and the gateway's own is set with ``url``. ``copy`` and ``with_options`` share
+    the gateway client, so closing a copy closes the original's too. The ``realtime`` resource, whose
+    websocket would bypass the gateway client, raises a ConfigurationError.
 
     Experimental: the gateway route is new, and this API may change or be
     removed in a later release.

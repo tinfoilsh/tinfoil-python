@@ -353,8 +353,10 @@ class RouterHTTPClient(_AttestedClient):
     chooses, and requires ``"ehbp"``. A ``verifier`` that authorizes the
     config itself is refused, since the router is verified against its own
     repository. ``user_cache_secret`` empty resolves the secret from
-    ``TINFOIL_USER_CACHE_SECRET`` or ``~/.tinfoil/user_cache_secret``. The
-    other options are those of ``EnclaveHTTPClient``.
+    ``TINFOIL_USER_CACHE_SECRET`` or ``~/.tinfoil/user_cache_secret``, before
+    discovery, so a secret file that cannot be used fails the constructor
+    without any network I/O. The other options are those of
+    ``EnclaveHTTPClient``.
     """
 
     def __init__(
@@ -369,13 +371,15 @@ class RouterHTTPClient(_AttestedClient):
     ) -> None:
         checked = _router_checks(transport_mode, base_url, verifier)
         mode = mode_for(transport_mode)
+        # The secret is resolved before discovery: a secret file that cannot be used fails the constructor
+        # before any router is probed, so no verified candidate is left behind.
+        secret = _cachesecret.resolve(user_cache_secret)
         keyed = discover(
             verifier,
             verification_check,
             lambda enclave: AttestedTransport(enclave, mode, timeout=timeout),
             timeout=timeout,
         )
-        secret = _cachesecret.resolve(user_cache_secret)
         self._attested = _Attested(keyed, transport_mode, checked, secret)
         # Discovery leaves its fallback unverified.
         try:
@@ -406,13 +410,13 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
     ) -> Self:
         checked = _router_checks(transport_mode, base_url, verifier)
         mode = async_mode_for(transport_mode)
+        secret = _cachesecret.resolve(user_cache_secret)
         keyed = await discover_async(
             verifier,
             verification_check,
             lambda enclave: AsyncAttestedTransport(enclave, mode, timeout=timeout),
             timeout=timeout,
         )
-        secret = _cachesecret.resolve(user_cache_secret)
         client = cls(_attested=_AsyncAttested(keyed, transport_mode, checked, secret))
         try:
             await keyed.ensure_verified()

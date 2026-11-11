@@ -19,11 +19,13 @@ from tinfoil._clients import AsyncEnclaveHTTPClient, EnclaveHTTPClient, GatewayH
 from tinfoil._errors import AttestationError, ConfigurationError, TinfoilError, tinfoil_error
 from tinfoil._gateway import CatalogEntry
 from tinfoil._openai import (
+    BASE_URL_FIXED,
     DROP_IN_OPTIONS,
     REALTIME_UNAVAILABLE,
     ROUTE_OPTIONS,
     AsyncClient,
     AsyncEnclaveOpenAIClient,
+    AsyncGatewayOpenAIClient,
     AsyncRouterOpenAIClient,
     Client,
     EnclaveOpenAIClient,
@@ -211,6 +213,27 @@ class TestConstruction:
         assert json.loads(recorder.bodies[0])["user_cache_secret"] == "s", "the chat body passed the secret layer"
         client.close()
 
+    def test_gateway_client_refuses_a_base_url(self, offline: Recorder) -> None:
+        """The gateway's base URL is its ``url`` option: a ``base_url`` is refused rather than dropped, from the
+        constructor and from copies alike, while a copy passing the gateway's own back is accepted."""
+        entries = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
+        with pytest.raises(ConfigurationError) as err:
+            GatewayOpenAIClient(
+                url="https://gateway.example/v1/",
+                catalog=lambda: entries,
+                api_key="k",
+                **foreign(base_url="https://other.example/v1/"),
+            )
+        assert str(err.value) == BASE_URL_FIXED
+        gateway = GatewayOpenAIClient(url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k")
+        for copy in (gateway.copy, gateway.with_options):
+            with pytest.raises(ConfigurationError, match="base_url"):
+                copy(**foreign(base_url="https://other.example/v1/"))
+        copied = gateway.with_options(timeout=1.0)
+        assert copied.base_url == gateway.base_url == "https://gateway.example/v1/"
+        assert copied.http_client is gateway.http_client
+        gateway.close()
+
     def test_constructor_failure_closes_the_attested_client_it_created(
         self, offline: Recorder, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -358,6 +381,26 @@ class TestErrors:
         enclave.chat.completions.create(**params, extra_body={"user_cache_secret": ""})
         assert [body["user_cache_secret"] for body in received] == ["client-level", "end-user-7", "client-level"]
         enclave.close()
+
+
+@pytest.mark.asyncio
+async def test_async_gateway_client_refuses_a_base_url(offline: Recorder) -> None:
+    entries = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
+    with pytest.raises(ConfigurationError) as err:
+        await AsyncGatewayOpenAIClient.create(
+            url="https://gateway.example/v1/",
+            catalog=lambda: entries,
+            api_key="k",
+            **foreign(base_url="https://other.example/v1/"),
+        )
+    assert str(err.value) == BASE_URL_FIXED
+    gateway = await AsyncGatewayOpenAIClient.create(
+        url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k"
+    )
+    with pytest.raises(ConfigurationError, match="base_url"):
+        gateway.with_options(**foreign(base_url="https://other.example/v1/"))
+    assert gateway.with_options(timeout=1.0).base_url == "https://gateway.example/v1/"
+    await gateway.close()
 
 
 @pytest.mark.asyncio
