@@ -259,7 +259,7 @@ client = RouterOpenAIClient(
 
 ## Closing
 
-Every client is a context manager and has `close()`. Closing releases the connections and stops re-verification; after it, the client's own methods raise `ConfigurationError`. Copies made with `with_options` share the attested client, so closing a copy closes the original's too.
+Every client is a context manager and has `close()`. Closing releases the connections and stops re-verification; afterward, verification and catalog methods raise `ConfigurationError`, while requests through the closed `http_client` (including OpenAI requests) raise `RuntimeError`. Copies made with `with_options` share the attested client, so closing a copy closes the original's too.
 
 ```python
 import os

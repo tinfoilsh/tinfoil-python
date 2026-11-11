@@ -295,10 +295,12 @@ The package verifies; it does not fetch documents, cache verifications,
 renew them before `freshness_expires_at`, or speak HTTP. Those live in the
 `tinfoil` package's clients: `create_client` and `RouterOpenAIClient` for
 Tinfoil's router, `EnclaveHTTPClient` and `EnclaveOpenAIClient` for one
-enclave, and `GatewayHTTPClient` for the gateway. Each verifies a document
-before it returns, pins its transport to `tls_public_key_fp` or encrypts
-to `hpke_public_key` as its transport mode calls for, and verifies again
-before the deadline. Use the verifier directly when you bring your own
+enclave, and `GatewayHTTPClient` for the gateway. The enclave clients
+verify a document before they return; the router client verifies the
+router it discovers, or its fallback host on first use; the gateway client
+verifies each model's replica on that model's first request. Every one
+pins its transport to `tls_public_key_fp` or encrypts to `hpke_public_key`
+as its transport mode calls for, and verifies again before the deadline. Use the verifier directly when you bring your own
 transport.
 
 ## Auditing the code
