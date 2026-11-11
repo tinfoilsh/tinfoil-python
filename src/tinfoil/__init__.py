@@ -4,6 +4,7 @@ from openai.resources.chat import Chat as OpenAIChat, AsyncChat as OpenAIAsyncCh
 from openai.resources.embeddings import Embeddings as OpenAIEmbeddings, AsyncEmbeddings as OpenAIAsyncEmbeddings
 from openai.resources.audio import Audio as OpenAIAudio, AsyncAudio as OpenAIAsyncAudio
 from openai.resources.decisions import Decisions as OpenAIDecisions, AsyncDecisions as OpenAIAsyncDecisions
+from openai.resources.responses import Responses as OpenAIResponses, AsyncResponses as OpenAIAsyncResponses
 import httpx
 
 from .client import (
@@ -19,6 +20,7 @@ class TinfoilAI:
     embeddings: OpenAIEmbeddings
     audio: OpenAIAudio
     decisions: OpenAIDecisions
+    responses: OpenAIResponses
     api_key: str
     enclave: str
 
@@ -63,6 +65,7 @@ class TinfoilAI:
         self.embeddings = self.client.embeddings
         self.audio = self.client.audio
         self.decisions = self.client.decisions
+        self.responses = self.client.responses
 
     def get_verification_document(self) -> Optional[VerificationDocument]:
         """Returns the detailed verification document with per-step status"""
@@ -76,6 +79,7 @@ class AsyncTinfoilAI:
     embeddings: OpenAIAsyncEmbeddings
     audio: OpenAIAsyncAudio
     decisions: OpenAIAsyncDecisions
+    responses: OpenAIAsyncResponses
     api_key: str
     enclave: str
 
@@ -121,6 +125,7 @@ class AsyncTinfoilAI:
         self.embeddings = self.client.embeddings
         self.audio = self.client.audio
         self.decisions = self.client.decisions
+        self.responses = self.client.responses
 
     def get_verification_document(self) -> Optional[VerificationDocument]:
         """Returns the detailed verification document with per-step status"""

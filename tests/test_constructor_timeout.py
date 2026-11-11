@@ -27,6 +27,7 @@ class FakeOpenAIClient:
         self.embeddings = object()
         self.audio = object()
         self.decisions = object()
+        self.responses = object()
 
 
 def test_tinfoilai_forwards_timeout_to_openai(monkeypatch):
@@ -115,3 +116,17 @@ def test_async_tinfoilai_uses_openai_default_timeout_when_unspecified(monkeypatc
     )
 
     assert captured["timeout"] is NOT_GIVEN
+
+
+def test_clients_expose_responses_api(monkeypatch):
+    monkeypatch.setattr(tinfoil, "SecureClient", FakeSecureClient)
+    monkeypatch.setattr(tinfoil, "OpenAI", FakeOpenAIClient)
+    monkeypatch.setattr(tinfoil, "AsyncOpenAI", FakeOpenAIClient)
+
+    for client_class in (tinfoil.TinfoilAI, tinfoil.AsyncTinfoilAI):
+        client = client_class(
+            enclave="router.test",
+            repo="tinfoilsh/confidential-model-router",
+            api_key="test-key",
+        )
+        assert client.responses is client.client.responses
