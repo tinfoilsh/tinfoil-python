@@ -1,175 +1,126 @@
-from typing import Optional
-from openai import OpenAI, AsyncOpenAI, NOT_GIVEN, NotGiven
-from openai.resources.chat import Chat as OpenAIChat, AsyncChat as OpenAIAsyncChat
-from openai.resources.embeddings import Embeddings as OpenAIEmbeddings, AsyncEmbeddings as OpenAIAsyncEmbeddings
-from openai.resources.audio import Audio as OpenAIAudio, AsyncAudio as OpenAIAsyncAudio
-from openai.resources.decisions import Decisions as OpenAIDecisions, AsyncDecisions as OpenAIAsyncDecisions
-import httpx
+"""Attested HTTP and OpenAI clients for Tinfoil's enclaves.
 
-from .client import (
-    DEFAULT_TRANSPORT_MODE,
-    SecureClient,
-    TransportMode,
-    VerificationDocument,
-    get_router_address,
+The enclave and router clients verify before the constructor returns;
+gateway clients verify each model's replica on its first request. Every
+request is bound to the keys of the current verification. The verifier that appraises the
+attestation documents is the ``verifier`` subpackage; its records and
+errors are not re-exported here.
+"""
+
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIResponseValidationError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    ConflictError,
+    InternalServerError,
+    NotFoundError,
+    OpenAIError,
+    PermissionDeniedError,
+    RateLimitError,
+    UnprocessableEntityError,
 )
 
-class TinfoilAI:
-    chat: OpenAIChat
-    embeddings: OpenAIEmbeddings
-    audio: OpenAIAudio
-    decisions: OpenAIDecisions
-    api_key: str
-    enclave: str
+from tinfoil._clients import (
+    AsyncEnclaveHTTPClient,
+    AsyncGatewayHTTPClient,
+    AsyncRouterHTTPClient,
+    EnclaveHTTPClient,
+    GatewayHTTPClient,
+    RouterHTTPClient,
+)
+from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, TinfoilError, tinfoil_error
+from tinfoil._gateway import (
+    DEFAULT_GATEWAY_URL,
+    Catalog,
+    CatalogEntry,
+    ModelPin,
+    ReplicaVerification,
+    fetch_catalog,
+    fetch_catalog_async,
+)
+from tinfoil._openai import (
+    AsyncClient,
+    AsyncEnclaveOpenAIClient,
+    AsyncGatewayOpenAIClient,
+    AsyncOpenAICopyOptions,
+    AsyncOpenAIOptions,
+    AsyncRouterOpenAIClient,
+    Client,
+    EnclaveOpenAIClient,
+    GatewayOpenAIClient,
+    OpenAICopyOptions,
+    OpenAIOptions,
+    RouterOpenAIClient,
+    create_async_client,
+    create_client,
+)
+from tinfoil._sdkinfo import sdk_version
+from tinfoil._types import (
+    DEFAULT_HTTP_TIMEOUT,
+    DEFAULT_TRANSPORT_MODE,
+    TimeoutTypes,
+    TransportMode,
+    VerificationCheck,
+)
 
-    def __init__(
-        self,
-        enclave: str = "",
-        repo: str = "tinfoilsh/confidential-model-router",
-        api_key: str = "tinfoil",
-        measurement: Optional[dict] = None,
-        timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
-        transport: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: Optional[str] = None,
-        attestation_bundle_url: str = "",
-        user_cache_secret: Optional[str] = None,
-    ):
-        if measurement is not None:
-            repo = ""
+__version__ = sdk_version()
+"""The version of this package, as installed."""
 
-        # Ensure at least one verification method is provided
-        if measurement is None and (repo == "" or repo is None):
-            raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
-
-        # If enclave is empty, fetch a random one from the routers API. When
-        # attesting from a bundle, the enclave host comes from the verified
-        # bundle, so no router lookup is needed.
-        if (enclave == "" or enclave is None) and not attestation_bundle_url:
-            enclave = get_router_address()
-
-        self.api_key = api_key
-        self._secure_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
-        secure_http = self._secure_client.make_secure_http_client()
-        # Building the secure transport verifies attestation, so the enclave host
-        # is now known even when it came from a bundle.
-        self.enclave = self._secure_client.enclave
-        self.client = OpenAI(
-            base_url=base_url or f"https://{self.enclave}/v1/",
-            api_key=api_key,
-            timeout=timeout,
-            http_client=secure_http,
-        )
-        self.chat = self.client.chat
-        self.embeddings = self.client.embeddings
-        self.audio = self.client.audio
-        self.decisions = self.client.decisions
-
-    def get_verification_document(self) -> Optional[VerificationDocument]:
-        """Returns the detailed verification document with per-step status"""
-        return self._secure_client.get_verification_document()
-
-class AsyncTinfoilAI:
-    """
-    Exactly like TinfoilAI, but fully async using AsyncOpenAI and httpx.AsyncClient.
-    """
-    chat: OpenAIAsyncChat
-    embeddings: OpenAIAsyncEmbeddings
-    audio: OpenAIAsyncAudio
-    decisions: OpenAIAsyncDecisions
-    api_key: str
-    enclave: str
-
-    def __init__(
-        self,
-        enclave: str = "",
-        repo: str = "tinfoilsh/confidential-model-router",
-        api_key: str = "tinfoil",
-        measurement: Optional[dict] = None,
-        timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
-        transport: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: Optional[str] = None,
-        attestation_bundle_url: str = "",
-        user_cache_secret: Optional[str] = None,
-    ):
-        if measurement is not None:
-            repo = ""
-
-        # Ensure at least one verification method is provided
-        if measurement is None and (repo == "" or repo is None):
-            raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
-
-        # If enclave is empty, fetch a random one from the routers API. When
-        # attesting from a bundle, the enclave host comes from the verified
-        # bundle, so no router lookup is needed.
-        if (enclave == "" or enclave is None) and not attestation_bundle_url:
-            enclave = get_router_address()
-
-        self.api_key = api_key
-        # verifier client remains sync; only used to fetch the expected public key
-        self._secure_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
-        async_http = self._secure_client.make_secure_async_http_client()
-        # Building the secure transport verifies attestation, so the enclave host
-        # is now known even when it came from a bundle.
-        self.enclave = self._secure_client.enclave
-        self.client = AsyncOpenAI(
-            base_url=base_url or f"https://{self.enclave}/v1/",
-            api_key=api_key,
-            timeout=timeout,
-            http_client=async_http,
-        )
-        self.chat = self.client.chat
-        self.embeddings = self.client.embeddings
-        self.audio = self.client.audio
-        self.decisions = self.client.decisions
-
-    def get_verification_document(self) -> Optional[VerificationDocument]:
-        """Returns the detailed verification document with per-step status"""
-        return self._secure_client.get_verification_document()
-
-class _HTTPSecureClient:
-    """Low-level HTTP client with enclave-pinned TLS."""
-    def __init__(self, enclave: str, tf_client: SecureClient):
-        self._tf_client = tf_client
-        self._http_client = tf_client.make_secure_http_client()
-        # Building the transport verifies attestation; for a bundle the enclave
-        # host is only known afterwards.
-        self.enclave = tf_client.enclave or enclave
-
-    def get(self, url: str, headers: Optional[dict] = None, params: Optional[dict] = None, timeout: Optional[int] = None) -> httpx.Response:
-        self._tf_client.assert_request_allowed(url)
-        return self._http_client.get(url, headers=headers, params=params, timeout=timeout)
-
-    def post(
-        self,
-        url: str,
-        headers: Optional[dict] = None,
-        data: Optional[dict] = None,
-        json: Optional[dict] = None,
-        timeout: Optional[int] = None,
-    ) -> httpx.Response:
-        self._tf_client.assert_request_allowed(url)
-        return self._http_client.post(url, headers=headers, data=data, json=json, timeout=timeout)
-
-    def get_verification_document(self) -> Optional[VerificationDocument]:
-        """Returns the detailed verification document with per-step status"""
-        return self._tf_client.get_verification_document()
-
-
-def NewSecureClient(enclave: str = "", repo: str = "tinfoilsh/confidential-model-router", measurement: Optional[dict] = None, transport: TransportMode = DEFAULT_TRANSPORT_MODE, base_url: Optional[str] = None, attestation_bundle_url: str = "", user_cache_secret: Optional[str] = None):
-    """Create a secure HTTP client for direct GET/POST through the Tinfoil enclave."""
-    if measurement is not None:
-        repo = ""
-
-    # Ensure at least one verification method is provided
-    if measurement is None and (repo == "" or repo is None):
-        raise ValueError("Must provide either 'measurement' or 'repo' parameter for verification.")
-
-    # If enclave is empty, fetch a random one from the routers API. When
-    # attesting from a bundle, the enclave host comes from the verified bundle.
-    if (enclave == "" or enclave is None) and not attestation_bundle_url:
-        enclave = get_router_address()
-
-    tf_client = SecureClient(enclave, repo, measurement, transport=transport, base_url=base_url, attestation_bundle_url=attestation_bundle_url, user_cache_secret=user_cache_secret)
-    return _HTTPSecureClient(tf_client.enclave, tf_client)
-
-__all__ = ["TinfoilAI", "AsyncTinfoilAI", "NewSecureClient", "SecureClient", "VerificationDocument", "TransportMode"]
+__all__ = [
+    "DEFAULT_GATEWAY_URL",
+    "DEFAULT_HTTP_TIMEOUT",
+    "DEFAULT_TRANSPORT_MODE",
+    "APIConnectionError",
+    "APIError",
+    "APIResponseValidationError",
+    "APIStatusError",
+    "APITimeoutError",
+    "AsyncClient",
+    "AsyncEnclaveHTTPClient",
+    "AsyncEnclaveOpenAIClient",
+    "AsyncGatewayHTTPClient",
+    "AsyncGatewayOpenAIClient",
+    "AsyncOpenAICopyOptions",
+    "AsyncOpenAIOptions",
+    "AsyncRouterHTTPClient",
+    "AsyncRouterOpenAIClient",
+    "AttestationError",
+    "AuthenticationError",
+    "BadRequestError",
+    "Catalog",
+    "CatalogEntry",
+    "Client",
+    "ConfigurationError",
+    "ConflictError",
+    "EnclaveHTTPClient",
+    "EnclaveOpenAIClient",
+    "GatewayHTTPClient",
+    "GatewayOpenAIClient",
+    "InternalServerError",
+    "ModelPin",
+    "NetworkError",
+    "NotFoundError",
+    "OpenAICopyOptions",
+    "OpenAIError",
+    "OpenAIOptions",
+    "PermissionDeniedError",
+    "RateLimitError",
+    "ReplicaVerification",
+    "RouterHTTPClient",
+    "RouterOpenAIClient",
+    "TimeoutTypes",
+    "TinfoilError",
+    "TransportMode",
+    "UnprocessableEntityError",
+    "VerificationCheck",
+    "__version__",
+    "create_async_client",
+    "create_client",
+    "fetch_catalog",
+    "fetch_catalog_async",
+    "tinfoil_error",
+]

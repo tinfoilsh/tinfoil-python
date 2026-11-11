@@ -110,7 +110,7 @@ def test_verify_stage_reports_usage_errors_as_malformed_and_rejections_by_layer(
     assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": "ENVELOPE_REJECTED"}}
     result = adapter.run(stage, {**_WELL_FORMED, "document_b64": ""})
     assert result.output["rejection"] == {"code": "ENVELOPE_REJECTED"}
-    from tests.v3 import document_builder
+    from tests import document_builder
 
     _, raw = document_builder.build(document_builder.test_nonce(), collateral_entries=[])
     bound = {**_WELL_FORMED, "document_b64": _b64(raw), "nonce_hex": document_builder.test_nonce().hex()}
@@ -268,7 +268,7 @@ def test_main_without_arguments_is_usage_error() -> None:
 
 
 def _world_inputs() -> tuple[Any, dict[str, Any]]:
-    from tests.v3.sigstore_world import World
+    from tests.sigstore_world import World
 
     world = World()
     return world, {"schema_version": "1", "sigstore_trusted_root_json_b64": _b64(world.trusted_root_json())}
@@ -279,14 +279,14 @@ def _b64(data: bytes) -> str:
 
 
 def _document_with(entries: list[dict[str, Any]]) -> str:
-    from tests.v3 import document_builder
+    from tests import document_builder
 
     _, raw = document_builder.build(document_builder.test_nonce(), collateral_entries=entries)
     return _b64(raw)
 
 
 def _code_entry(world: Any, repo: str, tag: str) -> tuple[dict[str, Any], str, dict[str, str]]:
-    from tests.v3.sigstore_world import FulcioIdentity, statement
+    from tests.sigstore_world import FulcioIdentity, statement
 
     digest = "3b" * 32
     registers = {"snp": "aa" * 48, "rtmr1": "bb" * 48, "rtmr2": "cc" * 48}
@@ -358,10 +358,10 @@ def test_authenticate_provenance_stage() -> None:
 def test_assemble_policy_stage() -> None:
     from pathlib import Path
 
-    from tests.v3.sigstore_world import FulcioIdentity, statement
+    from tests.sigstore_world import FulcioIdentity, statement
 
     world, base = _world_inputs()
-    artifact = (Path(__file__).resolve().parents[1] / "v3" / "testdata" / "platform-endorsements.json").read_bytes()
+    artifact = (Path(__file__).resolve().parents[1] / "testdata" / "platform-endorsements.json").read_bytes()
     digest = hashlib.sha256(artifact).hexdigest()
     payload = (
         b'{"_type":"https://in-toto.io/Statement/v1","subject":[{"name":"platform-endorsements.json","digest":{"sha256":"'
@@ -422,8 +422,8 @@ def test_assemble_policy_stage() -> None:
 
 
 def test_authenticate_approval_stage() -> None:
-    from tests.v3 import pki
-    from tests.v3.sigstore_world import statement
+    from tests import pki
+    from tests.sigstore_world import statement
 
     world, base = _world_inputs()
     digest = "ab" * 32

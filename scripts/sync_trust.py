@@ -11,7 +11,7 @@ Downloads the AMD Genoa and Turin certificate chains from the AMD KDS, the
 Intel SGX Provisioning Certification Root CA from Intel, and the Sigstore
 trusted root through a TUF client bootstrapped from a pinned root of the
 Sigstore repository (SHA-256 below), then writes them as Python
-constants under ``src/tinfoil/_v3/verifier/_trust/``. The Tinfoil release
+constants under ``src/tinfoil/verifier/_trust/``. The Tinfoil release
 signing key has no vendor download; it is a hand-maintained constant in this
 script, pinned by its SHA-256.
 
@@ -57,7 +57,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from tuf.ngclient import Updater
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-TRUST_DIR = REPO_ROOT / "src" / "tinfoil" / "_v3" / "verifier" / "_trust"
+TRUST_DIR = REPO_ROOT / "src" / "tinfoil" / "verifier" / "_trust"
 
 TIMEOUT_SECONDS = 60
 
@@ -302,11 +302,11 @@ INIT_MODULE = '''"""The trust anchors that the verifier ships: generated constan
 Regenerate with ``uv run scripts/sync_trust.py``.
 """
 
-from tinfoil._v3.verifier._trust.amd_genoa import AMD_GENOA_CERT_CHAIN_PEM
-from tinfoil._v3.verifier._trust.amd_turin import AMD_TURIN_CERT_CHAIN_PEM
-from tinfoil._v3.verifier._trust.intel_sgx_root import INTEL_SGX_ROOT_CA_PEM
-from tinfoil._v3.verifier._trust.signing_keys import PUBLIC_SIGNING_KEYS_PEM
-from tinfoil._v3.verifier._trust.sigstore_root import SIGSTORE_TRUSTED_ROOT_JSON
+from tinfoil.verifier._trust.amd_genoa import AMD_GENOA_CERT_CHAIN_PEM
+from tinfoil.verifier._trust.amd_turin import AMD_TURIN_CERT_CHAIN_PEM
+from tinfoil.verifier._trust.intel_sgx_root import INTEL_SGX_ROOT_CA_PEM
+from tinfoil.verifier._trust.signing_keys import PUBLIC_SIGNING_KEYS_PEM
+from tinfoil.verifier._trust.sigstore_root import SIGSTORE_TRUSTED_ROOT_JSON
 
 __all__ = [
     "AMD_GENOA_CERT_CHAIN_PEM",

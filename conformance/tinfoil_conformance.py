@@ -49,7 +49,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from tinfoil._sdkinfo import attestation_headers
-from tinfoil._v3.verifier import (
+from tinfoil.verifier import (
     NONCE_SIZE,
     UsageError,
     VerificationError,
@@ -59,18 +59,18 @@ from tinfoil._v3.verifier import (
     connection_cert_fp,
     random_nonce,
 )
-from tinfoil._v3.verifier import Verification as PublicVerification
-from tinfoil._v3.verifier._document import document
-from tinfoil._v3.verifier._document.collateral.collateral import NotFoundError
-from tinfoil._v3.verifier._endorsement import approval, provenance, reference
-from tinfoil._v3.verifier._endorsement import time as approval_time
-from tinfoil._v3.verifier._errors import LAYER_ENVELOPE, LAYER_POLICY, LAYER_PROVENANCE, LAYER_QUOTE
-from tinfoil._v3.verifier._policy import ARTIFACT_FORMAT
-from tinfoil._v3.verifier._quote import quote
-from tinfoil._v3.verifier._sigstore import bundle as sigstore_bundle
-from tinfoil._v3.verifier._sigstore import timestamp as sigstore_timestamp
-from tinfoil._v3.verifier._sigstore import trusted_root as sigstore_trusted_root
-from tinfoil._v3.verifier._x509 import certificate as x509_certificate
+from tinfoil.verifier import Verification as PublicVerification
+from tinfoil.verifier._document import document
+from tinfoil.verifier._document.collateral.collateral import NotFoundError
+from tinfoil.verifier._endorsement import approval, provenance, reference
+from tinfoil.verifier._endorsement import time as approval_time
+from tinfoil.verifier._errors import LAYER_ENVELOPE, LAYER_POLICY, LAYER_PROVENANCE, LAYER_QUOTE
+from tinfoil.verifier._policy import ARTIFACT_FORMAT
+from tinfoil.verifier._quote import quote
+from tinfoil.verifier._sigstore import bundle as sigstore_bundle
+from tinfoil.verifier._sigstore import timestamp as sigstore_timestamp
+from tinfoil.verifier._sigstore import trusted_root as sigstore_trusted_root
+from tinfoil.verifier._x509 import certificate as x509_certificate
 
 # Exit codes are the cross-SDK contract.
 EXIT_ACCEPTED = 0
