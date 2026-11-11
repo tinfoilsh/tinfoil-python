@@ -121,9 +121,15 @@ ignore = [
     "S",
     "RUF001", "RUF002", "RUF003",  # tests probe non-ASCII digits and letters on purpose
 ]
-# The client's `timeout` is the per-operation timeout that httpx.AsyncClient takes, passed through to it; waits
-# are bounded by task cancellation, not by a parameter.
-"src/tinfoil/_v3/_*.py" = ["ASYNC109"]
+# In these modules `timeout` is the per-operation timeout that httpx.AsyncClient takes, passed through to it;
+# waits are bounded by task cancellation, not by a parameter.
+"src/tinfoil/_v3/_clients.py" = ["ASYNC109"]
+"src/tinfoil/_v3/_enclave.py" = ["ASYNC109"]
+"src/tinfoil/_v3/_fetch.py" = ["ASYNC109"]
+"src/tinfoil/_v3/_gateway.py" = ["ASYNC109"]
+"src/tinfoil/_v3/_router.py" = ["ASYNC109"]
+"src/tinfoil/_v3/_tls.py" = ["ASYNC109"]
+"src/tinfoil/_v3/_transport.py" = ["ASYNC109"]
 
 [tool.mypy]
 python_version = "3.11"
