@@ -235,8 +235,9 @@ class EnclaveHTTPClient(_AttestedClient):
 
     ``host`` is the enclave, with an optional port, and ``repo`` the
     repository it is verified against, ``owner/name[@tag][@sha256:digest]``;
-    an empty or None ``repo`` accepts configs authorized by ``verifier``,
-    which defaults to public registry trust. ``transport_mode`` defaults to
+    both are required, and an empty or None ``repo`` accepts configs
+    authorized by ``verifier``, which defaults to public registry trust,
+    so passing None is an explicit choice. ``transport_mode`` defaults to
     ``"tls"``. ``base_url`` is a path on the enclave's own HTTPS origin, or
     a proxy on another origin, which requires ``"ehbp"``; requests to a
     proxy carry ``X-Tinfoil-Enclave-Url`` so it can forward them. A proxy
@@ -259,7 +260,7 @@ class EnclaveHTTPClient(_AttestedClient):
     def __init__(
         self,
         host: str,
-        repo: str | None = None,
+        repo: str | None,
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
@@ -291,7 +292,7 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
     async def create(
         cls,
         host: str,
-        repo: str | None = None,
+        repo: str | None,
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
