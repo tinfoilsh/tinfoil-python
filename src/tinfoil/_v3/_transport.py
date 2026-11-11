@@ -23,11 +23,15 @@ from tinfoil._v3._enclave import FRESHNESS_EXPIRED, Enclave, is_fresh
 from tinfoil._v3._errors import AttestationError, ConfigurationError
 from tinfoil._v3._keys import PeerLacksKeyError, key_rejection
 from tinfoil._v3._tls import NO_TLS, AsyncPinnedTransport, PinnedTransport
-from tinfoil._v3._types import DEFAULT_TIMEOUT, TimeoutTypes, TransportMode
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, TransportMode
 from tinfoil._v3.verifier import Verification
 
 CLIENT_CLOSED = "client is closed"
 """The message of the ConfigurationError that a closed client raises."""
+TRANSPORT_RETIRED = "transport retired; retry the request"
+"""The message of the ConfigurationError for a request that reached a transport after it was retired, whether a
+newer verification replaced its keys or a catalog refresh dropped its replica: the request was admitted under
+the old routing or keys and must be sent again under the current ones."""
 
 USE_CLIENT_DEFAULT = httpx.USE_CLIENT_DEFAULT
 """The per-call ``timeout`` value that keeps the client's own."""
@@ -183,7 +187,7 @@ class AttestedTransport(httpx.BaseTransport):
     request triggers; ``ensure_verified`` and ``reverify`` take their own.
     """
 
-    def __init__(self, enclave: Enclave, mode: Mode, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT) -> None:
+    def __init__(self, enclave: Enclave, mode: Mode, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> None:
         self.enclave = enclave
         self.mode = mode
         self.timeout = timeout
@@ -298,7 +302,7 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
     """``AttestedTransport`` for ``httpx.AsyncClient``. A waiting caller's cancellation ends its own wait, not
     the shared verification."""
 
-    def __init__(self, enclave: Enclave, mode: AsyncMode, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT) -> None:
+    def __init__(self, enclave: Enclave, mode: AsyncMode, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> None:
         self.enclave = enclave
         self.mode = mode
         self.timeout = timeout
@@ -396,7 +400,8 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
 class RetiringTransport(httpx.BaseTransport):
     """A transport that can be retired: it stops taking requests and closes once the responses in flight are
     done, so a replaced binding's connections go away without cutting off a streaming response. ``close``
-    ends everything at once."""
+    ends everything at once. A request that arrives after retirement is refused as retired, so that the caller
+    knows to send it again, and after a plain close as closed."""
 
     def __init__(self, inner: httpx.BaseTransport) -> None:
         self._inner = inner
@@ -407,7 +412,9 @@ class RetiringTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         with self._lock:
-            if self._retired or self._closed:
+            if self._retired:
+                raise ConfigurationError(TRANSPORT_RETIRED)
+            if self._closed:
                 raise ConfigurationError(CLIENT_CLOSED)
             self._inflight += 1
         try:
@@ -450,7 +457,9 @@ class AsyncRetiringTransport(httpx.AsyncBaseTransport):
         self._closed = False
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if self._retired or self._closed:
+        if self._retired:
+            raise ConfigurationError(TRANSPORT_RETIRED)
+        if self._closed:
             raise ConfigurationError(CLIENT_CLOSED)
         self._inflight += 1
         try:
@@ -525,6 +534,7 @@ class _AsyncReleasingStream(httpx.AsyncByteStream):
 
 __all__ = [
     "CLIENT_CLOSED",
+    "TRANSPORT_RETIRED",
     "USE_CLIENT_DEFAULT",
     "AsyncAttestedTransport",
     "AsyncEHBPMode",

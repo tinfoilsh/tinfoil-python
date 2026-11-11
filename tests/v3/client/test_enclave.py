@@ -14,6 +14,7 @@ from tinfoil._v3 import _enclave, _fetch
 from tinfoil._v3._enclave import (
     DEADLINE_EXCEEDED,
     FRESHNESS_EXPIRED,
+    NO_FRESHNESS_DEADLINE,
     Enclave,
     VerificationRejected,
     retryable,
@@ -262,8 +263,24 @@ class TestDeadline:
 
 
 def test_verification_without_a_deadline_is_rejected() -> None:
+    """A verification that no endorsed reference gives a deadline, from an all-embedded policy or from a
+    caller-authorized config over embedded runtime and platform references, cannot bound requests; the message
+    says so rather than reporting an expiry, and the rejection is retried like any other attestation failure."""
+    fetches = 0
+
+    def fetch() -> Verification:
+        nonlocal fetches
+        fetches += 1
+        return verification("key", deadline=None)
+
+    with pytest.raises(AttestationError) as err:
+        fake_enclave(fetch).verify()
+    assert str(err.value) == NO_FRESHNESS_DEADLINE
+    assert "when no reference endorses a deadline" in str(err.value), "the message names the cause, not one policy"
+    assert "expired" not in str(err.value)
+    assert fetches == 2
     with pytest.raises(AttestationError, match=FRESHNESS_EXPIRED):
-        fake_enclave(lambda: verification("key", deadline=None)).verify()
+        fake_enclave(lambda: verification("key", deadline=datetime.now(UTC) - timedelta(seconds=1))).verify()
 
 
 @pytest.mark.parametrize(
@@ -314,7 +331,7 @@ def test_rejected_document_is_an_attestation_error(monkeypatch: pytest.MonkeyPat
     with pytest.raises(AttestationError) as err:
         Enclave("enclave.example", "org/repo").verify()
     assert isinstance(err.value.__cause__, VerificationError), "the verifier's error remains the cause"
-    assert str(err.value).startswith("attestation error: ")
+    assert str(err.value) == str(err.value.__cause__), "the message is the verifier's own, without a prefix"
     assert len(recorder.requests) == 2, "a rejected document is fetched once more"
 
 
@@ -323,5 +340,6 @@ def test_unreachable_enclave_is_a_network_error(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(_fetch, "_TRANSPORT", recorder.transport)
     with pytest.raises(NetworkError) as err:
         Enclave("enclave.example", "org/repo").verify()
-    assert str(err.value).startswith("network error: ")
+    assert str(err.value) == err.value.message
+    assert "503" in err.value.message
     assert len(recorder.requests) == 2

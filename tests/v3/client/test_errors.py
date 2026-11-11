@@ -1,7 +1,9 @@
-"""The client's error hierarchy: three categories under one base, the message prefix, the cause chain and the
-helper that finds a client error behind a library's."""
+"""The client's error hierarchy: three categories under one abstract base, the bare message that pickles, the
+cause chain and the helper that finds a client error behind a caller's own."""
 
 from __future__ import annotations
+
+import pickle
 
 import httpx
 import httpx2
@@ -35,11 +37,31 @@ def test_error_contract(category: str, cls: type[TinfoilError]) -> None:
     assert isinstance(err, TinfoilError)
     assert err.category == category
     assert err.message == "timed out"
-    assert str(err) == f"{category} error: timed out"
+    assert str(err) == "timed out", "the message carries no category prefix"
+    assert err.args == ("timed out",)
     for other in (ConfigurationError, NetworkError, AttestationError):
         assert isinstance(err, other) == (other is cls), "an error has one category"
     assert err.__cause__ is cause
     assert not isinstance(err, httpx.HTTPError), "client errors are not the HTTP stack's own transport errors"
+
+
+@pytest.mark.parametrize("cls", [ConfigurationError, NetworkError, AttestationError])
+def test_errors_pickle_round_trip(cls: type[TinfoilError]) -> None:
+    err = cls("what went wrong")
+    restored = pickle.loads(pickle.dumps(err))
+    assert type(restored) is cls
+    assert restored.category == err.category
+    assert restored.message == "what went wrong"
+    assert str(restored) == "what went wrong"
+    assert restored.args == err.args
+
+
+def test_base_class_is_abstract() -> None:
+    with pytest.raises(TypeError, match="abstract"):
+        TinfoilError("x")
+    assert not hasattr(TinfoilError, "category"), "the category belongs to the three subclasses"
+    for cls in (ConfigurationError, NetworkError, AttestationError):
+        assert isinstance(cls("x"), TinfoilError)
 
 
 def test_wrap_keeps_classified_errors() -> None:
@@ -81,6 +103,34 @@ def test_tinfoil_error_follows_the_cause_chain() -> None:
     assert (
         tinfoil_error(openai.RateLimitError("429", response=httpx2.Response(429, request=request), body=None)) is None
     )
+
+
+def test_tinfoil_error_follows_the_chain_the_traceback_shows() -> None:
+    """A caller's own exception raised while handling a client error points at it through ``__context__``, or
+    through ``__cause__`` with ``from err``; ``from None`` hides it, as it does in the traceback."""
+    failure = AttestationError("channel binding failed")
+
+    def handle(suppress: bool) -> None:
+        try:
+            raise failure
+        except AttestationError:
+            if suppress:
+                raise RuntimeError("handled") from None
+            raise RuntimeError("handled")  # noqa: B904 - the implicit context is what the test exercises
+
+    with pytest.raises(RuntimeError) as implicit:
+        handle(False)
+    assert implicit.value.__context__ is failure
+    assert tinfoil_error(implicit.value) is failure, "an implicit context is the chain the traceback shows"
+    with pytest.raises(RuntimeError) as suppressed:
+        handle(True)
+    assert suppressed.value.__context__ is failure
+    assert tinfoil_error(suppressed.value) is None, "'from None' suppresses the context in the traceback and here"
+    explicit = RuntimeError("wrapped")
+    explicit.__cause__ = failure
+    explicit.__context__ = ConfigurationError("not this one")
+    explicit.__suppress_context__ = True
+    assert tinfoil_error(explicit) is failure, "a cause is followed before a context"
 
 
 def test_api_errors_are_not_client_errors() -> None:

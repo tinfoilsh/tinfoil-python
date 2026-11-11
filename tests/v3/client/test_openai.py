@@ -1,7 +1,8 @@
 """The OpenAI wrappers: every request goes through the attested HTTP client to the route's URL, the caller's
 ``http_client`` and ``base_url`` cannot replace it, the realtime resource is refused, copies keep the attested
-client, a failed constructor closes the one it created, API errors pass through unchanged and a client error
-raised from the transport is reachable behind the library's connection error."""
+client, a failed constructor closes the one it created, API errors pass through unchanged, and a client error
+raised in the transport reaches the caller unwrapped and unretried, since the library wraps and retries only
+the errors of its own HTTP stack."""
 
 from __future__ import annotations
 
@@ -14,11 +15,13 @@ import pytest
 
 from tests.v3.client.helpers import Recorder, response, verification
 from tinfoil._v3 import _fetch
-from tinfoil._v3._clients import EnclaveHTTPClient, GatewayHTTPClient, RouterHTTPClient
+from tinfoil._v3._clients import AsyncEnclaveHTTPClient, EnclaveHTTPClient, GatewayHTTPClient, RouterHTTPClient
 from tinfoil._v3._errors import AttestationError, ConfigurationError, TinfoilError, tinfoil_error
 from tinfoil._v3._gateway import CatalogEntry
 from tinfoil._v3._openai import (
+    DROP_IN_OPTIONS,
     REALTIME_UNAVAILABLE,
+    ROUTE_OPTIONS,
     AsyncClient,
     AsyncEnclaveOpenAIClient,
     AsyncRouterOpenAIClient,
@@ -29,9 +32,15 @@ from tinfoil._v3._openai import (
     create_async_client,
     create_client,
 )
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT
 from tinfoil._v3.verifier import Verifier
 
 MODELS = b'{"object":"list","data":[]}'
+
+
+def foreign(**options: Any) -> dict[str, Any]:
+    """Options that the type-checked surface does not take, splatted so a test can show they are refused."""
+    return options
 
 
 @pytest.fixture
@@ -130,7 +139,7 @@ class TestConstruction:
     def test_callers_http_client_and_base_url_cannot_replace_the_attested_ones(self, offline: Recorder) -> None:
         with pytest.raises(ConfigurationError, match="http_client"):
             EnclaveOpenAIClient(
-                "enclave.example", "org/repo", transport_mode="ehbp", api_key="k", http_client=httpx.Client()
+                "enclave.example", "org/repo", transport_mode="ehbp", api_key="k", **foreign(http_client=httpx.Client())
             )
         client = EnclaveOpenAIClient(
             "enclave.example",
@@ -144,6 +153,26 @@ class TestConstruction:
         )
         client.close()
 
+    def test_http_timeout_leaves_the_per_request_default_alone(self, offline: Recorder) -> None:
+        """``http_timeout`` is the attested client's timeout; the library's own per-request default stays unless
+        the caller sets ``timeout``, so a short attestation timeout does not cut a streamed completion short."""
+        client = EnclaveOpenAIClient(
+            "enclave.example", "org/repo", transport_mode="ehbp", api_key="k", http_timeout=10.0
+        )
+        assert client.timeout == openai.DEFAULT_TIMEOUT
+        assert client.http_client.http_client.timeout == httpx.Timeout(10.0)
+        client.close()
+        explicit = EnclaveOpenAIClient(
+            "enclave.example", "org/repo", transport_mode="ehbp", api_key="k", http_timeout=10.0, timeout=2.0
+        )
+        assert explicit.timeout == 2.0
+        assert explicit.with_options(max_retries=0).timeout == 2.0, "a copy keeps the caller's timeout"
+        explicit.close()
+        default = EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp", api_key="k")
+        assert default.http_client.http_client.timeout == DEFAULT_HTTP_TIMEOUT
+        assert default.timeout == openai.DEFAULT_TIMEOUT
+        default.close()
+
     def test_copies_keep_the_attested_client(self, offline: Recorder) -> None:
         client = EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp", api_key="k", max_retries=0)
         attestations = len(offline.requests)
@@ -154,7 +183,7 @@ class TestConstruction:
         assert copied.max_retries == 2
         assert len(offline.requests) == attestations, "a copy verifies nothing"
         with pytest.raises(ConfigurationError, match="http_client"):
-            client.with_options(http_client=httpx.Client())
+            client.with_options(**foreign(http_client=httpx.Client()))
         assert [str(r.url) for r in through(copied)] == ["https://enclave.example/v1/models"]
         client.close()
 
@@ -195,7 +224,9 @@ class TestConstruction:
         monkeypatch.setattr(EnclaveHTTPClient, "close", close)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         with pytest.raises(ConfigurationError, match="http_client"):
-            EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp", http_client=httpx.Client())
+            EnclaveOpenAIClient(
+                "enclave.example", "org/repo", transport_mode="ehbp", **foreign(http_client=httpx.Client())
+            )
         assert len(closes) == 1, "the attested client created for the refused options is closed"
         with pytest.raises(openai.OpenAIError):
             EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp")  # no api_key anywhere
@@ -205,18 +236,63 @@ class TestConstruction:
                 closed.ensure_verified()
         client = EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp", api_key="k")
         with pytest.raises(ConfigurationError, match="http_client"):
-            client.with_options(http_client=httpx.Client())
+            client.with_options(**foreign(http_client=httpx.Client()))
         assert len(closes) == 2, "a copy's failure leaves the original's attested client open"
         client.http_client.ensure_verified()
         client.close()
         assert len(closes) == 3
+
+    def test_host_and_repo_are_required(self, offline: Recorder) -> None:
+        """Both are positional and have no defaults, so leaving one out fails at the call, before any I/O."""
+        host_only: list[Any] = ["enclave.example"]
+        with pytest.raises(TypeError, match="repo"):
+            EnclaveOpenAIClient(*host_only, api_key="k")
+        with pytest.raises(TypeError, match="repo"):
+            EnclaveHTTPClient(*host_only)
+        with pytest.raises(TypeError, match="host"):
+            EnclaveOpenAIClient(api_key="k")  # type: ignore[call-arg]
+        assert offline.requests == []
+        client = EnclaveOpenAIClient("enclave.example", None, transport_mode="ehbp", api_key="k")
+        copied = client.with_options(max_retries=0)
+        assert copied.http_client is client.http_client
+        assert (copied.http_client.enclave, copied.http_client.repo) == ("enclave.example", "")
+        client.close()
+
+    @pytest.mark.parametrize("option", sorted(ROUTE_OPTIONS))
+    def test_drop_in_client_refuses_each_route_option(self, offline: Recorder, option: str) -> None:
+        with pytest.raises(ConfigurationError) as err:
+            Client(api_key="k", **foreign(**{option: "x"}))
+        assert option in str(err.value)
+        assert "RouterOpenAIClient" in str(err.value)
+        assert offline.requests == [], "the options are refused before discovery"
+
+    @pytest.mark.parametrize("option", sorted(ROUTE_OPTIONS))
+    def test_drop_in_copies_refuse_each_route_option(self, offline: Recorder, option: str) -> None:
+        """A route option is refused on ``copy`` and ``with_options`` as on the constructor, rather than dropped
+        in favor of the attested client's own."""
+        offline.handler = lambda request: (
+            response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
+        )
+        client = create_client(api_key="k")
+        for copy in (client.with_options, client.copy):
+            with pytest.raises(ConfigurationError) as err:
+                copy(**foreign(**{option: "x"}))
+            assert str(err.value) == DROP_IN_OPTIONS.format(name="Client", keys=option, route="RouterOpenAIClient")
+        assert isinstance(client.with_options(max_retries=0), Client)
+        client.close()
 
     def test_drop_in_client_takes_only_openai_options(self, offline: Recorder) -> None:
         offline.handler = lambda request: (
             response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
         )
         with pytest.raises(ConfigurationError, match="RouterOpenAIClient"):
-            create_client(api_key="k", base_url="https://proxy.example/v1/")
+            create_client(api_key="k", **foreign(base_url="https://proxy.example/v1/"))
+        with pytest.raises(ConfigurationError) as err:
+            create_client(api_key="k", **foreign(transport_mode="ehbp", http_timeout=1.0, verifier=Verifier()))
+        assert str(err.value) == DROP_IN_OPTIONS.format(
+            name="Client", keys="http_timeout, transport_mode, verifier", route="RouterOpenAIClient"
+        ), "every refused option is named"
+        assert offline.requests == []
         client = create_client(api_key="k")
         assert isinstance(client, Client)
         assert client.http_client.enclave == "inference.tinfoil.sh"
@@ -288,6 +364,12 @@ class TestErrors:
 async def test_async_wrappers(offline: Recorder) -> None:
     with pytest.raises(ConfigurationError, match="create"):
         AsyncEnclaveOpenAIClient(api_key="k")
+    host_only: list[Any] = ["enclave.example"]
+    with pytest.raises(TypeError, match="repo"):
+        await AsyncEnclaveOpenAIClient.create(*host_only, api_key="k")
+    with pytest.raises(TypeError, match="repo"):
+        await AsyncEnclaveHTTPClient.create(*host_only)
+    assert offline.requests == []
     client = await AsyncEnclaveOpenAIClient.create(
         "enclave.example", "org/repo", transport_mode="ehbp", api_key="k", max_retries=0
     )
@@ -309,11 +391,22 @@ async def test_async_wrappers(offline: Recorder) -> None:
         response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
     )
     with pytest.raises(ConfigurationError, match="AsyncRouterOpenAIClient"):
-        await create_async_client(api_key="k", base_url="https://proxy.example/v1/")
+        await create_async_client(api_key="k", **foreign(base_url="https://proxy.example/v1/"))
+    for option in sorted(ROUTE_OPTIONS):
+        with pytest.raises(ConfigurationError, match=option):
+            await AsyncClient.create(api_key="k", **foreign(**{option: "x"}))
     drop_in = await create_async_client(api_key="k")
     assert isinstance(drop_in, AsyncClient)
     assert isinstance(drop_in, AsyncRouterOpenAIClient)
     assert drop_in.http_client.enclave == "inference.tinfoil.sh"
+    for option in sorted(ROUTE_OPTIONS):
+        for copy in (drop_in.with_options, drop_in.copy):
+            with pytest.raises(ConfigurationError) as err:
+                copy(**foreign(**{option: "x"}))
+            assert str(err.value) == DROP_IN_OPTIONS.format(
+                name="AsyncClient", keys=option, route="AsyncRouterOpenAIClient"
+            )
+    assert isinstance(drop_in.with_options(max_retries=0), AsyncClient)
     with pytest.raises(ConfigurationError, match=REALTIME_UNAVAILABLE):
         realtime_of(drop_in)
     await drop_in.close()

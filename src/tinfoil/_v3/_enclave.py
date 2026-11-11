@@ -18,7 +18,7 @@ from tinfoil._v3._errors import (
     from_verify,
 )
 from tinfoil._v3._fetch import fetch_document, fetch_document_async, is_authority
-from tinfoil._v3._types import DEFAULT_TIMEOUT, TimeoutTypes, VerificationCheck
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
 from tinfoil._v3.verifier import (
     CRYPTO_MATERIAL_ID_HPKE,
     CRYPTO_MATERIAL_ID_TLS,
@@ -32,6 +32,13 @@ from tinfoil._v3.verifier import (
 
 FRESHNESS_EXPIRED = "attestation freshness witnesses have expired; retry verification with fresh evidence"
 """The message of the AttestationError for a verification whose witnesses no longer authorize requests."""
+NO_FRESHNESS_DEADLINE = (
+    "verification carries no freshness deadline; the client needs an endorsed deadline to bound requests "
+    "(use the verifier directly when no reference endorses a deadline)"
+)
+"""The message of the AttestationError for a verification without a freshness deadline: no endorsed reference
+supplied an approval time, whether every reference is embedded or a caller-authorized config is combined with
+embedded runtime and platform references, so nothing bounds the time the enclave's keys may be used for."""
 DEADLINE_EXCEEDED = "verification did not complete before its deadline"
 """The message of the NetworkError for a verification that ran past the deadline it was given."""
 
@@ -103,7 +110,7 @@ class Enclave:
         self._fetch = _fetch
         self._fetch_async = _fetch_async
 
-    def verify(self, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None) -> Verification:
+    def verify(self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None) -> Verification:
         """Fetch and verify the enclave's attestation, retrying once after a network or attestation failure. The
         verification it returns is fresh and has passed the verification check. ``timeout`` bounds each network
         operation of the fetch; ``deadline``, a ``time.monotonic`` instant, bounds the whole of each attempt,
@@ -111,18 +118,20 @@ class Enclave:
         that completes after it is a NetworkError."""
         return self._verify(VERIFICATION_RETRIES, timeout, deadline)
 
-    def verify_once(self, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None) -> Verification:
+    def verify_once(
+        self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
+    ) -> Verification:
         """``verify`` without the retry, so a caller trying several enclaves moves on quickly."""
         return self._verify(CANDIDATE_VERIFICATION_RETRIES, timeout, deadline)
 
     async def verify_async(
-        self, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None
+        self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
     ) -> Verification:
         """``verify`` on the event loop."""
         return await self._verify_async(VERIFICATION_RETRIES, timeout, deadline)
 
     async def verify_once_async(
-        self, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None
+        self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
     ) -> Verification:
         """``verify_once`` on the event loop."""
         return await self._verify_async(CANDIDATE_VERIFICATION_RETRIES, timeout, deadline)
@@ -211,8 +220,11 @@ def _retry_fits(deadline: float | None) -> bool:
 
 
 def check_freshness(verified: Verification) -> None:
-    """Rejects a verification whose witnesses no longer authorize requests. A verification without a deadline has
-    nothing that authorizes requests now, so it is rejected as well."""
+    """Rejects a verification whose witnesses no longer authorize requests. A verification without a deadline,
+    which no endorsed reference supplied, has nothing that bounds requests, so it is rejected as well, with a
+    message of its own."""
+    if verified.freshness_expires_at is None:
+        raise AttestationError(NO_FRESHNESS_DEADLINE)
     if not is_fresh(verified):
         raise AttestationError(FRESHNESS_EXPIRED)
 
@@ -248,6 +260,7 @@ def retryable(err: TinfoilError) -> bool:
 __all__ = [
     "DEADLINE_EXCEEDED",
     "FRESHNESS_EXPIRED",
+    "NO_FRESHNESS_DEADLINE",
     "VERIFICATION_RETRY_DELAY",
     "Enclave",
     "VerificationRejected",

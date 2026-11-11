@@ -46,22 +46,32 @@ from tinfoil._v3._openai import (
     AsyncClient,
     AsyncEnclaveOpenAIClient,
     AsyncGatewayOpenAIClient,
+    AsyncOpenAICopyOptions,
+    AsyncOpenAIOptions,
     AsyncRouterOpenAIClient,
     Client,
     EnclaveOpenAIClient,
     GatewayOpenAIClient,
+    OpenAICopyOptions,
+    OpenAIOptions,
     RouterOpenAIClient,
     create_async_client,
     create_client,
 )
-from tinfoil._v3._types import DEFAULT_TIMEOUT, DEFAULT_TRANSPORT_MODE, TimeoutTypes, TransportMode, VerificationCheck
+from tinfoil._v3._types import (
+    DEFAULT_HTTP_TIMEOUT,
+    DEFAULT_TRANSPORT_MODE,
+    TimeoutTypes,
+    TransportMode,
+    VerificationCheck,
+)
 
 __version__ = sdk_version()
 """The version of this package, as installed."""
 
 __all__ = [
     "DEFAULT_GATEWAY_URL",
-    "DEFAULT_TIMEOUT",
+    "DEFAULT_HTTP_TIMEOUT",
     "DEFAULT_TRANSPORT_MODE",
     "APIConnectionError",
     "APIError",
@@ -73,6 +83,8 @@ __all__ = [
     "AsyncEnclaveOpenAIClient",
     "AsyncGatewayHTTPClient",
     "AsyncGatewayOpenAIClient",
+    "AsyncOpenAICopyOptions",
+    "AsyncOpenAIOptions",
     "AsyncRouterHTTPClient",
     "AsyncRouterOpenAIClient",
     "AttestationError",
@@ -91,7 +103,9 @@ __all__ = [
     "ModelPin",
     "NetworkError",
     "NotFoundError",
+    "OpenAICopyOptions",
     "OpenAIError",
+    "OpenAIOptions",
     "PermissionDeniedError",
     "RateLimitError",
     "ReplicaVerification",

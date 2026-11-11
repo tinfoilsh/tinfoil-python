@@ -13,9 +13,12 @@ TimeoutTypes: TypeAlias = float | tuple[float | None, float | None, float | None
 """A timeout as ``httpx.Client`` accepts it: seconds for every operation, None for no limit, a
 ``(connect, read, write, pool)`` tuple or an ``httpx.Timeout``."""
 
-DEFAULT_TIMEOUT: httpx.Timeout = httpx.Timeout(5.0)
-"""The timeout a client applies when none is given: five seconds for each connect, read, write and pool wait, as
-``httpx.Client`` applies by default."""
+DEFAULT_HTTP_TIMEOUT: httpx.Timeout = httpx.Timeout(600.0, connect=5.0)
+"""The timeout a client applies when none is given: five seconds to connect and ten minutes for each read, write
+and pool wait, which is what the ``openai`` package applies to inference requests by default. It is the
+``httpx`` timeout of ``http_client``, whose requests may stream a long completion, and of the client's own
+attestation fetches, which are also bounded as a whole: an attestation document and the router list within
+30 seconds, the gateway catalog within 10 seconds."""
 
 VerificationCheck: TypeAlias = Callable[[Verification], None]
 """A caller's check of a verification that passed the verifier, called before the client uses the enclave's keys.
@@ -37,7 +40,7 @@ DEFAULT_TRANSPORT_MODE: TransportMode = "tls"
 """The transport mode a client uses when none is given: the stronger one. A proxy base URL requires ``"ehbp"``."""
 
 __all__ = [
-    "DEFAULT_TIMEOUT",
+    "DEFAULT_HTTP_TIMEOUT",
     "DEFAULT_TRANSPORT_MODE",
     "TimeoutTypes",
     "TransportMode",
