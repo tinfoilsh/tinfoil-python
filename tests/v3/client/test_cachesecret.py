@@ -4,6 +4,7 @@ on its own."""
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -264,3 +265,181 @@ def test_scan_object_caps_nesting() -> None:
     assert scanned is not None
     assert [m.key for m in scanned] == ["a"]
     assert scan_object(beyond) is None
+    mixed = '{"a":' + '{"k":[' * (MAX_NESTING // 2) + "]}" * (MAX_NESTING // 2) + "}"
+    assert scan_object(mixed) is not None, "objects and arrays count alike"
+    assert scan_object('{"a":' + '{"k":[' * (MAX_NESTING // 2 + 1) + "]}" * (MAX_NESTING // 2 + 1) + "}") is None
+
+
+def _reject_constant(value: str) -> float:
+    raise ValueError(value)
+
+
+_STDLIB = json.JSONDecoder(parse_constant=_reject_constant)
+"""The standard decoder, refusing ``NaN`` and ``Infinity`` as the scanner does."""
+
+
+def _stdlib_end(text: str) -> int | None:
+    """Where the standard decoder says the value at offset 0 ends, or None when it rejects the text."""
+    try:
+        return _STDLIB.raw_decode(text, 0)[1]
+    except ValueError:
+        return None
+
+
+_VALUE_TEXTS = [
+    # Strings: every escape form, surrogates, and what the standard decoder refuses.
+    '""',
+    '"plain"',
+    '"\\" \\\\ \\/ \\b \\f \\n \\r \\t"',
+    '"\\u0041\\u00e9\\uD83D\\uDE00"',
+    '"\\ud800"',
+    '"\\udc00\\ud800"',
+    '"\\uD83D x"',
+    '"\\uDE00"',
+    '"\\u00E9"',
+    '"\\u00e"',
+    '"\\u00g9"',
+    '"\\x41"',
+    '"\\a"',
+    '"\\"',
+    '"unterminated',
+    '"\\u',
+    '"tab\there"',
+    '"nul\x00"',
+    '"unit\x1f"',
+    '"del\x7f"',
+    '"line\nbreak"',
+    '"é😀 "',
+    "'single'",
+    # Numbers: the JSON grammar and its near misses.
+    "0",
+    "-0",
+    "1",
+    "-1",
+    "123",
+    "1.5",
+    "-1.5",
+    "1e5",
+    "1E5",
+    "1e+5",
+    "1e-5",
+    "1.5e5",
+    "-0.0e-0",
+    "1.",
+    "1.e5",
+    "01",
+    "-01",
+    ".5",
+    "-.5",
+    "1e",
+    "1e+",
+    "1ee5",
+    "+1",
+    "-",
+    "--1",
+    "1٣",
+    "٣",
+    "0x10",
+    "1_000",
+    # Literals, and the constants that are not JSON.
+    "true",
+    "false",
+    "null",
+    "True",
+    "nul",
+    "nulll",
+    "truefalse",
+    "NaN",
+    "Infinity",
+    "-Infinity",
+    "-NaN",
+    "undefined",
+    # Containers: whitespace placement, commas, nesting, and what is left unbalanced.
+    "[]",
+    "[ ]",
+    "[\n\t\r ]",
+    "[1]",
+    "[ 1 ]",
+    "[1,2]",
+    "[1 , 2]",
+    "[1,,2]",
+    "[,1]",
+    "[1,]",
+    "[1 ,]",
+    "[",
+    "[1",
+    "[1,",
+    "]",
+    "[1}",
+    "[[]]",
+    "[[],[[]]]",
+    "[1,[2,[3,[4]]]]",
+    '[1,"a",true,null,{},[]]',
+    "{}",
+    "{ }",
+    '{"a":1}',
+    '{ "a" : 1 }',
+    '{"a":1,"b":2}',
+    '{"a":1 , "b":2}',
+    '{"a":1,}',
+    '{"a":1,,"b":2}',
+    '{,"a":1}',
+    '{"a"}',
+    '{"a":}',
+    '{"a" 1}',
+    '{"a":1 "b":2}',
+    '{"a":1]',
+    "{1:2}",
+    "{a:1}",
+    "{'a':1}",
+    '{"a":{"b":{"c":[{"d":null}]}}}',
+    '{"a":[1,{"b":[]}],"c":{}}',
+    '{"\\u0041":1}',
+    '{"a\\":1}',
+    '{"a\x01":1}',
+    "{",
+    '{"a"',
+    '{"a":',
+    '{"a":1',
+    "}",
+    "{}}",
+    # Trailing data is not the scanner's concern: the end offset is reported and the caller sees the rest.
+    "1 2",
+    "[1] x",
+    "[1]]",
+    "truex",
+    "nullnull",
+    "1,",
+    # Leading whitespace is the caller's to skip.
+    " 1",
+    "\n[]",
+    "",
+    " ",
+    "\x0b1",
+    "\xa01",
+    # Nesting the standard decoder handles on every interpreter.
+    "[" * 200 + "]" * 200,
+    "[" * 200 + "]" * 199,
+    '{"k":' * 200 + "1" + "}" * 200,
+    '{"k":[' * 100 + "]}" * 100,
+    '{"k":[' * 100 + "]}" * 99 + "]",
+]
+
+
+@pytest.mark.parametrize("text", _VALUE_TEXTS, ids=lambda text: repr(text) if len(text) <= 40 else f"{len(text)}-chars")
+def test_scan_value_matches_the_standard_decoder(text: str) -> None:
+    """For every value the standard decoder can handle, the iterative scanner gives the same verdict and, when it
+    accepts, the same end offset."""
+    from tinfoil._v3._cachesecret import _scan_value
+
+    assert _scan_value(text, 0) == _stdlib_end(text)
+
+
+def test_scan_value_at_an_offset() -> None:
+    """The scanner starts where it is pointed and reports an absolute end offset."""
+    from tinfoil._v3._cachesecret import _scan_value
+
+    text = '{"a": [1, 2] , "b": "x"}'
+    assert _scan_value(text, 6) == 12
+    assert _scan_value(text, 20) == 23
+    assert _scan_value(text, 5) is None, "a value does not begin with whitespace"

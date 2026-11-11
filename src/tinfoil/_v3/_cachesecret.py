@@ -27,6 +27,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import secrets
 import stat
 import tempfile
@@ -94,36 +95,104 @@ _UNICODE_WHITESPACE = "".join(
 )
 
 
-def _reject_constant(value: str) -> float:
-    # NaN and Infinity are accepted by the json module but are not JSON.
-    raise ValueError(f"non-standard JSON constant: {value}")
-
-
-_DECODER = json.JSONDecoder(parse_constant=_reject_constant)
+_DECODER = json.JSONDecoder()
+"""Decodes member keys only; a key is a string, which never nests."""
 
 MAX_NESTING = 10_000
 """The most containers a value may nest before the body is forwarded unchanged.
 
-Some interpreters' JSON scanners accept any depth, others raise before this
-point; the cap makes the outcome the same everywhere and matches the
-nesting limit of the strict document parser."""
+The value scanner tracks open containers on an explicit stack, so the depth
+a body may reach is this cap on every interpreter rather than the
+call-stack limit of a recursive decoder; the cap matches the nesting limit
+of the strict document parser."""
+
+# A JSON string token (RFC 8259): no raw control character, and only the eight single-character escapes and
+# ``\uXXXX``, which may spell a lone surrogate. Possessive quantifiers keep a failed match linear in the text.
+_STRING = re.compile(r'"(?:[^"\\\x00-\x1f]++|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*+"')
+# A JSON number token. The fraction and exponent are optional as wholes, so ``1.`` and ``1e`` end after the
+# integer part and the rest is left for the caller to reject.
+_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?")
+_LITERALS = ("true", "false", "null")
+"""The literal values. ``NaN`` and ``Infinity`` are not JSON and are not among them."""
 
 
-def _exceeds_nesting(value: object) -> bool:
-    """Whether a decoded value nests containers deeper than ``MAX_NESTING``, walked without recursion."""
-    stack: list[tuple[object, int]] = [(value, 1)]
-    while stack:
-        current, depth = stack.pop()
-        if isinstance(current, dict):
-            children: list[object] = list(current.values())
-        elif isinstance(current, list):
-            children = current
+def _scan_value(text: str, index: int) -> int | None:
+    """The end offset of the JSON value that starts at ``index``, or None when no well-formed value starts there
+    or the value nests containers deeper than ``MAX_NESTING``. Nothing is decoded; the open containers are
+    tracked on an explicit stack so that depth never consumes the call stack."""
+    closers: list[str] = []
+    length = len(text)
+    while True:
+        # A value starts at index.
+        if index >= length:
+            return None
+        char = text[index]
+        if char in ("[", "{"):
+            if len(closers) >= MAX_NESTING:
+                return None
+            closer = "]" if char == "[" else "}"
+            index = _skip(text, index + 1)
+            if index < length and text[index] == closer:
+                index += 1
+            else:
+                closers.append(closer)
+                if closer == "}":
+                    key_end = _scan_key(text, index)
+                    if key_end is None:
+                        return None
+                    index = key_end
+                continue
         else:
-            continue
-        if depth > MAX_NESTING:
-            return True
-        stack.extend((child, depth + 1) for child in children)
-    return False
+            scalar_end = _scan_scalar(text, index)
+            if scalar_end is None:
+                return None
+            index = scalar_end
+        # A value ended at index: close the containers it completes, or carry on after a comma.
+        while closers:
+            index = _skip(text, index)
+            if index >= length:
+                return None
+            char = text[index]
+            if char == closers[-1]:
+                closers.pop()
+                index += 1
+                continue
+            if char != ",":
+                return None
+            index = _skip(text, index + 1)
+            if closers[-1] == "}":
+                key_end = _scan_key(text, index)
+                if key_end is None:
+                    return None
+                index = key_end
+            break
+        else:
+            return index
+
+
+def _scan_key(text: str, index: int) -> int | None:
+    """The offset after an object member's key and its colon, with the whitespace around them, or None."""
+    key = _STRING.match(text, index)
+    if key is None:
+        return None
+    index = _skip(text, key.end())
+    if index >= len(text) or text[index] != ":":
+        return None
+    return _skip(text, index + 1)
+
+
+def _scan_scalar(text: str, index: int) -> int | None:
+    """The end offset of the string, number or literal at ``index``, or None."""
+    if text[index] == '"':
+        string = _STRING.match(text, index)
+        return None if string is None else string.end()
+    number = _NUMBER.match(text, index)
+    if number is not None:
+        return number.end()
+    for literal in _LITERALS:
+        if text.startswith(literal, index):
+            return index + len(literal)
+    return None
 
 
 def path_eligible(method: str, path: str) -> bool:
@@ -158,7 +227,7 @@ def scan_object(text: str) -> list[Member] | None:
             return None
         try:
             key, key_end = _DECODER.raw_decode(text, i)
-        except (ValueError, RecursionError):
+        except ValueError:
             return None
         if not isinstance(key, str):  # pragma: no cover - a quote always decodes to a string
             return None
@@ -166,12 +235,8 @@ def scan_object(text: str) -> list[Member] | None:
         if j >= len(text) or text[j] != ":":
             return None
         value_start = _skip(text, j + 1)
-        try:
-            value, value_end = _DECODER.raw_decode(text, value_start)
-        except (ValueError, RecursionError):
-            # RecursionError: the scanner recurses per nesting level and gives up on pathologically deep bodies.
-            return None
-        if _exceeds_nesting(value):
+        value_end = _scan_value(text, value_start)
+        if value_end is None:
             return None
         members.append(Member(key, i, value_start, value_end))
         i = _skip(text, value_end)
