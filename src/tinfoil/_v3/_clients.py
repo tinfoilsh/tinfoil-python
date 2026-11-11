@@ -110,7 +110,10 @@ class _AttestedClient:
         """The ``httpx`` client that sends through the attested transport. It verifies the enclave again before
         new requests when the verification expires or its key changes, and refuses requests to any other origin,
         so sensitive headers cannot be disclosed elsewhere. A request's body and the response to it are protected
-        end to end; headers, and a request without a body, are not private on the EHBP transport."""
+        end to end; headers, and a request without a body, are not private on the EHBP transport. Attested
+        requests never follow redirects: a 3xx response is returned to the caller. A streaming request body,
+        such as an iterator, is sent only on the ``"tls"`` transport; the EHBP transport reads bodies into
+        memory, since a sealed body may be sent again after a key rotation."""
         return self._attested.http_client
 
     @property
@@ -140,16 +143,22 @@ class _AttestedClient:
     def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
         """A verification that is valid now, verifying first only if the cached one has expired or been rejected.
         It also prepares the TLS pin or HPKE key for it, so returning means requests can be sent. ``timeout``
-        bounds the network operations of a verification; the client's own applies by default."""
+        bounds each network operation of a verification: ``httpx.USE_CLIENT_DEFAULT``, the default, selects the
+        client's own, None disables the timeout, and the attestation fetch as a whole is bounded at 30 seconds
+        besides."""
         return self._attested.keyed.ensure_verified(timeout=timeout)
 
     def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
-        """Verifies again even if the cached verification is still valid."""
+        """Verifies again even if the cached verification is still valid. ``timeout`` is as for
+        ``ensure_verified``."""
         return self._attested.keyed.reverify(timeout=timeout)
 
     def close(self) -> None:
-        """Releases the client's connections and stops re-verification. A closed client refuses requests and
-        verifications with a ConfigurationError."""
+        """Releases the client's connections and stops re-verification. After it, the client's own methods
+        raise ConfigurationError, while a request sent through the closed ``http_client`` raises the
+        ``RuntimeError`` that ``httpx`` raises for a closed client. An OpenAI client built over this one closes
+        it with itself, and its copies share it, so closing a copy closes the original's too. A client is not
+        shared across ``os.fork``: its connections and verification state belong to the process that made it."""
         self._attested.http_client.close()
 
     def __enter__(self) -> Self:
@@ -166,7 +175,8 @@ class _AsyncAttestedClient:
 
     @property
     def http_client(self) -> httpx.AsyncClient:
-        """The ``httpx.AsyncClient`` that sends through the attested transport; see the synchronous client."""
+        """The ``httpx.AsyncClient`` that sends through the attested transport; see the synchronous client for
+        what it protects, redirects and streaming request bodies."""
         return self._attested.http_client
 
     @property
@@ -199,8 +209,8 @@ class _AsyncAttestedClient:
         return await self._attested.keyed.reverify()
 
     async def close(self) -> None:
-        """Releases the client's connections and stops re-verification. A closed client refuses requests and
-        verifications with a ConfigurationError."""
+        """Releases the client's connections and stops re-verification; see the synchronous client for what a
+        closed client refuses, how OpenAI copies share it, and forking."""
         await self._attested.http_client.aclose()
 
     async def __aenter__(self) -> Self:
@@ -438,8 +448,9 @@ class GatewayHTTPClient:
     replica's verification; a replica it rejects is skipped for the next
     replica of the model. ``user_cache_secret`` empty resolves the secret
     from the environment or the persisted file; the gateway sees a cache
-    prefix keyed on it, never the secret. ``url`` is the gateway's base URL;
-    None selects Tinfoil's gateway. ``catalog`` is read on every request and
+    prefix keyed on it, never the secret. ``url`` is the gateway's base URL,
+    exposed as ``base_url`` with a trailing slash; None selects Tinfoil's
+    gateway. ``catalog`` is read on every request and
     must return an immutable mapping; None fetches the gateway's catalog
     when the client is created and refreshes it every 10 seconds while the
     client is used, keeping the last catalog when a refresh fails.
@@ -490,7 +501,10 @@ class GatewayHTTPClient:
 
     @property
     def http_client(self) -> httpx.Client:
-        """The ``httpx`` client that seals each request to a verified replica of its model."""
+        """The ``httpx`` client that seals each request to a verified replica of its model. Requests never
+        follow redirects: a 3xx response is returned to the caller. Request bodies are read into memory, since a
+        sealed body may be sent again after a key rotation or a seal redirect; a multipart upload with an
+        explicit ``X-Tinfoil-Model`` header is the exception and streams."""
         return self._http_client
 
     @property
@@ -500,13 +514,18 @@ class GatewayHTTPClient:
 
     def models(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> list[str]:
         """The catalog's models that the client's policy serves, sorted, without verifying replicas. A failed
-        catalog refresh does not fail it; only the first fetch can."""
+        catalog refresh does not fail it; only the first fetch can. ``timeout`` bounds each network operation of
+        a catalog fetch that the call makes: ``httpx.USE_CLIENT_DEFAULT``, the default, selects the client's
+        own, None disables the timeout, and the fetch as a whole is bounded at 10 seconds besides."""
         return self._transport.models(timeout=timeout)
 
     def ensure_verified(
         self, model: str, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT
     ) -> Verification:
-        """A verification that is valid now of a replica serving ``model``, verifying replicas only if needed."""
+        """A verification that is valid now of a replica serving ``model``, verifying replicas only if needed.
+        ``timeout`` bounds each network operation of the catalog and attestation fetches that the call makes:
+        ``httpx.USE_CLIENT_DEFAULT``, the default, selects the client's own, None disables the timeout, and each
+        fetch as a whole is bounded besides, at 10 seconds for the catalog and 30 for an attestation."""
         return self._transport.ensure_verified(model, timeout=timeout)
 
     @property
@@ -516,7 +535,12 @@ class GatewayHTTPClient:
         return self._transport.verifications()
 
     def close(self) -> None:
-        """Releases every replica's connections. A closed client refuses requests with a ConfigurationError."""
+        """Releases every replica's connections and stops catalog refreshes; one in flight finishes on its own
+        and its result is dropped. After it, the client's own methods raise ConfigurationError, while a request
+        sent through the closed ``http_client`` raises the ``RuntimeError`` that ``httpx`` raises for a closed
+        client. An OpenAI client built over this one closes it with itself, and its copies share it, so closing
+        a copy closes the original's too. A client is not shared across ``os.fork``: its connections and
+        verification state belong to the process that made it."""
         self._http_client.close()
 
     def __enter__(self) -> Self:
@@ -579,10 +603,13 @@ class AsyncGatewayHTTPClient:
 
     @property
     def http_client(self) -> httpx.AsyncClient:
+        """The ``httpx.AsyncClient`` that seals each request to a verified replica of its model; see the
+        synchronous client for redirects and request bodies."""
         return self._http_client
 
     @property
     def base_url(self) -> str:
+        """The gateway's base URL, which requests are sent to: the ``url`` option with a trailing slash."""
         return self._base_url
 
     async def models(self) -> list[str]:
@@ -598,6 +625,8 @@ class AsyncGatewayHTTPClient:
         return self._transport.verifications()
 
     async def close(self) -> None:
+        """Releases every replica's connections and stops catalog refreshes; see the synchronous client for what
+        a closed client refuses, how OpenAI copies share it, and forking."""
         await self._http_client.aclose()
 
     async def __aenter__(self) -> Self:
