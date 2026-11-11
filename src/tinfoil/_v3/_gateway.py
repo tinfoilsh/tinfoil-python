@@ -49,6 +49,7 @@ from tinfoil._v3._errors import (
 )
 from tinfoil._v3._fetch import get_bounded, get_bounded_async
 from tinfoil._v3._transport import (
+    CLIENT_CLOSED,
     USE_CLIENT_DEFAULT,
     AsyncAttestedTransport,
     AsyncEHBPMode,
@@ -58,7 +59,7 @@ from tinfoil._v3._transport import (
     RetiringTransport,
     UseClientDefault,
 )
-from tinfoil._v3._types import DEFAULT_TIMEOUT, TimeoutTypes, VerificationCheck
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
 from tinfoil._v3.verifier import Verification, Verifier, parse_reference
 
 DEFAULT_GATEWAY_URL = "https://inference-gateway.tinfoil.sh/v1/"
@@ -130,7 +131,7 @@ class ReplicaVerification:
     verification: Verification
 
 
-def fetch_catalog(host: str, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT) -> Catalog:
+def fetch_catalog(host: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
     """The catalog of the gateway at ``host``, keeping only models with replicas of a bare ``tinfoilsh/``
     repository, without a tag or digest. Raises NetworkError when it cannot be fetched or decoded."""
     body = get_bounded(
@@ -144,7 +145,7 @@ def fetch_catalog(host: str, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT) -> Cata
     return parse_catalog(body)
 
 
-async def fetch_catalog_async(host: str, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT) -> Catalog:
+async def fetch_catalog_async(host: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
     """``fetch_catalog`` on the event loop."""
     body = await get_bounded_async(
         f"https://{host}{CATALOG_PATH}",
@@ -351,10 +352,11 @@ def prepare(method: str, path: str, headers: httpx.Headers, content: bytes | Non
         return Prepared(headers, body)
     scanned = _cachesecret.scan_object(text)
     if scanned is not None:
-        if _cachesecret.has_duplicates(
-            scanned, _cachesecret.MODEL_FIELD, _cachesecret.FIELD, _cachesecret.CACHE_SALT_FIELD
-        ):
-            raise ConfigurationError("request body repeats a model, user_cache_secret or cache_salt member")
+        routed = (_cachesecret.MODEL_FIELD, _cachesecret.FIELD, _cachesecret.CACHE_SALT_FIELD)
+        repeated = [key for key in routed if _cachesecret.has_duplicates(scanned, key)]
+        if repeated:
+            names = ", ".join(f'"{key}"' for key in repeated)
+            raise ConfigurationError(f"request body repeats the {names} member{'s' if len(repeated) > 1 else ''}")
         members = {member.key: member for member in scanned}
         model = members.get(_cachesecret.MODEL_FIELD)
         if not headers.get(MODEL_HEADER, "") and model is not None:
@@ -503,7 +505,8 @@ class _Shared(Generic[_T]):
     responses in flight are done. A host that a seal redirect named but the
     catalog does not list keeps its transport until the catalog next
     changes. A request routed from the previous catalog that reaches an
-    evicted transport is refused as closed.
+    evicted transport is refused as retired, and is routed by the current
+    catalog when it is sent again.
     """
 
     def __init__(
@@ -635,7 +638,9 @@ class _CatalogCache:
     """Fetches the catalog on first use and refreshes it on use once ``CATALOG_REFRESH_INTERVAL`` has passed.
     Concurrent callers share one fetch. Until a fetch succeeds, callers wait for it and a failure is retried on
     the next use. After that, callers never wait: a stale catalog is returned while a refresh runs in the
-    background, and a failed refresh keeps it for another interval."""
+    background, and a failed refresh keeps it for another interval. ``close`` starts no further fetch: an empty
+    cache raises ConfigurationError instead of fetching, and a refresh in flight finishes on its own with its
+    result dropped."""
 
     def __init__(self, fetch: Callable[[TimeoutTypes], Catalog]) -> None:
         self._fetch = fetch
@@ -644,11 +649,16 @@ class _CatalogCache:
         self._refresh_at = 0.0
         self._inflight: threading.Event | None = None
         self._error: BaseException | None = None
+        self._closed = False
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
 
     def get(self, timeout: TimeoutTypes) -> Catalog:
         with self._lock:
             if self._catalog is not None:
-                if time.monotonic() >= self._refresh_at and self._inflight is None:
+                if time.monotonic() >= self._refresh_at and self._inflight is None and not self._closed:
                     # Only this caller starts the refresh; moving the next refresh ahead now keeps later callers
                     # from starting another before this one finishes.
                     self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
@@ -658,6 +668,8 @@ class _CatalogCache:
             inflight = self._inflight
             owner = inflight is None
             if inflight is None:
+                if self._closed:
+                    raise ConfigurationError(CLIENT_CLOSED)
                 inflight = self._inflight = threading.Event()
         if owner:
             self._load(timeout, inflight)
@@ -686,9 +698,10 @@ class _CatalogCache:
             inflight.set()
             return
         with self._lock:
-            self._catalog = catalog
-            self._error = None
-            self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
+            if not self._closed:
+                self._catalog = catalog
+                self._error = None
+                self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
             self._inflight = None
         inflight.set()
 
@@ -708,7 +721,7 @@ class GatewayTransport(httpx.BaseTransport):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         _build: Callable[[_Replica], ReplicaTransport] | None = None,
     ) -> None:
         self._build = _build
@@ -819,12 +832,13 @@ class GatewayTransport(httpx.BaseTransport):
             self._closed = True
             transports = list(self._shared.enclaves.values())
             self._shared.enclaves = {}
+        self._cache.close()
         for transport in transports:
             transport.chain.close()
 
     def _check_open(self) -> None:
         if self._closed:
-            raise ConfigurationError("client is closed")
+            raise ConfigurationError(CLIENT_CLOSED)
 
     def _transport(self, replica: _Replica) -> ReplicaTransport:
         with self._shared.lock:
@@ -851,7 +865,8 @@ class GatewayTransport(httpx.BaseTransport):
 
 
 class _AsyncCatalogCache:
-    """``_CatalogCache`` on the event loop."""
+    """``_CatalogCache`` on the event loop. ``close`` also cancels a refresh in flight at its next await, which
+    ends its task cancelled; one past its last await finishes, and its result is dropped."""
 
     def __init__(self, fetch: Callable[[TimeoutTypes], Awaitable[Catalog]]) -> None:
         self._fetch = fetch
@@ -859,14 +874,17 @@ class _AsyncCatalogCache:
         self._refresh_at = 0.0
         self._inflight: asyncio.Task[None] | None = None
         self._error: BaseException | None = None
+        self._closed = False
 
     async def get(self, timeout: TimeoutTypes) -> Catalog:
         if self._catalog is not None:
-            if time.monotonic() >= self._refresh_at and self._inflight is None:
+            if time.monotonic() >= self._refresh_at and self._inflight is None and not self._closed:
                 self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
                 self._start(timeout)
             return self._catalog
         if self._inflight is None:
+            if self._closed:
+                raise ConfigurationError(CLIENT_CLOSED)
             self._start(timeout)
         assert self._inflight is not None
         await asyncio.shield(self._inflight)
@@ -894,16 +912,19 @@ class _AsyncCatalogCache:
     async def _load(self, timeout: TimeoutTypes) -> None:
         try:
             catalog = await self._fetch(timeout)
-        except BaseException as err:
+        except Exception as err:
             self._error = err
             if self._catalog is not None:
                 self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
+            return
+        if self._closed:
             return
         self._catalog = catalog
         self._error = None
         self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
 
-    def cancel(self) -> None:
+    def close(self) -> None:
+        self._closed = True
         if self._inflight is not None:
             self._inflight.cancel()
 
@@ -922,7 +943,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
-        timeout: TimeoutTypes = DEFAULT_TIMEOUT,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         _build: Callable[[_Replica], AsyncReplicaTransport] | None = None,
     ) -> None:
         self._build = _build
@@ -1021,7 +1042,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         self._closed = True
-        self._cache.cancel()
+        self._cache.close()
         transports = list(self._shared.enclaves.values())
         self._shared.enclaves = {}
         for transport in transports:
@@ -1029,7 +1050,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
 
     def _check_open(self) -> None:
         if self._closed:
-            raise ConfigurationError("client is closed")
+            raise ConfigurationError(CLIENT_CLOSED)
 
     def _transport(self, replica: _Replica) -> AsyncReplicaTransport:
         transport = self._shared.enclaves.get(replica)

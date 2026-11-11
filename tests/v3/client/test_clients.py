@@ -120,6 +120,18 @@ class TestEnclaveClient:
                     {"transport_mode": "ehbp", "base_url": "https://u:p@proxy.example/v1/"},
                 ),
             ),
+            (
+                "query in the base URL",
+                (
+                    "enclave.example",
+                    "org/repo",
+                    {"transport_mode": "ehbp", "base_url": "https://proxy.example/v1/?x=1"},
+                ),
+            ),
+            (
+                "fragment in the base URL",
+                ("enclave.example", "org/repo", {"base_url": "https://enclave.example/v1/#f"}),
+            ),
         ],
     )
     def test_rejects_invalid_options_before_any_io(
@@ -283,6 +295,7 @@ class TestRouterClient:
             {"transport_mode": "ehbp", "base_url": "http://proxy.example/v1/"},
             {"base_url": "https://proxy.example/v1/"},
             {"transport_mode": "tls", "base_url": "https://proxy.example/v1/"},
+            {"transport_mode": "ehbp", "base_url": "https://proxy.example/v1/?x=1"},
             {"verifier": authorizer()},
         ],
     )
@@ -339,6 +352,8 @@ class TestGatewayClient:
             {"url": "http://gateway.example/v1/"},
             {"url": "https://:443/v1/"},
             {"url": "https://u:hunter2@gateway.example/v1/"},
+            {"url": "https://gateway.example/v1/?x=1"},
+            {"url": "https://gateway.example/v1/#f"},
             {"url": "/v1/"},
             {"pinned_models_only": True},
             {"model_pins": {"m": ModelPin("acme/m")}},
@@ -356,7 +371,14 @@ class TestGatewayClient:
     def test_refused_gateway_url_is_not_echoed(self, network: Network) -> None:
         with pytest.raises(ConfigurationError) as err:
             GatewayHTTPClient(url="https://u:hunter2@gateway.example/v1/", catalog=dict)
-        assert str(err.value) == f"configuration error: {GATEWAY_URL_INVALID}"
+        assert str(err.value) == GATEWAY_URL_INVALID
+
+    @pytest.mark.parametrize("url", ["https://gateway.example/v1/?", "https://gateway.example/v1/#"])
+    def test_refuses_a_bare_query_or_fragment_delimiter(self, network: Network, url: str) -> None:
+        with pytest.raises(ConfigurationError) as err:
+            GatewayHTTPClient(url=url, catalog=dict)
+        assert str(err.value) == GATEWAY_URL_INVALID
+        assert network.requests == []
 
     def test_fetches_the_catalog_before_returning(self, network: Network) -> None:
         with pytest.raises(NetworkError):

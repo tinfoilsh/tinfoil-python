@@ -3,7 +3,7 @@ the attested transport reports that it has invalidated the verification a reques
 
 from __future__ import annotations
 
-from tinfoil._v3._errors import AttestationError, TinfoilError
+from tinfoil._v3._errors import AttestationError
 
 
 class PeerLacksKeyError(Exception):
@@ -23,10 +23,10 @@ class PeerLacksKeyError(Exception):
 class KeyRejectedError(Exception):
     """The attested transport's report of a key rejection: the verification the request was sent under has been
     invalidated, so a replay goes out under a fresh one. ``__cause__`` is the underlying failure, and the message
-    is that failure's own, without a category prefix when it is a client error."""
+    is that failure's own."""
 
     def __init__(self, cause: BaseException) -> None:
-        super().__init__(cause.message if isinstance(cause, TinfoilError) else str(cause))
+        super().__init__(str(cause))
         self.__cause__ = cause
 
 

@@ -20,8 +20,10 @@ from tinfoil._v3._keys import KeyRejectedError, PeerLacksKeyError, is_key_reject
 from tinfoil._v3._tls import CERT_MISMATCH, NO_TLS
 from tinfoil._v3._transport import (
     CLIENT_CLOSED,
+    TRANSPORT_RETIRED,
     AsyncAttestedTransport,
     AsyncEHBPMode,
+    AsyncRetiringTransport,
     AsyncTLSMode,
     AttestedTransport,
     EHBPMode,
@@ -260,8 +262,9 @@ def test_key_rejection_invalidates_without_replay(name: str, err: BaseException,
     if lacks_key:
         assert isinstance(raised.value.__cause__, KeyRejectedError)
         assert raised.value.__cause__.__cause__ is err.__cause__
-        assert str(raised.value).count("attestation error:") == 1, "the underlying message is carried once"
-        assert str(raised.value) == f"attestation error: {CERT_MISMATCH if name == 'TLS' else str(err.__cause__)}"
+        assert str(raised.value) == (CERT_MISMATCH if name == "TLS" else str(err.__cause__)), (
+            "the underlying message is carried once, without a prefix"
+        )
     state = keyed._current
     assert state is not None
     assert state.rejected == lacks_key
@@ -467,12 +470,30 @@ def test_retiring_waits_for_responses_in_flight() -> None:
     streaming = retiring.handle_request(httpx.Request("GET", f"https://{HOST}/"))
     retiring.retire()
     assert inner.closes == 0, "a response in flight keeps the binding open"
-    with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
+    with pytest.raises(ConfigurationError, match=TRANSPORT_RETIRED):
         retiring.handle_request(httpx.Request("GET", f"https://{HOST}/"))
     assert streaming.read() == b"body"
     assert inner.closes == 1, "the last response closes the retired binding"
     retiring.close()
     assert inner.closes == 1
+    with pytest.raises(ConfigurationError, match=TRANSPORT_RETIRED):
+        retiring.handle_request(httpx.Request("GET", f"https://{HOST}/"))
+    closed = RetiringTransport(Closing())
+    closed.close()
+    with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
+        closed.handle_request(httpx.Request("GET", f"https://{HOST}/"))
+
+
+@pytest.mark.asyncio
+async def test_async_retiring_names_the_reason() -> None:
+    retired = AsyncRetiringTransport(httpx.MockTransport(lambda _: response(200)))
+    await retired.retire()
+    with pytest.raises(ConfigurationError, match=TRANSPORT_RETIRED):
+        await retired.handle_async_request(httpx.Request("GET", f"https://{HOST}/"))
+    closed = AsyncRetiringTransport(httpx.MockTransport(lambda _: response(200)))
+    await closed.aclose()
+    with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
+        await closed.handle_async_request(httpx.Request("GET", f"https://{HOST}/"))
 
 
 def test_closed_transport_refuses_everything() -> None:

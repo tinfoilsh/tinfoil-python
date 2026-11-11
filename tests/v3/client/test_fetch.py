@@ -10,7 +10,7 @@ import pytest
 
 from tests.v3.client.helpers import Recorder, response
 from tinfoil._sdkinfo import SDK_NAME, sdk_version
-from tinfoil._v3 import _fetch
+from tinfoil._v3 import _fetch, _gateway, _router
 from tinfoil._v3._errors import ConfigurationError, NetworkError
 from tinfoil._v3._fetch import (
     MAX_DOCUMENT_BYTES,
@@ -20,6 +20,7 @@ from tinfoil._v3._fetch import (
     fetch_document_async,
     is_authority,
 )
+from tinfoil._v3._types import DEFAULT_HTTP_TIMEOUT
 from tinfoil._v3.verifier import NONCE_SIZE
 
 NONCE = bytes(range(NONCE_SIZE))
@@ -211,3 +212,16 @@ def test_fetch_caps_each_operation_at_the_time_left() -> None:
     assert capped.connect <= 2.0
     capped = bound.timeout(1.0)
     assert capped.read == 1.0
+
+
+def test_default_timeout_is_bounded_by_the_overall_deadlines() -> None:
+    """The default read timeout is long enough for a streamed completion; a document, router-list or catalog
+    fetch is still bounded by its own overall deadline, which caps every operation at the time left."""
+    assert DEFAULT_HTTP_TIMEOUT.read == 600.0
+    assert DEFAULT_HTTP_TIMEOUT.connect == 5.0
+    for overall in (_fetch.FETCH_TIMEOUT, _router.ROUTER_FETCH_TIMEOUT, _gateway.CATALOG_FETCH_TIMEOUT):
+        capped = _fetch._Deadline(overall, None).timeout(DEFAULT_HTTP_TIMEOUT)
+        assert capped.connect == 5.0
+        for wait in (capped.read, capped.write, capped.pool):
+            assert wait is not None
+            assert wait <= overall
