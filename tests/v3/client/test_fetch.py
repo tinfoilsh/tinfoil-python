@@ -1,8 +1,9 @@
-"""The document fetch: its URL, headers, bounds and redirect policy."""
+"""The document fetch: its URL, headers, bounds, per-request timeouts and redirect policy."""
 
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 
 import httpx
 import pytest
@@ -143,6 +144,40 @@ def test_fetch_rejects_a_redirect_with_user_information(mocked: Recorder) -> Non
     assert "hunter2" not in str(err.value)
     assert "user" not in str(err.value).replace("user information", "")
     assert hosts == ["enclave.example"], "the redirect is refused before it is followed"
+
+
+def test_fetch_recomputes_each_requests_timeouts_from_the_time_left(mocked: Recorder) -> None:
+    reads: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        reads.append(request.extensions["timeout"]["read"])
+        if len(reads) < 3:
+            time.sleep(0.05)
+            return response(302, headers={"Location": f"/hop{len(reads)}"})
+        return response(200, b"doc")
+
+    mocked.handler = handler
+    assert fetch_document("enclave.example", "", NONCE, timeout=None, deadline=time.monotonic() + 1.0) == b"doc"
+    assert len(reads) == 3
+    assert reads[0] <= 1.0
+    assert reads[0] > reads[1] > reads[2], "each redirect's request gets only the time that is left"
+
+
+class Trickle(httpx.SyncByteStream):
+    """A body whose chunks arrive slowly, so a deadline passes while it is read."""
+
+    def __iter__(self) -> Iterator[bytes]:
+        for _ in range(10):
+            time.sleep(0.03)
+            yield b"x"
+
+
+def test_fetch_stops_a_trickling_body_at_the_deadline(mocked: Recorder) -> None:
+    mocked.handler = lambda _: httpx.Response(200, stream=Trickle())
+    start = time.monotonic()
+    with pytest.raises(NetworkError, match="no complete response"):
+        fetch_document("enclave.example", "", NONCE, timeout=None, deadline=start + 0.1)
+    assert time.monotonic() - start < 0.25, "the read is abandoned at the deadline, not at the body's end"
 
 
 def test_fetch_keeps_the_redirect_limit(mocked: Recorder) -> None:

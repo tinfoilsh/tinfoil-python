@@ -52,8 +52,10 @@ from tinfoil._v3._transport import (
     USE_CLIENT_DEFAULT,
     AsyncAttestedTransport,
     AsyncEHBPMode,
+    AsyncRetiringTransport,
     AttestedTransport,
     EHBPMode,
+    RetiringTransport,
     UseClientDefault,
 )
 from tinfoil._v3._types import DEFAULT_TIMEOUT, TimeoutTypes, VerificationCheck
@@ -367,7 +369,10 @@ def prepare(method: str, path: str, headers: httpx.Headers, content: bytes | Non
 def scope_cache(headers: httpx.Headers, members: list[_cachesecret.Member], text: str, client_secret: str) -> bytes:
     """The body with the secret replaced by the derived ``cache_salt``, and the headers with the derived cache
     prefix. The secret is the body's non-empty string ``user_cache_secret``, otherwise ``client_secret``; with
-    neither, nothing changes. The secret itself never leaves the client."""
+    neither, nothing changes. The secret itself never leaves the client. Only the two members are spliced: the
+    ``user_cache_secret`` member is cut out and the ``cache_salt`` value replaced, or the member appended, so
+    every other byte the caller sent, its whitespace, key order and number spelling included, is forwarded as
+    it is."""
     by_key = {member.key: member for member in members}
     secret = ""
     field = by_key.get(_cachesecret.FIELD)
@@ -384,20 +389,36 @@ def scope_cache(headers: httpx.Headers, members: list[_cachesecret.Member], text
     head = prompt_head(by_key, text)
     if head is not None:
         headers[CACHE_PREFIX_HEADER] = cache_prefix(secret, api_key, head.encode())
-    salt_member = f'"{_cachesecret.CACHE_SALT_FIELD}":{json.dumps(salt)}'
-    kept: list[str] = []
-    replaced = False
-    for member in members:
-        if member.key == _cachesecret.FIELD:
-            continue
-        if member.key == _cachesecret.CACHE_SALT_FIELD:
-            kept.append(salt_member)
-            replaced = True
-            continue
-        kept.append(text[member.key_start : member.value_end])
-    if not replaced:
-        kept.append(salt_member)
-    return ("{" + ",".join(kept) + "}").encode()
+    edits: list[tuple[int, int, str]] = []
+    if field is not None:
+        edits.append(_removal(members, members.index(field)))
+    existing = by_key.get(_cachesecret.CACHE_SALT_FIELD)
+    if existing is not None:
+        edits.append((existing.value_start, existing.value_end, json.dumps(salt)))
+    else:
+        close = text.rindex("}")
+        comma = "," if len(members) > (1 if field is not None else 0) else ""
+        edits.append((close, close, f'{comma}"{_cachesecret.CACHE_SALT_FIELD}":{json.dumps(salt)}'))
+    return _spliced(text, edits).encode()
+
+
+def _removal(members: list[_cachesecret.Member], index: int) -> tuple[int, int, str]:
+    """The span that cuts member ``index`` out of its object: the member and the comma that separates it from
+    the next one, or from the previous one when it is last."""
+    member = members[index]
+    if index + 1 < len(members):
+        return member.key_start, members[index + 1].key_start, ""
+    if index > 0:
+        return members[index - 1].value_end, member.value_end, ""
+    return member.key_start, member.value_end, ""
+
+
+def _spliced(text: str, edits: list[tuple[int, int, str]]) -> str:
+    """``text`` with each ``(start, end, replacement)`` applied. The spans do not overlap, so applying them from
+    the end keeps the earlier offsets valid."""
+    for start, end, replacement in sorted(edits, reverse=True):
+        text = text[:start] + replacement + text[end:]
+    return text
 
 
 def multipart_model(body: bytes, boundary: str) -> str:
@@ -448,11 +469,12 @@ class AsyncKeyed(Protocol):
 
 
 class ReplicaTransport:
-    """One replica's verified transport and the models requested through it."""
+    """One replica's verified transport and the models requested through it. ``chain`` can be retired: it then
+    takes no new requests and closes once the responses in flight through it are done."""
 
     def __init__(self, keyed: Keyed, chain: httpx.BaseTransport) -> None:
         self.keyed = keyed
-        self.chain = chain
+        self.chain = RetiringTransport(chain)
         self.models: set[str] = set()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -463,7 +485,7 @@ class ReplicaTransport:
 class AsyncReplicaTransport:
     def __init__(self, keyed: AsyncKeyed, chain: httpx.AsyncBaseTransport) -> None:
         self.keyed = keyed
-        self.chain = chain
+        self.chain = AsyncRetiringTransport(chain)
         self.models: set[str] = set()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -473,7 +495,16 @@ class AsyncReplicaTransport:
 
 class _Shared(Generic[_T]):
     """What the synchronous and asynchronous gateway transports have in common: the policy, the replica
-    transports built so far, and the hosts the gateway rerouted each cache prefix to."""
+    transports built so far, and the hosts the gateway rerouted each cache prefix to.
+
+    Replica transports are retained while the catalog lists their host.
+    Each time the catalog changes, the transports of hosts it no longer
+    lists are evicted: they take no new requests and close once their
+    responses in flight are done. A host that a seal redirect named but the
+    catalog does not list keeps its transport until the catalog next
+    changes. A request routed from the previous catalog that reaches an
+    evicted transport is refused as closed.
+    """
 
     def __init__(
         self,
@@ -496,6 +527,18 @@ class _Shared(Generic[_T]):
         self.lock = threading.Lock()
         self.enclaves: dict[_Replica, _T] = {}
         self.rerouted: dict[str, str] = {}
+        self.retained_for: Catalog | None = None
+
+    def evict(self, catalog: Catalog) -> list[_T]:
+        """The replica transports of hosts that ``catalog`` no longer lists, removed from the retained ones when
+        the catalog differs from the one they were last retained for; the caller retires them."""
+        with self.lock:
+            if catalog is self.retained_for or catalog == self.retained_for:
+                return []
+            self.retained_for = catalog
+            listed = {host for entry in catalog.values() for host in entry.hosts}
+            evicted = [replica for replica in self.enclaves if replica.host not in listed]
+            return [self.enclaves.pop(replica) for replica in evicted]
 
     def enclave_for(self, replica: _Replica) -> Enclave:
         return Enclave(
@@ -692,9 +735,15 @@ class GatewayTransport(httpx.BaseTransport):
         return self._shared.timeout
 
     def catalog(self, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Catalog:
+        """The current catalog. Reading it evicts the replica transports of hosts a changed catalog no longer
+        lists."""
         if self._supplied is not None:
-            return self._supplied()
-        return self._cache.get(self._shared.timeout if isinstance(timeout, UseClientDefault) else timeout)
+            catalog = self._supplied()
+        else:
+            catalog = self._cache.get(self._shared.timeout if isinstance(timeout, UseClientDefault) else timeout)
+        for transport in self._shared.evict(catalog):
+            transport.chain.retire()
+        return catalog
 
     def models(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> list[str]:
         """The catalog's models that the policy serves, sorted, without verifying replicas. A failed catalog
@@ -719,7 +768,7 @@ class GatewayTransport(httpx.BaseTransport):
         raise failure
 
     def verifications(self) -> list[ReplicaVerification]:
-        """The last successful verification of each replica used so far, without checking them."""
+        """The last successful verification of each retained replica used so far, without checking them."""
         return self._shared.verifications(lambda transport: transport.keyed.current)
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -901,8 +950,12 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
 
     async def catalog(self) -> Catalog:
         if self._supplied is not None:
-            return self._supplied()
-        return await self._cache.get(self._shared.timeout)
+            catalog = self._supplied()
+        else:
+            catalog = await self._cache.get(self._shared.timeout)
+        for transport in self._shared.evict(catalog):
+            await transport.chain.retire()
+        return catalog
 
     async def models(self) -> list[str]:
         """The catalog's models that the policy serves, sorted, without verifying replicas."""

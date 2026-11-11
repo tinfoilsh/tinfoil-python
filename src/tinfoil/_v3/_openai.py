@@ -5,7 +5,8 @@ the enclave is verified. The one exception is the realtime resource: it opens a 
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from functools import cached_property
 from typing import Any, NoReturn, Protocol, Self, TypeVar
 
@@ -118,6 +119,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
         _http_client: EnclaveHTTPClient | None = None,
         **openai_kwargs: Any,
     ) -> None:
+        owned = _http_client is None
         if _http_client is None:
             _http_client = EnclaveHTTPClient(
                 host,
@@ -131,7 +133,8 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
             )
         self._tinfoil = _http_client
         attested = _http_client._attested
-        super().__init__(**_openai_options(openai_kwargs, attested.http_client, attested.openai_url))
+        with _closing_on_failure(_http_client, owned):
+            super().__init__(**_openai_options(openai_kwargs, attested.http_client, attested.openai_url))
 
     @property
     def http_client(self) -> EnclaveHTTPClient:
@@ -221,6 +224,7 @@ class RouterOpenAIClient(_AttestedOpenAI):
         _http_client: RouterHTTPClient | None = None,
         **openai_kwargs: Any,
     ) -> None:
+        owned = _http_client is None
         if _http_client is None:
             _http_client = RouterHTTPClient(
                 transport_mode=transport_mode,
@@ -232,7 +236,8 @@ class RouterOpenAIClient(_AttestedOpenAI):
             )
         self._tinfoil = _http_client
         attested = _http_client._attested
-        super().__init__(**_openai_options(openai_kwargs, attested.http_client, attested.openai_url))
+        with _closing_on_failure(_http_client, owned):
+            super().__init__(**_openai_options(openai_kwargs, attested.http_client, attested.openai_url))
 
     @property
     def http_client(self) -> RouterHTTPClient:
@@ -322,6 +327,7 @@ class GatewayOpenAIClient(_AttestedOpenAI):
         _http_client: GatewayHTTPClient | None = None,
         **openai_kwargs: Any,
     ) -> None:
+        owned = _http_client is None
         if _http_client is None:
             _http_client = GatewayHTTPClient(
                 model_pins=model_pins,
@@ -334,7 +340,8 @@ class GatewayOpenAIClient(_AttestedOpenAI):
                 timeout=http_timeout,
             )
         self._tinfoil = _http_client
-        super().__init__(**_openai_options(openai_kwargs, _http_client.http_client, _http_client.base_url))
+        with _closing_on_failure(_http_client, owned):
+            super().__init__(**_openai_options(openai_kwargs, _http_client.http_client, _http_client.base_url))
 
     @property
     def http_client(self) -> GatewayHTTPClient:
@@ -442,8 +449,24 @@ async def create_async_client(**openai_kwargs: Any) -> AsyncClient:
     return await AsyncClient.create(**openai_kwargs)
 
 
+class _Closable(Protocol):
+    def close(self) -> None: ...
+
+
 class _AsyncClosable(Protocol):
     async def close(self) -> None: ...
+
+
+@contextmanager
+def _closing_on_failure(http_client: _Closable, owned: bool) -> Iterator[None]:
+    """Closes ``http_client`` when the ``openai`` constructor inside refuses the options, but only when the
+    constructor created it: a copy shares the original's, which stays in use."""
+    try:
+        yield
+    except BaseException:
+        if owned:
+            http_client.close()
+        raise
 
 
 async def _built(cls: Callable[..., _C], http_client: _AsyncClosable, openai_kwargs: dict[str, Any]) -> _C:

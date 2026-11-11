@@ -436,7 +436,9 @@ class GatewayHTTPClient:
     The options are copied and checked before any network I/O; the catalog
     is then fetched before the constructor returns. A model's replicas are
     verified on its first request, so pins may name models the catalog does
-    not list.
+    not list. A verified replica's transport is kept while the catalog lists
+    its host; when a changed catalog no longer does, the transport takes no
+    new requests and closes once its responses in flight are done.
 
     Experimental: the gateway route is new, and this API may change or be
     removed in a later release.
@@ -498,8 +500,8 @@ class GatewayHTTPClient:
 
     @property
     def current(self) -> list[ReplicaVerification]:
-        """The last successful verification of each replica used so far, without checking them. They may have
-        expired or been rejected."""
+        """The last successful verification of each replica used so far and still listed by the catalog, without
+        checking them. They may have expired or been rejected."""
         return self._transport.verifications()
 
     def close(self) -> None:

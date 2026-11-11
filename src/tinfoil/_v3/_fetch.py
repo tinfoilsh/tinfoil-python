@@ -119,17 +119,18 @@ def get_bounded(
     ok: tuple[int, int] = (200, 299),
 ) -> bytes:
     """The body of a GET of ``url`` over a fresh connection pool, bounded in time (``overall`` seconds and
-    ``deadline``) and size (``max_bytes``), following at most ``MAX_REDIRECTS`` redirects and only to HTTPS URLs.
-    A status outside ``ok`` is a NetworkError, as is everything else that fails."""
+    ``deadline``) and size (``max_bytes``), following at most ``MAX_REDIRECTS`` redirects and only to HTTPS URLs
+    without user information. Each request's own timeouts are recomputed from the time left when it is sent, so
+    a redirect chain cannot carry the first request's budget past the deadline. A status outside ``ok`` is a
+    NetworkError, as is everything else that fails."""
     bound = _Deadline(overall, deadline)
     try:
-        with httpx.Client(
-            transport=_TRANSPORT, timeout=bound.timeout(timeout), follow_redirects=False, headers=headers
-        ) as client:
+        with httpx.Client(transport=_TRANSPORT, timeout=timeout, follow_redirects=False, headers=headers) as client:
             request = client.build_request("GET", url)
             redirects = 0
             while True:
                 bound.check(url, overall)
+                bound.apply(request, timeout)
                 response = client.send(request, stream=True)
                 try:
                     if response.has_redirect_location:
@@ -160,12 +161,13 @@ async def get_bounded_async(
     bound = _Deadline(overall, deadline)
     try:
         async with httpx.AsyncClient(
-            transport=_ASYNC_TRANSPORT, timeout=bound.timeout(timeout), follow_redirects=False, headers=headers
+            transport=_ASYNC_TRANSPORT, timeout=timeout, follow_redirects=False, headers=headers
         ) as client:
             request = client.build_request("GET", url)
             redirects = 0
             while True:
                 bound.check(url, overall)
+                bound.apply(request, timeout)
                 response = await client.send(request, stream=True)
                 try:
                     if response.has_redirect_location:
@@ -195,7 +197,8 @@ class _Deadline:
             raise network_error(f"HTTP GET {url}: no complete response within {overall:g}s")
 
     def timeout(self, timeout: TimeoutTypes) -> httpx.Timeout:
-        """``timeout`` with each operation also capped at the time left, so no single wait outlasts the deadline."""
+        """``timeout`` with each operation also capped at the time left now, so no single wait outlasts the
+        deadline by more than the time left when the operation began."""
         remaining = max(self.at - time.monotonic(), 0.001)
         configured = httpx.Timeout(timeout)
 
@@ -208,6 +211,11 @@ class _Deadline:
             write=cap(configured.write),
             pool=cap(configured.pool),
         )
+
+    def apply(self, request: httpx.Request, timeout: TimeoutTypes) -> None:
+        """Sets ``request``'s timeouts to ``timeout`` capped at the time left now. A redirect's request inherits
+        the previous one's timeouts, so each is recomputed before it is sent."""
+        request.extensions["timeout"] = self.timeout(timeout).as_dict()
 
 
 def _url(host: str, relay: str, nonce: bytes) -> str:

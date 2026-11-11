@@ -95,6 +95,10 @@ def discover(
         except TinfoilError:
             candidate.close()
             continue
+        except BaseException:
+            # An interruption ends discovery; the candidate in flight must not outlive it.
+            candidate.close()
+            raise
         return candidate
     return new_transport(fallback)
 
@@ -106,7 +110,8 @@ async def discover_async(
     *,
     timeout: TimeoutTypes = DEFAULT_TIMEOUT,
 ) -> AsyncAttestedTransport:
-    """``discover`` on the event loop. The task's cancellation ends discovery with it, without a fallback."""
+    """``discover`` on the event loop. The task's cancellation ends discovery with it, without a fallback, and
+    closes the candidate it was probing."""
     fallback = Enclave(FALLBACK_HOST, DEFAULT_ROUTER_REPO, verifier=verifier, verification_check=check)
     deadline = time.monotonic() + DISCOVERY_TIMEOUT
     try:
@@ -125,6 +130,9 @@ async def discover_async(
         except TinfoilError:
             await candidate.aclose()
             continue
+        except BaseException:
+            await candidate.aclose()
+            raise
         return candidate
     return new_transport(fallback)
 

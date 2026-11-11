@@ -1,5 +1,5 @@
-"""The enclave core: configuration checks, the one retry, freshness, the verification check and the transport
-keys a document must endorse."""
+"""The enclave core: configuration checks, the one retry, freshness, the verification check, the deadline that
+bounds an attempt as a whole, and the transport keys a document must endorse."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import pytest
 from tests.v3.client.helpers import HOST, Recorder, fake_enclave, response, verification
 from tinfoil._v3 import _enclave, _fetch
 from tinfoil._v3._enclave import (
+    DEADLINE_EXCEEDED,
     FRESHNESS_EXPIRED,
     Enclave,
     VerificationRejected,
@@ -198,6 +199,66 @@ def test_slow_verification_check_fetches_fresh_evidence(slow_calls: int) -> None
         assert verified.freshness_expires_at - datetime.now(UTC) > timedelta(minutes=59)
     assert fetches == 2, "an expiry after the check is retried with fresh evidence"
     assert checks == 2
+
+
+class TestDeadline:
+    """``deadline`` bounds each attempt as a whole: the fetch, the verification and the check."""
+
+    def test_slow_verification_is_refused_after_the_deadline(self) -> None:
+        def fetch() -> Verification:
+            time.sleep(0.1)  # a slow verifier
+            return verification("key")
+
+        with pytest.raises(NetworkError, match=DEADLINE_EXCEEDED):
+            fake_enclave(fetch).verify_once(deadline=time.monotonic() + 0.02)
+        assert fake_enclave(fetch).verify_once(deadline=time.monotonic() + 5).code_tag == "key"
+
+    def test_slow_check_is_refused_after_the_deadline(self) -> None:
+        checked = 0
+
+        def check(_: Verification) -> None:
+            nonlocal checked
+            checked += 1
+            time.sleep(0.1)
+
+        with pytest.raises(NetworkError, match=DEADLINE_EXCEEDED):
+            fake_enclave(lambda: verification("key"), check=check).verify(deadline=time.monotonic() + 0.02)
+        assert checked == 1, "the deadline leaves no budget for a retry"
+
+    def test_passed_deadline_sends_nothing(self) -> None:
+        def fetch() -> Verification:
+            pytest.fail("a passed deadline must not start an attempt")
+
+        with pytest.raises(NetworkError, match=DEADLINE_EXCEEDED):
+            fake_enclave(fetch).verify(deadline=time.monotonic() - 1)
+
+    def test_retry_only_when_it_fits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_enclave, "VERIFICATION_RETRY_DELAY", 0.5)
+        monkeypatch.setattr(time, "sleep", lambda _: None)
+        calls = 0
+
+        def fetch() -> Verification:
+            nonlocal calls
+            calls += 1
+            raise network_error("unavailable")
+
+        with pytest.raises(NetworkError, match="unavailable"):
+            fake_enclave(fetch).verify(deadline=time.monotonic() + 0.1)
+        assert calls == 1, "a retry that cannot start before the deadline is not attempted"
+        with pytest.raises(NetworkError, match="unavailable"):
+            fake_enclave(fetch).verify(deadline=time.monotonic() + 5)
+        assert calls == 3
+
+    @pytest.mark.asyncio
+    async def test_async_slow_verification_is_refused_after_the_deadline(self) -> None:
+        async def fetch() -> Verification:
+            await asyncio.sleep(0.1)
+            return verification("key")
+
+        enclave = Enclave(HOST, "org/repo", _fetch_async=fetch)
+        with pytest.raises(NetworkError, match=DEADLINE_EXCEEDED):
+            await enclave.verify_once_async(deadline=time.monotonic() + 0.02)
+        assert (await enclave.verify_once_async(deadline=time.monotonic() + 5)).code_tag == "key"
 
 
 def test_verification_without_a_deadline_is_rejected() -> None:

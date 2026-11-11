@@ -260,6 +260,8 @@ def test_key_rejection_invalidates_without_replay(name: str, err: BaseException,
     if lacks_key:
         assert isinstance(raised.value.__cause__, KeyRejectedError)
         assert raised.value.__cause__.__cause__ is err.__cause__
+        assert str(raised.value).count("attestation error:") == 1, "the underlying message is carried once"
+        assert str(raised.value) == f"attestation error: {CERT_MISMATCH if name == 'TLS' else str(err.__cause__)}"
     state = keyed._current
     assert state is not None
     assert state.rejected == lacks_key

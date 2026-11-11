@@ -1,8 +1,10 @@
 """Router discovery with a mocked router list: the first router that verifies wins, failures and malformed entries
-are skipped without a retry, the budget bounds every probe, and the fallback is left unverified."""
+are skipped without a retry, the budget bounds every probe, an interruption closes the candidate being probed,
+and the fallback is left unverified."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Callable
@@ -13,7 +15,7 @@ import pytest
 from tests.v3.client.helpers import Recorder, response, verification
 from tinfoil._v3 import _fetch, _router
 from tinfoil._v3._enclave import Enclave
-from tinfoil._v3._errors import NetworkError, network_error
+from tinfoil._v3._errors import ConfigurationError, NetworkError, network_error
 from tinfoil._v3._router import (
     DEFAULT_ROUTER_REPO,
     DEFAULT_ROUTER_URL,
@@ -23,7 +25,7 @@ from tinfoil._v3._router import (
     fetch_routers,
     parse_routers,
 )
-from tinfoil._v3._transport import AsyncAttestedTransport, AttestedTransport
+from tinfoil._v3._transport import CLIENT_CLOSED, AsyncAttestedTransport, AttestedTransport
 from tinfoil._v3.verifier import Verification
 
 from .test_transport import AsyncFakeMode, FakeMode
@@ -141,6 +143,47 @@ def test_discovery_uses_the_callers_policy(atc: Recorder) -> None:
     keyed = discover(shared, lambda v: seen.append(v.code_tag), probing({"router.example": None}, []))
     assert keyed.enclave.verifier is shared
     assert seen == ["router.example"], "the verification check sees each candidate"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_discovery_closes_the_candidate_in_flight(atc: Recorder) -> None:
+    probing_started = asyncio.Event()
+    built: list[AsyncAttestedTransport] = []
+
+    def new_transport(enclave: Enclave) -> AsyncAttestedTransport:
+        async def fetch() -> Verification:
+            probing_started.set()
+            await asyncio.Event().wait()  # a router that never answers
+            raise AssertionError("unreachable")
+
+        built.append(AsyncAttestedTransport(Enclave(enclave.host, enclave.repo, _fetch_async=fetch), AsyncFakeMode()))
+        return built[-1]
+
+    discovery = asyncio.create_task(discover_async(None, None, new_transport))
+    await probing_started.wait()
+    discovery.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await discovery
+    assert len(built) == 1
+    with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
+        await built[0].ensure_verified()
+
+
+def test_interrupted_discovery_closes_the_candidate_in_flight(atc: Recorder) -> None:
+    built: list[AttestedTransport] = []
+
+    def new_transport(enclave: Enclave) -> AttestedTransport:
+        def fetch() -> Verification:
+            raise KeyboardInterrupt
+
+        built.append(AttestedTransport(Enclave(enclave.host, enclave.repo, _fetch=fetch), FakeMode()))
+        return built[-1]
+
+    with pytest.raises(KeyboardInterrupt):
+        discover(None, None, new_transport)
+    assert len(built) == 1
+    with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
+        built[0].ensure_verified()
 
 
 @pytest.mark.asyncio

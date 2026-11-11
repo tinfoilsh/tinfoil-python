@@ -1,7 +1,7 @@
 """The OpenAI wrappers: every request goes through the attested HTTP client to the route's URL, the caller's
 ``http_client`` and ``base_url`` cannot replace it, the realtime resource is refused, copies keep the attested
-client, API errors pass through unchanged and a client error raised from the transport is reachable behind
-the library's connection error."""
+client, a failed constructor closes the one it created, API errors pass through unchanged and a client error
+raised from the transport is reachable behind the library's connection error."""
 
 from __future__ import annotations
 
@@ -181,6 +181,35 @@ class TestConstruction:
         assert all(r.url.host == "enclave.example" for r in recorder.requests)
         assert json.loads(recorder.bodies[0])["user_cache_secret"] == "s", "the chat body passed the secret layer"
         client.close()
+
+    def test_constructor_failure_closes_the_attested_client_it_created(
+        self, offline: Recorder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        closes: list[EnclaveHTTPClient] = []
+        original = EnclaveHTTPClient.close
+
+        def close(self: EnclaveHTTPClient) -> None:
+            closes.append(self)
+            original(self)
+
+        monkeypatch.setattr(EnclaveHTTPClient, "close", close)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with pytest.raises(ConfigurationError, match="http_client"):
+            EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp", http_client=httpx.Client())
+        assert len(closes) == 1, "the attested client created for the refused options is closed"
+        with pytest.raises(openai.OpenAIError):
+            EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp")  # no api_key anywhere
+        assert len(closes) == 2, "so is one the openai constructor refuses"
+        for closed in closes:
+            with pytest.raises(ConfigurationError, match="closed"):
+                closed.ensure_verified()
+        client = EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp", api_key="k")
+        with pytest.raises(ConfigurationError, match="http_client"):
+            client.with_options(http_client=httpx.Client())
+        assert len(closes) == 2, "a copy's failure leaves the original's attested client open"
+        client.http_client.ensure_verified()
+        client.close()
+        assert len(closes) == 3
 
     def test_drop_in_client_takes_only_openai_options(self, offline: Recorder) -> None:
         offline.handler = lambda request: (

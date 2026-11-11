@@ -1,5 +1,6 @@
-"""The gateway: the catalog, the pin policy, routing headers and the cache salt, the bound on buffered uploads,
-seal redirects with their single replay and bound, replica selection and the catalog cache."""
+"""The gateway: the catalog, the pin policy, routing headers and the cache salt spliced into the body, the bound
+on buffered uploads, seal redirects with their single replay and bound, replica selection and retention, and
+the catalog cache."""
 
 from __future__ import annotations
 
@@ -85,6 +86,10 @@ class FakeChain(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         assert self.keyed.transport is not None
         return self.keyed.transport.handle_request(request)
+
+    def close(self) -> None:
+        if self.keyed.transport is not None:
+            self.keyed.transport.close()
 
 
 def seal_transport(
@@ -257,6 +262,44 @@ class TestRouting:
         assert b'"seed":9007199254740993' in prepared.body
         assert json.loads(prepared.body)["cache_salt"] == cache_salt("s", "")
         assert prepared.body.count(b"cache_salt") == 1
+
+    @pytest.mark.parametrize(
+        ("body", "want"),
+        [
+            (
+                b'{ "messages" : [ {"role":"user","content":"hello"} ],\n\t"seed":9007199254740993 ,"model":"m",'
+                b'"user_cache_secret":"s"}',
+                b'{ "messages" : [ {"role":"user","content":"hello"} ],\n\t"seed":9007199254740993 ,"model":"m",'
+                b'"cache_salt":%s}',
+            ),
+            (
+                b'{"user_cache_secret":"s" , "model":"m","cache_salt" : "old","n":1.50}',
+                b'{"model":"m","cache_salt" : %s,"n":1.50}',
+            ),
+            (b'{ "user_cache_secret" : "s" }', b'{  "cache_salt":%s}'),
+            (b'{"a":1,"user_cache_secret":"s","cache_salt":"old"}', b'{"a":1,"cache_salt":%s}'),
+            (b'{"a":1, "user_cache_secret":"s"}', b'{"a":1,"cache_salt":%s}'),
+            (b'{"cache_salt":"old","user_cache_secret":"s","z":[ ]}', b'{"cache_salt":%s,"z":[ ]}'),
+            (b'{"model":"m","n":1e3}', b'{"model":"m","n":1e3,"cache_salt":%s}'),
+        ],
+        ids=[
+            "odd whitespace and a large integer",
+            "secret first and a salt to replace",
+            "the secret alone",
+            "secret then salt at the end",
+            "secret last after whitespace",
+            "salt then secret",
+            "no secret member",
+        ],
+    )
+    def test_prepare_splices_only_the_secret_members(self, body: bytes, want: bytes) -> None:
+        """Everything the caller sent other than the two members stays byte for byte: whitespace, key order and
+        number spellings included."""
+        headers = httpx.Headers({"Content-Type": "application/json", "Authorization": "Bearer test-api-key"})
+        prepared = prepare("POST", "/v1/chat/completions", headers, body, "s")
+        salt = json.dumps(cache_salt("s", "test-api-key")).encode()
+        assert prepared.body == want.replace(b"%s", salt)
+        assert json.loads(prepared.body)["cache_salt"] == cache_salt("s", "test-api-key")
 
     def test_prepare_without_a_secret_keeps_the_callers_prefix(self) -> None:
         headers = httpx.Headers({"Content-Type": "application/json", CACHE_PREFIX_HEADER: "caller"})
@@ -724,6 +767,52 @@ class TestVerifications:
         with pytest.raises(NetworkError, match="verification failed"):
             unreachable.ensure_verified(MODEL)
         assert seal.models() == [MODEL]
+
+    def test_evicts_replicas_a_changed_catalog_no_longer_lists(self) -> None:
+        closes: dict[str, int] = {}
+        entries: dict[str, Catalog] = {"current": catalog(("a.example",))}
+
+        class Counting(httpx.BaseTransport):
+            def __init__(self, host: str) -> None:
+                self.host = host
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                return httpx.Response(204 if request.url.path == "/stream" else 200, stream=httpx.ByteStream(b"body"))
+
+            def close(self) -> None:
+                closes[self.host] = closes.get(self.host, 0) + 1
+
+        seal = seal_transport(Counting, catalog_entries=None)
+        seal._supplied = lambda: entries["current"]
+
+        def post(path: str = "/v1/chat/completions") -> httpx.Response:
+            return seal.handle_request(
+                httpx.Request(
+                    "POST",
+                    f"https://gateway.example{path}",
+                    headers={"Content-Type": "application/json"},
+                    content=b'{"model":"test-model"}',
+                )
+            )
+
+        post().read()
+        streaming = post("/stream")  # a response in flight through a.example
+        assert [v.host for v in seal.verifications()] == ["a.example"]
+        entries["current"] = catalog(("a.example",))  # equal content: nothing changes
+        post().read()
+        assert closes == {}
+        entries["current"] = catalog(("b.example",))
+        post().read()
+        assert [v.host for v in seal.verifications()] == ["b.example"], "a.example is no longer retained"
+        assert closes == {}, "the evicted replica stays open while its response is in flight"
+        streaming.close()
+        assert closes == {"a.example": 1}, "and closes once the response is done"
+        entries["current"] = catalog(("a.example",))
+        post().read()
+        assert closes == {"a.example": 1, "b.example": 1}, "an idle evicted replica closes at once"
+        assert [v.host for v in seal.verifications()] == ["a.example"], "a relisted host gets a new transport"
+        seal.close()
+        assert closes == {"a.example": 2, "b.example": 1}
 
     def test_keeps_one_transport_per_replica(self) -> None:
         arrived = threading.Barrier(2, timeout=5)

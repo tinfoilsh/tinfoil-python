@@ -32,6 +32,8 @@ from tinfoil._v3.verifier import (
 
 FRESHNESS_EXPIRED = "attestation freshness witnesses have expired; retry verification with fresh evidence"
 """The message of the AttestationError for a verification whose witnesses no longer authorize requests."""
+DEADLINE_EXCEEDED = "verification did not complete before its deadline"
+"""The message of the NetworkError for a verification that ran past the deadline it was given."""
 
 VERIFICATION_RETRIES = 1
 CANDIDATE_VERIFICATION_RETRIES = 0
@@ -56,9 +58,11 @@ class Enclave:
     ``host`` is the enclave, a host with an optional port. ``relay``, when
     set, is a host that fetches attestation from the enclave on the
     client's behalf. ``repo`` pins a repository or registry project,
-    ``org/project[@revision][@sha256:digest]``; empty accepts configs
-    authorized by the verifier's registry trust. ``verifier`` is the
-    policy, which several enclaves can share; None selects the defaults.
+    ``org/project[@revision][@sha256:digest]``; empty accepts the configs
+    that the verifier's configured config trust authorizes: the public or
+    the caller's registry, the caller's signing keys, a config authorizer
+    or an embedded config. ``verifier`` is the policy, which several
+    enclaves can share; None selects the defaults.
     ``verification_check``, when set, is called with each verification
     that passes the verifier; raising rejects it without a retry.
 
@@ -101,7 +105,10 @@ class Enclave:
 
     def verify(self, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None) -> Verification:
         """Fetch and verify the enclave's attestation, retrying once after a network or attestation failure. The
-        verification it returns is fresh and has passed the verification check."""
+        verification it returns is fresh and has passed the verification check. ``timeout`` bounds each network
+        operation of the fetch; ``deadline``, a ``time.monotonic`` instant, bounds the whole of each attempt,
+        the fetch, the verification and the check included, and no retry starts once it has passed: an attempt
+        that completes after it is a NetworkError."""
         return self._verify(VERIFICATION_RETRIES, timeout, deadline)
 
     def verify_once(self, *, timeout: TimeoutTypes = DEFAULT_TIMEOUT, deadline: float | None = None) -> Verification:
@@ -124,11 +131,15 @@ class Enclave:
         first: TinfoilError | None = None
         for attempt in range(retries + 1):
             try:
+                check_deadline(deadline)
                 verified = self._fetch() if self._fetch is not None else self._fetch_verification(timeout, deadline)
                 self._admit(verified)
+                # The verification and the check are not bounded by the fetch's timeouts, so the deadline is
+                # checked again before the result is accepted.
+                check_deadline(deadline)
                 return verified
             except TinfoilError as err:
-                if attempt == retries or not retryable(err):
+                if attempt == retries or not retryable(err) or not _retry_fits(deadline):
                     if first is not None:
                         err.__context__ = first
                     raise
@@ -140,14 +151,16 @@ class Enclave:
         first: TinfoilError | None = None
         for attempt in range(retries + 1):
             try:
+                check_deadline(deadline)
                 if self._fetch_async is not None:
                     verified = await self._fetch_async()
                 else:
                     verified = await self._fetch_verification_async(timeout, deadline)
                 self._admit(verified)
+                check_deadline(deadline)
                 return verified
             except TinfoilError as err:
-                if attempt == retries or not retryable(err):
+                if attempt == retries or not retryable(err) or not _retry_fits(deadline):
                     if first is not None:
                         err.__context__ = first
                     raise
@@ -186,6 +199,17 @@ class Enclave:
         return verified
 
 
+def check_deadline(deadline: float | None) -> None:
+    """Raises NetworkError once ``deadline``, a ``time.monotonic`` instant, has passed; None is no deadline."""
+    if deadline is not None and time.monotonic() > deadline:
+        raise NetworkError(DEADLINE_EXCEEDED)
+
+
+def _retry_fits(deadline: float | None) -> bool:
+    """Whether the retry delay and another attempt can start before ``deadline``."""
+    return deadline is None or time.monotonic() + VERIFICATION_RETRY_DELAY < deadline
+
+
 def check_freshness(verified: Verification) -> None:
     """Rejects a verification whose witnesses no longer authorize requests. A verification without a deadline has
     nothing that authorizes requests now, so it is rejected as well."""
@@ -222,10 +246,12 @@ def retryable(err: TinfoilError) -> bool:
 
 
 __all__ = [
+    "DEADLINE_EXCEEDED",
     "FRESHNESS_EXPIRED",
     "VERIFICATION_RETRY_DELAY",
     "Enclave",
     "VerificationRejected",
+    "check_deadline",
     "check_freshness",
     "is_fresh",
     "retryable",

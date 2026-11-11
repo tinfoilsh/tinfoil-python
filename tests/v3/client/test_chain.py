@@ -409,6 +409,11 @@ def test_key_rejection_markers() -> None:
     assert isinstance(err, AttestationError)
     assert isinstance(err.__cause__, KeyRejectedError)
     assert str(err) == "attestation error: rotated"
+    pinned = AttestationError("certificate does not match")
+    tls = key_rejection(_PeerLacksKey(pinned))
+    assert str(tls) == "attestation error: certificate does not match", "a client error's message is carried once"
+    assert isinstance(tls.__cause__, KeyRejectedError)
+    assert tls.__cause__.__cause__ is pinned
     plain: Callable[[], NetworkError] = lambda: network_error("x")  # noqa: E731
     assert not replayable(httpx.Request("POST", "https://e.example", content=iter([b"x"])))
     assert replayable(httpx.Request("GET", "https://e.example"))
