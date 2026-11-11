@@ -1,8 +1,10 @@
 """Attested HTTP and OpenAI clients for Tinfoil's enclaves.
 
 The enclave and router clients verify before the constructor returns;
-gateway clients verify each model's replica on its first request. Every
-request is bound to the keys of the current verification. The verifier that appraises the
+gateway clients verify each model's replica on its first request. The
+asynchronous clients are built with ``await Cls.create(...)``, which is
+where they verify, since their constructor raises. Every request is bound
+to the keys of the current verification. The verifier that appraises the
 attestation documents is the ``verifier`` subpackage; its records and
 errors are not re-exported here.
 """

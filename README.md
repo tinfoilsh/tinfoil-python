@@ -167,7 +167,7 @@ client = GatewayOpenAIClient(
 
 ## Reading the verification
 
-`client.http_client.current` is the last successful verification, or `None` before the first; `ensure_verified()` returns one that is valid now, verifying again first if the cached one has expired. Both are a `tinfoil.verifier.Verification`: the facts that the attestation document proved, such as `code_tag`, `code_digest`, `config_repo`, `enclave_measurement`, `tls_public_key_fp`, `hpke_public_key` and `freshness_expires_at`, with `metadata.verified_at` recorded from the local clock. `to_json()` serializes the record.
+On an enclave or router client, `client.http_client.current` is the last successful verification, or `None` before the first; `ensure_verified()` returns one that is valid now, verifying again first if the cached one has expired. Both are a `tinfoil.verifier.Verification`: the facts that the attestation document proved, such as `code_tag`, `code_digest`, `config_repo`, `enclave_measurement`, `tls_public_key_fp`, `hpke_public_key` and `freshness_expires_at`, with `metadata.verified_at` recorded from the local clock. `to_json()` serializes the record.
 
 ```python
 import os
@@ -185,7 +185,9 @@ if current is not None:
     print(current.freshness_expires_at)
 ```
 
-To reject a verified enclave by its facts, pass `verification_check=` to a route client; to pin registers, set the freshness bound or supply your own trust, pass `verifier=` a `tinfoil.verifier.Verifier`.
+A gateway client verifies one replica per model, so its accessors differ: `ensure_verified(model)` returns a valid verification of a replica serving `model`, and `current` is a list of `ReplicaVerification` records, one per replica used so far and still listed by the catalog, each with the replica's `host`, the `models` requested through it, the `reference` it was verified against and its `verification`.
+
+To reject a verified enclave by its facts, pass `verification_check=` to a route client. To change what the verifier itself requires, pass `verifier=` a `tinfoil.verifier.Verifier`: `Verifier(pinned_registers=...)` pins registers that the enclave must have measured, `freshness_max_age` bounds how old a witness or approval may be, and the trust options supply your own roots.
 
 ## Errors
 
