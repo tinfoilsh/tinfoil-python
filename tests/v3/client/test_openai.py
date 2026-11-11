@@ -266,6 +266,21 @@ class TestConstruction:
         assert "RouterOpenAIClient" in str(err.value)
         assert offline.requests == [], "the options are refused before discovery"
 
+    @pytest.mark.parametrize("option", sorted(ROUTE_OPTIONS))
+    def test_drop_in_copies_refuse_each_route_option(self, offline: Recorder, option: str) -> None:
+        """A route option is refused on ``copy`` and ``with_options`` as on the constructor, rather than dropped
+        in favor of the attested client's own."""
+        offline.handler = lambda request: (
+            response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
+        )
+        client = create_client(api_key="k")
+        for copy in (client.with_options, client.copy):
+            with pytest.raises(ConfigurationError) as err:
+                copy(**foreign(**{option: "x"}))
+            assert str(err.value) == DROP_IN_OPTIONS.format(name="Client", keys=option, route="RouterOpenAIClient")
+        assert isinstance(client.with_options(max_retries=0), Client)
+        client.close()
+
     def test_drop_in_client_takes_only_openai_options(self, offline: Recorder) -> None:
         offline.handler = lambda request: (
             response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
@@ -384,6 +399,14 @@ async def test_async_wrappers(offline: Recorder) -> None:
     assert isinstance(drop_in, AsyncClient)
     assert isinstance(drop_in, AsyncRouterOpenAIClient)
     assert drop_in.http_client.enclave == "inference.tinfoil.sh"
+    for option in sorted(ROUTE_OPTIONS):
+        for copy in (drop_in.with_options, drop_in.copy):
+            with pytest.raises(ConfigurationError) as err:
+                copy(**foreign(**{option: "x"}))
+            assert str(err.value) == DROP_IN_OPTIONS.format(
+                name="AsyncClient", keys=option, route="AsyncRouterOpenAIClient"
+            )
+    assert isinstance(drop_in.with_options(max_retries=0), AsyncClient)
     with pytest.raises(ConfigurationError, match=REALTIME_UNAVAILABLE):
         realtime_of(drop_in)
     await drop_in.close()

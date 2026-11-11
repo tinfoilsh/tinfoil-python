@@ -10,6 +10,7 @@ from tinfoil._v3._url import (
     USERINFO_REFUSED,
     allowed_origins,
     enclave_url_header_value,
+    has_query_or_fragment,
     is_loopback,
     origin_of,
     validate_base_url,
@@ -92,6 +93,8 @@ def test_validate_base_url_accepts(base_url: str) -> None:
         "https://proxy.example/v1/?api-version=1",
         "https://proxy.example/v1/#fragment",
         "http://localhost:8080/v1?x=1",
+        "https://proxy.example/v1/?",
+        "https://proxy.example/v1/#",
     ],
 )
 def test_validate_base_url_rejects(base_url: str) -> None:
@@ -100,10 +103,20 @@ def test_validate_base_url_rejects(base_url: str) -> None:
 
 
 def test_validate_base_url_names_a_query_or_fragment() -> None:
-    for base_url in ("https://proxy.example/v1/?x=1", "https://proxy.example/v1/#f", "https://proxy.example/v1?x"):
+    """A query or a fragment is refused by name, including a bare delimiter, which parses as no component and
+    would otherwise be dropped with the trailing slash."""
+    for base_url in (
+        "https://proxy.example/v1/?x=1",
+        "https://proxy.example/v1/#f",
+        "https://proxy.example/v1?x",
+        "https://proxy.example/v1/?",
+        "https://proxy.example/v1/#",
+    ):
+        assert has_query_or_fragment(base_url), base_url
         with pytest.raises(ConfigurationError) as err:
             validate_base_url(base_url)
         assert str(err.value) == QUERY_OR_FRAGMENT_REFUSED
+    assert not has_query_or_fragment("https://proxy.example/v1/")
 
 
 def test_validate_base_url_normalizes_the_trailing_slash() -> None:

@@ -168,7 +168,12 @@ async def async_key() -> str:
     return "k"
 
 
-options: OpenAIOptions = {{"api_key": key, "timeout": httpx.Timeout(10.0), "max_retries": 0}}
+options: OpenAIOptions = {{
+    "api_key": key,
+    "timeout": httpx.Timeout(10.0),
+    "max_retries": 0,
+    "websocket_base_url": httpx.URL("wss://enclave.example/v1/"),
+}}
 async_options: AsyncOpenAIOptions = {{"api_key": async_key, "default_headers": {{"X-Trace": "1"}}}}
 overrides: OpenAICopyOptions = {{"set_default_headers": {{}}, "timeout": 1.0}}
 

@@ -263,8 +263,9 @@ class TestDeadline:
 
 
 def test_verification_without_a_deadline_is_rejected() -> None:
-    """An all-embedded policy endorses no deadline, so the client cannot bound requests; the message says so
-    rather than reporting an expiry, and the rejection is retried like any other attestation failure."""
+    """A verification that no endorsed reference gives a deadline, from an all-embedded policy or from a
+    caller-authorized config over embedded runtime and platform references, cannot bound requests; the message
+    says so rather than reporting an expiry, and the rejection is retried like any other attestation failure."""
     fetches = 0
 
     def fetch() -> Verification:
@@ -275,6 +276,7 @@ def test_verification_without_a_deadline_is_rejected() -> None:
     with pytest.raises(AttestationError) as err:
         fake_enclave(fetch).verify()
     assert str(err.value) == NO_FRESHNESS_DEADLINE
+    assert "when no reference endorses a deadline" in str(err.value), "the message names the cause, not one policy"
     assert "expired" not in str(err.value)
     assert fetches == 2
     with pytest.raises(AttestationError, match=FRESHNESS_EXPIRED):

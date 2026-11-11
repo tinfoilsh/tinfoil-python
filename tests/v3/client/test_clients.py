@@ -373,6 +373,13 @@ class TestGatewayClient:
             GatewayHTTPClient(url="https://u:hunter2@gateway.example/v1/", catalog=dict)
         assert str(err.value) == GATEWAY_URL_INVALID
 
+    @pytest.mark.parametrize("url", ["https://gateway.example/v1/?", "https://gateway.example/v1/#"])
+    def test_refuses_a_bare_query_or_fragment_delimiter(self, network: Network, url: str) -> None:
+        with pytest.raises(ConfigurationError) as err:
+            GatewayHTTPClient(url=url, catalog=dict)
+        assert str(err.value) == GATEWAY_URL_INVALID
+        assert network.requests == []
+
     def test_fetches_the_catalog_before_returning(self, network: Network) -> None:
         with pytest.raises(NetworkError):
             GatewayHTTPClient(url="https://gateway.example/v1/")
