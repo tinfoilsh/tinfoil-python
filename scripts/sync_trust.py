@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["tuf>=5,<8", "cryptography>=43", "certifi>=2025.1.31"]
+# dependencies = ["tuf>=6,<8", "cryptography>=43", "certifi>=2025.1.31"]
 # ///
 """Regenerate the verifier's embedded trust material from its authoritative sources.
 
@@ -16,13 +16,18 @@ signing key has no vendor download; it is a hand-maintained constant in this
 script, pinned by its SHA-256.
 
 Every source is fetched and checked before anything is written, the modules
-are rendered into a temporary directory, and they replace the committed ones
-only after every render succeeded, so a failure leaves the constants
-untouched. Checks before writing:
+are staged beside the committed ones, and each staged file is moved onto its
+target only after every render succeeded; a move that fails restores the
+targets already replaced, so the constants are replaced as a set or not at
+all. Checks before writing:
 
-- every download completes within the timeout and is non-empty;
+- no socket operation of a download (the connection, or a wait for data)
+  stalls longer than ``TIMEOUT_SECONDS``, for the direct downloads and for
+  the TUF client's fetches alike, and every body is non-empty; a transfer
+  that keeps delivering data is not bounded as a whole;
 - the bootstrap TUF root has the pinned SHA-256, and the trusted root is JSON
-  with the expected media type and every authority kind present;
+  with the expected media type and every authority kind present, and the
+  verifier's own strict parser accepts it, run in the project environment;
 - each PEM holds exactly the expected certificates: the AMD chains the ASK
   then the ARK, with the ASK signed by the ARK and the ARK self-signed; the
   Intel file one self-signed root;
@@ -39,12 +44,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import ssl
+import subprocess
 import sys
 import tempfile
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,12 +62,22 @@ from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from tuf.ngclient import Updater
+from tuf.ngclient import Updater, Urllib3Fetcher
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TRUST_DIR = REPO_ROOT / "src" / "tinfoil" / "verifier" / "_trust"
 
 TIMEOUT_SECONDS = 60
+"""The bound on one socket operation, the connection or one wait for data, of every download: the direct ones and,
+through its fetcher, the TUF client's. No transfer is bounded as a whole."""
+
+PARSE_TRUSTED_ROOT = (
+    "import sys\n"
+    "from tinfoil.verifier._sigstore.trusted_root import parse_trusted_root\n"
+    "parse_trusted_root(sys.stdin.buffer.read())\n"
+)
+"""Runs in the project environment, which holds the package and its dependencies; this script resolves only its
+own."""
 
 TRUSTED_ROOT_MEDIA_TYPE = "application/vnd.dev.sigstore.trustedroot+json;version=0.1"
 
@@ -110,7 +128,8 @@ class Source:
 
 
 def fetch(url: str) -> Source:
-    """Download ``url`` with a timeout; an empty body or any transport error is a SyncError."""
+    """Download ``url``; a socket operation that stalls past the timeout, an empty body or any transport error is
+    a SyncError."""
     fetched_at = datetime.now(UTC)
     # The interpreter that runs this script may have no system trust store; the
     # Mozilla bundle that certifi ships verifies the vendors' TLS certificates.
@@ -144,6 +163,7 @@ def fetch_sigstore_trusted_root(workdir: Path) -> Source:
             metadata_base_url=SIGSTORE_TUF_URL,
             target_dir=str(targets_dir),
             target_base_url=f"{SIGSTORE_TUF_URL}/targets",
+            fetcher=Urllib3Fetcher(socket_timeout=TIMEOUT_SECONDS),
             bootstrap=initial_root.content,
         )
         updater.refresh()
@@ -162,6 +182,8 @@ def fetch_sigstore_trusted_root(workdir: Path) -> Source:
 
 
 def check_trusted_root(source: Source) -> None:
+    """The quick shape checks, then the verifier's own strict parser, so that a root it would reject is never
+    committed."""
     try:
         root = json.loads(source.content.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as err:
@@ -171,6 +193,22 @@ def check_trusted_root(source: Source) -> None:
     for member in ("tlogs", "ctlogs", "certificateAuthorities", "timestampAuthorities"):
         if not root.get(member):
             raise SyncError(f"{source.url}: no {member}")
+    uv = shutil.which("uv")
+    if uv is None:
+        raise SyncError(f"{source.url}: uv is needed to run the verifier's trusted-root parser and was not found")
+    try:
+        result = subprocess.run(
+            [uv, "run", "--directory", str(REPO_ROOT), "python", "-c", PARSE_TRUSTED_ROOT],
+            input=source.content,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as err:
+        raise SyncError(f"{source.url}: cannot run the verifier's trusted-root parser: {err}") from err
+    if result.returncode != 0:
+        lines = result.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        detail = lines[-1] if lines else f"exit status {result.returncode}"
+        raise SyncError(f"{source.url}: the verifier rejects the trusted root: {detail}")
 
 
 def load_certificates(source: Source, count: int) -> list[x509.Certificate]:
@@ -356,29 +394,64 @@ def render_all(workdir: Path, allow_root_change: bool) -> dict[str, str]:
     }
 
 
+def commit_modules(outputs: dict[str, str], target: Path) -> None:
+    """Replace the modules under ``target`` with ``outputs``, as a set or not at all.
+
+    Every module is first written to a staged file beside its target, on
+    the same filesystem, so that each swap is one ``os.replace``. The swaps
+    run only once every file is staged; if one fails, the targets already
+    swapped are restored from their original contents and the remaining
+    staged files are removed.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    staged: dict[str, Path] = {}
+    originals: dict[str, bytes | None] = {}
+    try:
+        for name, text in outputs.items():
+            final = target / name
+            originals[name] = final.read_bytes() if final.is_file() else None
+            descriptor, path = tempfile.mkstemp(prefix=f".{name}.", suffix=".staged", dir=target)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            staged[name] = Path(path)
+    except OSError as err:
+        _discard(staged.values())
+        raise SyncError(f"staging modules under {target}: {err}") from err
+    swapped: list[str] = []
+    try:
+        for name, path in staged.items():
+            os.replace(path, target / name)
+            swapped.append(name)
+    except OSError as err:
+        for name in swapped:
+            original = originals[name]
+            if original is None:
+                (target / name).unlink(missing_ok=True)
+            else:
+                (target / name).write_bytes(original)
+        _discard(path for name, path in staged.items() if name not in swapped)
+        raise SyncError(f"replacing modules under {target}: {err}; the originals were restored") from err
+
+
+def _discard(paths: Iterable[Path]) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--allow-root-change", action="store_true", help="accept a self-signed root that differs")
     args = parser.parse_args(argv)
 
     with tempfile.TemporaryDirectory(prefix="sync_trust-") as tmp:
-        workdir = Path(tmp)
         try:
-            outputs = render_all(workdir, args.allow_root_change)
-            # Render everything into the temporary directory first; the committed
-            # modules are replaced only once every file is on disk.
-            staged = workdir / "staged"
-            staged.mkdir()
-            for name, text in outputs.items():
-                (staged / name).write_text(text)
+            outputs = render_all(Path(tmp), args.allow_root_change)
+            commit_modules(outputs, TRUST_DIR)
         except SyncError as err:
             print(f"sync_trust: {err}", file=sys.stderr)
             return 1
-
-        TRUST_DIR.mkdir(parents=True, exist_ok=True)
-        for name in outputs:
-            shutil.move(staged / name, TRUST_DIR / name)
-            print(f"wrote {TRUST_DIR / name}")
+    for name in outputs:
+        print(f"wrote {TRUST_DIR / name}")
     return 0
 
 
