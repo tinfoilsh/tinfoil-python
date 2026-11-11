@@ -165,20 +165,29 @@ def test_fetch_recomputes_each_requests_timeouts_from_the_time_left(mocked: Reco
 
 
 class Trickle(httpx.SyncByteStream):
-    """A body whose chunks arrive slowly, so a deadline passes while it is read."""
+    """A body whose chunks arrive slowly, so a deadline passes while it is read. ``yielded`` counts the chunks
+    the reader took."""
+
+    chunks = 10
+
+    def __init__(self) -> None:
+        self.yielded = 0
 
     def __iter__(self) -> Iterator[bytes]:
-        for _ in range(10):
+        for _ in range(self.chunks):
             time.sleep(0.03)
+            self.yielded += 1
             yield b"x"
 
 
 def test_fetch_stops_a_trickling_body_at_the_deadline(mocked: Recorder) -> None:
-    mocked.handler = lambda _: httpx.Response(200, stream=Trickle())
+    trickle = Trickle()
+    mocked.handler = lambda _: httpx.Response(200, stream=trickle)
     start = time.monotonic()
     with pytest.raises(NetworkError, match="no complete response"):
         fetch_document("enclave.example", "", NONCE, timeout=None, deadline=start + 0.1)
-    assert time.monotonic() - start < 0.25, "the read is abandoned at the deadline, not at the body's end"
+    assert 0 < trickle.yielded < Trickle.chunks, "the read is abandoned at the deadline, not at the body's end"
+    assert time.monotonic() - start < 2.0
 
 
 class Chunks(httpx.SyncByteStream, httpx.AsyncByteStream):

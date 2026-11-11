@@ -73,16 +73,24 @@ def through(client: openai.OpenAI, handler: Any = models_response) -> list[httpx
     return recorder.requests
 
 
-def below_the_attested_transport(client: EnclaveOpenAIClient, handler: Any) -> Recorder:
+def below_the_attested_transport(client: openai.OpenAI | openai.AsyncOpenAI, handler: Any) -> Recorder:
     """Puts a recorder where the enclave's connections would be, under the attested transport and every layer
     above it, so requests arrive through the whole chain."""
     recorder = Recorder(handler)
-    client.http_client._attested.keyed._current.transport._inner = recorder.transport  # type: ignore[union-attr]
+    holder: Any = client
+    holder.http_client._attested.keyed._current.transport._inner = (
+        recorder.async_transport if isinstance(client, openai.AsyncOpenAI) else recorder.transport
+    )
     return recorder
 
 
 CHAT = b'{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}'
 EMBEDDINGS = b'{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5]}],"model":"m"}'
+RESPONSE = (
+    b'{"id":"r1","object":"response","created_at":0,"model":"m","parallel_tool_calls":true,"tool_choice":"auto",'
+    b'"tools":[],"output":[{"type":"message","id":"m1","status":"completed","role":"assistant",'
+    b'"content":[{"type":"output_text","text":"ok","annotations":[]}]}]}'
+)
 
 
 def realtime_of(holder: object) -> object:
@@ -91,7 +99,12 @@ def realtime_of(holder: object) -> object:
 
 
 def by_path(request: httpx.Request) -> httpx.Response:
-    bodies = {"/v1/chat/completions": CHAT, "/v1/embeddings": EMBEDDINGS, "/v1/audio/transcriptions": b'{"text":"hi"}'}
+    bodies = {
+        "/v1/chat/completions": CHAT,
+        "/v1/embeddings": EMBEDDINGS,
+        "/v1/audio/transcriptions": b'{"text":"hi"}',
+        "/v1/responses": RESPONSE,
+    }
     return response(200, bodies[request.url.path], {"Content-Type": "application/json"})
 
 
@@ -212,6 +225,26 @@ class TestConstruction:
         assert all(r.url.host == "enclave.example" for r in recorder.requests)
         assert json.loads(recorder.bodies[0])["user_cache_secret"] == "s", "the chat body passed the secret layer"
         client.close()
+
+    def test_responses_go_through_the_attested_transport(self, offline: Recorder) -> None:
+        """The Responses API is reachable on each wrapper and takes the path chat does: the attested origin,
+        with the client-level cache secret in the body."""
+        offline.handler = lambda request: (
+            response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
+        )
+        enclave = EnclaveOpenAIClient(
+            "enclave.example", "org/repo", transport_mode="ehbp", user_cache_secret="s", api_key="k", max_retries=0
+        )
+        drop_in = create_client(api_key="k", max_retries=0)
+        for client, host, secret in (
+            (enclave, "enclave.example", "s"),
+            (drop_in, "inference.tinfoil.sh", "test-secret"),
+        ):
+            recorder = below_the_attested_transport(client, by_path)
+            assert client.responses.create(model="m", input="hi").output_text == "ok"
+            assert [(r.url.host, r.url.path) for r in recorder.requests] == [(host, "/v1/responses")]
+            assert json.loads(recorder.bodies[0])["user_cache_secret"] == secret, "the body passed the secret layer"
+            client.close()
 
     def test_gateway_client_refuses_a_base_url(self, offline: Recorder) -> None:
         """The gateway's base URL is its ``url`` option: a ``base_url`` is refused rather than dropped, from the
@@ -381,6 +414,23 @@ class TestErrors:
         enclave.chat.completions.create(**params, extra_body={"user_cache_secret": ""})
         assert [body["user_cache_secret"] for body in received] == ["client-level", "end-user-7", "client-level"]
         enclave.close()
+
+
+@pytest.mark.asyncio
+async def test_async_responses_go_through_the_attested_transport(offline: Recorder) -> None:
+    offline.handler = lambda request: (
+        response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
+    )
+    enclave = await AsyncEnclaveOpenAIClient.create(
+        "enclave.example", "org/repo", transport_mode="ehbp", user_cache_secret="s", api_key="k", max_retries=0
+    )
+    drop_in = await create_async_client(api_key="k", max_retries=0)
+    for client, host, secret in ((enclave, "enclave.example", "s"), (drop_in, "inference.tinfoil.sh", "test-secret")):
+        recorder = below_the_attested_transport(client, by_path)
+        assert (await client.responses.create(model="m", input="hi")).output_text == "ok"
+        assert [(r.url.host, r.url.path) for r in recorder.requests] == [(host, "/v1/responses")]
+        assert json.loads(recorder.bodies[0])["user_cache_secret"] == secret
+        await client.close()
 
 
 @pytest.mark.asyncio
