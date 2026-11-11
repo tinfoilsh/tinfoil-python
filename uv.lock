@@ -17,7 +17,6 @@ tinfoil-ehbp = false
 
 [manifest]
 constraints = [
-    { name = "dnspython", specifier = ">=2.9.0" },
     { name = "idna", specifier = ">=3.15" },
     { name = "pyjwt", specifier = ">=2.15.0" },
 ]

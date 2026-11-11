@@ -107,7 +107,6 @@ exclude-newer = "4 days"
 constraint-dependencies = [
     "idna>=3.15", # GHSA-65pc-fj4g-8rjx
     "pyjwt>=2.15.0", # GHSA-42vr-xj54-vc7v, GHSA-x33g-cr3x-6449 (via sigstore)
-    "dnspython>=2.9.0", # GHSA-45c3-73f7-pv4m (via sigstore -> pydantic[email])
 ]
 
 [tool.uv.exclude-newer-package]
