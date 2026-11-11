@@ -28,6 +28,9 @@ from tinfoil._v3.verifier import Verification
 
 CLIENT_CLOSED = "client is closed"
 """The message of the ConfigurationError that a closed client raises."""
+TRANSPORT_RETIRED = "transport retired after re-verification; retry the request"
+"""The message of the ConfigurationError for a request that reached a transport after a newer verification
+replaced it: the request was admitted against the old keys and must be sent again under the current ones."""
 
 USE_CLIENT_DEFAULT = httpx.USE_CLIENT_DEFAULT
 """The per-call ``timeout`` value that keeps the client's own."""
@@ -396,7 +399,8 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
 class RetiringTransport(httpx.BaseTransport):
     """A transport that can be retired: it stops taking requests and closes once the responses in flight are
     done, so a replaced binding's connections go away without cutting off a streaming response. ``close``
-    ends everything at once."""
+    ends everything at once. A request that arrives after retirement is refused as retired, so that the caller
+    knows to send it again, and after a plain close as closed."""
 
     def __init__(self, inner: httpx.BaseTransport) -> None:
         self._inner = inner
@@ -407,7 +411,9 @@ class RetiringTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         with self._lock:
-            if self._retired or self._closed:
+            if self._retired:
+                raise ConfigurationError(TRANSPORT_RETIRED)
+            if self._closed:
                 raise ConfigurationError(CLIENT_CLOSED)
             self._inflight += 1
         try:
@@ -450,7 +456,9 @@ class AsyncRetiringTransport(httpx.AsyncBaseTransport):
         self._closed = False
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if self._retired or self._closed:
+        if self._retired:
+            raise ConfigurationError(TRANSPORT_RETIRED)
+        if self._closed:
             raise ConfigurationError(CLIENT_CLOSED)
         self._inflight += 1
         try:
@@ -525,6 +533,7 @@ class _AsyncReleasingStream(httpx.AsyncByteStream):
 
 __all__ = [
     "CLIENT_CLOSED",
+    "TRANSPORT_RETIRED",
     "USE_CLIENT_DEFAULT",
     "AsyncAttestedTransport",
     "AsyncEHBPMode",

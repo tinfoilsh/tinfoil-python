@@ -9,6 +9,9 @@ from tinfoil._v3._errors import ConfigurationError
 
 USERINFO_REFUSED = "URL must not contain user information"
 """The message for a URL with a user name or password. The URL itself is never echoed."""
+QUERY_OR_FRAGMENT_REFUSED = "invalid base URL: a base URL must not carry a query or a fragment"
+"""The message for a base URL with a query or a fragment: request paths join under a base URL, so neither has a
+place there."""
 
 
 def origin_of(raw_url: str) -> str:
@@ -47,17 +50,21 @@ def request_origin(raw_url: str) -> str:
 
 def validate_base_url(base_url: str) -> str:
     """Checks that ``base_url`` is an absolute URL that keeps request headers private on the way to the enclave or
-    proxy: HTTPS, or HTTP to a loopback host, whose traffic never leaves the machine. Returns the URL with its path
-    ending in a slash. Raises ConfigurationError."""
+    proxy: HTTPS, or HTTP to a loopback host, whose traffic never leaves the machine. A query or a fragment is
+    refused, since request paths join under the URL. Returns the URL with its path ending in a slash. Raises
+    ConfigurationError."""
     try:
         origin = origin_of(base_url)
     except ValueError as err:
         raise ConfigurationError(f"invalid base URL: {err}") from None
-    if not origin.startswith("https://") and not is_loopback(urlsplit(base_url).hostname or ""):
+    parts = urlsplit(base_url)
+    if not origin.startswith("https://") and not is_loopback(parts.hostname or ""):
         raise ConfigurationError(
             "invalid base URL: HTTP is allowed only for localhost or a loopback IP address; "
             "use HTTPS to protect request headers"
         )
+    if parts.query or parts.fragment:
+        raise ConfigurationError(QUERY_OR_FRAGMENT_REFUSED)
     return with_trailing_slash(base_url)
 
 
@@ -136,6 +143,7 @@ def _split(raw_url: str) -> SplitResult:
 
 
 __all__ = [
+    "QUERY_OR_FRAGMENT_REFUSED",
     "USERINFO_REFUSED",
     "allowed_origins",
     "enclave_url_header_value",

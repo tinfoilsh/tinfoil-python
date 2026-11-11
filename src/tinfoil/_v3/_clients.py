@@ -406,7 +406,9 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
         return client
 
 
-GATEWAY_URL_INVALID = "gateway base URL must be an absolute HTTPS URL with a host and without user information"
+GATEWAY_URL_INVALID = (
+    "gateway base URL must be an absolute HTTPS URL with a host and without user information, a query or a fragment"
+)
 """The message for a gateway URL that is refused. The URL itself is never echoed, since it may carry
 credentials."""
 
@@ -418,9 +420,10 @@ def _gateway_url(url: str | None) -> tuple[str, str]:
         origin = origin_of(base_url)
     except ValueError:
         raise ConfigurationError(GATEWAY_URL_INVALID) from None
-    if not origin.startswith("https://"):
+    parts = urlsplit(base_url)
+    if not origin.startswith("https://") or parts.query or parts.fragment:
         raise ConfigurationError(GATEWAY_URL_INVALID)
-    return with_trailing_slash(base_url), urlsplit(base_url).netloc
+    return with_trailing_slash(base_url), parts.netloc
 
 
 class GatewayHTTPClient:

@@ -14,6 +14,7 @@ from tinfoil._v3 import _enclave, _fetch
 from tinfoil._v3._enclave import (
     DEADLINE_EXCEEDED,
     FRESHNESS_EXPIRED,
+    NO_FRESHNESS_DEADLINE,
     Enclave,
     VerificationRejected,
     retryable,
@@ -262,8 +263,22 @@ class TestDeadline:
 
 
 def test_verification_without_a_deadline_is_rejected() -> None:
+    """An all-embedded policy endorses no deadline, so the client cannot bound requests; the message says so
+    rather than reporting an expiry, and the rejection is retried like any other attestation failure."""
+    fetches = 0
+
+    def fetch() -> Verification:
+        nonlocal fetches
+        fetches += 1
+        return verification("key", deadline=None)
+
+    with pytest.raises(AttestationError) as err:
+        fake_enclave(fetch).verify()
+    assert str(err.value) == NO_FRESHNESS_DEADLINE
+    assert "expired" not in str(err.value)
+    assert fetches == 2
     with pytest.raises(AttestationError, match=FRESHNESS_EXPIRED):
-        fake_enclave(lambda: verification("key", deadline=None)).verify()
+        fake_enclave(lambda: verification("key", deadline=datetime.now(UTC) - timedelta(seconds=1))).verify()
 
 
 @pytest.mark.parametrize(

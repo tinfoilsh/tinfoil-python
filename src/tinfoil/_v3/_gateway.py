@@ -351,10 +351,11 @@ def prepare(method: str, path: str, headers: httpx.Headers, content: bytes | Non
         return Prepared(headers, body)
     scanned = _cachesecret.scan_object(text)
     if scanned is not None:
-        if _cachesecret.has_duplicates(
-            scanned, _cachesecret.MODEL_FIELD, _cachesecret.FIELD, _cachesecret.CACHE_SALT_FIELD
-        ):
-            raise ConfigurationError("request body repeats a model, user_cache_secret or cache_salt member")
+        routed = (_cachesecret.MODEL_FIELD, _cachesecret.FIELD, _cachesecret.CACHE_SALT_FIELD)
+        repeated = [key for key in routed if _cachesecret.has_duplicates(scanned, key)]
+        if repeated:
+            names = ", ".join(f'"{key}"' for key in repeated)
+            raise ConfigurationError(f"request body repeats the {names} member{'s' if len(repeated) > 1 else ''}")
         members = {member.key: member for member in scanned}
         model = members.get(_cachesecret.MODEL_FIELD)
         if not headers.get(MODEL_HEADER, "") and model is not None:
@@ -503,7 +504,8 @@ class _Shared(Generic[_T]):
     responses in flight are done. A host that a seal redirect named but the
     catalog does not list keeps its transport until the catalog next
     changes. A request routed from the previous catalog that reaches an
-    evicted transport is refused as closed.
+    evicted transport is refused as retired, and is routed by the current
+    catalog when it is sent again.
     """
 
     def __init__(
@@ -635,7 +637,8 @@ class _CatalogCache:
     """Fetches the catalog on first use and refreshes it on use once ``CATALOG_REFRESH_INTERVAL`` has passed.
     Concurrent callers share one fetch. Until a fetch succeeds, callers wait for it and a failure is retried on
     the next use. After that, callers never wait: a stale catalog is returned while a refresh runs in the
-    background, and a failed refresh keeps it for another interval."""
+    background, and a failed refresh keeps it for another interval. ``close`` starts no further refresh; one in
+    flight finishes on its own, and its result is dropped."""
 
     def __init__(self, fetch: Callable[[TimeoutTypes], Catalog]) -> None:
         self._fetch = fetch
@@ -644,11 +647,16 @@ class _CatalogCache:
         self._refresh_at = 0.0
         self._inflight: threading.Event | None = None
         self._error: BaseException | None = None
+        self._closed = False
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
 
     def get(self, timeout: TimeoutTypes) -> Catalog:
         with self._lock:
             if self._catalog is not None:
-                if time.monotonic() >= self._refresh_at and self._inflight is None:
+                if time.monotonic() >= self._refresh_at and self._inflight is None and not self._closed:
                     # Only this caller starts the refresh; moving the next refresh ahead now keeps later callers
                     # from starting another before this one finishes.
                     self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
@@ -686,9 +694,10 @@ class _CatalogCache:
             inflight.set()
             return
         with self._lock:
-            self._catalog = catalog
-            self._error = None
-            self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
+            if not self._closed:
+                self._catalog = catalog
+                self._error = None
+                self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
             self._inflight = None
         inflight.set()
 
@@ -819,6 +828,7 @@ class GatewayTransport(httpx.BaseTransport):
             self._closed = True
             transports = list(self._shared.enclaves.values())
             self._shared.enclaves = {}
+        self._cache.close()
         for transport in transports:
             transport.chain.close()
 
@@ -851,7 +861,8 @@ class GatewayTransport(httpx.BaseTransport):
 
 
 class _AsyncCatalogCache:
-    """``_CatalogCache`` on the event loop."""
+    """``_CatalogCache`` on the event loop. ``close`` also cancels a refresh in flight at its next await; one
+    past its last await finishes, and its result is dropped."""
 
     def __init__(self, fetch: Callable[[TimeoutTypes], Awaitable[Catalog]]) -> None:
         self._fetch = fetch
@@ -859,10 +870,11 @@ class _AsyncCatalogCache:
         self._refresh_at = 0.0
         self._inflight: asyncio.Task[None] | None = None
         self._error: BaseException | None = None
+        self._closed = False
 
     async def get(self, timeout: TimeoutTypes) -> Catalog:
         if self._catalog is not None:
-            if time.monotonic() >= self._refresh_at and self._inflight is None:
+            if time.monotonic() >= self._refresh_at and self._inflight is None and not self._closed:
                 self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
                 self._start(timeout)
             return self._catalog
@@ -899,11 +911,14 @@ class _AsyncCatalogCache:
             if self._catalog is not None:
                 self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
             return
+        if self._closed:
+            return
         self._catalog = catalog
         self._error = None
         self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
 
-    def cancel(self) -> None:
+    def close(self) -> None:
+        self._closed = True
         if self._inflight is not None:
             self._inflight.cancel()
 
@@ -1021,7 +1036,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         self._closed = True
-        self._cache.cancel()
+        self._cache.close()
         transports = list(self._shared.enclaves.values())
         self._shared.enclaves = {}
         for transport in transports:

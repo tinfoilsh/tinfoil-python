@@ -4,6 +4,7 @@ the catalog cache."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -29,6 +30,7 @@ from tinfoil._v3._gateway import (
     GatewayTransport,
     ModelPin,
     ReplicaTransport,
+    _AsyncCatalogCache,
     _CatalogCache,
     _Policy,
     _Replica,
@@ -350,13 +352,22 @@ class TestRouting:
 
     def test_prepare_refuses_repeated_security_members(self) -> None:
         headers = httpx.Headers({"Content-Type": "application/json"})
-        for body in (
-            b'{"model":"a","model":"b"}',
-            b'{"user_cache_secret":"a","user_cache_secret":"b"}',
-            b'{"cache_salt":"a","cache_salt":"b"}',
+        for body, name in (
+            (b'{"model":"a","model":"b"}', "model"),
+            (b'{"user_cache_secret":"a","user_cache_secret":"b"}', "user_cache_secret"),
+            (b'{"cache_salt":"a","cache_salt":"b"}', "cache_salt"),
         ):
-            with pytest.raises(ConfigurationError, match="repeats"):
+            with pytest.raises(ConfigurationError) as err:
                 prepare("POST", "/v1/chat/completions", headers, body, "s")
+            assert str(err.value) == f'request body repeats the "{name}" member'
+        with pytest.raises(ConfigurationError, match='repeats the "model", "cache_salt" members'):
+            prepare(
+                "POST",
+                "/v1/chat/completions",
+                headers,
+                b'{"model":"a","cache_salt":"x","model":"b","cache_salt":"y"}',
+                "s",
+            )
 
     def test_prompt_head_selection(self) -> None:
         def head(text: str) -> str | None:
@@ -933,6 +944,64 @@ class TestCatalogCache:
         time.sleep(0.05)
         assert "new" in cache.get(5.0), "the gateway's catalog is refreshed"
         assert fetches == 3
+
+    def test_close_drops_a_late_refresh(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A refresh in flight when the cache is closed finishes on its own, but its catalog is not kept and no
+        further refresh starts."""
+        monkeypatch.setattr(_gateway, "CATALOG_REFRESH_INTERVAL", 0.0)
+        release = threading.Semaphore(0)
+        fetches = 0
+
+        def fetch(timeout: TimeoutTypes) -> Catalog:
+            nonlocal fetches
+            fetches += 1
+            release.acquire(timeout=5)
+            return {"old": CatalogEntry("tinfoilsh/old", ("a",))} if fetches == 1 else catalog()
+
+        cache = _CatalogCache(fetch)
+        release.release()
+        assert "old" in cache.get(5.0)
+        assert "old" in cache.get(5.0), "the interval has passed, so this use starts a refresh"
+        inflight = cache._inflight
+        assert inflight is not None
+        cache.close()
+        release.release()
+        assert inflight.wait(5)
+        assert fetches == 2
+        assert "old" in cache.get(5.0), "the late result was dropped and no refresh starts after close"
+        assert cache._inflight is None
+        assert fetches == 2
+
+    @pytest.mark.asyncio
+    async def test_async_close_drops_a_late_refresh(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_gateway, "CATALOG_REFRESH_INTERVAL", 0.0)
+        release = asyncio.Event()
+        fetches = 0
+
+        async def fetch(_: TimeoutTypes) -> Catalog:
+            nonlocal fetches
+            fetches += 1
+            if fetches == 1:
+                return {"old": CatalogEntry("tinfoilsh/old", ("a",))}
+            await release.wait()
+            return catalog()
+
+        cache = _AsyncCatalogCache(fetch)
+        assert "old" in await cache.get(5.0)
+        assert "old" in await cache.get(5.0)
+        inflight = cache._inflight
+        assert inflight is not None
+        cache.close()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await inflight
+        assert "old" in await cache.get(5.0), "a cancelled refresh changes nothing and no refresh starts after close"
+        assert cache._inflight is None
+        past_cancel = _AsyncCatalogCache(fetch)
+        past_cancel._catalog = {"old": CatalogEntry("tinfoilsh/old", ("a",))}
+        past_cancel._closed = True
+        await past_cancel._load(5.0)
+        assert "old" in past_cancel._catalog, "a refresh past its last await finishes and its result is dropped"
 
 
 def test_models_and_current_without_network(monkeypatch: pytest.MonkeyPatch) -> None:

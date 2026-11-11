@@ -32,6 +32,12 @@ from tinfoil._v3.verifier import (
 
 FRESHNESS_EXPIRED = "attestation freshness witnesses have expired; retry verification with fresh evidence"
 """The message of the AttestationError for a verification whose witnesses no longer authorize requests."""
+NO_FRESHNESS_DEADLINE = (
+    "verification carries no freshness deadline; the client needs an endorsed deadline to bound requests "
+    "(use the verifier directly for an all-embedded policy)"
+)
+"""The message of the AttestationError for a verification without a freshness deadline: every reference came
+from the caller's embedded policy, so nothing endorsed bounds the time the enclave's keys may be used for."""
 DEADLINE_EXCEEDED = "verification did not complete before its deadline"
 """The message of the NetworkError for a verification that ran past the deadline it was given."""
 
@@ -213,8 +219,11 @@ def _retry_fits(deadline: float | None) -> bool:
 
 
 def check_freshness(verified: Verification) -> None:
-    """Rejects a verification whose witnesses no longer authorize requests. A verification without a deadline has
-    nothing that authorizes requests now, so it is rejected as well."""
+    """Rejects a verification whose witnesses no longer authorize requests. A verification without a deadline,
+    from an all-embedded policy, has nothing endorsed that bounds requests, so it is rejected as well, with a
+    message of its own."""
+    if verified.freshness_expires_at is None:
+        raise AttestationError(NO_FRESHNESS_DEADLINE)
     if not is_fresh(verified):
         raise AttestationError(FRESHNESS_EXPIRED)
 
@@ -250,6 +259,7 @@ def retryable(err: TinfoilError) -> bool:
 __all__ = [
     "DEADLINE_EXCEEDED",
     "FRESHNESS_EXPIRED",
+    "NO_FRESHNESS_DEADLINE",
     "VERIFICATION_RETRY_DELAY",
     "Enclave",
     "VerificationRejected",
