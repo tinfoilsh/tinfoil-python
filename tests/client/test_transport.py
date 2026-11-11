@@ -613,6 +613,46 @@ async def test_async_refresh_coalesces_and_survives_cancellation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_close_during_a_refresh_refuses_its_waiters() -> None:
+    """Close cancels the shared verification, and the callers waiting on it see the closed transport rather than
+    the cancellation; a caller's own cancellation still ends only its wait, and the verification goes on."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    attempts = 0
+
+    def fetch() -> Verification:
+        nonlocal attempts
+        attempts += 1
+        return verification("new")
+
+    async def fetch_async() -> Verification:
+        started.set()
+        await release.wait()
+        return fetch()
+
+    enclave = fake_enclave(fetch)
+    enclave._fetch_async = fetch_async
+    keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
+    waiters = [asyncio.create_task(keyed.ensure_verified()) for _ in range(2)]
+    await started.wait()
+    own = asyncio.create_task(keyed.ensure_verified())
+    await asyncio.sleep(0)
+    own.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await own
+    assert not waiters[0].done(), "one caller's cancellation leaves the verification and the other callers alone"
+    await keyed.aclose()
+    for waiter in waiters:
+        with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
+            await waiter
+    assert attempts == 0, "the cancelled verification never completed"
+    assert keyed.current is None
+    release.set()
+    with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
+        await keyed.ensure_verified()
+
+
+@pytest.mark.asyncio
 async def test_async_key_rejection_and_close() -> None:
     sent_under: list[str] = []
     fetches = 0

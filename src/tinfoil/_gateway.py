@@ -58,6 +58,7 @@ from tinfoil._transport import (
     EHBPMode,
     RetiringTransport,
     UseClientDefault,
+    _cancelling,
 )
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
 from tinfoil.verifier import Verification, Verifier, parse_reference
@@ -938,12 +939,6 @@ class _AsyncCatalogCache:
         self._closed = True
         if self._inflight is not None:
             self._inflight.cancel()
-
-
-def _cancelling() -> bool:
-    """Whether the running task has a cancellation request of its own pending."""
-    task = asyncio.current_task()
-    return task is not None and task.cancelling() > 0
 
 
 class AsyncGatewayTransport(httpx.AsyncBaseTransport):

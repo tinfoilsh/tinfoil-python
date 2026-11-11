@@ -304,7 +304,8 @@ class AttestedTransport(httpx.BaseTransport):
 
 class AsyncAttestedTransport(httpx.AsyncBaseTransport):
     """``AttestedTransport`` for ``httpx.AsyncClient``. A waiting caller's cancellation ends its own wait, not
-    the shared verification."""
+    the shared verification; ``aclose`` cancels the shared verification, and the callers waiting on it see the
+    closed transport's ConfigurationError."""
 
     def __init__(self, enclave: Enclave, mode: AsyncMode, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> None:
         self.enclave = enclave
@@ -379,6 +380,12 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
                 await asyncio.wait_for(asyncio.shield(refresh), _time_left(deadline))
             except TimeoutError:
                 raise NetworkError(DEADLINE_EXCEEDED) from None
+            except asyncio.CancelledError:
+                if _cancelling() or not refresh.cancelled():
+                    raise
+                # The wait ended because close cancelled the refresh, not because this caller was cancelled:
+                # the next pass refuses the closed transport.
+                continue
             force = False
 
     def _refresh_done(self, task: asyncio.Task[None]) -> None:
@@ -407,6 +414,12 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
 def _time_left(deadline: float | None) -> float | None:
     """The seconds until ``deadline``, a ``time.monotonic`` instant, never negative; None for no deadline."""
     return None if deadline is None else max(deadline - time.monotonic(), 0.0)
+
+
+def _cancelling() -> bool:
+    """Whether the running task has a cancellation request of its own pending."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 class RetiringTransport(httpx.BaseTransport):
