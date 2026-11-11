@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tinfoil._v3 import _cachesecret
+from tinfoil import _cachesecret
 
 
 @pytest.fixture(autouse=True)

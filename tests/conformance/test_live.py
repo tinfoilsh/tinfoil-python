@@ -24,8 +24,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 
 import tinfoil_conformance as adapter
-from tests.v3 import pki
-from tinfoil._v3.verifier import (
+from tests import pki
+from tinfoil.verifier import (
     KEY_SPKI_FP_SHA256_V1_FORMAT,
     KEY_X25519_HPKE_V1_FORMAT,
     LAYER_PROVENANCE,
