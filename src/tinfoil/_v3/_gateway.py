@@ -405,8 +405,7 @@ def multipart_model(body: bytes, boundary: str) -> str:
     for a missing boundary, a malformed body, or a missing, repeated, empty or file ``model`` part."""
     if not boundary:
         raise ConfigurationError("multipart upload is missing its boundary")
-    if len(body) > MAX_MULTIPART_BODY_SIZE:
-        raise ConfigurationError(f"multipart upload exceeds {MAX_MULTIPART_BODY_SIZE} bytes")
+    _check_multipart_size(len(body))
     header = f'Content-Type: multipart/form-data; boundary="{boundary}"\r\nMIME-Version: 1.0\r\n\r\n'.encode()
     message = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(header + body)
     if message.defects or not message.is_multipart():
@@ -1000,16 +999,29 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
 
 def _buffered(request: httpx.Request) -> bytes | None:
     """The body of a POST with a JSON or multipart content type, read into memory so it can be routed and
-    replayed; None for any other request, whose body is forwarded as it is."""
+    replayed; None for any other request, whose body is forwarded as it is. A multipart upload is read only up
+    to ``MAX_MULTIPART_BODY_SIZE``: one that declares a larger length is refused before any of it is read, and
+    one that streams past the limit is refused at the byte that crosses it."""
     if request.method.upper() != "POST":
         return None
     media_type, _ = _media_type(request.headers.get("Content-Type", ""))
     if media_type not in ("application/json", "multipart/form-data"):
         return None
-    if media_type == "multipart/form-data" and request.headers.get(MODEL_HEADER, ""):
-        # Explicit routing keeps uploads streaming.
-        return None
+    if media_type == "multipart/form-data":
+        if request.headers.get(MODEL_HEADER, ""):
+            # Explicit routing keeps uploads streaming.
+            return None
+        _check_declared_length(request)
+        if not replayable(request):
+            assert isinstance(request.stream, httpx.SyncByteStream)
+            body = bytearray()
+            for chunk in request.stream:
+                body += chunk
+                _check_multipart_size(len(body))
+            request.stream = httpx.ByteStream(bytes(body))
     request.read()
+    if media_type == "multipart/form-data":
+        _check_multipart_size(len(request.content))
     return request.content
 
 
@@ -1019,10 +1031,33 @@ async def _buffered_async(request: httpx.Request) -> bytes | None:
     media_type, _ = _media_type(request.headers.get("Content-Type", ""))
     if media_type not in ("application/json", "multipart/form-data"):
         return None
-    if media_type == "multipart/form-data" and request.headers.get(MODEL_HEADER, ""):
-        return None
+    if media_type == "multipart/form-data":
+        if request.headers.get(MODEL_HEADER, ""):
+            return None
+        _check_declared_length(request)
+        if not replayable(request):
+            assert isinstance(request.stream, httpx.AsyncByteStream)
+            body = bytearray()
+            async for chunk in request.stream:
+                body += chunk
+                _check_multipart_size(len(body))
+            request.stream = httpx.ByteStream(bytes(body))
     await request.aread()
+    if media_type == "multipart/form-data":
+        _check_multipart_size(len(request.content))
     return request.content
+
+
+def _check_declared_length(request: httpx.Request) -> None:
+    """Refuses a multipart upload whose ``Content-Length`` is over the limit before reading any of it."""
+    declared = request.headers.get("Content-Length", "")
+    if declared.isdigit():
+        _check_multipart_size(int(declared))
+
+
+def _check_multipart_size(size: int) -> None:
+    if size > MAX_MULTIPART_BODY_SIZE:
+        raise ConfigurationError(f"multipart upload exceeds {MAX_MULTIPART_BODY_SIZE} bytes")
 
 
 __all__ = [

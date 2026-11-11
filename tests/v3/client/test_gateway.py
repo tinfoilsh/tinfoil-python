@@ -1,12 +1,12 @@
-"""The gateway: the catalog, the pin policy, routing headers and the cache salt, seal redirects with their single
-replay and bound, replica selection and the catalog cache."""
+"""The gateway: the catalog, the pin policy, routing headers and the cache salt, the bound on buffered uploads,
+seal redirects with their single replay and bound, replica selection and the catalog cache."""
 
 from __future__ import annotations
 
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import replace
 
 import httpx
@@ -383,6 +383,65 @@ class TestMultipart:
             "POST", "/v1/audio/transcriptions", httpx.Headers({**headers, MODEL_HEADER: "caller"}), None, "s"
         )
         assert routed.body is None, "an explicitly routed upload streams"
+
+    def test_oversized_uploads_are_refused_before_they_are_buffered(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_gateway, "MAX_MULTIPART_BODY_SIZE", 64)
+        seal = seal_transport(lambda _: pytest.fail("no replica is touched"))
+        headers = {"Content-Type": "multipart/form-data; boundary=b1"}
+        url = "https://gateway.example/v1/audio/transcriptions"
+        read: list[int] = []
+
+        def chunks(count: int) -> Iterator[bytes]:
+            for _ in range(count):
+                read.append(1)
+                yield b"x" * 16
+
+        declared = httpx.Request("POST", url, headers={**headers, "Content-Length": "65"}, content=chunks(1))
+        with pytest.raises(ConfigurationError, match="exceeds 64 bytes"):
+            seal.handle_request(declared)
+        assert read == [], "a declared length over the limit is refused before any of the body is read"
+
+        streaming = httpx.Request("POST", url, headers=headers, content=chunks(100))
+        with pytest.raises(ConfigurationError, match="exceeds 64 bytes"):
+            seal.handle_request(streaming)
+        assert len(read) == 5, "a streamed body is read only up to the chunk that crosses the limit"
+
+        buffered = httpx.Request("POST", url, headers=headers, content=b"x" * 65)
+        with pytest.raises(ConfigurationError, match="exceeds 64 bytes"):
+            seal.handle_request(buffered)
+        within = httpx.Request("POST", url, headers=headers, content=iter([self.body([("model", None, b"m")])]))
+        with pytest.raises(ConfigurationError, match="exceeds 64 bytes"):
+            seal.handle_request(within)  # the body is read whole; it is simply too big for this test's cap
+
+    @pytest.mark.asyncio
+    async def test_oversized_uploads_are_refused_before_they_are_buffered_async(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(_gateway, "MAX_MULTIPART_BODY_SIZE", 64)
+        seal = AsyncGatewayTransport(
+            base_url="https://gateway.example/v1/",
+            relay="gateway.example",
+            catalog=catalog,
+            user_cache_secret="",
+            _build=lambda _: pytest.fail("no replica is touched"),
+        )
+        headers = {"Content-Type": "multipart/form-data; boundary=b1"}
+        url = "https://gateway.example/v1/audio/transcriptions"
+        read: list[int] = []
+
+        async def chunks(count: int) -> AsyncIterator[bytes]:
+            for _ in range(count):
+                read.append(1)
+                yield b"x" * 16
+
+        with pytest.raises(ConfigurationError, match="exceeds 64 bytes"):
+            await seal.handle_async_request(
+                httpx.Request("POST", url, headers={**headers, "Content-Length": "65"}, content=chunks(1))
+            )
+        assert read == []
+        with pytest.raises(ConfigurationError, match="exceeds 64 bytes"):
+            await seal.handle_async_request(httpx.Request("POST", url, headers=headers, content=chunks(100)))
+        assert len(read) == 5
 
 
 class TestSeal:

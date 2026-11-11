@@ -32,10 +32,22 @@ def test_origin_of_normalizes(raw: str, want: str) -> None:
     assert origin_of(raw) == want
 
 
-@pytest.mark.parametrize("raw", ["/v1/", "enclave.example", "ftp://enclave.example/v1", "https://", ""])
-def test_origin_of_rejects_relative_and_other_schemes(raw: str) -> None:
+@pytest.mark.parametrize(
+    "raw",
+    ["/v1/", "enclave.example", "ftp://enclave.example/v1", "https://", "", "https://:443/v1", "https://:8443"],
+)
+def test_origin_of_rejects_relative_hostless_and_other_schemes(raw: str) -> None:
     with pytest.raises(ValueError, match="URL must"):
         origin_of(raw)
+
+
+def test_hostless_authority_is_a_configuration_error() -> None:
+    with pytest.raises(ValueError, match="must name a host"):
+        origin_of("https://:443/v1")
+    with pytest.raises(ConfigurationError, match="invalid base URL: URL must name a host"):
+        validate_base_url("https://:443/v1")
+    with pytest.raises(ValueError, match="must name a host"):
+        allowed_origins("", "https://:443/v1/")
 
 
 def test_origin_of_refuses_userinfo_without_echoing_it() -> None:
@@ -75,6 +87,7 @@ def test_validate_base_url_accepts(base_url: str) -> None:
         "ftp://localhost/v1/",
         "",
         "https://proxy.example:port/v1/",
+        "https://:443/v1/",
     ],
 )
 def test_validate_base_url_rejects(base_url: str) -> None:

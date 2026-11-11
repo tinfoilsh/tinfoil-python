@@ -9,7 +9,7 @@ import socket
 import ssl
 import struct
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
@@ -272,6 +272,8 @@ class EHBPServer:
         self.plaintexts: list[bytes] = []
         self.reply: Callable[[httpx.Request, bytes], tuple[int, bytes]] = lambda _, body: (200, b"echo:" + body)
         self.rotated = False
+        self.corrupt_chunk: int | None = None
+        """The index of the sealed response chunk whose ciphertext is damaged before it is sent, if any."""
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -297,12 +299,33 @@ class EHBPServer:
         nonce = os.urandom(32)
         material = derive_response_keys(exported, enc, nonce)
         chunks = [body[i : i + 7] for i in range(0, len(body), 7)] or [b""]
-        sealed = b"".join(frame_chunk(encrypt_chunk(material, seq, chunk)) for seq, chunk in enumerate(chunks))
-        return httpx.Response(status, headers={RESPONSE_NONCE_HEADER: nonce.hex()}, content=sealed)
+        frames = [encrypt_chunk(material, seq, chunk) for seq, chunk in enumerate(chunks)]
+        if self.corrupt_chunk is not None:
+            damaged = bytearray(frames[self.corrupt_chunk])
+            damaged[-1] ^= 0xFF
+            frames[self.corrupt_chunk] = bytes(damaged)
+        # One frame per response chunk, so a client that streams reaches a damaged chunk only after the others.
+        return httpx.Response(
+            status, headers={RESPONSE_NONCE_HEADER: nonce.hex()}, stream=_Chunked([frame_chunk(f) for f in frames])
+        )
 
     @property
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
+
+
+class _Chunked(httpx.SyncByteStream, httpx.AsyncByteStream):
+    """A response body delivered one frame at a time, for synchronous and asynchronous clients alike."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield from self._chunks
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            yield chunk
 
 
 def _frames(body: bytes) -> Iterator[bytes]:

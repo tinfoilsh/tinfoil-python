@@ -128,6 +128,23 @@ def test_fetch_rejects_non_https_redirect(mocked: Recorder) -> None:
     assert schemes == ["https"]
 
 
+def test_fetch_rejects_a_redirect_with_user_information(mocked: Recorder) -> None:
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        if request.url.host == "mirror.example":
+            return response(200, b"document from the credentialed mirror")
+        return response(302, headers={"Location": "https://user:hunter2@mirror.example/doc"})
+
+    mocked.handler = handler
+    with pytest.raises(NetworkError, match="refusing redirect to a URL with user information") as err:
+        fetch_document("enclave.example", "", NONCE)
+    assert "hunter2" not in str(err.value)
+    assert "user" not in str(err.value).replace("user information", "")
+    assert hosts == ["enclave.example"], "the redirect is refused before it is followed"
+
+
 def test_fetch_keeps_the_redirect_limit(mocked: Recorder) -> None:
     mocked.handler = lambda _: response(302, headers={"Location": "/loop"})
     with pytest.raises(NetworkError, match=f"stopped after {MAX_REDIRECTS} redirects"):

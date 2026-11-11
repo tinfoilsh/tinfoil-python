@@ -80,9 +80,9 @@ def fetch_document(
     stops after ``FETCH_TIMEOUT`` seconds or at ``deadline`` (a
     ``time.monotonic`` instant), whichever comes first, and refuses a body
     over ``MAX_DOCUMENT_BYTES``. Redirects are followed up to
-    ``MAX_REDIRECTS`` times and only to HTTPS URLs. A URL that cannot be
-    built is a ConfigurationError; everything else that fails is a
-    NetworkError.
+    ``MAX_REDIRECTS`` times, only to HTTPS URLs and never to a URL that
+    carries user information. A URL that cannot be built is a
+    ConfigurationError; everything else that fails is a NetworkError.
     """
     return get_bounded(
         _url(host, relay, nonce),
@@ -218,14 +218,17 @@ def _url(host: str, relay: str, nonce: bytes) -> str:
 
 
 def _redirect(response: httpx.Response, redirects: int) -> httpx.Request:
-    """The request a redirect response leads to, refused when it leaves HTTPS or when ``redirects`` (this one
-    included) reaches the limit."""
+    """The request a redirect response leads to, refused when it leaves HTTPS, when its URL carries user
+    information, or when ``redirects`` (this one included) reaches the limit. A refused URL is reported without
+    its user information."""
     request = response.next_request
     if request is None:  # pragma: no cover - httpx builds it for every redirect location
         raise network_error("redirect without a target")
+    redacted = request.url.copy_with(userinfo=b"")
     if request.url.scheme != "https":
-        redacted = request.url.copy_with(userinfo=b"")
         raise network_error(f"refusing redirect to non-HTTPS URL {redacted}")
+    if request.url.userinfo:
+        raise network_error(f"refusing redirect to a URL with user information: {redacted}")
     if redirects >= MAX_REDIRECTS:
         raise network_error(f"stopped after {MAX_REDIRECTS} redirects")
     return request

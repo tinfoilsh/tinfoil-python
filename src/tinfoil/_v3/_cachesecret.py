@@ -12,7 +12,9 @@ since other enclaves do not read the field:
 2. the client's ``user_cache_secret`` option,
 3. the ``TINFOIL_USER_CACHE_SECRET`` environment variable,
 4. a generated secret persisted at ``~/.tinfoil/user_cache_secret``
-   (mode 0600), shared with the other Tinfoil SDKs on the machine.
+   (mode 0600), shared with the other Tinfoil SDKs on the machine. An
+   existing file that group or others can read or write is refused with a
+   ConfigurationError rather than adopted, and is never rewritten.
 
 Injection happens in the transport, before the body is sealed or sent over
 the pinned connection, so the secret is only ever visible to the verified
@@ -32,6 +34,8 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from tinfoil._v3._errors import ConfigurationError
+
 logger = logging.getLogger("tinfoil")
 
 FIELD = "user_cache_secret"
@@ -44,6 +48,8 @@ ENV = "TINFOIL_USER_CACHE_SECRET"
 DIR_NAME = ".tinfoil"
 FILE_NAME = "user_cache_secret"
 _DIR_MODE = 0o700
+_FILE_MODE = 0o600
+"""The mode a persisted secret file is created with, and the most permissive mode an existing one may have."""
 
 _PATHS = ("/chat/completions", "/completions", "/responses")
 """The OpenAI-compatible endpoints whose bodies carry the field, matched by suffix so that custom base URLs with
@@ -193,8 +199,9 @@ def _skip(text: str, index: int) -> int:
 
 def resolve(explicit: str | None) -> str:
     """The client-level secret: a non-empty ``explicit`` value wins, then a non-empty environment value, then the
-    persisted or generated secret. Never raises: persistence and generation failures fall back as documented on
-    the helpers below."""
+    persisted or generated secret. Persistence and generation failures fall back as documented on the helpers
+    below; the one failure that raises is a persisted file that group or others can read or write, which is a
+    ConfigurationError."""
     if explicit:
         return explicit
     env = os.environ.get(ENV)
@@ -252,7 +259,7 @@ def _load_or_generate() -> str:
     if path is None:
         return _ephemeral_secret_value()
     # ValueError alongside OSError throughout: a pathological path, such as an embedded NUL in the home
-    # variable, surfaces as ValueError, and resolution must never fail client construction.
+    # variable, surfaces as ValueError, and an unusable home must not fail client construction.
     try:
         if os.name == "nt":
             try:
@@ -287,7 +294,8 @@ def _is_plain_directory(path_stat: os.stat_result) -> bool:
 
 def _read(path: Path) -> tuple[str | None, bool]:
     """``(secret, usable)`` with surrounding whitespace trimmed. A missing file is usable; a blank or invalid
-    UTF-8 file is unusable and stays untouched."""
+    UTF-8 file is unusable and stays untouched. A file that group or others can read or write is a
+    ConfigurationError."""
     fd, usable = _open(path)
     if fd is None:
         return None, usable
@@ -305,7 +313,9 @@ def _read(path: Path) -> tuple[str | None, bool]:
 
 def _open(path: Path) -> tuple[int | None, bool]:
     """A descriptor for the secret file, or None and whether a missing file was the reason. The file must be a
-    regular file reached without following a symbolic link."""
+    regular file reached without following a symbolic link and, where modes are meaningful, one that only its
+    owner can read or write; a more permissive file is refused with a ConfigurationError, since another account
+    could read or replace the secret, and is left as it is."""
     if os.name == "nt":
         try:
             path_stat = os.lstat(path)
@@ -328,12 +338,19 @@ def _open(path: Path) -> tuple[int | None, bool]:
     except (OSError, ValueError):
         return None, False
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
             os.close(fd)
             return None, False
     except (OSError, ValueError):
         _close_quietly(fd)
         return None, False
+    if os.name != "nt" and stat.S_IMODE(mode) & ~_FILE_MODE:
+        _close_quietly(fd)
+        raise ConfigurationError(
+            f"user cache secret file {path} has mode {stat.S_IMODE(mode):04o}, which lets group or others read or "
+            f"write it; expected mode {_FILE_MODE:04o} (set {ENV} or the user_cache_secret option to bypass the file)"
+        )
     return fd, True
 
 

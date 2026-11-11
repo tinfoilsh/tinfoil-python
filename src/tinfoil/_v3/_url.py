@@ -12,13 +12,15 @@ USERINFO_REFUSED = "URL must not contain user information"
 
 
 def origin_of(raw_url: str) -> str:
-    """The normalized origin of an absolute http or https URL without user information. Raises ValueError
-    otherwise, without echoing a URL that carries user information."""
+    """The normalized origin of an absolute http or https URL with a host and without user information. Raises
+    ValueError otherwise, without echoing a URL that carries user information."""
     parts = _split(raw_url)
     if not parts.scheme or not parts.netloc:
         raise ValueError(f"URL must be absolute: {raw_url!r}")
     if parts.scheme.lower() not in ("http", "https"):
         raise ValueError(f"URL must use http or https: {raw_url!r}")
+    if not parts.hostname:
+        raise ValueError(f"URL must name a host: {raw_url!r}")
     return normalized_origin(parts)
 
 

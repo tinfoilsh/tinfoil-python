@@ -15,6 +15,7 @@ import pytest
 
 from tinfoil._v3 import _cachesecret
 from tinfoil._v3._cachesecret import DIR_NAME, ENV, FILE_NAME, inject, path_eligible, resolve, scan_object
+from tinfoil._v3._errors import ConfigurationError
 
 
 @pytest.fixture
@@ -28,6 +29,19 @@ def secret_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 def secret_file(home: Path) -> Path:
     return home / DIR_NAME / FILE_NAME
+
+
+def write_secret(home: Path, contents: str | bytes, *, mode: int = 0o600, dir_mode: int = 0o700) -> Path:
+    """A pre-existing secret file under ``home`` with the given modes, as another SDK would have left it."""
+    path = secret_file(home)
+    path.parent.mkdir(mode=dir_mode)
+    if isinstance(contents, bytes):
+        path.write_bytes(contents)
+    else:
+        path.write_text(contents)
+    path.chmod(mode)
+    path.parent.chmod(dir_mode)
+    return path
 
 
 class TestPrecedence:
@@ -66,32 +80,41 @@ class TestPersistence:
         assert sorted(path.parent.iterdir()) == [path], "no candidate file is left behind"
 
     def test_adopts_an_existing_file_trimming_whitespace(self, secret_home: Path) -> None:
-        path = secret_file(secret_home)
-        path.parent.mkdir(mode=0o700)
-        path.write_text(" shared-secret\n　")
+        write_secret(secret_home, " shared-secret\n　")
         assert resolve(None) == "shared-secret"
 
     def test_preserves_separator_controls_in_the_value(self, secret_home: Path) -> None:
-        path = secret_file(secret_home)
-        path.parent.mkdir(mode=0o700)
-        path.write_text("\x1cvalue\x1f")
+        write_secret(secret_home, "\x1cvalue\x1f")
         assert resolve(None) == "\x1cvalue\x1f"
 
-    def test_accepts_permissive_preexisting_modes(self, secret_home: Path) -> None:
-        path = secret_file(secret_home)
-        path.parent.mkdir(mode=0o777)
-        path.write_text("shared-secret")
-        path.chmod(0o666)
-        path.parent.chmod(0o777)
+    def test_accepts_a_permissive_preexisting_directory(self, secret_home: Path) -> None:
+        path = write_secret(secret_home, "shared-secret", mode=0o600, dir_mode=0o777)
         assert resolve(None) == "shared-secret"
-        assert stat.S_IMODE(path.stat().st_mode) == 0o666
-        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o777
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o777, "the directory's mode is not the file's"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+    @pytest.mark.parametrize("mode", [0o644, 0o660, 0o604, 0o640, 0o666])
+    def test_refuses_a_file_that_group_or_others_can_read_or_write(self, secret_home: Path, mode: int) -> None:
+        path = write_secret(secret_home, "shared-secret", mode=mode)
+        with pytest.raises(ConfigurationError) as err:
+            resolve(None)
+        assert str(path) in str(err.value), "the error names the file"
+        assert "0600" in str(err.value), "the error names the expected mode"
+        assert "shared-secret" not in str(err.value)
+        assert path.read_text() == "shared-secret", "the file is never rewritten"
+        assert stat.S_IMODE(path.stat().st_mode) == mode, "nor is its mode changed"
+        assert sorted(path.parent.iterdir()) == [path]
+
+    @pytest.mark.parametrize("mode", [0o600, 0o400])
+    def test_adopts_an_owner_only_file(self, secret_home: Path, mode: int) -> None:
+        path = write_secret(secret_home, "shared-secret", mode=mode)
+        assert resolve(None) == "shared-secret"
+        assert stat.S_IMODE(path.stat().st_mode) == mode
 
     @pytest.mark.parametrize("contents", [b"", b"  \n", b"\xff\xfea"])
     def test_unusable_existing_file_is_untouched(self, secret_home: Path, contents: bytes) -> None:
-        path = secret_file(secret_home)
-        path.parent.mkdir(mode=0o700)
-        path.write_bytes(contents)
+        path = write_secret(secret_home, contents)
         first = resolve(None)
         assert len(first) == 64
         assert resolve(None) == first, "the in-memory fallback is stable"

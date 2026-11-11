@@ -1,6 +1,7 @@
 """The OpenAI wrappers: every request goes through the attested HTTP client to the route's URL, the caller's
-``http_client`` and ``base_url`` cannot replace it, copies keep it, API errors pass through unchanged and a client
-error raised from the transport is reachable behind the library's connection error."""
+``http_client`` and ``base_url`` cannot replace it, the realtime resource is refused, copies keep the attested
+client, API errors pass through unchanged and a client error raised from the transport is reachable behind
+the library's connection error."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from tinfoil._v3._clients import EnclaveHTTPClient, GatewayHTTPClient, RouterHTT
 from tinfoil._v3._errors import AttestationError, ConfigurationError, TinfoilError, tinfoil_error
 from tinfoil._v3._gateway import CatalogEntry
 from tinfoil._v3._openai import (
+    REALTIME_UNAVAILABLE,
     AsyncClient,
     AsyncEnclaveOpenAIClient,
     AsyncRouterOpenAIClient,
@@ -58,6 +60,28 @@ def through(client: openai.OpenAI, handler: Any = models_response) -> list[httpx
     finally:
         inner._transport = original
     return recorder.requests
+
+
+def below_the_attested_transport(client: EnclaveOpenAIClient, handler: Any) -> Recorder:
+    """Puts a recorder where the enclave's connections would be, under the attested transport and every layer
+    above it, so requests arrive through the whole chain."""
+    recorder = Recorder(handler)
+    client.http_client._attested.keyed._current.transport._inner = recorder.transport  # type: ignore[union-attr]
+    return recorder
+
+
+CHAT = b'{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}'
+EMBEDDINGS = b'{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5]}],"model":"m"}'
+
+
+def realtime_of(holder: object) -> object:
+    """The realtime resource of a client or of one of its resource groups; the access itself is what is refused."""
+    return getattr(holder, "realtime")  # noqa: B009 - a plain attribute access would be a useless expression
+
+
+def by_path(request: httpx.Request) -> httpx.Response:
+    bodies = {"/v1/chat/completions": CHAT, "/v1/embeddings": EMBEDDINGS, "/v1/audio/transcriptions": b'{"text":"hi"}'}
+    return response(200, bodies[request.url.path], {"Content-Type": "application/json"})
 
 
 class TestConstruction:
@@ -134,6 +158,30 @@ class TestConstruction:
         assert [str(r.url) for r in through(copied)] == ["https://enclave.example/v1/models"]
         client.close()
 
+    def test_realtime_is_refused_while_http_resources_go_through_the_attested_transport(
+        self, offline: Recorder
+    ) -> None:
+        client = EnclaveOpenAIClient(
+            "enclave.example", "org/repo", transport_mode="ehbp", user_cache_secret="s", api_key="k", max_retries=0
+        )
+        for holder in (client, client.beta, client.with_options(), client.with_raw_response):
+            with pytest.raises(ConfigurationError, match=REALTIME_UNAVAILABLE):
+                realtime_of(holder)
+        assert client.beta.chat is not None, "the other beta resources stay available"
+        recorder = below_the_attested_transport(client, by_path)
+        messages: list[Any] = [{"role": "user", "content": "hi"}]
+        assert client.chat.completions.create(model="m", messages=messages).choices[0].message.content == "ok"
+        assert client.embeddings.create(model="m", input="hi").data[0].embedding == [0.5]
+        assert client.audio.transcriptions.create(model="m", file=("a.wav", b"RIFF")).text == "hi"
+        assert [r.url.path for r in recorder.requests] == [
+            "/v1/chat/completions",
+            "/v1/embeddings",
+            "/v1/audio/transcriptions",
+        ]
+        assert all(r.url.host == "enclave.example" for r in recorder.requests)
+        assert json.loads(recorder.bodies[0])["user_cache_secret"] == "s", "the chat body passed the secret layer"
+        client.close()
+
     def test_drop_in_client_takes_only_openai_options(self, offline: Recorder) -> None:
         offline.handler = lambda request: (
             response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
@@ -198,9 +246,7 @@ class TestErrors:
             api_key="k",
             max_retries=0,
         )
-        recorder = Recorder(chat)
-        # Below the cache-secret layer, so the recorder sees the injected body.
-        enclave.http_client._attested.keyed._current.transport._inner = recorder.transport  # type: ignore[union-attr]
+        below_the_attested_transport(enclave, chat)  # below the cache-secret layer, so it sees the injected body
         params: dict[str, Any] = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
         enclave.chat.completions.create(**params)
         enclave.chat.completions.create(**params, extra_body={"user_cache_secret": "end-user-7"})
@@ -221,6 +267,9 @@ async def test_async_wrappers(offline: Recorder) -> None:
     assert inner is client.http_client.http_client
     copied = client.with_options(timeout=1.0)
     assert copied.http_client is client.http_client
+    for holder in (client, client.beta, copied):
+        with pytest.raises(ConfigurationError, match=REALTIME_UNAVAILABLE):
+            realtime_of(holder)
     recorder = Recorder(models_response)
     inner_client: Any = client._client
     inner_client._transport = recorder.async_transport
@@ -236,4 +285,6 @@ async def test_async_wrappers(offline: Recorder) -> None:
     assert isinstance(drop_in, AsyncClient)
     assert isinstance(drop_in, AsyncRouterOpenAIClient)
     assert drop_in.http_client.enclave == "inference.tinfoil.sh"
+    with pytest.raises(ConfigurationError, match=REALTIME_UNAVAILABLE):
+        realtime_of(drop_in)
     await drop_in.close()

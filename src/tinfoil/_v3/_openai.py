@@ -1,14 +1,17 @@
 """OpenAI clients over the attested HTTP clients. Each is an ``openai`` client whose requests go through one of
-them, so every resource of the ``openai`` package works unchanged and no application data is sent before the
-enclave is verified."""
+them, so every HTTP resource of the ``openai`` package works unchanged and no application data is sent before
+the enclave is verified. The one exception is the realtime resource: it opens a websocket of its own, outside
+``http_client``, so it is refused rather than left to bypass the attested transport."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import Any, Protocol, Self, TypeVar
+from functools import cached_property
+from typing import Any, NoReturn, Protocol, Self, TypeVar
 
 import httpx
 import openai
+from openai.resources.beta import AsyncBeta, Beta
 
 from tinfoil._v3._clients import (
     AsyncEnclaveHTTPClient,
@@ -27,6 +30,54 @@ _C = TypeVar("_C", bound=openai.AsyncOpenAI)
 
 HTTP_CLIENT_FIXED = "http_client is the attested HTTP client's and cannot be replaced"
 DROP_IN_OPTIONS = "{name} takes only the openai package's options; configure the route with {route}"
+REALTIME_UNAVAILABLE = "realtime is not available over an attested client"
+"""The message of the ConfigurationError that accessing a realtime resource raises: its websocket would open
+outside the attested HTTP client, bypassing the origin guard, the TLS pin and EHBP."""
+
+
+def _no_realtime() -> NoReturn:
+    raise ConfigurationError(REALTIME_UNAVAILABLE)
+
+
+class _Beta(Beta):
+    """The ``beta`` resources without their realtime alias."""
+
+    @property
+    def realtime(self) -> NoReturn:
+        _no_realtime()
+
+
+class _AsyncBeta(AsyncBeta):
+    """``_Beta`` for the asynchronous clients."""
+
+    @property
+    def realtime(self) -> NoReturn:
+        _no_realtime()
+
+
+class _AttestedOpenAI(openai.OpenAI):
+    """An ``openai.OpenAI`` client whose realtime resource, and its ``beta`` alias, raise a ConfigurationError
+    instead of opening a websocket outside the attested HTTP client."""
+
+    @property
+    def realtime(self) -> NoReturn:
+        _no_realtime()
+
+    @cached_property
+    def beta(self) -> _Beta:
+        return _Beta(self)
+
+
+class _AsyncAttestedOpenAI(openai.AsyncOpenAI):
+    """``_AttestedOpenAI`` for ``openai.AsyncOpenAI``."""
+
+    @property
+    def realtime(self) -> NoReturn:
+        _no_realtime()
+
+    @cached_property
+    def beta(self) -> _AsyncBeta:
+        return _AsyncBeta(self)
 
 
 def _openai_options(
@@ -40,7 +91,7 @@ def _openai_options(
     return {**kwargs, "http_client": http_client, "base_url": base_url}
 
 
-class EnclaveOpenAIClient(openai.OpenAI):
+class EnclaveOpenAIClient(_AttestedOpenAI):
     """An ``openai.OpenAI`` client whose requests go through an ``EnclaveHTTPClient``, to ``base_url`` or, when
     that is unset, the enclave's ``/v1/`` API.
 
@@ -49,7 +100,8 @@ class EnclaveOpenAIClient(openai.OpenAI):
     enclave; the remaining keyword arguments are the ``openai`` package's,
     applied after it, except ``http_client`` and ``base_url``, which the
     attested client fixes. ``copy`` and ``with_options`` keep the attested
-    client.
+    client. The ``realtime`` resource, whose websocket would bypass the
+    attested client, raises a ConfigurationError.
     """
 
     def __init__(
@@ -97,9 +149,9 @@ class EnclaveOpenAIClient(openai.OpenAI):
         self._tinfoil.close()
 
 
-class AsyncEnclaveOpenAIClient(openai.AsyncOpenAI):
+class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
     """``EnclaveOpenAIClient`` for asyncio, built with ``await AsyncEnclaveOpenAIClient.create(...)``, which
-    takes the same arguments."""
+    takes the same arguments. The ``realtime`` resource raises a ConfigurationError."""
 
     def __init__(self, *, _http_client: AsyncEnclaveHTTPClient | None = None, **openai_kwargs: Any) -> None:
         if _http_client is None:
@@ -150,11 +202,12 @@ class AsyncEnclaveOpenAIClient(openai.AsyncOpenAI):
         await self._tinfoil.close()
 
 
-class RouterOpenAIClient(openai.OpenAI):
+class RouterOpenAIClient(_AttestedOpenAI):
     """An ``openai.OpenAI`` client whose requests go through a ``RouterHTTPClient``, to ``base_url`` or, when
     that is unset, the router's ``/v1/`` API. The keyword options up to ``http_timeout`` are those of
     ``RouterHTTPClient``; the remaining keyword arguments are the ``openai`` package's, except ``http_client``
-    and ``base_url``, which the attested client fixes."""
+    and ``base_url``, which the attested client fixes. The ``realtime`` resource, whose websocket would bypass
+    the attested client, raises a ConfigurationError."""
 
     def __init__(
         self,
@@ -197,8 +250,9 @@ class RouterOpenAIClient(openai.OpenAI):
         self._tinfoil.close()
 
 
-class AsyncRouterOpenAIClient(openai.AsyncOpenAI):
-    """``RouterOpenAIClient`` for asyncio, built with ``await AsyncRouterOpenAIClient.create(...)``."""
+class AsyncRouterOpenAIClient(_AsyncAttestedOpenAI):
+    """``RouterOpenAIClient`` for asyncio, built with ``await AsyncRouterOpenAIClient.create(...)``. The
+    ``realtime`` resource raises a ConfigurationError."""
 
     def __init__(self, *, _http_client: AsyncRouterHTTPClient | None = None, **openai_kwargs: Any) -> None:
         if _http_client is None:
@@ -244,10 +298,11 @@ class AsyncRouterOpenAIClient(openai.AsyncOpenAI):
         await self._tinfoil.close()
 
 
-class GatewayOpenAIClient(openai.OpenAI):
+class GatewayOpenAIClient(_AttestedOpenAI):
     """An ``openai.OpenAI`` client whose requests go through a ``GatewayHTTPClient``, to the gateway's URL. The
     keyword options up to ``http_timeout`` are those of ``GatewayHTTPClient``; the remaining keyword arguments are
-    the ``openai`` package's, except ``http_client`` and ``base_url``, which the gateway client fixes.
+    the ``openai`` package's, except ``http_client`` and ``base_url``, which the gateway client fixes. The
+    ``realtime`` resource, whose websocket would bypass the gateway client, raises a ConfigurationError.
 
     Experimental: the gateway route is new, and this API may change or be
     removed in a later release.
@@ -297,8 +352,9 @@ class GatewayOpenAIClient(openai.OpenAI):
         self._tinfoil.close()
 
 
-class AsyncGatewayOpenAIClient(openai.AsyncOpenAI):
-    """``GatewayOpenAIClient`` for asyncio, built with ``await AsyncGatewayOpenAIClient.create(...)``.
+class AsyncGatewayOpenAIClient(_AsyncAttestedOpenAI):
+    """``GatewayOpenAIClient`` for asyncio, built with ``await AsyncGatewayOpenAIClient.create(...)``. The
+    ``realtime`` resource raises a ConfigurationError.
 
     Experimental: the gateway route is new, and this API may change or be
     removed in a later release.

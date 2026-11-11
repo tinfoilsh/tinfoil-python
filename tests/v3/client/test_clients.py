@@ -16,6 +16,7 @@ from tests.v3.client.helpers import EHBPServer, response, verification
 from tinfoil._v3 import _cachesecret, _ehbp, _fetch, _router
 from tinfoil._v3._chain import ENCLAVE_URL_HEADER
 from tinfoil._v3._clients import (
+    GATEWAY_URL_INVALID,
     AsyncEnclaveHTTPClient,
     AsyncGatewayHTTPClient,
     AsyncRouterHTTPClient,
@@ -336,6 +337,9 @@ class TestGatewayClient:
         "options",
         [
             {"url": "http://gateway.example/v1/"},
+            {"url": "https://:443/v1/"},
+            {"url": "https://u:hunter2@gateway.example/v1/"},
+            {"url": "/v1/"},
             {"pinned_models_only": True},
             {"model_pins": {"m": ModelPin("acme/m")}},
             {"model_pins": {"m": ModelPin("tinfoilsh/m@")}},
@@ -344,9 +348,15 @@ class TestGatewayClient:
         ],
     )
     def test_rejects_invalid_options(self, network: Network, options: dict[str, object]) -> None:
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError) as err:
             GatewayHTTPClient(catalog=dict, **options)  # type: ignore[arg-type]
         assert network.requests == []
+        assert "hunter2" not in str(err.value), "a refused gateway URL is never echoed"
+
+    def test_refused_gateway_url_is_not_echoed(self, network: Network) -> None:
+        with pytest.raises(ConfigurationError) as err:
+            GatewayHTTPClient(url="https://u:hunter2@gateway.example/v1/", catalog=dict)
+        assert str(err.value) == f"configuration error: {GATEWAY_URL_INVALID}"
 
     def test_fetches_the_catalog_before_returning(self, network: Network) -> None:
         with pytest.raises(NetworkError):

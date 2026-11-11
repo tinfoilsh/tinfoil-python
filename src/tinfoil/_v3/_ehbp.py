@@ -4,12 +4,15 @@ A sealed request's method, URL and headers are not sealed, and neither is a
 request without a body or its response. The enclave answers a body sealed
 to a key it no longer holds with a key configuration mismatch, which is
 reported as a ``PeerLacksKeyError`` so that the attested transport verifies
-again. Every other protocol failure that is detected before the response
-body is handed over means the channel is not bound to the attested key and
-is an AttestationError.
+again. Every other protocol failure means the channel is not bound to the
+attested key and is an AttestationError, whether it is detected before the
+response body is handed over or while the body is read: a response chunk
+that does not open is reported from the read that reached it.
 """
 
 from __future__ import annotations
+
+from collections.abc import AsyncIterator, Iterator
 
 import httpx
 from ehbp import AsyncEHBPTransport, EHBPError, EHBPTransport, KeyConfigMismatchError, ServerIdentity
@@ -56,11 +59,13 @@ class SealingTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         try:
-            return self._sealing.handle_request(request)
+            response = self._sealing.handle_request(request)
         except KeyConfigMismatchError as err:
             raise PeerLacksKeyError(err) from err
         except EHBPError as err:
             raise attestation_error(err) from err
+        response.stream = _OpeningStream(response.stream)
+        return response
 
     def close(self) -> None:
         self._sealing.close()
@@ -77,14 +82,55 @@ class AsyncSealingTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         try:
-            return await self._sealing.handle_async_request(request)
+            response = await self._sealing.handle_async_request(request)
         except KeyConfigMismatchError as err:
             raise PeerLacksKeyError(err) from err
         except EHBPError as err:
             raise attestation_error(err) from err
+        response.stream = _AsyncOpeningStream(response.stream)
+        return response
 
     async def aclose(self) -> None:
         await self._sealing.aclose()
+
+
+class _OpeningStream(httpx.SyncByteStream):
+    """A response stream whose chunks are opened as they are read: a chunk that fails to open, or a body that
+    ends without its final frame, is an AttestationError raised from the read that reached it, with the
+    protocol error as its cause."""
+
+    def __init__(self, inner: httpx.SyncByteStream | httpx.AsyncByteStream) -> None:
+        self._inner = inner
+
+    def __iter__(self) -> Iterator[bytes]:
+        assert isinstance(self._inner, httpx.SyncByteStream)
+        try:
+            yield from self._inner
+        except EHBPError as err:
+            raise attestation_error(err) from err
+
+    def close(self) -> None:
+        if isinstance(self._inner, httpx.SyncByteStream):
+            self._inner.close()
+
+
+class _AsyncOpeningStream(httpx.AsyncByteStream):
+    """``_OpeningStream`` for asynchronous responses."""
+
+    def __init__(self, inner: httpx.SyncByteStream | httpx.AsyncByteStream) -> None:
+        self._inner = inner
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        assert isinstance(self._inner, httpx.AsyncByteStream)
+        try:
+            async for chunk in self._inner:
+                yield chunk
+        except EHBPError as err:
+            raise attestation_error(err) from err
+
+    async def aclose(self) -> None:
+        if isinstance(self._inner, httpx.AsyncByteStream):
+            await self._inner.aclose()
 
 
 __all__ = [

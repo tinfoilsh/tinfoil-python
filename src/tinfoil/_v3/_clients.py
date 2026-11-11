@@ -49,7 +49,7 @@ from tinfoil._v3._transport import (
     mode_for,
 )
 from tinfoil._v3._types import DEFAULT_TIMEOUT, DEFAULT_TRANSPORT_MODE, TimeoutTypes, TransportMode, VerificationCheck
-from tinfoil._v3._url import validate_base_url, validate_tls_base_url, with_trailing_slash
+from tinfoil._v3._url import origin_of, validate_base_url, validate_tls_base_url, with_trailing_slash
 from tinfoil._v3.verifier import Verification, Verifier
 
 ROUTER_PROXY_NEEDS_EHBP = 'a base URL is a proxy when discovering the router, which requires the "ehbp" transport mode'
@@ -398,13 +398,21 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
         return client
 
 
+GATEWAY_URL_INVALID = "gateway base URL must be an absolute HTTPS URL with a host and without user information"
+"""The message for a gateway URL that is refused. The URL itself is never echoed, since it may carry
+credentials."""
+
+
 def _gateway_url(url: str | None) -> tuple[str, str]:
     """The gateway base URL, with a trailing slash, and its host, which attestation is fetched through."""
     base_url = url or DEFAULT_GATEWAY_URL
-    parts = urlsplit(base_url)
-    if parts.scheme != "https" or not parts.netloc:
-        raise ConfigurationError(f'gateway base URL must be an absolute HTTPS URL: "{base_url}"')
-    return with_trailing_slash(base_url), parts.netloc
+    try:
+        origin = origin_of(base_url)
+    except ValueError:
+        raise ConfigurationError(GATEWAY_URL_INVALID) from None
+    if not origin.startswith("https://"):
+        raise ConfigurationError(GATEWAY_URL_INVALID)
+    return with_trailing_slash(base_url), urlsplit(base_url).netloc
 
 
 class GatewayHTTPClient:
