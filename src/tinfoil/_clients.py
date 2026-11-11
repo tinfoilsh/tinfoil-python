@@ -354,9 +354,10 @@ class RouterHTTPClient(_AttestedClient):
     config itself is refused, since the router is verified against its own
     repository. ``user_cache_secret`` empty resolves the secret from
     ``TINFOIL_USER_CACHE_SECRET`` or ``~/.tinfoil/user_cache_secret``, before
-    discovery, so a secret file that cannot be used fails the constructor
-    without any network I/O. The other options are those of
-    ``EnclaveHTTPClient``.
+    discovery: a secret file that group or others can read or write fails
+    the constructor without any network I/O, while a blank, invalid or
+    symlinked file falls back to an in-memory secret with a warning. The
+    other options are those of ``EnclaveHTTPClient``.
     """
 
     def __init__(
@@ -371,8 +372,8 @@ class RouterHTTPClient(_AttestedClient):
     ) -> None:
         checked = _router_checks(transport_mode, base_url, verifier)
         mode = mode_for(transport_mode)
-        # The secret is resolved before discovery: a secret file that cannot be used fails the constructor
-        # before any router is probed, so no verified candidate is left behind.
+        # The secret is resolved before discovery: a secret file that group or others can read or write fails
+        # the constructor before any router is probed, so no verified candidate is left behind.
         secret = _cachesecret.resolve(user_cache_secret)
         keyed = discover(
             verifier,

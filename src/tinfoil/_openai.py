@@ -38,7 +38,7 @@ from tinfoil.verifier import Verifier
 _C = TypeVar("_C", bound=openai.AsyncOpenAI)
 
 HTTP_CLIENT_FIXED = "http_client is the attested HTTP client's and cannot be replaced"
-BASE_URL_FIXED = "base_url is the attested HTTP client's and cannot be replaced; the gateway's is its url option"
+BASE_URL_FIXED = "base_url is the attested HTTP client's and cannot be replaced"
 DROP_IN_OPTIONS = "{name} takes only the openai package's options; {keys} belong to {route}"
 REALTIME_UNAVAILABLE = "realtime is not available over an attested client"
 """The message of the ConfigurationError that accessing a realtime resource raises: its websocket would open
@@ -417,8 +417,8 @@ class GatewayOpenAIClient(_AttestedOpenAI):
     keyword options up to ``http_timeout`` are those of ``GatewayHTTPClient``, ``http_timeout`` being its
     ``timeout``; the remaining keyword arguments are ``OpenAIOptions``, the ``openai`` package's, except
     ``http_client`` and ``base_url``, which the gateway client fixes: a ``base_url`` other than the gateway's
-    is a ConfigurationError, and the gateway's own is set with ``url``. ``copy`` and ``with_options`` share
-    the gateway client, so closing a copy closes the original's too. The ``realtime`` resource, whose
+    is a ConfigurationError, since the gateway's base URL is its ``url`` option. ``copy`` and ``with_options``
+    share the gateway client, so closing a copy closes the original's too. The ``realtime`` resource, whose
     websocket would bypass the gateway client, raises a ConfigurationError.
 
     Experimental: the gateway route is new, and this API may change or be

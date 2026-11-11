@@ -512,7 +512,10 @@ def test_rsa_pss_parameters_are_strict_der() -> None:
             c.signature_algorithm(_pss_params(*fields))
     # The trailer field has one legal value. DER would omit it as the default, but the AMD chains encode it, so an
     # explicit 1 is accepted and anything else is not.
-    assert c.signature_algorithm(_pss_params(_PSS_HASH, _PSS_MGF, _PSS_SALT, _tagged(3, tb.integer(1)))).oid
+    assert (
+        c.signature_algorithm(_pss_params(_PSS_HASH, _PSS_MGF, _PSS_SALT, _tagged(3, tb.integer(1)))).oid
+        == c.OID_RSA_PSS
+    )
     with pytest.raises(c.X509Error, match="RSA-PSS trailer field must be 1"):
         c.signature_algorithm(_pss_params(_PSS_HASH, _PSS_MGF, _PSS_SALT, _tagged(3, tb.integer(2))))
     with pytest.raises(c.X509Error, match="must be in tag order without repeats"):

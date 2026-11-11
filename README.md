@@ -185,7 +185,7 @@ if current is not None:
     print(current.freshness_expires_at)
 ```
 
-A gateway client verifies one replica per model, so its accessors differ: `ensure_verified(model)` returns a valid verification of a replica serving `model`, and `current` is a list of `ReplicaVerification` records, one per replica used so far and still listed by the catalog, each with the replica's `host`, the `models` requested through it, the `reference` it was verified against and its `verification`.
+A gateway client verifies one replica per model, so its accessors differ: `ensure_verified(model)` returns a valid verification of a replica serving `model`, and `current` is a list of `ReplicaVerification` records, one per replica used so far and retained by the client (a replica reached by redirect may not be in the catalog), each with the replica's `host`, the `models` requested through it, the `reference` it was verified against and its `verification`.
 
 To reject a verified enclave by its facts, pass `verification_check=` to a route client. To change what the verifier itself requires, pass `verifier=` a `tinfoil.verifier.Verifier`: `Verifier(pinned_registers=...)` pins registers that the enclave must have measured, `freshness_max_age` bounds how old a witness or approval may be, and the trust options supply your own roots.
 

@@ -398,10 +398,12 @@ def commit_modules(outputs: dict[str, str], target: Path) -> None:
     """Replace the modules under ``target`` with ``outputs``, as a set or not at all.
 
     Every module is first written to a staged file beside its target, on
-    the same filesystem, so that each swap is one ``os.replace``. The swaps
-    run only once every file is staged; if one fails, the targets already
-    swapped are restored from their original contents and the remaining
-    staged files are removed.
+    the same filesystem, so that each swap is one ``os.replace``. The staged
+    file takes the target's current permission bits, or 0644 for a new
+    module, since ``mkstemp`` creates it readable by its owner only. The
+    swaps run only once every file is staged; if one fails, the targets
+    already swapped are restored from their original contents and the
+    remaining staged files are removed.
     """
     target.mkdir(parents=True, exist_ok=True)
     staged: dict[str, Path] = {}
@@ -410,10 +412,13 @@ def commit_modules(outputs: dict[str, str], target: Path) -> None:
         for name, text in outputs.items():
             final = target / name
             originals[name] = final.read_bytes() if final.is_file() else None
+            mode = final.stat().st_mode & 0o777 if final.exists() else 0o644
             descriptor, path = tempfile.mkstemp(prefix=f".{name}.", suffix=".staged", dir=target)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(text)
+            # Registered before the write so that a failed write still has its staged file removed.
             staged[name] = Path(path)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                os.fchmod(descriptor, mode)
+                handle.write(text)
     except OSError as err:
         _discard(staged.values())
         raise SyncError(f"staging modules under {target}: {err}") from err
