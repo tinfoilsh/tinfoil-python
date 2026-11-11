@@ -55,7 +55,13 @@ from tinfoil._v3._types import (
     TransportMode,
     VerificationCheck,
 )
-from tinfoil._v3._url import origin_of, validate_base_url, validate_tls_base_url, with_trailing_slash
+from tinfoil._v3._url import (
+    has_query_or_fragment,
+    origin_of,
+    validate_base_url,
+    validate_tls_base_url,
+    with_trailing_slash,
+)
 from tinfoil._v3.verifier import Verification, Verifier
 
 ROUTER_PROXY_NEEDS_EHBP = 'a base URL is a proxy when discovering the router, which requires the "ehbp" transport mode'
@@ -430,10 +436,9 @@ def _gateway_url(url: str | None) -> tuple[str, str]:
         origin = origin_of(base_url)
     except ValueError:
         raise ConfigurationError(GATEWAY_URL_INVALID) from None
-    parts = urlsplit(base_url)
-    if not origin.startswith("https://") or parts.query or parts.fragment:
+    if not origin.startswith("https://") or has_query_or_fragment(base_url):
         raise ConfigurationError(GATEWAY_URL_INVALID)
-    return with_trailing_slash(base_url), parts.netloc
+    return with_trailing_slash(base_url), urlsplit(base_url).netloc
 
 
 class GatewayHTTPClient:

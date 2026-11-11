@@ -49,6 +49,7 @@ from tinfoil._v3._errors import (
 )
 from tinfoil._v3._fetch import get_bounded, get_bounded_async
 from tinfoil._v3._transport import (
+    CLIENT_CLOSED,
     USE_CLIENT_DEFAULT,
     AsyncAttestedTransport,
     AsyncEHBPMode,
@@ -637,8 +638,9 @@ class _CatalogCache:
     """Fetches the catalog on first use and refreshes it on use once ``CATALOG_REFRESH_INTERVAL`` has passed.
     Concurrent callers share one fetch. Until a fetch succeeds, callers wait for it and a failure is retried on
     the next use. After that, callers never wait: a stale catalog is returned while a refresh runs in the
-    background, and a failed refresh keeps it for another interval. ``close`` starts no further refresh; one in
-    flight finishes on its own, and its result is dropped."""
+    background, and a failed refresh keeps it for another interval. ``close`` starts no further fetch: an empty
+    cache raises ConfigurationError instead of fetching, and a refresh in flight finishes on its own with its
+    result dropped."""
 
     def __init__(self, fetch: Callable[[TimeoutTypes], Catalog]) -> None:
         self._fetch = fetch
@@ -666,6 +668,8 @@ class _CatalogCache:
             inflight = self._inflight
             owner = inflight is None
             if inflight is None:
+                if self._closed:
+                    raise ConfigurationError(CLIENT_CLOSED)
                 inflight = self._inflight = threading.Event()
         if owner:
             self._load(timeout, inflight)
@@ -834,7 +838,7 @@ class GatewayTransport(httpx.BaseTransport):
 
     def _check_open(self) -> None:
         if self._closed:
-            raise ConfigurationError("client is closed")
+            raise ConfigurationError(CLIENT_CLOSED)
 
     def _transport(self, replica: _Replica) -> ReplicaTransport:
         with self._shared.lock:
@@ -861,8 +865,8 @@ class GatewayTransport(httpx.BaseTransport):
 
 
 class _AsyncCatalogCache:
-    """``_CatalogCache`` on the event loop. ``close`` also cancels a refresh in flight at its next await; one
-    past its last await finishes, and its result is dropped."""
+    """``_CatalogCache`` on the event loop. ``close`` also cancels a refresh in flight at its next await, which
+    ends its task cancelled; one past its last await finishes, and its result is dropped."""
 
     def __init__(self, fetch: Callable[[TimeoutTypes], Awaitable[Catalog]]) -> None:
         self._fetch = fetch
@@ -879,6 +883,8 @@ class _AsyncCatalogCache:
                 self._start(timeout)
             return self._catalog
         if self._inflight is None:
+            if self._closed:
+                raise ConfigurationError(CLIENT_CLOSED)
             self._start(timeout)
         assert self._inflight is not None
         await asyncio.shield(self._inflight)
@@ -906,7 +912,7 @@ class _AsyncCatalogCache:
     async def _load(self, timeout: TimeoutTypes) -> None:
         try:
             catalog = await self._fetch(timeout)
-        except BaseException as err:
+        except Exception as err:
             self._error = err
             if self._catalog is not None:
                 self._refresh_at = time.monotonic() + CATALOG_REFRESH_INTERVAL
@@ -1044,7 +1050,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
 
     def _check_open(self) -> None:
         if self._closed:
-            raise ConfigurationError("client is closed")
+            raise ConfigurationError(CLIENT_CLOSED)
 
     def _transport(self, replica: _Replica) -> AsyncReplicaTransport:
         transport = self._shared.enclaves.get(replica)

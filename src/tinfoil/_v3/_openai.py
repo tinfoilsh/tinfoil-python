@@ -57,7 +57,7 @@ class _SharedOptions(TypedDict, total=False):
     organization: str | None
     project: str | None
     webhook_secret: str | None
-    websocket_base_url: str | None
+    websocket_base_url: str | httpx.URL | None
     provider: object | None
     data_residency: DataResidency | None
     timeout: float | httpx.Timeout | Timeout | None
@@ -511,12 +511,20 @@ class Client(RouterOpenAIClient):
     """An OpenAI client for Tinfoil's recommended route: the router, verified before the constructor returns. It
     takes only the ``openai`` package's options, ``OpenAIOptions``; a route option, such as a proxy
     ``base_url``, a transport mode, verifier, verification check, cache secret or ``http_timeout``, is a
-    ConfigurationError here and is configured on ``RouterOpenAIClient`` instead."""
+    ConfigurationError here, from the constructor and from ``copy`` and ``with_options`` alike, and is configured
+    on ``RouterOpenAIClient`` instead."""
 
     def __init__(self, *, _http_client: RouterHTTPClient | None = None, **openai_kwargs: Unpack[OpenAIOptions]) -> None:
         if _http_client is None:
             _refuse_route_options("Client", "RouterOpenAIClient", openai_kwargs)
         super().__init__(_http_client=_http_client, **openai_kwargs)
+
+    # A copy's constructor receives the attested client's own base URL, so the caller's options are checked here.
+    def copy(self, **kwargs: Unpack[OpenAICopyOptions]) -> Self:  # type: ignore[override]
+        _refuse_route_options("Client", "RouterOpenAIClient", kwargs)
+        return super().copy(**kwargs)
+
+    with_options = copy  # type: ignore[assignment]
 
 
 class AsyncClient(AsyncRouterOpenAIClient):
@@ -533,6 +541,12 @@ class AsyncClient(AsyncRouterOpenAIClient):
     async def create(cls, **openai_kwargs: Unpack[AsyncOpenAIOptions]) -> Self:  # type: ignore[override]
         _refuse_route_options("AsyncClient", "AsyncRouterOpenAIClient", openai_kwargs)
         return await super().create(**openai_kwargs)
+
+    def copy(self, **kwargs: Unpack[AsyncOpenAICopyOptions]) -> Self:  # type: ignore[override]
+        _refuse_route_options("AsyncClient", "AsyncRouterOpenAIClient", kwargs)
+        return super().copy(**kwargs)
+
+    with_options = copy  # type: ignore[assignment]
 
 
 def create_client(**openai_kwargs: Unpack[OpenAIOptions]) -> Client:

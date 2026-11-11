@@ -28,9 +28,10 @@ from tinfoil._v3.verifier import Verification
 
 CLIENT_CLOSED = "client is closed"
 """The message of the ConfigurationError that a closed client raises."""
-TRANSPORT_RETIRED = "transport retired after re-verification; retry the request"
-"""The message of the ConfigurationError for a request that reached a transport after a newer verification
-replaced it: the request was admitted against the old keys and must be sent again under the current ones."""
+TRANSPORT_RETIRED = "transport retired; retry the request"
+"""The message of the ConfigurationError for a request that reached a transport after it was retired, whether a
+newer verification replaced its keys or a catalog refresh dropped its replica: the request was admitted under
+the old routing or keys and must be sent again under the current ones."""
 
 USE_CLIENT_DEFAULT = httpx.USE_CLIENT_DEFAULT
 """The per-call ``timeout`` value that keeps the client's own."""

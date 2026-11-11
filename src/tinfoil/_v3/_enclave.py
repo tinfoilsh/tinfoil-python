@@ -34,10 +34,11 @@ FRESHNESS_EXPIRED = "attestation freshness witnesses have expired; retry verific
 """The message of the AttestationError for a verification whose witnesses no longer authorize requests."""
 NO_FRESHNESS_DEADLINE = (
     "verification carries no freshness deadline; the client needs an endorsed deadline to bound requests "
-    "(use the verifier directly for an all-embedded policy)"
+    "(use the verifier directly when no reference endorses a deadline)"
 )
-"""The message of the AttestationError for a verification without a freshness deadline: every reference came
-from the caller's embedded policy, so nothing endorsed bounds the time the enclave's keys may be used for."""
+"""The message of the AttestationError for a verification without a freshness deadline: no endorsed reference
+supplied an approval time, whether every reference is embedded or a caller-authorized config is combined with
+embedded runtime and platform references, so nothing bounds the time the enclave's keys may be used for."""
 DEADLINE_EXCEEDED = "verification did not complete before its deadline"
 """The message of the NetworkError for a verification that ran past the deadline it was given."""
 
@@ -220,7 +221,7 @@ def _retry_fits(deadline: float | None) -> bool:
 
 def check_freshness(verified: Verification) -> None:
     """Rejects a verification whose witnesses no longer authorize requests. A verification without a deadline,
-    from an all-embedded policy, has nothing endorsed that bounds requests, so it is rejected as well, with a
+    which no endorsed reference supplied, has nothing that bounds requests, so it is rejected as well, with a
     message of its own."""
     if verified.freshness_expires_at is None:
         raise AttestationError(NO_FRESHNESS_DEADLINE)

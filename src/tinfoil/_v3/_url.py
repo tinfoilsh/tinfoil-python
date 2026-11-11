@@ -63,7 +63,7 @@ def validate_base_url(base_url: str) -> str:
             "invalid base URL: HTTP is allowed only for localhost or a loopback IP address; "
             "use HTTPS to protect request headers"
         )
-    if parts.query or parts.fragment:
+    if has_query_or_fragment(base_url):
         raise ConfigurationError(QUERY_OR_FRAGMENT_REFUSED)
     return with_trailing_slash(base_url)
 
@@ -122,6 +122,14 @@ def enclave_url_header_value(base_url: str, enclave: str) -> str | None:
     return enclave_url
 
 
+def has_query_or_fragment(url: str) -> bool:
+    """Whether ``url`` carries a query or a fragment, even an empty one. ``urlsplit`` parses a bare ``?`` or
+    ``#`` as no component at all and ``urlunsplit`` then drops it, so the delimiters are looked for in the URL
+    as written as well as in its parsed components."""
+    parts = urlsplit(url)
+    return bool(parts.query or parts.fragment) or "?" in url or "#" in url
+
+
 def with_trailing_slash(url: str) -> str:
     """``url`` with its path ending in a slash, so that relative paths join under it."""
     parts = urlsplit(url)
@@ -147,6 +155,7 @@ __all__ = [
     "USERINFO_REFUSED",
     "allowed_origins",
     "enclave_url_header_value",
+    "has_query_or_fragment",
     "is_loopback",
     "normalized_origin",
     "origin_of",
