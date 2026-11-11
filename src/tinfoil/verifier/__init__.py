@@ -1,10 +1,16 @@
 """Offline verification of v3 attestation documents.
 
 A ``Verifier`` appraises an attestation document that the caller fetched from
-an enclave: it parses the envelope and checks the nonce binding, authenticates
-the code or config reference values and their freshness witnesses against the
-embedded Sigstore trust root, authenticates the CPU quote against the embedded
-AMD and Intel roots, and enforces the assembled platform policy. The result is
+an enclave: it parses the envelope and checks the nonce binding, establishes
+the code or config reference values and their freshness witnesses through
+the trust path that its options select, authenticates the CPU quote against
+the embedded AMD and Intel roots, and enforces the assembled platform
+policy. By default the reference values are signed bundles, verified against
+the embedded Sigstore trust root and the public registry and release signing
+keys; a verifier may instead be built with the caller's own signing keys, with
+a config authorizer that applies the caller's policy to the config bytes, or
+with embedded references that the caller trusts outright, and then no bundle
+authenticates the component that the caller supplied. The result is
 a ``Verification``: the facts that the document proved, including the endorsed
 TLS key fingerprint and HPKE public key that a client binds its connection
 to, and the deadline after which a cached result must not authorize new

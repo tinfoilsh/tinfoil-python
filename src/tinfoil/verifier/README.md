@@ -44,8 +44,11 @@ def fetch_and_verify(host: str, repo: str | None) -> Verification:
 `repo` is `org/repo`, optionally pinned to a revision or a digest as
 `org/repo@v1.2.3` or `org/repo@sha256:<hex>`. An empty string or `None`
 pins no repository. A document that carries v3 collateral is then accepted
-on any config that the public registry authorized; one that carries v2
-collateral requires a repository pin, so the call is a `UsageError`.
+on any config that the verifier's configured config trust authorizes: the
+public registry by default, or, when the verifier was built with one, the
+caller's config signing keys, config authorizer or embedded config. One that
+carries v2 collateral requires a repository pin, so the call is a
+`UsageError`.
 
 A successful return is not the end of the caller's job. The returned
 `Verification` proves facts about the enclave that served the document; the
