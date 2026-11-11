@@ -857,6 +857,7 @@ def _live_tls_fingerprint(host: str) -> str:
     is not verified: trust comes from matching the endorsed fingerprint, not from the public PKI."""
     hostname, port = _authority(host)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     with (

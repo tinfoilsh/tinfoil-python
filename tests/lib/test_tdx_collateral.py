@@ -7,6 +7,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -375,9 +376,12 @@ class TestParseIssuerChainHeader:
     def test_plus_decodes_to_a_space(self) -> None:
         intel = SCENARIO.intel
         pem = intel.pem(intel.tcb_signing) + intel.pem(intel.root)
-        assert b"+" in pem
+        encoded = quote(pem.decode(), safe="")
+        signing, root = parse_issuer_chain_header(encoded, "Tcb-Info-Issuer-Chain")
+        assert (signing.serial_number, root.serial_number) == (3, 1)
+        # A bare plus decodes to a space, which breaks the PEM where a line break belonged.
         with pytest.raises(CollateralError, match="could not parse PEM"):
-            parse_issuer_chain_header(pem.decode(), "Tcb-Info-Issuer-Chain")
+            parse_issuer_chain_header(encoded.replace("%0A", "+", 1), "Tcb-Info-Issuer-Chain")
 
     @pytest.mark.parametrize(
         ("value", "match"),

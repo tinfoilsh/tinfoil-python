@@ -557,6 +557,7 @@ def tls_server(tmp_path: Path) -> Iterator[tuple[str, bytes]]:
     (tmp_path / "cert.pem").write_bytes(cert_pem)
     (tmp_path / "key.pem").write_bytes(key_pem)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(tmp_path / "cert.pem"), str(tmp_path / "key.pem"))
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))

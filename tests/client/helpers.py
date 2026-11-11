@@ -211,6 +211,7 @@ def server_context(leaf: pki.Issued, tmp_path: Path) -> ssl.SSLContext:
         )
     )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(cert_path), str(key_path))
     return context
 
