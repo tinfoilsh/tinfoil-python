@@ -21,9 +21,10 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from tinfoil.verifier import _json, _semver
 from tinfoil.verifier._canonical import EncodingError, decode_base64, decode_lower_hex
-from tinfoil.verifier._document.collateral.runtime import RuntimeReference
+from tinfoil.verifier._document.collateral.runtime import RUNTIME_REPO, RuntimeReference
 from tinfoil.verifier._endorsement.reference import SHA256_DIGEST_RE
 from tinfoil.verifier._endorsement.time import TimePolicy, TimePolicyError, new_time_policy
+from tinfoil.verifier._repositories import CVMIMAGE_REPO
 from tinfoil.verifier._runtime.config import RuntimeConfigError, runtime_from_config
 from tinfoil.verifier._sigstore.bundle import (
     IN_TOTO_STATEMENT_V1,
@@ -97,8 +98,7 @@ ARTIFACT_FRESHNESS_DOMAIN = b"tinfoil-artifact-freshness/v1\x00"
 
 KIND_PLATFORM = "platform"
 KIND_RUNTIME = "runtime"
-PLATFORM_REPO = "tinfoilsh/cvmimage"
-RUNTIME_REPO = "tinfoilsh/cvmimage"
+PLATFORM_REPO = CVMIMAGE_REPO
 PLATFORM_NAME = "platform-endorsements.json"
 PLATFORM_TAG_PREFIX = "platform-"
 RUNTIME_NAME_PREFIX = "tinfoil-inference-"

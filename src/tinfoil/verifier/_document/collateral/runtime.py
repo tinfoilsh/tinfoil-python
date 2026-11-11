@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from tinfoil.verifier import _json, _semver
 from tinfoil.verifier._canonical import decode_base64, decode_lower_hex
 from tinfoil.verifier._document.collateral.entry import Entry, unmarshal_data
+from tinfoil.verifier._repositories import CVMIMAGE_REPO
 
-RUNTIME_REPO = "tinfoilsh/cvmimage"
+RUNTIME_REPO = CVMIMAGE_REPO
 RUNTIME_ID = "runtime"
 RUNTIME_V1_FORMAT = "https://tinfoil.sh/collateral/igvm-runtime/v1"
 PLATFORM_ID = "platform"
@@ -31,7 +32,7 @@ class RuntimeReference:
         repository, the tag is not a full semantic version, or the digest is not a lowercase SHA-256."""
         if self.repo != RUNTIME_REPO:
             raise RuntimeCollateralError(f"runtime repository must be {RUNTIME_REPO}")
-        if not _semver.is_valid(self.tag) or _semver.canonical(self.tag) + _semver.build(self.tag) != self.tag:
+        if not _semver.is_full(self.tag):
             raise RuntimeCollateralError("runtime tag must be a full semantic version")
         decode_lower_hex("runtime digest", self.digest, 32)
 

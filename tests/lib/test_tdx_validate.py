@@ -6,7 +6,8 @@ import struct
 
 import pytest
 
-from tinfoil.verifier._quote.tdx.lib.abi import INTEL_QE_VENDOR_ID
+from tests import tdx_builders as tb
+from tinfoil.verifier._quote.tdx.lib.abi import INTEL_QE_VENDOR_ID, parse_quote
 from tinfoil.verifier._quote.tdx.lib.validate import (
     TD_ATTRIBUTES_DEBUG_BIT,
     TD_ATTRIBUTES_PERFMON,
@@ -18,6 +19,8 @@ from tinfoil.verifier._quote.tdx.lib.validate import (
     PolicyOptions,
     TdQuoteBodyOptions,
     TdxValidationError,
+    _byte_fields,
+    _check_options_lengths,
     validate_td_attributes,
     validate_xfam,
 )
@@ -148,40 +151,47 @@ class TestPolicyOptions:
 class TestOptionsLengthValidation:
     """Test that option field lengths are validated."""
 
-    def test_invalid_qe_vendor_id_length(self):
-        """QE_VENDOR_ID with wrong length is rejected."""
-        from tinfoil.verifier._quote.tdx.lib.validate import _check_options_lengths
+    @staticmethod
+    def check(opts: PolicyOptions) -> None:
+        """The length checks alone, over the field table that the equality checks share."""
+        quote = parse_quote(tb.Scenario().quote())
+        _check_options_lengths(_byte_fields(quote, opts), opts)
 
+    def test_invalid_qe_vendor_id_length(self) -> None:
+        """QE_VENDOR_ID with wrong length is rejected."""
         opts = PolicyOptions(
             header=HeaderOptions(qe_vendor_id=b"\x00" * 8),  # Should be 16
         )
         with pytest.raises(TdxValidationError, match=r"qe_vendor_id.*length"):
-            _check_options_lengths(opts)
+            self.check(opts)
 
-    def test_invalid_mr_td_length(self):
+    def test_invalid_mr_td_length(self) -> None:
         """MR_TD with wrong length is rejected."""
-        from tinfoil.verifier._quote.tdx.lib.validate import _check_options_lengths
-
         opts = PolicyOptions(
             td_quote_body=TdQuoteBodyOptions(mr_td=b"\x00" * 32),  # Should be 48
         )
         with pytest.raises(TdxValidationError, match=r"mr_td.*length"):
-            _check_options_lengths(opts)
+            self.check(opts)
 
-    def test_invalid_rtmrs_count(self):
+    def test_invalid_minimum_tee_tcb_svn_length(self) -> None:
+        """The minimum TEE TCB SVN is compared component-wise, so its length is checked beside the pinned fields."""
+        opts = PolicyOptions(td_quote_body=TdQuoteBodyOptions(minimum_tee_tcb_svn=b"\x00" * 15))  # Should be 16
+        with pytest.raises(TdxValidationError, match=r"minimum_tee_tcb_svn.*length is 15"):
+            self.check(opts)
+
+    def test_invalid_rtmrs_count(self) -> None:
         """RTMRs with wrong count is rejected."""
-        from tinfoil.verifier._quote.tdx.lib.validate import _check_options_lengths
-
         opts = PolicyOptions(
             td_quote_body=TdQuoteBodyOptions(rtmrs=(b"\x00" * 48,) * 3),  # Should be 4
         )
         with pytest.raises(TdxValidationError, match=r"rtmrs.*entries"):
-            _check_options_lengths(opts)
+            self.check(opts)
+        opts = PolicyOptions(td_quote_body=TdQuoteBodyOptions(rtmrs=(b"\x00" * 48,) * 3 + (b"\x00" * 47,)))
+        with pytest.raises(TdxValidationError, match=r"rtmrs\[3\].*length is 47"):
+            self.check(opts)
 
-    def test_valid_options_pass(self):
+    def test_valid_options_pass(self) -> None:
         """Valid options pass length checks."""
-        from tinfoil.verifier._quote.tdx.lib.validate import _check_options_lengths
-
         opts = PolicyOptions(
             header=HeaderOptions(qe_vendor_id=INTEL_QE_VENDOR_ID),
             td_quote_body=TdQuoteBodyOptions(
@@ -193,7 +203,7 @@ class TestOptionsLengthValidation:
                 mr_owner_config=b"\x00" * 48,
             ),
         )
-        _check_options_lengths(opts)
+        self.check(opts)
 
 
 if __name__ == "__main__":

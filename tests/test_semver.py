@@ -50,3 +50,23 @@ def test_semver(version: str, valid: bool, canonical: str, build: str) -> None:
     assert _semver.is_valid(version) is valid
     assert _semver.canonical(version) == canonical
     assert _semver.build(version) == build
+    # A full version is a valid one that is already its canonical form plus its build metadata.
+    assert _semver.is_full(version) is (valid and canonical + build == version)
+
+
+@pytest.mark.parametrize(
+    ("version", "full"),
+    [
+        ("v1.2.3", True),
+        ("v1.2.3-rc.1", True),
+        ("v1.2.3+build.5", True),
+        ("v1.2.3-rc.1+build.5", True),
+        ("v1", False),
+        ("v1.2", False),
+        ("v1.2-rc.1", False),
+        ("1.2.3", False),
+        ("", False),
+    ],
+)
+def test_is_full(version: str, full: bool) -> None:
+    assert _semver.is_full(version) is full

@@ -62,7 +62,9 @@ def test_parse_timestamp_response_reads_the_token() -> None:
     assert parsed.hash_algorithm == ts.OID_SHA256
     assert parsed.hashed_message == hashlib.sha256(data).digest()
     assert parsed.tst_info_version == ts.TST_INFO_VERSION
-    assert parsed.raw
+    # The token is the CMS SignedData inside the response, not the response itself.
+    assert parsed.token_raw in response
+    assert len(parsed.token_raw) < len(response)
     ts.check_imprint(parsed, data)
     with pytest.raises(ts.TimestampError, match="does not match the input"):
         ts.check_imprint(parsed, data + b"x")

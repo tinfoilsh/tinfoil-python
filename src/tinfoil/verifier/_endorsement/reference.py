@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from tinfoil.verifier._repositories import CVMIMAGE_REPO
+
 # The patterns are ASCII-only so that the character classes match the same
 # characters on every interpreter; they are applied with ``fullmatch`` so that
 # a trailing newline never slips past the end anchor.
@@ -20,7 +22,7 @@ REF_RE = re.compile(
 TINFOIL_ORGANIZATION_ID = "168487856"
 RUNTIME_REPO_ID = "902195777"
 FRESHNESS_WITNESS_REPO = "tinfoilsh/freshness-witness"
-PLATFORM_ENDORSEMENTS_REPO = "tinfoilsh/cvmimage"
+PLATFORM_ENDORSEMENTS_REPO = CVMIMAGE_REPO
 
 
 class ReleaseReferenceError(ValueError):

@@ -10,11 +10,11 @@ seconds in UTCTime.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+from tinfoil.verifier._canonical import EncodingError, decode_base64
 
 CLASS_UNIVERSAL = 0
 CLASS_APPLICATION = 1
@@ -388,14 +388,11 @@ def pem_blocks(pem: str, label: str) -> tuple[bytes, ...]:
 
 
 def _base64(text: str) -> bytes:
-    """Standard base64 with padding; the round trip rejects padding bits that are not zero."""
+    """The PEM body as canonical standard base64, decoded by the one decoder that every encoded field shares."""
     try:
-        decoded = base64.b64decode(text, validate=True)
-    except (binascii.Error, ValueError) as err:
-        raise DerError("PEM body is not valid base64") from err
-    if base64.b64encode(decoded).decode("ascii") != text:
-        raise DerError("PEM body is not canonical base64")
-    return decoded
+        return decode_base64("PEM body", text)
+    except EncodingError as err:
+        raise DerError(str(err)) from err
 
 
 def ecdsa_signature_to_raw(der: bytes, coordinate_bytes: int) -> bytes:

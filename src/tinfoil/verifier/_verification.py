@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, TypeAlias
 
@@ -216,10 +216,11 @@ def _measurement_dict(measurement: Measurement | Expected) -> dict[str, Any]:
             out["launch"] = measurement.launch.hex()
         return out
     out = {"platform": PLATFORM_TDX}
-    for name in ("mrtd", "rtmr0", "rtmr1", "rtmr2", "rtmr3"):
-        value: bytes | None = getattr(measurement, name)
+    # Every field of a TDX record is a register, so the record itself names them.
+    for register in fields(measurement):
+        value: bytes | None = getattr(measurement, register.name)
         if value is not None:
-            out[name] = value.hex()
+            out[register.name] = value.hex()
     return out
 
 

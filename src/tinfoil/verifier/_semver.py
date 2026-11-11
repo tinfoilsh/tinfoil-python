@@ -32,6 +32,12 @@ def canonical(version: str) -> str:
     return version + parsed.short
 
 
+def is_full(version: str) -> bool:
+    """Whether ``version`` is valid and written in full, vMAJOR.MINOR.PATCH with any prerelease and build metadata
+    as given, so that it has exactly one spelling."""
+    return is_valid(version) and canonical(version) + build(version) == version
+
+
 def build(version: str) -> str:
     """The build-metadata suffix including "+", or ""."""
     parsed = _parse(version)

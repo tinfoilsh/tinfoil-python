@@ -63,7 +63,8 @@ class TimestampResponse:
     tst_info_version: int
     serial_number: int
     nonce: int | None
-    raw: bytes
+    token_raw: bytes
+    """The DER TimeStampToken that the response carries: the CMS SignedData, not the TimeStampResp around it."""
 
 
 def timestamp_input(domain: bytes, core: _json.JsonValue) -> bytes:
@@ -153,7 +154,7 @@ def _tst_info(token: der.Element) -> TimestampResponse:
         tst_info_version=der.integer(fields[0]),
         serial_number=der.integer(fields[3]),
         nonce=nonce,
-        raw=token.raw,
+        token_raw=token.raw,
     )
 
 

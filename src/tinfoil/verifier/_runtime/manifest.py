@@ -89,7 +89,7 @@ def decode_manifest(data: bytes) -> Manifest:
             tdx_launch = _decode_tdx_launch(_opt_object(igvm, "tdx_launch"))
     except _json.JsonError as err:
         raise ManifestError(f"parsing runtime manifest: {err}") from err
-    if not _semver.is_valid(version) or _semver.canonical(version) + _semver.build(version) != version:
+    if not _semver.is_full(version):
         raise ManifestError("runtime manifest version must be a full semantic version")
     if igvm is None or format_version != FORMAT_VERSION:
         raise ManifestError("runtime manifest format is unsupported")

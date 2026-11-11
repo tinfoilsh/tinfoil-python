@@ -81,53 +81,62 @@ class PolicyOptions:
     td_quote_body: TdQuoteBodyOptions = field(default_factory=TdQuoteBodyOptions)
 
 
-def _check_option_length(name: str, expected: int, value: bytes | None) -> None:
-    if value is not None and len(value) != expected:
-        raise TdxValidationError(f"option '{name}' length is {len(value)}, expected {expected}")
+@dataclass(frozen=True, slots=True)
+class _ByteField:
+    """One quote field that an option pins verbatim: the option's name, the quote field's name, the field's size,
+    the quote's value and the option's expected value (None when unchecked)."""
+
+    option: str
+    field: str
+    size: int
+    given: bytes
+    expected: bytes | None
 
 
-def _check_options_lengths(options: PolicyOptions) -> None:
-    h = options.header
+def _byte_fields(quote: QuoteV4, options: PolicyOptions) -> tuple[_ByteField, ...]:
+    """The pinned fields in their check order; the four RTMRs appear once the option holds exactly four."""
     t = options.td_quote_body
-    _check_option_length("mr_seam", MR_SEAM_SIZE, t.mr_seam)
-    _check_option_length("td_attributes", TD_ATTRIBUTES_SIZE, t.td_attributes)
-    _check_option_length("xfam", XFAM_SIZE, t.xfam)
-    _check_option_length("mr_td", MR_TD_SIZE, t.mr_td)
-    _check_option_length("mr_config_id", MR_CONFIG_ID_SIZE, t.mr_config_id)
-    _check_option_length("mr_owner", MR_OWNER_SIZE, t.mr_owner)
-    _check_option_length("mr_owner_config", MR_OWNER_CONFIG_SIZE, t.mr_owner_config)
-    _check_option_length("report_data", REPORT_DATA_SIZE, t.report_data)
-    _check_option_length("qe_vendor_id", QE_VENDOR_ID_SIZE, h.qe_vendor_id)
-    _check_option_length("minimum_tee_tcb_svn", TEE_TCB_SVN_SIZE, t.minimum_tee_tcb_svn)
+    body = quote.td_quote_body
+    rows = [
+        _ByteField("mr_seam", "MR_SEAM", MR_SEAM_SIZE, body.mr_seam, t.mr_seam),
+        _ByteField("td_attributes", "TD_ATTRIBUTES", TD_ATTRIBUTES_SIZE, body.td_attributes, t.td_attributes),
+        _ByteField("xfam", "XFAM", XFAM_SIZE, body.xfam, t.xfam),
+        _ByteField("mr_td", "MR_TD", MR_TD_SIZE, body.mr_td, t.mr_td),
+        _ByteField("mr_config_id", "MR_CONFIG_ID", MR_CONFIG_ID_SIZE, body.mr_config_id, t.mr_config_id),
+        _ByteField("mr_owner", "MR_OWNER", MR_OWNER_SIZE, body.mr_owner, t.mr_owner),
+        _ByteField("mr_owner_config", "MR_OWNER_CONFIG", MR_OWNER_CONFIG_SIZE, body.mr_owner_config, t.mr_owner_config),
+    ]
     if t.rtmrs is not None:
         if len(t.rtmrs) != RTMR_COUNT:
             raise TdxValidationError(f"option 'rtmrs' has {len(t.rtmrs)} entries, expected {RTMR_COUNT}")
-        for i, rtmr in enumerate(t.rtmrs):
-            _check_option_length(f"rtmrs[{i}]", RTMR_SIZE, rtmr)
+        rows.extend(
+            _ByteField(f"rtmrs[{i}]", f"RTMR[{i}]", RTMR_SIZE, given, expected)
+            for i, (given, expected) in enumerate(zip(body.rtmrs, t.rtmrs, strict=True))
+        )
+    rows.append(_ByteField("report_data", "REPORT_DATA", REPORT_DATA_SIZE, body.report_data, t.report_data))
+    rows.append(
+        _ByteField(
+            "qe_vendor_id", "QE_VENDOR_ID", QE_VENDOR_ID_SIZE, quote.header.qe_vendor_id, options.header.qe_vendor_id
+        )
+    )
+    return tuple(rows)
 
 
-def _byte_check(field_name: str, given: bytes, expected: bytes | None) -> None:
-    if expected is None:
-        return
-    if given != expected:
-        raise TdxValidationError(f"quote field {field_name} is {given.hex()}. Expect {expected.hex()}")
+def _check_options_lengths(rows: tuple[_ByteField, ...], options: PolicyOptions) -> None:
+    """Every set option has its field's size; the minimum TEE TCB SVN, compared component-wise rather than
+    verbatim, is checked here too."""
+    minimum = options.td_quote_body.minimum_tee_tcb_svn
+    sized = [(row.option, row.size, row.expected) for row in rows]
+    sized.append(("minimum_tee_tcb_svn", TEE_TCB_SVN_SIZE, minimum))
+    for name, size, expected in sized:
+        if expected is not None and len(expected) != size:
+            raise TdxValidationError(f"option '{name}' length is {len(expected)}, expected {size}")
 
 
-def _exact_byte_match(quote: QuoteV4, options: PolicyOptions) -> None:
-    t = options.td_quote_body
-    body = quote.td_quote_body
-    _byte_check("MR_SEAM", body.mr_seam, t.mr_seam)
-    _byte_check("TD_ATTRIBUTES", body.td_attributes, t.td_attributes)
-    _byte_check("XFAM", body.xfam, t.xfam)
-    _byte_check("MR_TD", body.mr_td, t.mr_td)
-    _byte_check("MR_CONFIG_ID", body.mr_config_id, t.mr_config_id)
-    _byte_check("MR_OWNER", body.mr_owner, t.mr_owner)
-    _byte_check("MR_OWNER_CONFIG", body.mr_owner_config, t.mr_owner_config)
-    if t.rtmrs is not None:
-        for i, (given, expected) in enumerate(zip(body.rtmrs, t.rtmrs, strict=True)):
-            _byte_check(f"RTMR[{i}]", given, expected)
-    _byte_check("REPORT_DATA", body.report_data, t.report_data)
-    _byte_check("QE_VENDOR_ID", quote.header.qe_vendor_id, options.header.qe_vendor_id)
+def _exact_byte_match(rows: tuple[_ByteField, ...]) -> None:
+    for row in rows:
+        if row.expected is not None and row.given != row.expected:
+            raise TdxValidationError(f"quote field {row.field} is {row.given.hex()}. Expect {row.expected.hex()}")
 
 
 def _is_svn_higher_or_equal(quote_svn: bytes, minimum: bytes | None) -> bool:
@@ -178,8 +187,9 @@ def validate_td_attributes(td_attributes: bytes) -> None:
 def validate_tdx_policy(quote: QuoteV4, options: PolicyOptions) -> None:
     """Validate a parsed quote against the options: exact matches, the minimum TEE TCB SVN, then the fixed bits
     of XFAM and TD_ATTRIBUTES."""
-    _check_options_lengths(options)
-    _exact_byte_match(quote, options)
+    rows = _byte_fields(quote, options)
+    _check_options_lengths(rows, options)
+    _exact_byte_match(rows)
     _min_version_check(quote, options)
     validate_xfam(quote.td_quote_body.xfam)
     validate_td_attributes(quote.td_quote_body.td_attributes)
