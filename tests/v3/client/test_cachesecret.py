@@ -94,7 +94,7 @@ class TestPersistence:
         assert stat.S_IMODE(path.parent.stat().st_mode) == 0o777, "the directory's mode is not the file's"
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
-    @pytest.mark.parametrize("mode", [0o644, 0o660, 0o604, 0o640, 0o666])
+    @pytest.mark.parametrize("mode", [0o644, 0o660, 0o604, 0o640, 0o620, 0o602, 0o666])
     def test_refuses_a_file_that_group_or_others_can_read_or_write(self, secret_home: Path, mode: int) -> None:
         path = write_secret(secret_home, "shared-secret", mode=mode)
         with pytest.raises(ConfigurationError) as err:
@@ -252,3 +252,15 @@ class TestInjection:
         assert path_eligible("post", "/responses")
         assert not path_eligible("GET", "/v1/chat/completions")
         assert not path_eligible("POST", "/v1/embeddings")
+
+
+def test_scan_object_caps_nesting() -> None:
+    """A value nested to the cap scans; one level deeper is treated as malformed on every interpreter."""
+    from tinfoil._v3._cachesecret import MAX_NESTING, scan_object
+
+    within = '{"a":' + "[" * MAX_NESTING + "]" * MAX_NESTING + "}"
+    beyond = '{"a":' + "[" * (MAX_NESTING + 1) + "]" * (MAX_NESTING + 1) + "}"
+    scanned = scan_object(within)
+    assert scanned is not None
+    assert [m.key for m in scanned] == ["a"]
+    assert scan_object(beyond) is None

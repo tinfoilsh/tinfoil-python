@@ -101,6 +101,30 @@ def _reject_constant(value: str) -> float:
 
 _DECODER = json.JSONDecoder(parse_constant=_reject_constant)
 
+MAX_NESTING = 10_000
+"""The most containers a value may nest before the body is forwarded unchanged.
+
+Some interpreters' JSON scanners accept any depth, others raise before this
+point; the cap makes the outcome the same everywhere and matches the
+nesting limit of the strict document parser."""
+
+
+def _exceeds_nesting(value: object) -> bool:
+    """Whether a decoded value nests containers deeper than ``MAX_NESTING``, walked without recursion."""
+    stack: list[tuple[object, int]] = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        if isinstance(current, dict):
+            children: list[object] = list(current.values())
+        elif isinstance(current, list):
+            children = current
+        else:
+            continue
+        if depth > MAX_NESTING:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
 
 def path_eligible(method: str, path: str) -> bool:
     """Whether a request can carry the field: a POST to one of the supported endpoints."""
@@ -143,9 +167,11 @@ def scan_object(text: str) -> list[Member] | None:
             return None
         value_start = _skip(text, j + 1)
         try:
-            _, value_end = _DECODER.raw_decode(text, value_start)
+            value, value_end = _DECODER.raw_decode(text, value_start)
         except (ValueError, RecursionError):
             # RecursionError: the scanner recurses per nesting level and gives up on pathologically deep bodies.
+            return None
+        if _exceeds_nesting(value):
             return None
         members.append(Member(key, i, value_start, value_end))
         i = _skip(text, value_end)
