@@ -134,12 +134,12 @@ def test_router_discovery() -> None:
 
 def test_gateway() -> None:
     host = urlsplit(DEFAULT_GATEWAY_URL).netloc
-    catalog = fetch_catalog(host)
-    assert catalog
+    assert fetch_catalog(host), "the gateway publishes a catalog with usable entries"
     with GatewayHTTPClient(user_cache_secret=CACHE_SECRET) as gateway:
         models = gateway.models()
         assert models
-        model = max(models, key=lambda m: len(catalog[m].hosts))
+        # The client's own catalog decides what it serves; a separately fetched snapshot may already differ.
+        model = models[0]
         verified = gateway.ensure_verified(model)
         assert verified.hpke_public_key
         assert [v.host for v in gateway.current]

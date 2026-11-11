@@ -168,8 +168,11 @@ def test_verification_check_rejects_without_retry() -> None:
     assert calls == 1, "a rejection is a decision about the evidence, so it isn't retried"
 
 
-@pytest.mark.parametrize("slow_calls", [1, 2])
+@pytest.mark.parametrize("slow_calls", [1, 2], ids=["fresh evidence outlives the check", "every check outlasts it"])
 def test_slow_verification_check_fetches_fresh_evidence(slow_calls: int) -> None:
+    """Evidence that expires during the check is refetched. The evidence fetched for a check that is slow has a
+    short deadline, which the check outlasts; the evidence fetched after the last slow check has a wide one, so
+    the success case does not depend on timing."""
     checks = 0
     fetches = 0
 
@@ -177,12 +180,13 @@ def test_slow_verification_check_fetches_fresh_evidence(slow_calls: int) -> None
         nonlocal checks
         checks += 1
         if checks <= slow_calls:
-            time.sleep(0.15)  # outlasts the verification's deadline
+            time.sleep(0.25)  # outlasts the short deadline
 
     def fetch() -> Verification:
         nonlocal fetches
         fetches += 1
-        return verification("key", deadline=datetime.now(UTC) + timedelta(seconds=0.05))
+        validity = timedelta(seconds=0.1) if fetches <= slow_calls else timedelta(hours=1)
+        return verification("key", deadline=datetime.now(UTC) + validity)
 
     enclave = fake_enclave(fetch, check=check)
     if slow_calls == 2:
@@ -191,8 +195,9 @@ def test_slow_verification_check_fetches_fresh_evidence(slow_calls: int) -> None
     else:
         verified = enclave.verify()
         assert verified.freshness_expires_at is not None
-        assert datetime.now(UTC) < verified.freshness_expires_at
+        assert verified.freshness_expires_at - datetime.now(UTC) > timedelta(minutes=59)
     assert fetches == 2, "an expiry after the check is retried with fresh evidence"
+    assert checks == 2
 
 
 def test_verification_without_a_deadline_is_rejected() -> None:

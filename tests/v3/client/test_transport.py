@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from tests.v3.client.helpers import HOST, fake_enclave, response, verification
+from tinfoil._v3 import _transport
 from tinfoil._v3._enclave import FRESHNESS_EXPIRED
 from tinfoil._v3._errors import AttestationError, ConfigurationError, NetworkError, network_error
 from tinfoil._v3._keys import KeyRejectedError, PeerLacksKeyError, is_key_rejection
@@ -124,11 +125,36 @@ def test_expired_keys_never_authorize_a_request() -> None:
 
 
 @pytest.mark.parametrize("refresh_error", [None, network_error("verification failed")], ids=["success", "failure"])
-def test_refresh_coalesces_requests_and_explicit_verify(refresh_error: NetworkError | None) -> None:
+def test_refresh_coalesces_requests_and_explicit_verify(
+    refresh_error: NetworkError | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    callers = 17
+    arrived = threading.Barrier(callers, timeout=5)  # every caller starts at once, so they contend for one refresh
+    all_waiting = threading.Event()  # set once every caller but the owner waits at the refresh
     release = threading.Event()
     lock = threading.Lock()
     attempts = 0
+    refreshes = 0
+    waiting = 0
     requests = 0
+
+    class CountingEvent(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            nonlocal waiting
+            with lock:
+                waiting += 1
+                if waiting == callers - 1:
+                    all_waiting.set()
+            return super().wait(timeout)
+
+    class ObservedRefresh(_transport._Refresh):
+        def __init__(self) -> None:
+            nonlocal refreshes
+            super().__init__()
+            refreshes += 1
+            self.done = CountingEvent()
+
+    monkeypatch.setattr(_transport, "_Refresh", ObservedRefresh)
 
     def fetch() -> Verification:
         nonlocal attempts
@@ -153,22 +179,25 @@ def test_refresh_coalesces_requests_and_explicit_verify(refresh_error: NetworkEr
     results: list[BaseException | None] = []
 
     def run(call: Callable[[], object]) -> None:
+        arrived.wait()
         try:
             call()
             results.append(None)
         except BaseException as err:
             results.append(err)
 
-    threads = [threading.Thread(target=run, args=(lambda: get(keyed),)) for _ in range(16)]
+    threads = [threading.Thread(target=run, args=(lambda: get(keyed),)) for _ in range(callers - 1)]
     threads.append(threading.Thread(target=run, args=(keyed.reverify,)))
     for thread in threads:
         thread.start()
-    time.sleep(0.1)
+    assert all_waiting.wait(5), "every caller but the owner waits at the refresh"
     assert attempts == 1
     release.set()
     for thread in threads:
         thread.join(5)
-    assert len(results) == 17
+    assert refreshes == 1, "the callers that found the refresh in progress waited for it instead of starting one"
+    assert attempts == (1 if refresh_error is None else 2), "a failed attempt is retried once, within the refresh"
+    assert len(results) == callers
     if refresh_error is not None:
         assert all(result is refresh_error for result in results)
         assert requests == 0
@@ -364,6 +393,7 @@ def test_refresh_rejects_a_verification_that_expires_during_creation() -> None:
 
 
 def test_late_rejection_does_not_invalidate_the_replacement() -> None:
+    sent_under_old = threading.Event()
     release = threading.Event()
     verifications = 0
 
@@ -375,6 +405,7 @@ def test_late_rejection_does_not_invalidate_the_replacement() -> None:
     def build(verified: Verification) -> httpx.BaseTransport:
         def handler(_: httpx.Request) -> httpx.Response:
             if verified.code_tag == "old":
+                sent_under_old.set()
                 release.wait(5)
                 raise PeerLacksKeyError(AttestationError(CERT_MISMATCH))
             return response(200)
@@ -393,7 +424,7 @@ def test_late_rejection_does_not_invalidate_the_replacement() -> None:
 
     thread = threading.Thread(target=send)
     thread.start()
-    time.sleep(0.05)
+    assert sent_under_old.wait(5), "the request went out under the old verification"
     keyed.reverify()
     release.set()
     thread.join(5)
@@ -492,25 +523,40 @@ async def test_async_refresh_coalesces_and_survives_cancellation() -> None:
 
 @pytest.mark.asyncio
 async def test_async_key_rejection_and_close() -> None:
-    sends = 0
+    sent_under: list[str] = []
+    fetches = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        nonlocal sends
-        sends += 1
-        raise PeerLacksKeyError(AttestationError(CERT_MISMATCH))
+    def fetch() -> Verification:
+        nonlocal fetches
+        fetches += 1
+        return verification("key", tag=f"verification {fetches}")
 
-    keyed = AsyncAttestedTransport(
-        fake_enclave(lambda: verification("key")), AsyncFakeMode(lambda _: httpx.MockTransport(handler))
-    )
+    def build(verified: Verification) -> httpx.BaseTransport:
+        def handler(_: httpx.Request) -> httpx.Response:
+            sent_under.append(verified.code_tag)
+            raise PeerLacksKeyError(AttestationError(CERT_MISMATCH))
+
+        return httpx.MockTransport(handler)
+
+    mode = AsyncFakeMode(build)
+    keyed = AsyncAttestedTransport(fake_enclave(fetch), mode)
     with pytest.raises(AttestationError) as err:
         await keyed.handle_async_request(httpx.Request("GET", f"https://{HOST}/"))
     assert is_key_rejection(err.value)
-    state = keyed._current
-    assert state is not None
-    assert state.rejected
-    with pytest.raises(AttestationError):
+    rejected = keyed._current
+    assert rejected is not None
+    assert rejected.rejected
+    assert fetches == 1
+    with pytest.raises(AttestationError) as again:
         await keyed.handle_async_request(httpx.Request("GET", f"https://{HOST}/"))
-    assert sends == 2, "the next request verifies again and sends under the fresh state"
+    assert is_key_rejection(again.value)
+    assert fetches == 2, "the rejection invalidated the state, so the next request verified again"
+    assert sent_under == ["verification 1", "verification 2"], "the second request went out under the fresh one"
+    assert [built.code_tag for built in mode.built] == sent_under, "each verification got a transport of its own"
+    fresh = keyed._current
+    assert fresh is not None
+    assert fresh is not rejected
+    assert fresh.rejected, "the fresh state was rejected in its turn"
     await keyed.aclose()
     with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
         await keyed.ensure_verified()

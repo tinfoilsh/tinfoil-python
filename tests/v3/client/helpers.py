@@ -129,17 +129,30 @@ class Recorder:
         return self.handler(request)
 
 
+class _TLSHTTPServer(http.server.ThreadingHTTPServer):
+    """A threading HTTP server that wraps each accepted connection in the TLS context it holds at that moment."""
+
+    context: ssl.SSLContext
+
+
 @dataclass
 class TLSServer:
-    """A loopback HTTPS server. ``context`` is used for each new connection, so a test can swap the certificate
-    the server presents. ``requests`` counts the requests its handler served."""
+    """A loopback HTTPS server. ``context`` is the server's own, used for each new connection, so a test that
+    assigns it swaps the certificate the server presents. ``requests`` counts the requests its handler served."""
 
-    server: http.server.ThreadingHTTPServer
-    context: ssl.SSLContext
+    server: _TLSHTTPServer
     thread: threading.Thread
     fingerprint: str
     requests: list[str]
     connections: list[int]
+
+    @property
+    def context(self) -> ssl.SSLContext:
+        return self.server.context
+
+    @context.setter
+    def context(self, context: ssl.SSLContext) -> None:
+        self.server.context = context
 
     @property
     def port(self) -> int:
@@ -231,10 +244,9 @@ def start_tls_server(leaf: pki.Issued, tmp_path: Path, *, body: bytes = b"ok", s
         def log_message(self, format: str, *args: Any) -> None:
             pass
 
-    class Server(http.server.ThreadingHTTPServer):
+    class Server(_TLSHTTPServer):
         daemon_threads = True
         allow_reuse_address = True
-        context: ssl.SSLContext
 
         def get_request(self) -> tuple[socket.socket, Any]:
             sock, address = super().get_request()
@@ -249,7 +261,7 @@ def start_tls_server(leaf: pki.Issued, tmp_path: Path, *, body: bytes = b"ok", s
     server.context = server_context(leaf, tmp_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    return TLSServer(server, server.context, thread, cert_pubkey_fp(leaf.der), requests, connections)
+    return TLSServer(server, thread, cert_pubkey_fp(leaf.der), requests, connections)
 
 
 def trust(ca: pki.Issued, tmp_path: Path) -> str:

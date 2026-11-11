@@ -173,14 +173,14 @@ class TestPersistence:
             )
             for _ in range(8)
         ]
+        # Every process is released before any is waited for, so they contend for the election at once. The
+        # input is flushed but the pipe is left open: communicate() closes it, and refuses one already closed.
         for process in processes:
             assert process.stdin is not None
             process.stdin.write("x")
-            process.stdin.close()
+            process.stdin.flush()
         results: list[str] = []
         for process in processes:
-            assert process.stdout is not None
-            assert process.stderr is not None
             out, err = process.communicate(timeout=60)
             assert process.returncode == 0, err
             results.append(out.strip())

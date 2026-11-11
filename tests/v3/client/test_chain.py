@@ -292,7 +292,8 @@ class TestCacheSecretInjector:
         raw = b'{"model":"m"}'
         unscoped = post_json("https://enclave.example.com/v1/chat/completions", raw)
         assert roundtrip("", unscoped).bodies == [raw]
-        assert with_cache_secret(Recorder().transport, "") is not None
+        transport = Recorder().transport
+        assert with_cache_secret(transport, "") is transport, "an empty secret adds no layer"
 
     def test_injects_into_a_streaming_body(self) -> None:
         request = httpx.Request(
