@@ -48,8 +48,17 @@ def test_pin_tls_key() -> None:
         pin_tls_key("00" * 32)(Connection(issued.der))  # type: ignore[arg-type]
     assert rejected.value.layer == LAYER_POLICY
     assert fp in str(rejected.value)
-    with pytest.raises(UsageError):
+    with pytest.raises(UsageError, match="no peer certificates"):
         pin_tls_key(fp)(Connection(None))  # type: ignore[arg-type]
+
+
+def test_pin_tls_key_rejects_a_peer_certificate_that_does_not_parse() -> None:
+    # The leaf is the peer's evidence: one that does not parse is a policy rejection, not a caller's mistake.
+    fp = cert_pubkey_fp(pki.certificate("leaf", pki.p256()).der)
+    with pytest.raises(VerificationError) as rejected:
+        pin_tls_key(fp)(Connection(b"not a certificate"))  # type: ignore[arg-type]
+    assert rejected.value.layer == LAYER_POLICY
+    assert "peer certificate" in str(rejected.value)
 
 
 def test_pin_tls_key_rejects_a_malformed_fingerprint_when_built() -> None:

@@ -46,7 +46,9 @@ def connection_cert_fp(connection: ssl.SSLSocket | ssl.SSLObject) -> str:
 def pin_tls_key(fp: str) -> Callable[[ssl.SSLSocket | ssl.SSLObject], None]:
     """A check that accepts only a connection whose leaf certificate carries the public key fingerprint ``fp``, in
     the form ``Verification.tls_public_key_fp`` reports. It adds to the certificate checks that the TLS context
-    performs; it does not replace them. A mismatch is a VerificationError of the policy layer.
+    performs; it does not replace them. A mismatch, or a peer certificate that does not parse, is a
+    VerificationError of the policy layer; a connection without a peer certificate is a UsageError.
+
 
     Call the returned check on the ``ssl.SSLSocket`` or ``ssl.SSLObject``
     immediately after ``do_handshake()`` returns and before the first byte
@@ -73,7 +75,14 @@ def pin_tls_key(fp: str) -> Callable[[ssl.SSLSocket | ssl.SSLObject], None]:
         raise UsageError(f"TLS key fingerprint must be {_FINGERPRINT_SIZE} bytes as lowercase hex")
 
     def check(connection: ssl.SSLSocket | ssl.SSLObject) -> None:
-        got = connection_cert_fp(connection)
+        leaf = connection.getpeercert(binary_form=True)
+        if not leaf:
+            raise UsageError("no peer certificates")
+        try:
+            got = cert_pubkey_fp(leaf)
+        except UsageError as err:
+            # The leaf is the peer's evidence, not the caller's input: one that does not parse is a rejection.
+            raise VerificationError(LAYER_POLICY, f"peer certificate: {err.message}") from err
         if got != fp:
             raise VerificationError(LAYER_POLICY, f"TLS key {got} does not match the attested key {fp}")
 

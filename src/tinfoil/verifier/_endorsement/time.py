@@ -7,6 +7,10 @@ from datetime import datetime, timedelta
 
 DEFAULT_MAX_AGE = timedelta(days=7)
 DEFAULT_FUTURE_SKEW = timedelta(minutes=5)
+MAX_AGE_SPAN = datetime.max - datetime.min
+"""The longest age that any window can hold: the span between the earliest and the latest representable instants.
+A longer age overflows ``now - max_age`` for every ``now``; a shorter one can still overflow for a ``now`` near the
+earliest instant, which the window builder reports."""
 
 
 class TimePolicyError(ValueError):

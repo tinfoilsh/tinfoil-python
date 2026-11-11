@@ -63,7 +63,7 @@ from tinfoil.verifier._endorsement.approval import (
     runtime_name,
 )
 from tinfoil.verifier._endorsement.reference import AuthenticatedArtifact, Reference
-from tinfoil.verifier._endorsement.time import DEFAULT_MAX_AGE
+from tinfoil.verifier._endorsement.time import DEFAULT_MAX_AGE, MAX_AGE_SPAN
 from tinfoil.verifier._errors import (
     LAYER_ENVELOPE,
     LAYER_PROVENANCE,
@@ -132,6 +132,12 @@ def test_freshness_max_age() -> None:
     for bad in (0, 3600, "7d"):
         with pytest.raises(UsageError, match="freshness maximum age must be a timedelta"):
             Verifier(freshness_max_age=bad)  # type: ignore[arg-type]
+    # The longest window spans the representable datetimes; a longer age could not be anchored on any verification
+    # instant, and would reject every document as stale rather than fail the caller.
+    assert Verifier(freshness_max_age=MAX_AGE_SPAN).freshness_max_age == MAX_AGE_SPAN
+    for too_long in (MAX_AGE_SPAN + timedelta(microseconds=1), timedelta.max):
+        with pytest.raises(UsageError, match="freshness maximum age is longer than any representable window"):
+            Verifier(freshness_max_age=too_long)
 
 
 def test_pinned_registers_must_be_expected_values() -> None:
@@ -705,6 +711,9 @@ def test_option_fields_of_the_wrong_type_are_usage_errors() -> None:
         ({"config_registry_ids": [5]}, "config registry IDs must be strings"),
         ({"config_registry_ids": [PRIVATE_REGISTRY_ID, None]}, "config registry IDs must be strings"),
         ({"config_registry_ids": 5}, "config registry IDs must be a sequence"),
+        ({"config_signing_keys": 5}, "config signing keys must be a sequence of keys"),
+        ({"freshness_signing_keys": object()}, "freshness signing keys must be a sequence of keys"),
+        ({"embedded_references": {"runtime": b"{}"}}, "embedded references must be an EmbeddedReferences value"),
         ({"embedded_references": _refs(runtime="{}")}, "embedded runtime manifest must be bytes"),
         ({"embedded_references": _refs(platform="{}")}, "embedded platform artifact must be bytes"),
         ({"embedded_references": _refs(config=_config(data=config_text))}, "embedded config data must be bytes"),

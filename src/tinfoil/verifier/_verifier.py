@@ -42,7 +42,7 @@ from tinfoil.verifier._endorsement.approval import ApprovalError, ConfigPolicy, 
 from tinfoil.verifier._endorsement.provenance import ProvenanceClient, ProvenanceError
 from tinfoil.verifier._endorsement.reference import AuthenticatedArtifact, Reference, ReleaseReferenceError
 from tinfoil.verifier._endorsement.reference import parse_reference as _parse_reference
-from tinfoil.verifier._endorsement.time import DEFAULT_MAX_AGE
+from tinfoil.verifier._endorsement.time import DEFAULT_MAX_AGE, MAX_AGE_SPAN
 from tinfoil.verifier._errors import (
     LAYER_ENVELOPE,
     LAYER_POLICY,
@@ -129,7 +129,10 @@ class Verifier:
         may be at the verification instant. None keeps the seven-day
         default. Any non-negative ``timedelta`` is honored as given: zero
         accepts only a witness that is no older than the verification
-        instant, and a negative age is a UsageError.
+        instant. A negative age, or one longer than the span between the
+        earliest and the latest representable ``datetime``, so that no
+        verification instant could anchor the window, is a UsageError.
+
 
         ``config_signing_keys``: ECDSA P-256 keys (``load_public_key``)
         that replace the public config trust. Configs must be key-signed by
@@ -283,6 +286,19 @@ def _repo(repo: str | None) -> str:
     return repo
 
 
+def _key_tuple(what: str, keys: Sequence[PublicKey] | None) -> tuple[PublicKey, ...] | None:
+    """The keys as a tuple, None for None; a value that is not iterable or an empty one is a UsageError."""
+    if keys is None:
+        return None
+    try:
+        out = tuple(keys)
+    except TypeError as err:
+        raise UsageError(f"{what} must be a sequence of keys") from err
+    if len(out) == 0:
+        raise UsageError(f"{what} must not be empty")
+    return out
+
+
 def _build(
     *,
     overrides: Overrides | None = None,
@@ -333,13 +349,12 @@ def _trust_policy(
             raise UsageError(f"freshness maximum age must be a timedelta, not {type(freshness_max_age).__name__}")
         if freshness_max_age < timedelta(0):
             raise UsageError("freshness maximum age must not be negative")
+        if freshness_max_age > MAX_AGE_SPAN:
+            raise UsageError("freshness maximum age is longer than any representable window")
         max_age = freshness_max_age
-    config_keys = None if config_signing_keys is None else tuple(config_signing_keys)
-    if config_keys is not None and len(config_keys) == 0:
-        raise UsageError("config signing keys must not be empty")
-    freshness_keys = None if freshness_signing_keys is None else tuple(freshness_signing_keys)
-    if freshness_keys is not None and len(freshness_keys) == 0:
-        raise UsageError("freshness signing keys must not be empty")
+    config_keys = _key_tuple("config signing keys", config_signing_keys)
+    freshness_keys = _key_tuple("freshness signing keys", freshness_signing_keys)
+
     registry_ids: tuple[str, ...] | None = None
     if config_registry_ids is not None:
         try:

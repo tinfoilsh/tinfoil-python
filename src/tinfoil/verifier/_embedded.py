@@ -79,8 +79,11 @@ def resolve_embedded(refs: EmbeddedReferences) -> ResolvedReferences:
     The manifest and platform bytes are copied, so a caller cannot change
     the policy through a mutable buffer after the verifier is built.
     """
+    if not isinstance(refs, EmbeddedReferences):
+        raise UsageError(f"embedded references must be an EmbeddedReferences value, not {type(refs).__name__}")
     if refs.config is None and refs.runtime is None and refs.platform is None:
         raise UsageError("embedded references must contain at least one component")
+
     if refs.config is not None and not isinstance(refs.config, EmbeddedConfig | EmbeddedConfigReference):
         raise UsageError(
             "embedded config must be an EmbeddedConfig or EmbeddedConfigReference value, "

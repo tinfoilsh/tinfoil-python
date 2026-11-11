@@ -59,9 +59,14 @@ class VerificationError(VerifyError):
     message: str
 
     def __init__(self, layer: Layer, message: str) -> None:
-        super().__init__(f"{layer}: {message}")
+        # ``args`` holds the constructor's own arguments, so that the error
+        # survives ``copy`` and ``pickle``, which rebuild it from them.
+        super().__init__(layer, message)
         self.layer = layer
         self.message = message
+
+    def __str__(self) -> str:
+        return f"{self.layer}: {self.message}"
 
 
 __all__ = [
