@@ -1,7 +1,8 @@
 """The OpenAI wrappers: every request goes through the attested HTTP client to the route's URL, the caller's
 ``http_client`` and ``base_url`` cannot replace it, the realtime resource is refused, copies keep the attested
-client, a failed constructor closes the one it created, API errors pass through unchanged and a client error
-raised from the transport is reachable behind the library's connection error."""
+client, a failed constructor closes the one it created, API errors pass through unchanged, and a client error
+raised in the transport reaches the caller unwrapped and unretried, since the library wraps and retries only
+the errors of its own HTTP stack."""
 
 from __future__ import annotations
 

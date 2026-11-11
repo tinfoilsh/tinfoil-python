@@ -314,7 +314,7 @@ def test_rejected_document_is_an_attestation_error(monkeypatch: pytest.MonkeyPat
     with pytest.raises(AttestationError) as err:
         Enclave("enclave.example", "org/repo").verify()
     assert isinstance(err.value.__cause__, VerificationError), "the verifier's error remains the cause"
-    assert str(err.value).startswith("attestation error: ")
+    assert str(err.value) == str(err.value.__cause__), "the message is the verifier's own, without a prefix"
     assert len(recorder.requests) == 2, "a rejected document is fetched once more"
 
 
@@ -323,5 +323,6 @@ def test_unreachable_enclave_is_a_network_error(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(_fetch, "_TRANSPORT", recorder.transport)
     with pytest.raises(NetworkError) as err:
         Enclave("enclave.example", "org/repo").verify()
-    assert str(err.value).startswith("network error: ")
+    assert str(err.value) == err.value.message
+    assert "503" in err.value.message
     assert len(recorder.requests) == 2

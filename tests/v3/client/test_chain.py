@@ -408,10 +408,10 @@ def test_key_rejection_markers() -> None:
     err = rejection("rotated")
     assert isinstance(err, AttestationError)
     assert isinstance(err.__cause__, KeyRejectedError)
-    assert str(err) == "attestation error: rotated"
+    assert str(err) == "rotated"
     pinned = AttestationError("certificate does not match")
     tls = key_rejection(_PeerLacksKey(pinned))
-    assert str(tls) == "attestation error: certificate does not match", "a client error's message is carried once"
+    assert str(tls) == "certificate does not match", "a client error's message is carried once"
     assert isinstance(tls.__cause__, KeyRejectedError)
     assert tls.__cause__.__cause__ is pinned
     plain: Callable[[], NetworkError] = lambda: network_error("x")  # noqa: E731

@@ -356,7 +356,7 @@ class TestGatewayClient:
     def test_refused_gateway_url_is_not_echoed(self, network: Network) -> None:
         with pytest.raises(ConfigurationError) as err:
             GatewayHTTPClient(url="https://u:hunter2@gateway.example/v1/", catalog=dict)
-        assert str(err.value) == f"configuration error: {GATEWAY_URL_INVALID}"
+        assert str(err.value) == GATEWAY_URL_INVALID
 
     def test_fetches_the_catalog_before_returning(self, network: Network) -> None:
         with pytest.raises(NetworkError):

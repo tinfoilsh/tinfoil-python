@@ -18,18 +18,23 @@ _E = TypeVar("_E", bound="TinfoilError")
 class TinfoilError(Exception):
     """A client error: one of the three categories and the message that explains it.
 
-    ``str(err)`` is the category, " error: " and the message, as in
-    ``"attestation error: <message>"``. Upstream API errors, such as the
-    ``openai`` package's, keep their own types and are never wrapped.
+    ``str(err)`` is the message alone; the category is ``err.category`` and
+    the class. The message is the exception's only argument, so an error
+    pickles and unpickles unchanged. The class is abstract: only the three
+    categories are raised, and constructing it directly is a TypeError.
+    Upstream API errors, such as the ``openai`` package's, keep their own
+    types and are never wrapped.
     """
 
-    category: ClassVar[str] = ""
+    category: ClassVar[str]
     """The category name: ``"configuration"``, ``"network"`` or ``"attestation"``."""
 
     def __init__(self, message: str) -> None:
-        super().__init__(f"{self.category} error: {message}")
+        if type(self) is TinfoilError:
+            raise TypeError("TinfoilError is abstract; raise ConfigurationError, NetworkError or AttestationError")
+        super().__init__(message)
         self.message = message
-        """The message without the category prefix."""
+        """The message, as ``str(err)`` renders it."""
 
 
 class ConfigurationError(TinfoilError):
@@ -86,12 +91,15 @@ def from_verify(err: VerifyError) -> TinfoilError:
 
 
 def tinfoil_error(err: BaseException) -> TinfoilError | None:
-    """The client error in ``err``'s cause chain, or None when there is none.
+    """The client error that ``err`` is or was raised from, or None when there is none.
 
-    A client error raised from the transport reaches a caller of the
-    ``openai`` package wrapped in that package's ``APIConnectionError`` or
-    ``APITimeoutError``; this follows ``__cause__`` and ``__context__``
-    to find it.
+    A client error raised in the transport reaches a caller of the
+    ``openai`` package as itself, not wrapped in that package's connection
+    error, and the package does not retry it: it wraps and retries only
+    the errors of its own HTTP stack. This helper is for a caller whose
+    own code wraps the error, such as ``raise MyError(...) from err``: it
+    follows the chain that the traceback shows, ``__cause__`` when it is
+    set and otherwise ``__context__`` unless ``from None`` suppressed it.
     """
     current: BaseException | None = err
     seen: set[int] = set()
@@ -99,7 +107,12 @@ def tinfoil_error(err: BaseException) -> TinfoilError | None:
         seen.add(id(current))
         if isinstance(current, TinfoilError):
             return current
-        current = current.__cause__ or current.__context__
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
     return None
 
 
