@@ -3,7 +3,7 @@ the attested transport reports that it has invalidated the verification a reques
 
 from __future__ import annotations
 
-from tinfoil._errors import AttestationError
+from tinfoil._errors import AttestationError, attestation_error
 
 
 class PeerLacksKeyError(Exception):
@@ -33,10 +33,7 @@ class KeyRejectedError(Exception):
 def key_rejection(err: PeerLacksKeyError) -> AttestationError:
     """The AttestationError that reports a key rejection, carrying the underlying failure's message once, with
     the ``KeyRejectedError`` marker as its cause and the failure behind that."""
-    rejection = KeyRejectedError(err.__cause__ or err)
-    reported = AttestationError(str(rejection))
-    reported.__cause__ = rejection
-    return reported
+    return attestation_error(KeyRejectedError(err.__cause__ or err))
 
 
 def is_key_rejection(err: BaseException) -> bool:
