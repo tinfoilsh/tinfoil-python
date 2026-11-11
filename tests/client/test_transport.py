@@ -14,7 +14,7 @@ import pytest
 
 from tests.client.helpers import HOST, fake_enclave, response, verification
 from tinfoil import _transport
-from tinfoil._enclave import FRESHNESS_EXPIRED
+from tinfoil._enclave import DEADLINE_EXCEEDED, FRESHNESS_EXPIRED
 from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, network_error
 from tinfoil._keys import KeyRejectedError, PeerLacksKeyError, is_key_rejection
 from tinfoil._tls import CERT_MISMATCH, NO_TLS
@@ -206,6 +206,74 @@ def test_refresh_coalesces_requests_and_explicit_verify(
     else:
         assert all(result is None for result in results)
         assert requests == 16
+
+
+def test_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadline() -> None:
+    """A caller that joins a refresh another caller owns waits no longer than its own deadline: it leaves with
+    the deadline error while the refresh goes on and completes for its owner."""
+    started = threading.Event()
+    release = threading.Event()
+    attempts = 0
+
+    def fetch() -> Verification:
+        nonlocal attempts
+        attempts += 1
+        started.set()
+        release.wait(5)
+        return verification("slow")
+
+    keyed = transport(fetch)
+    owner_result: list[Verification | BaseException] = []
+
+    def own() -> None:
+        try:
+            owner_result.append(keyed.reverify())
+        except BaseException as err:
+            owner_result.append(err)
+
+    owner = threading.Thread(target=own)
+    owner.start()
+    assert started.wait(5)
+    begun = time.monotonic()
+    with pytest.raises(NetworkError, match=DEADLINE_EXCEEDED):
+        keyed.verify_once(deadline=begun + 0.1)
+    assert time.monotonic() - begun < 2.0, "the wait ended at the deadline, not at the refresh's end"
+    assert not release.is_set(), "the owner's refresh is still running"
+    release.set()
+    owner.join(5)
+    assert isinstance(owner_result[0], Verification)
+    assert owner_result[0].code_tag == "slow"
+    assert attempts == 1, "the joining caller started no refresh of its own"
+    assert keyed.current is not None
+    assert keyed.ensure_verified().code_tag == "slow", "the refresh that outlasted the deadline still counts"
+
+
+@pytest.mark.asyncio
+async def test_async_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadline() -> None:
+    release = asyncio.Event()
+    attempts = 0
+
+    async def fetch_async() -> Verification:
+        nonlocal attempts
+        attempts += 1
+        await release.wait()
+        return verification("slow")
+
+    enclave = fake_enclave(lambda: verification("slow"))
+    enclave._fetch_async = fetch_async
+    keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
+    owner = asyncio.create_task(keyed.reverify())
+    await asyncio.sleep(0.01)
+    assert attempts == 1
+    begun = time.monotonic()
+    with pytest.raises(NetworkError, match=DEADLINE_EXCEEDED):
+        await keyed.verify_once(deadline=begun + 0.1)
+    assert time.monotonic() - begun < 2.0
+    assert not owner.done(), "the owner's refresh survives the joining caller's deadline"
+    release.set()
+    assert (await owner).code_tag == "slow"
+    assert attempts == 1
+    assert (await keyed.ensure_verified()).code_tag == "slow"
 
 
 def test_requests_use_the_explicit_verification() -> None:

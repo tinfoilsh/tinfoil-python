@@ -5,6 +5,7 @@ the catalog cache."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import threading
 import time
@@ -1007,6 +1008,88 @@ class TestCatalogCache:
         past_cancel._closed = True
         await past_cancel._load(5.0)
         assert "old" in past_cancel._catalog, "a refresh past its last await finishes and its result is dropped"
+
+    def test_close_during_the_first_fetch_refuses_its_waiters(self) -> None:
+        """A first fetch that succeeds after close has its catalog dropped, so the callers waiting on it see the
+        closed client, not a catalog or a network failure."""
+        release = threading.Event()
+
+        def fetch(timeout: TimeoutTypes) -> Catalog:
+            release.wait(5)
+            return catalog()
+
+        cache = _CatalogCache(fetch)
+        results: list[BaseException | Catalog] = []
+
+        def get() -> None:
+            try:
+                results.append(cache.get(5.0))
+            except BaseException as err:
+                results.append(err)
+
+        threads = [threading.Thread(target=get) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        time.sleep(0.05)
+        cache.close()
+        release.set()
+        for thread in threads:
+            thread.join(5)
+        assert len(results) == 2
+        for result in results:
+            assert isinstance(result, ConfigurationError)
+            assert str(result) == CLIENT_CLOSED
+        assert cache._catalog is None, "the late catalog was dropped"
+
+    @pytest.mark.asyncio
+    async def test_async_close_during_the_first_fetch_refuses_its_waiters(self) -> None:
+        """Close cancels the first fetch, and the callers waiting on it see the closed client rather than the
+        cancellation; a caller's own cancellation still ends only its wait, and the fetch goes on."""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        fetches = 0
+
+        async def fetch(_: TimeoutTypes) -> Catalog:
+            nonlocal fetches
+            fetches += 1
+            started.set()
+            await release.wait()
+            return catalog()
+
+        cache = _AsyncCatalogCache(fetch)
+        waiters = [asyncio.create_task(cache.get(5.0)) for _ in range(2)]
+        await started.wait()
+        own = asyncio.create_task(cache.get(5.0))
+        await asyncio.sleep(0)
+        own.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await own
+        assert not waiters[0].done(), "one caller's cancellation leaves the fetch and the other callers alone"
+        cache.close()
+        for waiter in waiters:
+            with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
+                await waiter
+        assert fetches == 1
+        release.set()
+
+    @pytest.mark.asyncio
+    async def test_async_fetch_that_outlives_its_cancellation_refuses_its_waiters(self) -> None:
+        """A fetch that finishes despite the cancellation close sent it has its catalog dropped, and its waiters
+        see the closed client."""
+        release = asyncio.Event()
+
+        async def fetch(_: TimeoutTypes) -> Catalog:
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+            return catalog()
+
+        cache = _AsyncCatalogCache(fetch)
+        waiter = asyncio.create_task(cache.get(5.0))
+        await asyncio.sleep(0)
+        cache.close()
+        with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
+            await waiter
+        assert cache._catalog is None
 
     def test_close_before_the_first_fetch_fetches_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An empty cache that is closed refuses its callers instead of starting its first fetch, from the cache

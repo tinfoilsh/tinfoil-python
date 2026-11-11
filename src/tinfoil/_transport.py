@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from typing import Any, Generic, Protocol, TypeVar
 
@@ -19,8 +20,8 @@ import httpx
 from httpx._client import UseClientDefault  # the sentinel's type; httpx exports only the value
 
 from tinfoil._ehbp import NO_HPKE_KEY, AsyncSealingTransport, SealingTransport, check_ehbp, server_identity
-from tinfoil._enclave import FRESHNESS_EXPIRED, Enclave, is_fresh
-from tinfoil._errors import AttestationError, ConfigurationError
+from tinfoil._enclave import DEADLINE_EXCEEDED, FRESHNESS_EXPIRED, Enclave, is_fresh
+from tinfoil._errors import AttestationError, ConfigurationError, NetworkError
 from tinfoil._keys import PeerLacksKeyError, key_rejection
 from tinfoil._tls import NO_TLS, AsyncPinnedTransport, PinnedTransport
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, TransportMode
@@ -246,7 +247,9 @@ class AttestedTransport(httpx.BaseTransport):
         self, force: bool, verify: VerifyMethod, timeout: TimeoutTypes, deadline: float | None
     ) -> _State[RetiringTransport]:
         """A valid state, refreshing it first when ``force`` is set or the current one is invalid. Concurrent
-        callers share one refresh, including its failure."""
+        callers share one refresh, including its failure; a caller with a ``deadline`` stops waiting for a
+        refresh another caller runs once the deadline passes, with the NetworkError its own attempt would raise,
+        and the refresh goes on for the others."""
         while True:
             with self._lock:
                 if self._closed:
@@ -269,7 +272,8 @@ class AttestedTransport(httpx.BaseTransport):
                         self._refresh = None
                     refresh.done.set()
             else:
-                refresh.done.wait()
+                if not refresh.done.wait(_time_left(deadline)):
+                    raise NetworkError(DEADLINE_EXCEEDED)
                 if refresh.error is not None:
                     raise refresh.error
             # A request can reject the new state before this caller wakes, so
@@ -369,9 +373,12 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
             if refresh is None:
                 refresh = self._refresh = asyncio.create_task(self._refresh_once(verify, timeout, deadline))
                 refresh.add_done_callback(self._refresh_done)
-            # The refresh runs in its own task, so this caller's cancellation ends
-            # only its wait; the task keeps serving the other callers.
-            await asyncio.shield(refresh)
+            # The refresh runs in its own task, so this caller's cancellation, or its
+            # deadline passing, ends only its wait; the task keeps serving the other callers.
+            try:
+                await asyncio.wait_for(asyncio.shield(refresh), _time_left(deadline))
+            except TimeoutError:
+                raise NetworkError(DEADLINE_EXCEEDED) from None
             force = False
 
     def _refresh_done(self, task: asyncio.Task[None]) -> None:
@@ -395,6 +402,11 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
         replaced, self._current = self._current, state
         if replaced is not None:
             await replaced.transport.retire()
+
+
+def _time_left(deadline: float | None) -> float | None:
+    """The seconds until ``deadline``, a ``time.monotonic`` instant, never negative; None for no deadline."""
+    return None if deadline is None else max(deadline - time.monotonic(), 0.0)
 
 
 class RetiringTransport(httpx.BaseTransport):

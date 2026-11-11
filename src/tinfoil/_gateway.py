@@ -163,7 +163,8 @@ def parse_catalog(body: bytes) -> Catalog:
     A body of another shape is a NetworkError; an entry that is not trusted is dropped."""
     try:
         raw = json.loads(body)
-    except ValueError as err:
+    except (ValueError, RecursionError) as err:
+        # Nesting deep enough to exhaust the decoder's recursion is as malformed as any other reply.
         raise network_error(f"decoding gateway catalog: {err}") from err
     if not isinstance(raw, dict):
         raise network_error("decoding gateway catalog: want a JSON object")
@@ -639,8 +640,8 @@ class _CatalogCache:
     Concurrent callers share one fetch. Until a fetch succeeds, callers wait for it and a failure is retried on
     the next use. After that, callers never wait: a stale catalog is returned while a refresh runs in the
     background, and a failed refresh keeps it for another interval. ``close`` starts no further fetch: an empty
-    cache raises ConfigurationError instead of fetching, and a refresh in flight finishes on its own with its
-    result dropped."""
+    cache raises ConfigurationError instead of fetching, a refresh in flight finishes on its own with its result
+    dropped, and a first fetch in flight leaves its waiters with the same ConfigurationError."""
 
     def __init__(self, fetch: Callable[[TimeoutTypes], Catalog]) -> None:
         self._fetch = fetch
@@ -675,16 +676,17 @@ class _CatalogCache:
             self._load(timeout, inflight)
         else:
             inflight.wait()
-        loaded, error = self._loaded()
+        loaded, error, closed = self._loaded()
         if loaded is not None:
             return loaded
-        if error is None:  # pragma: no cover - a finished load leaves a catalog or an error
-            raise network_error("gateway catalog is unavailable")
+        if closed or error is None:
+            # Close dropped the result of the fetch that this caller waited for.
+            raise ConfigurationError(CLIENT_CLOSED)
         raise error
 
-    def _loaded(self) -> tuple[Catalog | None, BaseException | None]:
+    def _loaded(self) -> tuple[Catalog | None, BaseException | None, bool]:
         with self._lock:
-            return self._catalog, self._error
+            return self._catalog, self._error, self._closed
 
     def _load(self, timeout: TimeoutTypes, inflight: threading.Event) -> None:
         try:
@@ -865,8 +867,9 @@ class GatewayTransport(httpx.BaseTransport):
 
 
 class _AsyncCatalogCache:
-    """``_CatalogCache`` on the event loop. ``close`` also cancels a refresh in flight at its next await, which
-    ends its task cancelled; one past its last await finishes, and its result is dropped."""
+    """``_CatalogCache`` on the event loop. ``close`` also cancels a fetch in flight at its next await, which
+    ends its task cancelled and its waiters with the closed client's ConfigurationError; one past its last await
+    finishes, and its result is dropped."""
 
     def __init__(self, fetch: Callable[[TimeoutTypes], Awaitable[Catalog]]) -> None:
         self._fetch = fetch
@@ -886,17 +889,25 @@ class _AsyncCatalogCache:
             if self._closed:
                 raise ConfigurationError(CLIENT_CLOSED)
             self._start(timeout)
-        assert self._inflight is not None
-        await asyncio.shield(self._inflight)
-        loaded, error = self._loaded()
+        inflight = self._inflight
+        assert inflight is not None
+        try:
+            # The fetch runs in its own task, so this caller's cancellation ends only its wait.
+            await asyncio.shield(inflight)
+        except asyncio.CancelledError:
+            if inflight.cancelled() and self._closed and not _cancelling():
+                # The wait ended because close cancelled the fetch, not because this caller was cancelled.
+                raise ConfigurationError(CLIENT_CLOSED) from None
+            raise
+        loaded, error, closed = self._loaded()
         if loaded is not None:
             return loaded
-        if error is None:  # pragma: no cover - a finished load leaves a catalog or an error
-            raise network_error("gateway catalog is unavailable")
+        if closed or error is None:
+            raise ConfigurationError(CLIENT_CLOSED)
         raise error
 
-    def _loaded(self) -> tuple[Catalog | None, BaseException | None]:
-        return self._catalog, self._error
+    def _loaded(self) -> tuple[Catalog | None, BaseException | None, bool]:
+        return self._catalog, self._error, self._closed
 
     def _start(self, timeout: TimeoutTypes) -> None:
         task = asyncio.create_task(self._load(timeout))
@@ -927,6 +938,12 @@ class _AsyncCatalogCache:
         self._closed = True
         if self._inflight is not None:
             self._inflight.cancel()
+
+
+def _cancelling() -> bool:
+    """Whether the running task has a cancellation request of its own pending."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 class AsyncGatewayTransport(httpx.AsyncBaseTransport):
