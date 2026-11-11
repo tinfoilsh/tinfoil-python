@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Awaitable, Iterator
 
 import httpx
 import pytest
@@ -181,11 +181,84 @@ def test_fetch_stops_a_trickling_body_at_the_deadline(mocked: Recorder) -> None:
     assert time.monotonic() - start < 0.25, "the read is abandoned at the deadline, not at the body's end"
 
 
-def test_fetch_keeps_the_redirect_limit(mocked: Recorder) -> None:
+class Chunks(httpx.SyncByteStream, httpx.AsyncByteStream):
+    """A body delivered in the given chunks, counting how many the reader took."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.yielded = 0
+
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self.chunks:
+            self.yielded += 1
+            yield chunk
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            self.yielded += 1
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_fetch_rejects_an_oversized_chunk_before_keeping_it(
+    mocked: Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One chunk over the limit is refused on arrival, so the body never holds more than the limit, and the
+    chunks behind it are never taken; a chunk that exactly fills the limit is accepted."""
+    limit = 1 << 20
+    monkeypatch.setattr(_fetch, "MAX_DOCUMENT_BYTES", limit)
+    fits = Chunks([b"x" * limit])
+    mocked.handler = lambda _: httpx.Response(200, stream=fits)
+    assert len(fetch_document("enclave.example", "", NONCE)) == limit
+    assert len(await fetch_document_async("enclave.example", "", NONCE)) == limit
+    for fetch in (fetch_document, fetch_document_async):
+        body = Chunks([b"x" * (limit + 1), b"never taken"])
+
+        def handler(_: httpx.Request, body: Chunks = body) -> httpx.Response:
+            return httpx.Response(200, stream=body)
+
+        mocked.handler = handler
+        with pytest.raises(NetworkError, match=f"exceeds {limit} bytes"):
+            await _awaited(fetch("enclave.example", "", NONCE))
+        assert body.yielded == 1, fetch.__name__
+
+
+async def _awaited(result: bytes | Awaitable[bytes]) -> bytes:
+    """``result`` itself, or what it yields when it is awaitable, so a synchronous and an asynchronous fetch can
+    share one check."""
+    return await result if isinstance(result, Awaitable) else result
+
+
+def test_read_refuses_the_chunk_that_would_exceed_the_limit() -> None:
+    """The check runs before the chunk is appended: a body at the limit and a chunk of any size is refused, and
+    a chunk that lands exactly on the limit is kept."""
+    bound = _fetch._Deadline(30.0, None)
+    assert _fetch._read(iter([b"x" * 6, b"y" * 4]), bound, "u", 30.0, 10) == b"xxxxxxyyyy"
+    taken = Chunks([b"x" * 6, b"y" * 5, b"z"])
+    with pytest.raises(NetworkError, match="exceeds 10 bytes"):
+        _fetch._read(iter(taken), bound, "u", 30.0, 10)
+    assert taken.yielded == 2, "the chunk that would exceed the limit is the last one taken"
+
+
+def test_fetch_follows_exactly_the_redirect_limit(mocked: Recorder) -> None:
+    """``MAX_REDIRECTS`` redirects are followed; the one after is refused."""
     mocked.handler = lambda _: response(302, headers={"Location": "/loop"})
     with pytest.raises(NetworkError, match=f"stopped after {MAX_REDIRECTS} redirects"):
         fetch_document("enclave.example", "", NONCE)
-    assert len(mocked.requests) == MAX_REDIRECTS
+    assert len(mocked.requests) == MAX_REDIRECTS + 1, "the first request and one per followed redirect"
+    hops = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal hops
+        if hops == MAX_REDIRECTS:
+            return response(200, b"doc")
+        hops += 1
+        return response(302, headers={"Location": f"/hop{hops}"})
+
+    mocked.handler = handler
+    mocked.requests = []
+    assert fetch_document("enclave.example", "", NONCE) == b"doc"
+    assert len(mocked.requests) == MAX_REDIRECTS + 1
 
 
 def test_fetch_reports_http_errors_as_network_errors(mocked: Recorder) -> None:
@@ -196,6 +269,27 @@ def test_fetch_reports_http_errors_as_network_errors(mocked: Recorder) -> None:
     with pytest.raises(NetworkError, match="refused") as err:
         fetch_document("enclave.example", "", NONCE)
     assert isinstance(err.value.__cause__, httpx.ConnectError)
+
+
+@pytest.mark.asyncio
+async def test_fetch_wraps_a_transport_error_raised_while_a_client_error_was_handled(mocked: Recorder) -> None:
+    """A transport error whose context is a client error is still a NetworkError with the transport error as its
+    cause: the wrap decides by the error itself, so the fetch never raises the transport error as its own cause."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        try:
+            raise ConfigurationError("being handled")
+        except ConfigurationError:
+            raise httpx.ConnectError("refused")  # noqa: B904 - the implicit context is what the test exercises
+
+    mocked.handler = handler
+    with pytest.raises(NetworkError, match="refused") as err:
+        fetch_document("enclave.example", "", NONCE)
+    assert isinstance(err.value.__cause__, httpx.ConnectError)
+    assert err.value.__cause__.__cause__ is None
+    with pytest.raises(NetworkError, match="refused") as async_err:
+        await fetch_document_async("enclave.example", "", NONCE)
+    assert isinstance(async_err.value.__cause__, httpx.ConnectError)
 
 
 def test_fetch_honors_the_caller_deadline(mocked: Recorder) -> None:

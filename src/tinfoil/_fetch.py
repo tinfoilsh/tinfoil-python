@@ -22,7 +22,7 @@ operation."""
 MAX_DOCUMENT_BYTES = 32 << 20
 """The largest document a fetch accepts."""
 MAX_REDIRECTS = 10
-"""The redirect at which a fetch stops."""
+"""The most redirects a fetch follows; one more is refused."""
 
 # The transports every fetch sends through when set; tests point them at a mock. None selects httpx's own.
 _TRANSPORT: httpx.BaseTransport | None = None
@@ -227,8 +227,8 @@ def _url(host: str, relay: str, nonce: bytes) -> str:
 
 def _redirect(response: httpx.Response, redirects: int) -> httpx.Request:
     """The request a redirect response leads to, refused when it leaves HTTPS, when its URL carries user
-    information, or when ``redirects`` (this one included) reaches the limit. A refused URL is reported without
-    its user information."""
+    information, or when ``redirects`` (this one included) exceeds ``MAX_REDIRECTS``. A refused URL is reported
+    without its user information."""
     request = response.next_request
     if request is None:  # pragma: no cover - httpx builds it for every redirect location
         raise network_error("redirect without a target")
@@ -237,7 +237,7 @@ def _redirect(response: httpx.Response, redirects: int) -> httpx.Request:
         raise network_error(f"refusing redirect to non-HTTPS URL {redacted}")
     if request.url.userinfo:
         raise network_error(f"refusing redirect to a URL with user information: {redacted}")
-    if redirects >= MAX_REDIRECTS:
+    if redirects > MAX_REDIRECTS:
         raise network_error(f"stopped after {MAX_REDIRECTS} redirects")
     return request
 
@@ -248,12 +248,14 @@ def _check_status(response: httpx.Response, url: str, ok: tuple[int, int]) -> No
 
 
 def _read(chunks: Iterator[bytes], bound: _Deadline, url: str, overall: float, max_bytes: int) -> bytes:
+    """The body ``chunks`` make up, refused before a chunk that would take it over ``max_bytes`` is kept. The
+    chunks are taken as they arrive rather than re-chunked to a fixed size: a fixed size would hold back small
+    chunks until it filled, and with them the deadline check that each chunk gets."""
     body = bytearray()
     for chunk in chunks:
         bound.check(url, overall)
+        _check_size(body, chunk, url, max_bytes)
         body += chunk
-        if len(body) > max_bytes:
-            raise network_error(f"response from {url} exceeds {max_bytes} bytes")
     return bytes(body)
 
 
@@ -261,10 +263,14 @@ async def _aread(chunks: AsyncIterator[bytes], bound: _Deadline, url: str, overa
     body = bytearray()
     async for chunk in chunks:
         bound.check(url, overall)
+        _check_size(body, chunk, url, max_bytes)
         body += chunk
-        if len(body) > max_bytes:
-            raise network_error(f"response from {url} exceeds {max_bytes} bytes")
     return bytes(body)
+
+
+def _check_size(body: bytearray, chunk: bytes, url: str, max_bytes: int) -> None:
+    if len(body) + len(chunk) > max_bytes:
+        raise network_error(f"response from {url} exceeds {max_bytes} bytes")
 
 
 __all__ = [

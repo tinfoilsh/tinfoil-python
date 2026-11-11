@@ -59,7 +59,8 @@ def parse_routers(body: bytes) -> list[str]:
     """The router list in ``body``, which must be a JSON array of strings."""
     try:
         routers = json.loads(body)
-    except ValueError as err:
+    except (ValueError, RecursionError) as err:
+        # Nesting deep enough to exhaust the decoder's recursion is as malformed as any other reply.
         raise network_error(f"decoding router list: {err}") from err
     if not isinstance(routers, list) or not all(isinstance(router, str) for router in routers):
         raise network_error("decoding router list: want a JSON array of strings")

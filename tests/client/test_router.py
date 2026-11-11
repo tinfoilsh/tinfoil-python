@@ -66,6 +66,18 @@ def test_parse_routers() -> None:
             parse_routers(bad)
 
 
+def test_parse_routers_treats_deep_nesting_as_malformed(atc: Recorder) -> None:
+    """A reply nested deeper than the JSON decoder can follow is refused like any other malformed reply, and
+    discovery falls back as it does for one."""
+    nested = b"[" * 100_000 + b"]" * 100_000
+    with pytest.raises(NetworkError, match="decoding router list"):
+        parse_routers(nested)
+    atc.handler = lambda _: response(200, nested)
+    probes: list[str] = []
+    assert discover(None, None, probing({}, probes)).enclave.host == FALLBACK_HOST
+    assert probes == []
+
+
 def test_fetch_routers_refuses_insecure_redirects(atc: Recorder) -> None:
     for location, refused in (("https://mirror.example/routers", False), ("http://mirror.example/routers", True)):
 

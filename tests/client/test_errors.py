@@ -72,9 +72,19 @@ def test_wrap_keeps_classified_errors() -> None:
         assert wrapped.__cause__ is cause
         for classified in (ConfigurationError("x"), network_error(cause), attestation_error("y")):
             assert wrap(classified) is classified, "do not reclassify or double-wrap client errors"
-        outer = RuntimeError("context")
-        outer.__cause__ = classified
-        assert wrap(outer) is outer, "an error whose cause chain holds a client error keeps its category"
+
+
+def test_wrap_decides_by_the_errors_own_type() -> None:
+    """A client error that is only in the chain behind ``err``, such as one that was being handled when ``err``
+    was raised, does not make ``err`` a client error: ``raise wrap(err) from err`` must end in a client error
+    whose cause is ``err``, never in ``err`` itself with itself as its cause."""
+    for wrap, cls in ((wrap_network, NetworkError), (wrap_attestation, AttestationError)):
+        for link in ("__cause__", "__context__"):
+            err = httpx.ConnectError("refused")
+            setattr(err, link, ConfigurationError("being handled"))
+            wrapped = wrap(err)
+            assert isinstance(wrapped, cls), link
+            assert wrapped.__cause__ is err
 
 
 def test_from_verify_classifies_by_type() -> None:

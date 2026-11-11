@@ -73,13 +73,21 @@ def attestation_error(cause: BaseException | str) -> AttestationError:
 
 
 def wrap_network(err: BaseException) -> BaseException:
-    """``err`` itself when it already carries a client error, otherwise a NetworkError caused by it."""
-    return err if tinfoil_error(err) is not None else network_error(err)
+    """``err`` itself when it is a client error, otherwise a NetworkError caused by it.
+
+    Only ``err``'s own type decides: a client error that is merely in its
+    cause or context chain, such as one that was being handled when ``err``
+    was raised, leaves ``err`` unclassified, so the caller's ``raise
+    wrap_network(err) from err`` always ends in a client error whose cause
+    is ``err``.
+    """
+    return err if isinstance(err, TinfoilError) else network_error(err)
 
 
 def wrap_attestation(err: BaseException) -> BaseException:
-    """``err`` itself when it already carries a client error, otherwise an AttestationError caused by it."""
-    return err if tinfoil_error(err) is not None else attestation_error(err)
+    """``err`` itself when it is a client error, otherwise an AttestationError caused by it, deciding as
+    ``wrap_network`` does."""
+    return err if isinstance(err, TinfoilError) else attestation_error(err)
 
 
 def from_verify(err: VerifyError) -> TinfoilError:
