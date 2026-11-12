@@ -201,6 +201,28 @@ def test_object_identifier_rejects_malformed(content: bytes) -> None:
         der.object_identifier(der.decode(element(0x06, content)))
 
 
+def test_object_identifier_bounds_each_sub_identifier() -> None:
+    """A sub-identifier of ten octets (70 bits) decodes; an eleventh octet is rejected before it is accumulated."""
+    widest = b"\x55" + b"\xff" * 9 + b"\x7f"
+    assert der.object_identifier(der.decode(element(0x06, widest))) == f"2.5.{(1 << 70) - 1}"
+    with pytest.raises(der.DerError, match="sub-identifier longer than 10 octets"):
+        der.object_identifier(der.decode(element(0x06, b"\x55" + b"\xff" * 10 + b"\x7f")))
+
+
+def test_object_identifier_bounds_its_content() -> None:
+    """128 octets of content decode; 129 are rejected before any sub-identifier is read."""
+    longest = b"\x55" + b"\x01" * (der.MAX_OBJECT_IDENTIFIER_OCTETS - 1)
+    assert der.object_identifier(der.decode(element(0x06, longest))) == "2.5" + ".1" * 127
+    with pytest.raises(der.DerError, match="longer than 128 octets"):
+        der.object_identifier(der.decode(element(0x06, longest + b"\x01")))
+    # The tree walk applies the same bound, so a huge identifier costs one length check.
+    huge = element(0x06, b"\xff" * (1 << 20) + b"\x7f")
+    started = time.perf_counter()
+    with pytest.raises(der.DerError, match="longer than 128 octets"):
+        der.validate_tree(der.decode(element(0x30, huge)))
+    assert time.perf_counter() - started < 1.0
+
+
 def test_strings() -> None:
     assert der.ia5_string(der.decode(b"\x16\x03abc")) == "abc"
     with pytest.raises(der.DerError, match="above 0x7F"):

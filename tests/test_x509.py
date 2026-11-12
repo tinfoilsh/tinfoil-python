@@ -9,6 +9,7 @@ it adds the pre-checks for the encodings that ``cryptography`` accepts.
 from __future__ import annotations
 
 import copy
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
@@ -766,6 +767,18 @@ def test_crl_parse_rejections() -> None:
 
     with pytest.raises(crl_module.CRLError, match="thisUpdate is after nextUpdate"):
         crl_module.parse_revocation_list(der_tree.mutate(base, swap_updates))
+
+
+def test_crl_with_a_huge_object_identifier_rejects_quickly() -> None:
+    """A 1 MiB CRL whose only content is one OBJECT IDENTIFIER is rejected at the identifier's length check,
+    not after its sub-identifiers are accumulated."""
+    content = b"\xff" * ((1 << 20) - 1) + b"\x7f"
+    identifier = b"\x06" + der.encode_length(len(content)) + content
+    huge = b"\x30" + der.encode_length(len(identifier)) + identifier
+    started = time.perf_counter()
+    with pytest.raises(crl_module.CRLError, match="OBJECT IDENTIFIER longer than"):
+        crl_module.parse_revocation_list(huge)
+    assert time.perf_counter() - started < 1.0
 
 
 def test_crl_verification_rejections() -> None:

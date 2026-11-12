@@ -40,7 +40,13 @@ MAX_DEPTH = 32
 """The deepest nesting that ``children`` and every recursive walker built on it follow; deeper structures are
 rejected."""
 
+MAX_OBJECT_IDENTIFIER_OCTETS = 128
+"""The longest OBJECT IDENTIFIER content that ``object_identifier`` decodes, in octets; every identifier that a
+certificate, CRL or timestamp carries is far shorter."""
+
 _MAX_LENGTH_OCTETS = 4
+_MAX_SUBIDENTIFIER_OCTETS = 10
+"""Ten base-128 octets hold 70 bits, more than any sub-identifier in use."""
 _UTC_TIME = re.compile(rb"\A(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z\Z")
 _GENERALIZED_TIME = re.compile(rb"\A(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\.(\d{1,9}))?Z\Z")
 _PEM_BOUNDARY = re.compile(r"\A-----(BEGIN|END) ([^-]+)-----\Z")
@@ -274,23 +280,35 @@ def octet_string(element: Element) -> bytes:
 
 
 def object_identifier(element: Element) -> str:
-    """Decode an OBJECT IDENTIFIER to dotted-decimal, rejecting non-minimal subidentifiers."""
+    """Decode an OBJECT IDENTIFIER to dotted-decimal, rejecting non-minimal subidentifiers.
+
+    The content is bounded by MAX_OBJECT_IDENTIFIER_OCTETS and each
+    sub-identifier by ``_MAX_SUBIDENTIFIER_OCTETS``, both checked before
+    the sub-identifier is accumulated, so that the walk costs time that a
+    small constant bounds rather than time that grows with the element's
+    length.
+    """
     content = _expect_primitive(element, TAG_OBJECT_IDENTIFIER, "OBJECT IDENTIFIER")
     if not content:
         raise DerError("OBJECT IDENTIFIER has no content")
+    if len(content) > MAX_OBJECT_IDENTIFIER_OCTETS:
+        raise DerError(f"OBJECT IDENTIFIER longer than {MAX_OBJECT_IDENTIFIER_OCTETS} octets")
     if content[-1] & 0x80:
         raise DerError("OBJECT IDENTIFIER is truncated")
     arcs: list[int] = []
     value = 0
-    start = True
+    octets = 0
     for octet in content:
-        if start and octet == 0x80:
+        if octets == 0 and octet == 0x80:
             raise DerError("OBJECT IDENTIFIER sub-identifier is not minimally encoded")
+        octets += 1
+        if octets > _MAX_SUBIDENTIFIER_OCTETS:
+            raise DerError(f"OBJECT IDENTIFIER sub-identifier longer than {_MAX_SUBIDENTIFIER_OCTETS} octets")
         value = (value << 7) | (octet & 0x7F)
-        start = not octet & 0x80
-        if start:
+        if not octet & 0x80:
             arcs.append(value)
             value = 0
+            octets = 0
     first = arcs[0]
     lead = [first // 40, first % 40] if first < 80 else [2, first - 80]
     return ".".join(str(arc) for arc in [*lead, *arcs[1:]])
