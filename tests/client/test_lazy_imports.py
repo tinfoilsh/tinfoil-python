@@ -153,3 +153,29 @@ def test_the_lazy_table_covers_exactly_the_exported_names() -> None:
     import tinfoil
 
     assert set(tinfoil._MODULE_OF) == set(tinfoil.__all__) - {"__version__"}
+
+
+def test_the_type_checker_sees_the_same_names_from_the_same_modules() -> None:
+    """The imports under ``TYPE_CHECKING`` are what a type checker resolves the exports from, so they must name
+    exactly the exported names and take each one from the module that the table imports it from at run time."""
+    import ast
+    import inspect
+
+    import tinfoil
+
+    tree = ast.parse(inspect.getsource(tinfoil))
+    guarded = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING"
+    ]
+    assert len(guarded) == 1
+    typed: dict[str, str] = {}
+    for statement in guarded[0].body:
+        assert isinstance(statement, ast.ImportFrom)
+        assert statement.module is not None
+        for alias in statement.names:
+            assert alias.asname is None, alias.name
+            assert alias.name not in typed, alias.name
+            typed[alias.name] = statement.module
+    assert typed == tinfoil._MODULE_OF
