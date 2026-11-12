@@ -176,10 +176,10 @@ def product_from_report(report: Report) -> str:
 def reject_masked_chip_key(report: Report) -> None:
     """Reject a report whose SIGNER_INFO has MASK_CHIP_KEY set: the firmware did not sign it with the chip key.
 
-    The signature check already requires a VCEK signature, which such a
-    report cannot carry, so this names the cause instead of reporting a
-    signature failure; validation applies the rule again as part of its
-    signer check.
+    In ``authenticate`` the signature check runs first and already rejects
+    such a report, since it requires a VCEK signature; this rule states the
+    condition explicitly, and validation applies it again in its signer
+    check, where it names the cause for a quote that another path built.
     """
     try:
         signer = parse_signer_info(report.signer_info)
