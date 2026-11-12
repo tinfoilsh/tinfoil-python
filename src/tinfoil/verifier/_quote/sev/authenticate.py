@@ -173,32 +173,37 @@ def product_from_report(report: Report) -> str:
     return product.name
 
 
-def reject_masked_chip_id(report: Report) -> None:
-    """Reject a report whose SIGNER_INFO masks CHIP_ID: masked platform identities are unsupported.
+def reject_masked_chip_key(report: Report) -> None:
+    """Reject a report whose SIGNER_INFO has MASK_CHIP_KEY set: the firmware did not sign it with the chip key.
 
-    The identity is derived from CHIP_ID right after the signature check,
-    so a masked report never produces a quote; validation applies the rule
-    again as part of its signer check.
+    The signature check already requires a VCEK signature, which such a
+    report cannot carry, so this names the cause instead of reporting a
+    signature failure; validation applies the rule again as part of its
+    signer check.
     """
     try:
         signer = parse_signer_info(report.signer_info)
     except AbiError as err:
         raise SevAuthenticationError(f"parsing report SIGNER_INFO: {err}") from err
     if signer.mask_chip_key:
-        raise SevAuthenticationError("report masks CHIP_ID; masked platform identities are unsupported")
+        raise SevAuthenticationError(
+            "report SIGNER_INFO has MASK_CHIP_KEY set; reports that the chip key did not sign are unsupported"
+        )
 
 
 def reject_zero_chip_id(report: Report) -> None:
-    """Reject a report whose CHIP_ID is all zero while SIGNER_INFO does not mask it.
+    """Reject a report whose CHIP_ID is all zero: masked platform identities are unsupported.
 
-    Firmware zeroes CHIP_ID only when the host masks it, which
-    ``reject_masked_chip_id`` already rejects, so an unmasked zero CHIP_ID
-    is not a platform identity. Accepting it would skip the binding of the
-    report to the VCEK's hardware id, since an all-zero value never names a
-    certified chip, and would turn 64 zero bytes into the machine identity.
+    No SIGNER_INFO bit reflects masking of CHIP_ID; the firmware writes
+    zeros into the field instead, and a genuine chip identifier is never
+    all zero. The field is covered by the report signature, so an all-zero
+    CHIP_ID in a verified report means that the host masked it. Accepting
+    it would skip the binding of the report to the VCEK's hardware id,
+    since an all-zero value never names a certified chip, and would turn 64
+    zero bytes into the machine identity.
     """
     if not any(report.chip_id):
-        raise SevAuthenticationError("report CHIP_ID is all zero without the mask flag set")
+        raise SevAuthenticationError("report CHIP_ID is all zero; masked platform identities are unsupported")
 
 
 def parse_crl(crl_der: bytes, now: datetime) -> RevocationList:
@@ -259,7 +264,8 @@ def authenticate(evidence: Evidence, now: datetime, options: Options | None = No
     PEM decodes; the CRL is non-empty, parses and ``now`` is within its
     window; the report has the exact size and parses; the product is read
     from the report and its roots selected; the signature chain verifies;
-    CHIP_ID is neither masked nor all zero; the identity is derived; the
+    the chip key signed the report and CHIP_ID is not all zero; the
+    identity is derived; the
     measurement is 48 bytes.
 
     The ASK and ARK that the document carries are checked for shape only:
@@ -280,7 +286,7 @@ def authenticate(evidence: Evidence, now: datetime, options: Options | None = No
     product_line = product_from_report(report)
     roots = trusted_roots(product_line, options.test_only_root_pem if options is not None else None)
     chain = verify_signature(report, evidence, roots, crl, now)
-    reject_masked_chip_id(report)
+    reject_masked_chip_key(report)
     reject_zero_chip_id(report)
     try:
         machine = identity(report.chip_id)

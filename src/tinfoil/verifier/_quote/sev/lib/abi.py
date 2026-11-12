@@ -89,7 +89,11 @@ class SignerInfo:
 
     signing_key: ReportSigner
     mask_chip_key: bool
-    """The host enabled CHIP_ID masking, so the report's CHIP_ID is all zeros."""
+    """MASK_CHIP_KEY: the firmware did not sign the report with the chip key and wrote zeros into SIGNATURE instead.
+
+    Masking of CHIP_ID is a different host setting that no SIGNER_INFO bit
+    reflects; its only trace is an all-zero CHIP_ID field.
+    """
     author_key_en: bool
     """The VM was launched with an ID block that includes an author key."""
 

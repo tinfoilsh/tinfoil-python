@@ -181,9 +181,9 @@ def test_identity() -> None:
         identity(bytes([1, 2, 3]))
 
 
-def test_check_signer_rejects_masked_chip_id_and_id_blocks() -> None:
+def test_check_signer_rejects_unsigned_chip_key_and_id_blocks() -> None:
     masked = abi.compose_signer_info(abi.SignerInfo(abi.ReportSigner.VCEK, mask_chip_key=True, author_key_en=False))
-    with pytest.raises(sev.SevPolicyError, match="masks CHIP_ID"):
+    with pytest.raises(sev.SevPolicyError, match="MASK_CHIP_KEY set"):
         exp.check_signer(fx.make_report(signer_info=masked))
     author = abi.compose_signer_info(abi.SignerInfo(abi.ReportSigner.VCEK, mask_chip_key=False, author_key_en=True))
     with pytest.raises(sev.SevPolicyError, match="carries an author key;"):
@@ -198,7 +198,7 @@ def test_check_signer_rejects_masked_chip_id_and_id_blocks() -> None:
 def test_check_signer_rejects_an_all_zero_chip_id() -> None:
     """The zero-CHIP_ID rule is applied at validation as well as at authentication, so a quote that reaches
     expectations with 64 zero bytes as its identity is rejected whichever path built it."""
-    with pytest.raises(sev.SevPolicyError, match="CHIP_ID is all zero without the mask flag set"):
+    with pytest.raises(sev.SevPolicyError, match="CHIP_ID is all zero; masked platform identities"):
         exp.check_signer(fx.make_report(chip_id=bytes(64)))
     turin = parse_report(fx.box2_turin_report())
     exp.check_signer(turin)

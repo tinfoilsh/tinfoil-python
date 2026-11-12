@@ -23,7 +23,7 @@ from tinfoil.verifier._quote.sev.authenticate import (
     parse_crl,
     parse_report_bytes,
     product_from_report,
-    reject_masked_chip_id,
+    reject_masked_chip_key,
     reject_zero_chip_id,
     trusted_roots,
     verify_signature,
@@ -273,16 +273,17 @@ def test_parse_crl_window_is_inclusive() -> None:
         parse_crl(crl_der + b"\x00", case.now)
 
 
-def test_masked_chip_id_is_rejected_after_the_signature_check() -> None:
+def test_a_report_the_chip_key_did_not_sign_is_rejected() -> None:
     masked = abi.compose_signer_info(abi.SignerInfo(abi.ReportSigner.VCEK, mask_chip_key=True, author_key_en=False))
-    with pytest.raises(SevAuthenticationError, match="masks CHIP_ID"):
-        reject_masked_chip_id(fx.make_report(signer_info=masked))
-    reject_masked_chip_id(fx.make_report())
+    with pytest.raises(SevAuthenticationError, match="MASK_CHIP_KEY set"):
+        reject_masked_chip_key(fx.make_report(signer_info=masked))
+    reject_masked_chip_key(fx.make_report())
 
 
-def test_zero_chip_id_without_the_mask_flag_is_rejected() -> None:
-    """A real Genoa and a real Turin report with CHIP_ID zeroed are rejected, since neither masks it; the same
-    reports with their CHIP_ID intact pass, and so does a Turin CHIP_ID, which is zero-padded after its 8 bytes."""
+def test_zero_chip_id_is_rejected() -> None:
+    """A real Genoa and a real Turin report with CHIP_ID zeroed are rejected, since no flag marks a masked CHIP_ID
+    and a genuine one is never all zero; the same reports with their CHIP_ID intact pass, and so does a Turin
+    CHIP_ID, which is zero-padded after its 8 bytes."""
     genoa = parse_report(fx.happy_case().document.cpu_evidence().report)
     turin = parse_report(fx.box2_turin_report())
     for report in (genoa, turin):
@@ -322,7 +323,7 @@ def test_entry_point_rejects_a_zero_chip_id_once_the_signature_passes(monkeypatc
     assert authenticate_sev(sev_evidence(case), case.now, options).identity == fx.GENOA_HWID.hex()
     zeroed = bytearray(sev_evidence(case).report)
     zeroed[0x1A0:0x1E0] = bytes(64)
-    with pytest.raises(SevAuthenticationError, match="CHIP_ID is all zero without the mask flag set"):
+    with pytest.raises(SevAuthenticationError, match="CHIP_ID is all zero; masked platform identities"):
         authenticate_sev(replace(sev_evidence(case), report=bytes(zeroed)), case.now, options)
 
 

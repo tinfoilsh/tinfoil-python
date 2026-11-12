@@ -9,7 +9,7 @@ from tinfoil.verifier._policy import TCB, PolicyError, SEVSNPPolicy
 from tinfoil.verifier._quote.sev.authenticate import (
     Quote,
     SevAuthenticationError,
-    reject_masked_chip_id,
+    reject_masked_chip_key,
     reject_zero_chip_id,
 )
 from tinfoil.verifier._quote.sev.lib.abi import (
@@ -120,16 +120,16 @@ def validate(expectations: Expectations, quote: Quote) -> None:
 
 
 def check_signer(report: Report) -> None:
-    """Reject a report with a masked or all-zero CHIP_ID, an author key, a non-zero ID key digest or a non-zero
-    author key digest: ID-block launches are unsupported.
+    """Reject a report that the chip key did not sign, one with an all-zero CHIP_ID, and one with an author key, a
+    non-zero ID key digest or a non-zero author key digest: ID-block launches are unsupported.
 
-    The CHIP_ID rules are the ones that authentication applies before it
-    derives the identity; they are applied again here so that a quote
-    reaches validation with a usable platform identity whichever path
-    built it.
+    The signer and CHIP_ID rules are the ones that authentication applies
+    before it derives the identity; they are applied again here so that a
+    quote reaches validation with a usable platform identity whichever
+    path built it.
     """
     try:
-        reject_masked_chip_id(report)
+        reject_masked_chip_key(report)
         reject_zero_chip_id(report)
         signer = parse_signer_info(report.signer_info)
     except (SevAuthenticationError, AbiError) as err:
