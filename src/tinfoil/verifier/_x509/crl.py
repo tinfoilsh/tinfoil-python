@@ -99,7 +99,9 @@ def parse_revocation_list(der_bytes: bytes) -> RevocationList:
     The outer structure is tokenized first so that trailing bytes and
     non-minimal encodings are rejected. Requires version 2, a nextUpdate,
     times with ``Z``, no unsupported critical CRL extensions and no
-    critical CRL entry extensions.
+    critical CRL entry extensions. The library decodes the issuer name on
+    first access, so it is read here: a name that it cannot decode is a
+    CRLError from the parse, never an error from a later accessor.
     """
     try:
         _check_crl_der(der_bytes)
@@ -109,6 +111,7 @@ def parse_revocation_list(der_bytes: bytes) -> RevocationList:
         raise CRLError(f"revocation list: {err}") from err
     try:
         crl = x509.load_der_x509_crl(der_bytes)
+        crl.issuer  # noqa: B018
     except (ValueError, TypeError, UnsupportedAlgorithm) as err:
         raise CRLError(f"revocation list: {err}") from err
     if crl.public_bytes(serialization.Encoding.DER) != der_bytes:

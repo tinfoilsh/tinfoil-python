@@ -197,6 +197,64 @@ def test_trailing_bytes_and_indefinite_lengths_reject(probe_certificate: bytes) 
         c.parse_certificate(b"")
 
 
+def corrupt_common_name(name_node: Node) -> None:
+    """Make the first byte of the UTF8String commonName in ``name_node`` invalid UTF-8. The strict tokenizer does
+    not type Name attribute values, so the pre-checks pass the structure and only the library's decoding of the
+    name, which happens on first access, fails."""
+    attribute = der_tree.children(der_tree.children(der_tree.children(name_node)[0])[0])
+    identifier, value = attribute[1]
+    assert identifier == 0x0C
+    assert isinstance(value, bytes)
+    attribute[1] = (0x0C, b"\xff" + value[1:])
+
+
+def corrupt_certificate_name(field: int) -> Mutation:
+    def change(tree: Node) -> None:
+        corrupt_common_name(tbs(tree)[field])
+
+    return change
+
+
+def corrupt_crl_issuer(tree: Node) -> None:
+    corrupt_common_name(der_tree.children(der_tree.children(tree)[0])[2])
+
+
+def test_names_the_library_cannot_decode_reject_at_parse(probe_certificate: bytes) -> None:
+    """An undecodable issuer or subject name is an X509Error from parse_certificate, and an undecodable CRL issuer
+    name a CRLError from parse_revocation_list, never a ValueError from the first accessor that reads the name."""
+    for field, name in ((3, "issuer"), (5, "subject")):
+        mutated = der_tree.mutate(probe_certificate, corrupt_certificate_name(field))
+        loaded = x509.load_der_x509_certificate(mutated)  # the library loads it; reading the name raises
+        with pytest.raises(ValueError, match="asn1"):
+            getattr(loaded, name)
+        with pytest.raises(c.X509Error, match=r"^certificate: .*asn1"):
+            c.parse_certificate(mutated)
+    root, _, _ = pki.chain()
+    mutated = der_tree.mutate(pki.crl(root), corrupt_crl_issuer)
+    loaded_crl = x509.load_der_x509_crl(mutated)
+    with pytest.raises(ValueError, match="asn1"):
+        _ = loaded_crl.issuer
+    with pytest.raises(crl_module.CRLError, match=r"^revocation list: .*asn1"):
+        crl_module.parse_revocation_list(mutated)
+
+
+def test_version_2_certificate_rejects_at_the_pre_check(probe_certificate: bytes) -> None:
+    """The library refuses a version 2 certificate with an error that is not a ValueError, so the pre-check names
+    the version first and the library error is caught as well."""
+
+    def to_version_2_without_extensions(tree: Node) -> None:
+        tbs(tree)[0] = (0xA0, [(0x02, b"\x01")])
+        assert tbs(tree)[-1][0] == 0xA3
+        tbs(tree).pop()
+
+    mutated = der_tree.mutate(probe_certificate, to_version_2_without_extensions)
+    assert not issubclass(x509.InvalidVersion, ValueError)
+    with pytest.raises(x509.InvalidVersion):
+        x509.load_der_x509_certificate(mutated)
+    with pytest.raises(c.X509Error, match="certificate version 2 is not supported"):
+        c.parse_certificate(mutated)
+
+
 # --- library claims ----------------------------------------------------------
 
 

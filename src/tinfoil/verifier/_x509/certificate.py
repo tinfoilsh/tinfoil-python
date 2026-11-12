@@ -109,12 +109,16 @@ def parse_certificate(der_bytes: bytes) -> Certificate:
     Before handing the bytes to the library, the outer structure is
     tokenized so that trailing bytes, indefinite lengths and non-minimal
     encodings are rejected, and the result must re-encode to the same
-    bytes.
+    bytes. The library decodes the subject and issuer names on first
+    access, so both are read here: a name that it cannot decode is an
+    X509Error from the parse, never an error from a later accessor.
     """
     _with_context("certificate", lambda: _check_certificate_der(der_bytes))
     try:
         certificate = x509.load_der_x509_certificate(der_bytes)
-    except (ValueError, TypeError, UnsupportedAlgorithm) as err:
+        certificate.subject  # noqa: B018
+        certificate.issuer  # noqa: B018
+    except (ValueError, TypeError, UnsupportedAlgorithm, x509.InvalidVersion) as err:
         raise X509Error(f"certificate: {err}") from err
     if certificate.public_bytes(serialization.Encoding.DER) != der_bytes:
         raise X509Error("certificate: does not re-encode to its input")
@@ -630,10 +634,10 @@ def _check_certificate_der(der_bytes: bytes) -> None:
     """Check the structure that ``x509.load_der_x509_certificate`` is looser about.
 
     Rejected here: anything the strict tokenizer rejects anywhere in the
-    tree; a negative serial number; an explicit version 1; extensions in a
-    certificate below version 3; a duplicate extension; an inner signature
-    algorithm that differs from the outer one; a signature BIT STRING with
-    unused bits.
+    tree; a negative serial number; an explicit version 1; version 2, which
+    the library does not load; extensions in a certificate below version 3;
+    a duplicate extension; an inner signature algorithm that differs from
+    the outer one; a signature BIT STRING with unused bits.
     """
     top = der.decode(der_bytes)
     der.validate_tree(top)
@@ -659,7 +663,9 @@ def _parse_tbs(tbs_element: der.Element, outer_algorithm: der.Element) -> _Tbs:
         version = der.integer(inner[0])
         if version == 0:
             raise X509Error("version 1 must be encoded by omitting the version field")
-        if version not in (1, 2):
+        if version == 1:
+            raise X509Error("certificate version 2 is not supported")
+        if version != 2:
             raise X509Error(f"unsupported certificate version {version + 1}")
         index = 1
     if len(fields) < index + 6:
