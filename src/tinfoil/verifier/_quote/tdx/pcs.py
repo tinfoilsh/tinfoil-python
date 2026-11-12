@@ -108,7 +108,7 @@ class Captured:
 class PCSReplay:
     """The captured responses indexed by canonical URL, with the appraisal time for the CRL windows."""
 
-    __slots__ = ("_now", "_responses")
+    __slots__ = ("_now", "_parsed", "_responses")
 
     def __init__(self, responses: Sequence[PCSResponse], now: datetime) -> None:
         """Indexes the responses; a URL that fails to parse is an error, a repeated URL keeps the last."""
@@ -116,6 +116,8 @@ class PCSReplay:
         for response in responses:
             self._responses[pcs_collateral_key(response.url)] = response
         self._now = now
+        self._parsed: dict[str, RevocationList | CRLError] = {}
+        """Each captured body's parse as a CRL, or the failure, by collateral key; a body is parsed at most once."""
 
     def get(self, url: str) -> Captured:
         """The captured response for ``url``, or an error naming the URL.
@@ -130,14 +132,12 @@ class PCSReplay:
         response = self._responses.get(key)
         if response is None:
             raise PCSReplayError(f"intel-pcs collateral has no captured response for {url}")
-        try:
-            crl = parse_revocation_list(response.body)
-        except CRLError as err:
+        parsed = self._parse_crl(key, response.body)
+        if isinstance(parsed, CRLError):
             if "crl" in key:
-                raise PCSReplayError(f"parsing captured CRL for {url}: {err}") from err
-        else:
-            if self._now < crl.this_update or self._now > crl.next_update:
-                raise PCSReplayError(f"captured CRL for {url} is outside its validity window")
+                raise PCSReplayError(f"parsing captured CRL for {url}: {parsed}") from parsed
+        elif self._now < parsed.this_update or self._now > parsed.next_update:
+            raise PCSReplayError(f"captured CRL for {url} is outside its validity window")
         headers: dict[str, tuple[str, ...]] = {}
         for name, values in response.headers.items():
             canonical = canonical_header_name(name)
@@ -145,6 +145,25 @@ class PCSReplay:
                 raise PCSReplayError(f"repeated header {canonical!r} in the captured response for {url}")
             headers[canonical] = tuple(values)
         return Captured(url=response.url, headers=headers, body=bytes(response.body))
+
+    def _parse_crl(self, key: str, body: bytes) -> RevocationList | CRLError:
+        """Parse ``body`` as a CRL the first time that ``key`` is asked for, and return the remembered result,
+        success or failure, after that."""
+        parsed = self._parsed.get(key)
+        if parsed is None:
+            try:
+                parsed = parse_revocation_list(body)
+            except CRLError as err:
+                parsed = err
+            self._parsed[key] = parsed
+        return parsed
+
+    def _crl(self, url: str) -> RevocationList:
+        """The CRL that ``get`` parsed for ``url``; a body that is not a CRL is an error."""
+        parsed = self._parsed[pcs_collateral_key(url)]
+        if isinstance(parsed, CRLError):
+            raise PCSReplayError(f"unable to parse DER bytes of CRL: {parsed}") from parsed
+        return parsed
 
     def tcb_info(self, fmspc: str) -> tuple[TdxTcbInfo, bytes, tuple[Certificate, Certificate]]:
         """Load the TCB Info for ``fmspc``: the decoded response, the signed ``tcbInfo`` bytes, and the signing
@@ -192,19 +211,24 @@ class PCSReplay:
             )
         except CollateralError as err:
             raise PCSReplayError(f"unable to receive PCK CRL: {err}") from err
-        return PckCrl(crl=_parse_crl(captured.body), ca_type=ca, issuer_intermediate=intermediate, issuer_root=root)
+        return PckCrl(crl=self._crl(pck_crl_url(ca)), ca_type=ca, issuer_intermediate=intermediate, issuer_root=root)
 
     def root_crl(self, distribution_points: Sequence[str]) -> RootCrl:
-        """Load the DER root CA CRL from the first distribution point with a captured CRL body."""
+        """Load the DER root CA CRL from the first distribution point with a captured CRL body.
+
+        The points are tried in order, each distinct URL once: the
+        certificate that lists them is not yet verified, so a list that
+        repeats one URL costs one lookup.
+        """
         if not distribution_points:
             raise PCSReplayError(
                 "empty url found in QeIdentity issuer's chain which is required to receive ROOT CA CRL"
             )
         failures: list[str] = []
-        for url in distribution_points:
+        for url in dict.fromkeys(distribution_points):
             try:
-                captured = self.get(url)
-                return RootCrl(crl=_parse_crl(captured.body))
+                self.get(url)
+                return RootCrl(crl=self._crl(url))
             except PCSReplayError as err:
                 failures.append(str(err))
         raise PCSReplayError(f"could not fetch root CRL: {'; '.join(failures)}")
@@ -228,13 +252,6 @@ class PCSReplay:
             pck_crl=pck_crl,
             root_crl=root_crl,
         )
-
-
-def _parse_crl(body: bytes) -> RevocationList:
-    try:
-        return parse_revocation_list(body)
-    except CRLError as err:
-        raise PCSReplayError(f"unable to parse DER bytes of CRL: {err}") from err
 
 
 def crl_distribution_points(certificate: Certificate) -> tuple[str, ...]:

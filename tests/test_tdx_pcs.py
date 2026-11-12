@@ -11,6 +11,7 @@ from cryptography import x509
 from tests import pki
 from tests import tdx_builders as tb
 from tinfoil.verifier._document.collateral.tdx import PCSResponse
+from tinfoil.verifier._quote.tdx import pcs
 from tinfoil.verifier._quote.tdx.lib.collateral import TdxCollateral
 from tinfoil.verifier._quote.tdx.pcs import (
     INTEL_SGX_ROOT_CA_CRL_URL,
@@ -27,6 +28,7 @@ from tinfoil.verifier._quote.tdx.pcs import (
 )
 from tinfoil.verifier._x509 import der
 from tinfoil.verifier._x509.certificate import parse_certificate
+from tinfoil.verifier._x509.crl import parse_revocation_list
 
 TCB_URL = "https://api.trustedservices.intel.com/tdx/certification/v4/tcb?fmspc=90c06f000000"
 QE_URL = "https://api.trustedservices.intel.com/tdx/certification/v4/qe/identity"
@@ -299,6 +301,48 @@ def test_root_crl_falls_through_to_the_next_distribution_point() -> None:
     assert replay.root_crl(["https://certificates.example/missing.der", INTEL_SGX_ROOT_CA_CRL_URL]).crl
     with pytest.raises(PCSReplayError, match="empty url found"):
         replay.root_crl([])
+
+
+def test_root_crl_parses_each_captured_body_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A root that lists one URL fifty times costs one parse of the body under it, whether the body is a CRL or
+    not, and the failure reads as it does for a single point."""
+    url = "https://certificates.example/root.der"
+    points = [x509.DistributionPoint([x509.UniformResourceIdentifier(url)], None, None, None)] * 50
+    root = parse_certificate(
+        pki.certificate(
+            tb.ROOT_CN,
+            pki.p256(),
+            ca=True,
+            key_usage=pki.CA_USAGE,
+            serial=1,
+            extra=[(x509.CRLDistributionPoints(points), False)],
+        ).der
+    )
+    assert len(crl_distribution_points(root)) == 50
+    calls: list[int] = []
+
+    def counting_parse(body: bytes) -> object:
+        calls.append(len(body))
+        return parse_revocation_list(body)
+
+    monkeypatch.setattr(pcs, "parse_revocation_list", counting_parse)
+    # A valid DER tree that is not a CRL, large enough that a repeated parse would show.
+    nulls = b"\x05\x00" * 100_000
+    body = b"\x30" + der.encode_length(len(nulls)) + nulls
+    replay = PCSReplay([tb.response(url, body)], tb.NOW)
+    with pytest.raises(PCSReplayError, match=r"^could not fetch root CRL: unable to parse DER bytes of CRL: ") as info:
+        replay.root_crl(crl_distribution_points(root))
+    assert str(info.value).count("unable to parse DER bytes") == 1
+    assert calls == [len(body)]
+    # A later lookup of the same URL reads the remembered result.
+    replay.get(url)
+    assert calls == [len(body)]
+    # A CRL body is parsed once as well, across the window check and the load.
+    scenario = tb.Scenario()
+    replay = PCSReplay(scenario.responses(), tb.NOW)
+    calls.clear()
+    assert replay.root_crl(crl_distribution_points(parse_certificate(scenario.intel.root.der)) * 50).crl
+    assert len(calls) == 1
 
 
 def test_pck_crl_must_be_der() -> None:
