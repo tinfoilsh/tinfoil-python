@@ -2,24 +2,65 @@ name: Test
 
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 
 permissions: {}
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Check formatting
+        run: uv run ruff format --check
+
+      - name: Type check
+        run: uv run mypy
+
   test:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11"]   # pick one stable Python
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        working-directory: tinfoil-python
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          path: tinfoil-python
+          persist-credentials: false
+
+      - name: Check out the conformance suite
+        # The adapter tests and the conformance runner read the shared v3
+        # vectors from a checkout beside the repository, pinned to one commit.
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: tinfoilsh/tinfoil-conformance
+          ref: 549c95ea136b32ed6262101f37065ff859c43317
+          path: tinfoil-conformance
           persist-credentials: false
 
       - name: Set up uv
@@ -31,9 +72,20 @@ jobs:
         run: uv sync --locked
 
       - name: Run unit tests
+        env:
+          TINFOIL_CONFORMANCE_FIXTURES: ${{ github.workspace }}/tinfoil-conformance/vectors/v3
         run: uv run pytest -m "not integration"
 
+      - name: Run the conformance suite
+        run: python3 ../tinfoil-conformance/tools/run_adapter.py --adapter "uv run python conformance/tinfoil_conformance.py"
+
       - name: Run integration tests
+        # One interpreter is enough for the live checks; they exercise the
+        # service, not the interpreter. Pull requests from forks have no
+        # access to the API key, so they skip the live checks.
+        if: >-
+          matrix.python-version == '3.11' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         env:
           TINFOIL_API_KEY: ${{ secrets.TINFOIL_API_KEY }}
         run: uv run pytest -m "integration"

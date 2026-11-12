@@ -1,6 +1,8 @@
-from tinfoil import TinfoilAI
+import os
 
-client = TinfoilAI()
+from tinfoil import create_client
+
+client = create_client(api_key=os.environ["TINFOIL_API_KEY"])
 
 chat_completion = client.chat.completions.create(
     messages=[
@@ -9,6 +11,6 @@ chat_completion = client.chat.completions.create(
             "content": "What is Tinfoil?",
         }
     ],
-    model="llama-free",
+    model="llama3-3-70b",
 )
 print(chat_completion.choices[0].message.content)

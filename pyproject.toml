@@ -15,21 +15,20 @@ requires-python = ">=3.11"
 dependencies = [
     "openai>=3.26.0",
     "httpx>=0.28",
-    "tinfoil-ehbp>=0.3.0",
-    "requests>=2.31.0",
+    "tinfoil-ehbp>=0.5.0",
     "cryptography>=42.0.0",
-    "pyOpenSSL>=25.0.0",
-    "pyasn1>=0.6.5",
-    "sigstore>=4.3.0",
-    "platformdirs>=4.2.0",
-    "urllib3>=2.8.0",
-    "certifi>=2026.10.19",
+    "pyyaml>=6.0.3",
+    "sigstore-models>=0.0.6",
+    "rfc3161-client>=1.0.7",
 ]
 
 [dependency-groups]
 dev = [
+    "mypy>=2.4.1",
     "pytest",
     "pytest-asyncio>=0.26.0",
+    "ruff>=0.17.4",
+    "types-pyyaml>=6.0.12.20261103",
 ]
 
 [tool.pytest.ini_options]
@@ -39,13 +38,75 @@ markers = [
 ]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["conformance"]
+# pytest discards the warning filters that imported modules install, so the
+# filter that tinfoil.verifier._x509.certificate sets for the zero serial
+# of production AMD VCEK certificates is re-stated for the test run.
+filterwarnings = [
+    "ignore:^Parsed a serial number which wasn't positive:cryptography.utils.CryptographyDeprecationWarning",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = [".", "src", "conformance"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "C4",       # comprehensions
+    "SIM",      # simplify
+    "PIE",      # misc
+    "PT",       # pytest style
+    "RUF",      # ruff's own
+    "ASYNC",    # blocking calls in async code
+    "S",        # bandit
+]
+ignore = [
+    "S101",     # assert is the test idiom and the contract check idiom
+    "S603",     # subprocess without shell, with an argument list, is the intended use
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S",
+    "RUF001", "RUF002", "RUF003",  # tests probe non-ASCII digits and letters on purpose
+]
+# In these modules `timeout` is the per-operation timeout that httpx.AsyncClient takes, passed through to it;
+# waits are bounded by task cancellation, not by a parameter.
+"src/tinfoil/_clients.py" = ["ASYNC109"]
+"src/tinfoil/_enclave.py" = ["ASYNC109"]
+"src/tinfoil/_fetch.py" = ["ASYNC109"]
+"src/tinfoil/_gateway.py" = ["ASYNC109"]
+"src/tinfoil/_router.py" = ["ASYNC109"]
+"src/tinfoil/_tls.py" = ["ASYNC109"]
+"src/tinfoil/_transport.py" = ["ASYNC109"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+mypy_path = ["conformance"]
+files = ["src/tinfoil", "conformance", "tests"]
+
+# The SEV-SNP and TDX library code was moved from the 0.x tree and is typed
+# incrementally; its tests follow it. Everything else is strict.
+[[tool.mypy.overrides]]
+module = ["tinfoil.verifier._quote.tdx.lib.*", "tests.lib.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+warn_return_any = false
 
 [tool.uv]
 exclude-newer = "4 days"
 constraint-dependencies = [
     "idna>=3.15", # GHSA-65pc-fj4g-8rjx
     "pyjwt>=2.15.0", # GHSA-42vr-xj54-vc7v, GHSA-x33g-cr3x-6449 (via sigstore)
-    "dnspython>=2.9.0", # GHSA-45c3-73f7-pv4m (via sigstore -> pydantic[email])
 ]
 
 [tool.uv.exclude-newer-package]
