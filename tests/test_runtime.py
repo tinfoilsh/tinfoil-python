@@ -13,6 +13,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+import yaml
 
 from tinfoil.verifier._document.collateral.runtime import RUNTIME_REPO, RuntimeReference
 from tinfoil.verifier._runtime import (
@@ -371,6 +372,12 @@ def test_config_decode_rejects() -> None:
         raises_config(b"a: " + b"[" * depth + b"]" * depth + b"\n" + GOOD.encode(), r"nested too deeply")
         raises_config(b"a: " + b"{b: " * depth + b"1" + b"}" * depth + b"\n" + GOOD.encode(), r"nested too deeply")
     raises_config(b"cvm-version: \xff\n", r"^parsing config runtime pin: ")
+    # A quoted escape beyond the Unicode range is a ValueError from the scanner, not a YAML error.
+    with pytest.raises(ValueError, match="not in range") as info:
+        yaml.compose(b'cvm-version: "\\U00110000"\n', Loader=yaml.SafeLoader)
+    assert not isinstance(info.value, yaml.YAMLError)
+    raises_config(b'cvm-version: "\\U00110000"\n', r"^parsing config runtime pin: .*not in range")
+    raises_config(b'"\\U00110000": 1\n' + GOOD.encode(), r"^parsing config runtime pin: .*not in range")
 
 
 @pytest.mark.parametrize(

@@ -51,16 +51,19 @@ def _read_cvm_version(data: bytes) -> str:
     try:
         documents = yaml.compose_all(data, Loader=yaml.SafeLoader)
         root = next(documents, None)
-        if root is None:
-            raise RuntimeConfigError(f"{_PREFIX}: EOF")
-        if next(documents, None) is not None:
-            raise RuntimeConfigError("config must contain exactly one YAML document")
-    except yaml.YAMLError as err:
+        second = None if root is None else next(documents, None)
+    except (yaml.YAMLError, ValueError) as err:
+        # The scanner raises a ValueError of its own for a quoted escape
+        # that names a code point beyond the Unicode range.
         raise RuntimeConfigError(f"{_PREFIX}: {err}") from err
     except RecursionError as err:
         # Composition recurses once per nesting level, so a document nested
         # deeper than the interpreter allows is rejected rather than crashing.
         raise RuntimeConfigError(f"{_PREFIX}: config is nested too deeply") from err
+    if root is None:
+        raise RuntimeConfigError(f"{_PREFIX}: EOF")
+    if second is not None:
+        raise RuntimeConfigError("config must contain exactly one YAML document")
     if not isinstance(root, yaml.MappingNode):
         raise RuntimeConfigError(f"{_PREFIX}: config is not a mapping")
     value_node: object = None
