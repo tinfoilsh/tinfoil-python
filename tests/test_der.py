@@ -201,12 +201,15 @@ def test_object_identifier_rejects_malformed(content: bytes) -> None:
         der.object_identifier(der.decode(element(0x06, content)))
 
 
-def test_object_identifier_bounds_each_sub_identifier() -> None:
-    """A sub-identifier of ten octets (70 bits) decodes; an eleventh octet is rejected before it is accumulated."""
-    widest = b"\x55" + b"\xff" * 9 + b"\x7f"
-    assert der.object_identifier(der.decode(element(0x06, widest))) == f"2.5.{(1 << 70) - 1}"
-    with pytest.raises(der.DerError, match="sub-identifier longer than 10 octets"):
-        der.object_identifier(der.decode(element(0x06, b"\x55" + b"\xff" * 10 + b"\x7f")))
+def test_object_identifier_accepts_a_uuid_arc() -> None:
+    """A single sub-identifier may carry a 128-bit UUID, as the arcs under ``2.25`` do."""
+    uuid = 0xF81D4FAE7DEC11D0A76500A0C91E6BF6
+    octets = [uuid & 0x7F]
+    rest = uuid >> 7
+    while rest:
+        octets.insert(0, 0x80 | (rest & 0x7F))
+        rest >>= 7
+    assert der.object_identifier(der.decode(element(0x06, b"\x69" + bytes(octets)))) == f"2.25.{uuid}"
 
 
 def test_object_identifier_bounds_its_content() -> None:
