@@ -18,7 +18,8 @@ import httpx
 
 from tinfoil._errors import ConfigurationError, attestation_error, wrap_attestation
 from tinfoil._keys import PeerLacksKeyError
-from tinfoil.verifier import UsageError, VerificationError, pin_tls_key
+from tinfoil._pin import pin_tls_key
+from tinfoil.verifier import UsageError, VerificationError
 
 CERT_MISMATCH = "enclave certificate does not match the attested key; re-verify the enclave"
 NO_TLS = "TLS transport mode requires an HTTPS request"

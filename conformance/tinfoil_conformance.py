@@ -48,6 +48,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from tinfoil import connection_cert_fp
 from tinfoil._sdkinfo import attestation_headers
 from tinfoil.verifier import (
     NONCE_SIZE,
@@ -56,7 +57,6 @@ from tinfoil.verifier import (
     Verifier,
     _measurement,
     _verifier,
-    connection_cert_fp,
     random_nonce,
 )
 from tinfoil.verifier import Verification as PublicVerification

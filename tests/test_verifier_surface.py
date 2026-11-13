@@ -64,14 +64,12 @@ EXPECTED_ALL = (
     "Verifier",
     "VerifyError",
     "cert_pubkey_fp",
-    "connection_cert_fp",
     "crypto_material_data",
     "load_public_key",
     "parse_expected_sevsnp",
     "parse_expected_tdx",
     "parse_reference",
     "parse_register",
-    "pin_tls_key",
     "random_nonce",
 )
 
@@ -96,19 +94,21 @@ CONSTANTS = (
 )
 FUNCTIONS = (
     "cert_pubkey_fp",
-    "connection_cert_fp",
     "crypto_material_data",
     "load_public_key",
     "parse_expected_sevsnp",
     "parse_expected_tdx",
     "parse_reference",
     "parse_register",
-    "pin_tls_key",
     "random_nonce",
 )
 
 # Names that exist for the conformance harness or inside the package and must never be reachable from it.
 PRIVATE_NAMES = ("Overrides", "_build", "ResolvedReferences", "resolve_embedded", "TrustPolicy")
+
+# The TLS connection checks that moved to the client package (``tinfoil.pin_tls_key`` and
+# ``tinfoil.connection_cert_fp``): the verifier takes no socket or connection objects.
+CLIENT_NAMES = ("connection_cert_fp", "pin_tls_key")
 
 # Exported aliases of builtin types, which carry no module of their own.
 BUILTIN_ALIASES = ("Layer", "Register")
@@ -199,6 +199,14 @@ def test_nothing_private_is_exported(surface: ModuleType) -> None:
             assert name.startswith("_"), f"submodule {value.__name__} is exported as {name}"
 
 
+def test_connection_checks_belong_to_the_client(surface: ModuleType) -> None:
+    import tinfoil
+
+    for name in CLIENT_NAMES:
+        assert not hasattr(surface, name), name
+        assert name in tinfoil.__all__, name
+
+
 def test_the_package_is_typed() -> None:
     package_root = Path(importlib.import_module("tinfoil").__file__ or "").parent
     assert (package_root / "py.typed").is_file()
@@ -243,7 +251,6 @@ from {module} import (
     parse_expected_tdx,
     parse_reference,
     parse_register,
-    pin_tls_key,
     random_nonce,
 )
 
@@ -291,11 +298,10 @@ def report(verified: Verification) -> str:
     runtime_tag = verified.runtime.tag if verified.runtime is not None else ""
     verified_at: datetime = verified.metadata.verified_at
     registers: list[Register | None] = pins(verified.code_measurement)
-    check = pin_tls_key(fp) if fp is not None else None
     return "".join(
         (verified.code_digest, verified.code_tag, verified.config_repo, describe(verified.enclave_measurement),
          fp or "", key or "", data or "", str(expires), name, runtime_tag, verified_at.isoformat(),
-         str(len(registers)), str(check is not None), verified.to_json(), verified.to_json(indent=2),
+         str(len(registers)), verified.to_json(), verified.to_json(indent=2),
          str(verified.to_dict()), str(source_of(verified)))
     )
 

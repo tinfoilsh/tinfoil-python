@@ -66,10 +66,12 @@ EXPECTED_ALL = (
     "UnprocessableEntityError",
     "VerificationCheck",
     "__version__",
+    "connection_cert_fp",
     "create_async_client",
     "create_client",
     "fetch_catalog",
     "fetch_catalog_async",
+    "pin_tls_key",
     "tinfoil_error",
 )
 
@@ -248,5 +250,6 @@ def test_submodules_import() -> None:
         "_url",
         "_types",
         "_keys",
+        "_pin",
     ):
         importlib.import_module(f"tinfoil.{name}")

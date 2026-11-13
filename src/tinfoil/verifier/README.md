@@ -55,7 +55,7 @@ A successful return is not the end of the caller's job. The returned
 caller must bind its traffic to them:
 
 - `verified.tls_public_key_fp`: pin every TLS connection to the enclave to
-  this SPKI fingerprint (see `pin_tls_key` below). A connection whose leaf
+  this SPKI fingerprint (see `tinfoil.pin_tls_key`). A connection whose leaf
   certificate carries another key is not the attested enclave.
 - `verified.hpke_public_key`: encrypt request bodies to this key when the
   transport uses HPKE.
@@ -266,31 +266,11 @@ except ValueError as err:
 
 ## Pinning the TLS connection
 
-`pin_tls_key` turns the endorsed fingerprint into a check on a TLS
-connection. Call it on the `ssl.SSLSocket` or `ssl.SSLObject` immediately
-after the handshake and before the first byte is written; a mismatch is a
-`VerificationError` at the policy layer. The check adds to the certificate
-validation that the TLS context performs; it does not replace it.
-
-```python
-import socket
-import ssl
-
-from tinfoil.verifier import pin_tls_key
-
-
-def open_pinned(host: str, fingerprint: str) -> ssl.SSLSocket:
-    check = pin_tls_key(fingerprint)
-    context = ssl.create_default_context()
-    raw = socket.create_connection((host, 443), timeout=10)
-    tls = context.wrap_socket(raw, server_hostname=host)  # runs do_handshake()
-    check(tls)
-    return tls
-```
-
-`cert_pubkey_fp(cert_der)` computes the same fingerprint from a DER
-certificate, and `connection_cert_fp(connection)` from a live connection,
-for callers that pin inside their own HTTP client.
+`cert_pubkey_fp(cert_der)` computes the SPKI fingerprint of a DER
+certificate in the form that `tls_public_key_fp` reports. The checks that
+read the peer certificate off a live connection belong to the transport, so
+they live in the client package: see `tinfoil.pin_tls_key` and
+`tinfoil.connection_cert_fp` in the [client README](../../../README.md#pinning-your-own-tls-connection).
 
 ## What is not here
 

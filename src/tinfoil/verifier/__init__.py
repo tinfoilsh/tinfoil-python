@@ -33,8 +33,10 @@ Measurements are closed sets with one frozen record per platform:
 48-byte ``bytes`` values (``Register``); ``parse_register`` and the
 ``parse_expected_*`` helpers decode them from hex.
 
-``cert_pubkey_fp``, ``connection_cert_fp`` and ``pin_tls_key`` compute and
-check the SPKI fingerprint form in which documents endorse TLS keys.
+``cert_pubkey_fp`` computes the SPKI fingerprint form in which documents
+endorse TLS keys. Checking that a TLS connection presents the endorsed key is
+the transport's job: ``tinfoil.pin_tls_key`` and ``tinfoil.connection_cert_fp``
+build that check on this fingerprint.
 
 The option types of the ``Verifier`` constructor are exported with it:
 ``PublicKey`` is the ECDSA P-256 key type that it accepts for config and
@@ -68,7 +70,7 @@ from tinfoil.verifier._errors import (
     VerificationError,
     VerifyError,
 )
-from tinfoil.verifier._fingerprint import cert_pubkey_fp, connection_cert_fp, pin_tls_key
+from tinfoil.verifier._fingerprint import cert_pubkey_fp
 from tinfoil.verifier._measurement import (
     REGISTER_SIZE,
     SEVSNP,
@@ -140,13 +142,11 @@ __all__ = [
     "Verifier",
     "VerifyError",
     "cert_pubkey_fp",
-    "connection_cert_fp",
     "crypto_material_data",
     "load_public_key",
     "parse_expected_sevsnp",
     "parse_expected_tdx",
     "parse_reference",
     "parse_register",
-    "pin_tls_key",
     "random_nonce",
 ]
