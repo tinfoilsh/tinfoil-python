@@ -88,4 +88,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
-        run: gh release create "$TAG_NAME" --generate-notes dist/*.whl
+        # A pre-release version (v0.16.0a1, v0.16.0b1, v0.16.0rc1) is a GitHub pre-release, not the latest release.
+        run: |
+          flags=()
+          if [[ "$TAG_NAME" =~ (a|b|rc)[0-9]+$ ]]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$TAG_NAME" --generate-notes "${flags[@]}" dist/*.whl
