@@ -285,7 +285,7 @@ nonce = random_nonce()
 
 ### Pinning your own TLS connection
 
-The clients pin their TLS connections for you. If you bring your own transport, check that the connection presents the attested key yourself: after the handshake and before the first byte is written, compare `tinfoil.verifier.cert_pubkey_fp` of the peer certificate with the verification's `tls_public_key_fp`. That is `None` when the document endorses no TLS key, so refuse the connection then too. The check adds to the certificate validation that the TLS context performs; it does not replace it.
+In the default TLS transport mode, the enclave and router clients pin their TLS connections for you; in EHBP mode, and in the gateway clients, they seal request bodies to the attested key instead. If you bring your own transport, check that the connection presents the attested key yourself: after the handshake and before the first byte is written, compare `tinfoil.verifier.cert_pubkey_fp` of the peer certificate with the verification's `tls_public_key_fp`. That is `None` when the document endorses no TLS key, so refuse the connection then too. The check adds to the certificate validation that the TLS context performs; it does not replace it.
 
 ```python
 import socket
@@ -300,11 +300,18 @@ def open_pinned(host: str, verified: Verification) -> ssl.SSLSocket:
         raise RuntimeError("the attestation document endorses no TLS key")
     context = ssl.create_default_context()
     raw = socket.create_connection((host, 443), timeout=10)
-    tls = context.wrap_socket(raw, server_hostname=host)  # runs do_handshake()
-    leaf = tls.getpeercert(binary_form=True)
-    if leaf is None or cert_pubkey_fp(leaf) != expected:
-        tls.close()
-        raise RuntimeError("the enclave did not present the attested TLS key")
+    try:
+        tls = context.wrap_socket(raw, server_hostname=host)  # runs do_handshake()
+    except BaseException:
+        raw.close()
+        raise
+    try:
+        leaf = tls.getpeercert(binary_form=True)
+        if leaf is None or cert_pubkey_fp(leaf) != expected:
+            raise RuntimeError("the enclave did not present the attested TLS key")
+    except BaseException:
+        tls.close()  # also when cert_pubkey_fp rejects a certificate that does not parse
+        raise
     return tls  # only now send the request
 ```
 
