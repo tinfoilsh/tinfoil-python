@@ -7,7 +7,7 @@ The client verifies enclaves with version 3 of Tinfoil's attestation format, thr
 | `TinfoilAI(api_key=k)` | `create_client(api_key=k)` |
 | `TinfoilAI(enclave=host, repo=r, api_key=k)` | `EnclaveOpenAIClient(host, r, api_key=k)`. `host` and `repo` are positional and required. |
 | `AsyncTinfoilAI(...)` | `await create_async_client(...)` for the router, `await AsyncEnclaveOpenAIClient.create(host, r, ...)` for one enclave. Every asynchronous client is built with `await Cls.create(...)`, since the constructor verifies. |
-| `client.chat`, `client.embeddings`, `client.audio` | Unchanged, and every other resource of the `openai` package with them, `realtime` excluded: its websocket would bypass the attested connection, so it raises `ConfigurationError`. |
+| `client.chat`, `client.embeddings`, `client.audio` | Unchanged, and every other resource of the `openai` package with them, except the websocket entry points: `realtime`, its `beta.realtime` alias and the `connect` methods of `responses`, `beta.responses`, `live`, `live.sideband` and `live.forks` raise `ConfigurationError`, because a websocket can't use the attested HTTP client and would bypass the attested connection. The `websocket_base_url` option is refused for the same reason when it is set; `None` counts as unset. |
 | `client.client` | The client itself: it is an `openai.OpenAI`. |
 | `client.enclave` | `client.http_client.enclave` |
 | `NewSecureClient().get(url, headers, timeout)`, `.post(...)` | `RouterHTTPClient()`, or `EnclaveHTTPClient(host, repo)`, then `c.http_client.get(c.base_url + "v1/...", headers=..., timeout=...)`, which returns an `httpx.Response`. `http_client` is an `httpx.Client` with every method, and `base_url` ends in a slash. |

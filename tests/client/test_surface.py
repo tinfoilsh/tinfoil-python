@@ -172,11 +172,10 @@ options: OpenAIOptions = {{
     "api_key": key,
     "timeout": httpx.Timeout(10.0),
     "max_retries": 0,
-    "websocket_base_url": httpx.URL("wss://enclave.example/v1/"),
 }}
 async_options: AsyncOpenAIOptions = {{"api_key": async_key, "default_headers": {{"X-Trace": "1"}}}}
 overrides: OpenAICopyOptions = {{"set_default_headers": {{}}, "timeout": 1.0}}
-other_options: OpenAIOptions = {{"organization": "o", "default_query": {{"v": 1}}, "websocket_base_url": None}}
+other_options: OpenAIOptions = {{"organization": "o", "default_query": {{"v": 1}}}}
 
 
 async def consume() -> None:
@@ -202,6 +201,7 @@ MISTAKES = (
     'create_client(api_key="k", data_residency="us")',
     "RouterOpenAIClient(provider=None)",
     'EnclaveOpenAIClient("enclave.example", None, workload_identity=None).with_options(workload_identity=None)',
+    'create_client(api_key="k", websocket_base_url=None)',
 )
 """Consumer mistakes, one per line of the probe: a misspelled option, a route option on the drop-in client, the
 fixed ``http_client`` and ``base_url``, a missing ``repo``, an awaitable key on a synchronous client, and the
