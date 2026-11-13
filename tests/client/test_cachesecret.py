@@ -84,6 +84,29 @@ class TestResolution:
         assert len(results) == 8
         assert len(set(results)) == 1, "every thread adopts the one generated secret"
 
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+    def test_a_forked_child_keeps_the_secret_and_does_not_deadlock(self) -> None:
+        """A child forked while the lock is held gets a fresh lock, and keeps the parent's secret."""
+        script = """
+import os, signal
+from tinfoil._cachesecret import resolve
+import tinfoil._cachesecret as cachesecret
+parent = resolve(None)
+cachesecret._process_lock.acquire()
+pid = os.fork()
+if pid == 0:
+    signal.alarm(10)
+    os._exit(0 if resolve(None) == parent else 1)
+cachesecret._process_lock.release()
+_, status = os.waitpid(pid, 0)
+raise SystemExit(os.waitstatus_to_exitcode(status))
+"""
+        env = os.environ.copy()
+        source = str(Path(__file__).parents[2] / "src")
+        env["PYTHONPATH"] = os.pathsep.join(value for value in (source, env.get("PYTHONPATH")) if value)
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=60)
+        assert result.returncode == 0, (result.returncode, result.stderr)
+
     def test_each_process_generates_its_own(self, legacy_sources: Path) -> None:
         """Two processes with the variable and the file of earlier releases both set get different secrets, so
         neither source is read."""

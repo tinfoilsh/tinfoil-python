@@ -11,7 +11,9 @@ since other enclaves do not read the field:
 1. a non-empty per-request ``user_cache_secret`` field in the body,
 2. the client's ``user_cache_secret`` option,
 3. a random secret that is generated in memory once per process and shared by
-   every client in the process.
+   every client in the process. A process created by ``os.fork`` after the
+   secret exists keeps its parent's secret, so prefork workers of one
+   application share a cache namespace, as they share an API identity.
 
 The SDK reads no environment variable or file for the secret. The generated
 secret lasts only as long as the process, so applications that want a
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import secrets
 import threading
@@ -262,6 +265,17 @@ def _new_secret() -> str:
 
 _process_lock = threading.Lock()
 _process_secret: str | None = None
+
+
+def _reset_lock_after_fork() -> None:
+    """Gives a forked child a fresh lock, since the fork may have happened while another thread held it. The
+    child keeps the parent's secret."""
+    global _process_lock
+    _process_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_lock_after_fork)
 
 
 def _process_secret_value() -> str:
