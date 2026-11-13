@@ -6,12 +6,8 @@ asynchronous clients are built with ``await Cls.create(...)``, which is
 where they verify, since their constructor raises. Every request is bound
 to the keys of the current verification. The verifier that appraises the
 attestation documents is the ``verifier`` subpackage; its records and
-errors are not re-exported here. For a TLS connection that the caller opens,
-``pin_tls_key`` is the check: it rejects a connection that does not present
-the key that a verification endorses. ``connection_cert_fp`` only reports the
-fingerprint of the presented key and compares nothing. The client modules
-load on first use, so that
-importing the ``verifier`` subpackage alone stays light.
+errors are not re-exported here. The client modules load on first use, so
+that importing the ``verifier`` subpackage alone stays light.
 """
 
 import importlib
@@ -71,7 +67,6 @@ if TYPE_CHECKING:
         create_async_client,
         create_client,
     )
-    from tinfoil._pin import connection_cert_fp, pin_tls_key
     from tinfoil._types import (
         DEFAULT_HTTP_TIMEOUT,
         DEFAULT_TRANSPORT_MODE,
@@ -131,12 +126,10 @@ __all__ = [
     "UnprocessableEntityError",
     "VerificationCheck",
     "__version__",
-    "connection_cert_fp",
     "create_async_client",
     "create_client",
     "fetch_catalog",
     "fetch_catalog_async",
-    "pin_tls_key",
     "tinfoil_error",
 ]
 
@@ -208,7 +201,6 @@ _MODULE_OF: dict[str, str] = {
                 "create_client",
             ),
         ),
-        ("tinfoil._pin", ("connection_cert_fp", "pin_tls_key")),
         (
             "tinfoil._types",
             ("DEFAULT_HTTP_TIMEOUT", "DEFAULT_TRANSPORT_MODE", "TimeoutTypes", "TransportMode", "VerificationCheck"),

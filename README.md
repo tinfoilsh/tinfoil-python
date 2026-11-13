@@ -285,25 +285,28 @@ nonce = random_nonce()
 
 ### Pinning your own TLS connection
 
-`tinfoil.pin_tls_key` turns the fingerprint that a verification endorses (`tls_public_key_fp`) into a check on a TLS connection that you open yourself. Call it on the `ssl.SSLSocket` or `ssl.SSLObject` immediately after the handshake and before the first byte is written; a mismatch, or a peer certificate that does not parse, is a `tinfoil.verifier.VerificationError` at the policy layer, and a connection without a peer certificate is a `tinfoil.verifier.UsageError`. The check adds to the certificate validation that the TLS context performs; it does not replace it. A fingerprint that is not a SHA-256 digest as lowercase hex, such as the `None` that a verification reports when the document endorses no TLS key, is a `UsageError` when the check is built.
+The clients pin their TLS connections for you. If you bring your own transport, check that the connection presents the attested key yourself: after the handshake and before the first byte is written, compare `tinfoil.verifier.cert_pubkey_fp` of the peer certificate with the verification's `tls_public_key_fp`. That is `None` when the document endorses no TLS key, so refuse the connection then too. The check adds to the certificate validation that the TLS context performs; it does not replace it.
 
 ```python
 import socket
 import ssl
 
-from tinfoil import pin_tls_key
+from tinfoil.verifier import Verification, cert_pubkey_fp
 
 
-def open_pinned(host: str, fingerprint: str) -> ssl.SSLSocket:
-    check = pin_tls_key(fingerprint)
+def open_pinned(host: str, verified: Verification) -> ssl.SSLSocket:
+    expected = verified.tls_public_key_fp
+    if expected is None:
+        raise RuntimeError("the attestation document endorses no TLS key")
     context = ssl.create_default_context()
     raw = socket.create_connection((host, 443), timeout=10)
     tls = context.wrap_socket(raw, server_hostname=host)  # runs do_handshake()
-    check(tls)
-    return tls
+    leaf = tls.getpeercert(binary_form=True)
+    if leaf is None or cert_pubkey_fp(leaf) != expected:
+        tls.close()
+        raise RuntimeError("the enclave did not present the attested TLS key")
+    return tls  # only now send the request
 ```
-
-`tinfoil.connection_cert_fp(connection)` reports the fingerprint of the leaf certificate that a live connection presented, and `tinfoil.verifier.cert_pubkey_fp(cert_der)` computes the same fingerprint from a DER certificate, for callers that pin inside their own HTTP client.
 
 ## Development
 

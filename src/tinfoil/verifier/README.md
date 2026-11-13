@@ -17,8 +17,7 @@ pip install tinfoil
 from tinfoil.verifier import Verifier, random_nonce
 ```
 
-Every name documented here is importable from `tinfoil.verifier`, except
-the `tinfoil.`-qualified client names that it points to; the
+Every name documented here is importable from `tinfoil.verifier`; the
 `_`-prefixed submodules are implementation detail and may change without
 notice.
 
@@ -56,7 +55,7 @@ A successful return is not the end of the caller's job. The returned
 caller must bind its traffic to them:
 
 - `verified.tls_public_key_fp`: pin every TLS connection to the enclave to
-  this SPKI fingerprint (see `tinfoil.pin_tls_key`). A connection whose leaf
+  this SPKI fingerprint (see "Pinning the TLS connection" below). A connection whose leaf
   certificate carries another key is not the attested enclave.
 - `verified.hpke_public_key`: encrypt request bodies to this key when the
   transport uses HPKE.
@@ -268,10 +267,11 @@ except ValueError as err:
 ## Pinning the TLS connection
 
 `cert_pubkey_fp(cert_der)` computes the SPKI fingerprint of a DER
-certificate in the form that `tls_public_key_fp` reports. The checks that
-read the peer certificate off a live connection belong to the transport, so
-they live in the client package: see `tinfoil.pin_tls_key` and
-`tinfoil.connection_cert_fp` in the [client README](../../../README.md#pinning-your-own-tls-connection).
+certificate in the form that `tls_public_key_fp` reports. A caller that
+brings its own transport compares `cert_pubkey_fp` of the peer certificate
+with `tls_public_key_fp` after the handshake and before the first byte is
+written; the [client README](../../../README.md#pinning-your-own-tls-connection)
+shows how.
 
 ## What is not here
 

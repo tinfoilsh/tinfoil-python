@@ -1,4 +1,5 @@
-"""Checks that bind a TLS connection to the key fingerprint that an attestation document endorses.
+"""Checks that bind a TLS connection to the key fingerprint that an attestation document endorses. They are
+private: the pinned transport uses ``pin_tls_key`` and the conformance adapter uses ``connection_cert_fp``.
 
 The verifier reports the fingerprint (``Verification.tls_public_key_fp``) and computes it from certificate bytes
 (``cert_pubkey_fp``); reading the peer certificate off a connection and building the check on it is the
@@ -36,18 +37,7 @@ def pin_tls_key(fp: str) -> Callable[[ssl.SSLSocket | ssl.SSLObject], None]:
     Call the returned check on the ``ssl.SSLSocket`` or ``ssl.SSLObject``
     immediately after ``do_handshake()`` returns and before the first byte
     is written, so that nothing reaches a peer that holds the wrong key.
-    The SDK's HTTP clients do this in their transport; a caller that opens
-    its own connection does it like this::
-
-        fp = verified.tls_public_key_fp
-        if fp is None:  # a valid verification may endorse no TLS key
-            raise RuntimeError("the document endorses no TLS key")
-        check = pin_tls_key(fp)
-        context = ssl.create_default_context()
-        with socket.create_connection((host, 443)) as raw:
-            with context.wrap_socket(raw, server_hostname=host) as tls:
-                check(tls)  # do_handshake() ran inside wrap_socket()
-                tls.sendall(request)
+    The pinned transport in ``tinfoil._tls`` does this in its network backend.
 
     ``fp`` must be a SHA-256 digest as lowercase hex; anything else, such as the None that
     ``Verification.tls_public_key_fp`` reports when the document endorses no TLS key, is a UsageError here rather

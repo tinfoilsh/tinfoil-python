@@ -35,8 +35,9 @@ Measurements are closed sets with one frozen record per platform:
 
 ``cert_pubkey_fp`` computes the SPKI fingerprint form in which documents
 endorse TLS keys. Checking that a TLS connection presents the endorsed key is
-the transport's job: ``tinfoil.pin_tls_key`` and ``tinfoil.connection_cert_fp``
-build that check on this fingerprint.
+the transport's job: compare ``cert_pubkey_fp`` of the peer certificate with
+``Verification.tls_public_key_fp`` after the handshake and before the first
+byte is written.
 
 The option types of the ``Verifier`` constructor are exported with it:
 ``PublicKey`` is the ECDSA P-256 key type that it accepts for config and

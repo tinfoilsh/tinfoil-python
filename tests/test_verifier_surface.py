@@ -106,9 +106,9 @@ FUNCTIONS = (
 # Names that exist for the conformance harness or inside the package and must never be reachable from it.
 PRIVATE_NAMES = ("Overrides", "_build", "ResolvedReferences", "resolve_embedded", "TrustPolicy")
 
-# The TLS connection checks that moved to the client package (``tinfoil.pin_tls_key`` and
-# ``tinfoil.connection_cert_fp``): the verifier takes no socket or connection objects.
-CLIENT_NAMES = ("connection_cert_fp", "pin_tls_key")
+# The TLS connection checks, which are private to the client package (``tinfoil._pin``): the verifier takes no
+# socket or connection objects, and the client package does not export them either.
+CONNECTION_CHECKS = ("connection_cert_fp", "pin_tls_key")
 
 # Exported aliases of builtin types, which carry no module of their own.
 BUILTIN_ALIASES = ("Layer", "Register")
@@ -199,12 +199,14 @@ def test_nothing_private_is_exported(surface: ModuleType) -> None:
             assert name.startswith("_"), f"submodule {value.__name__} is exported as {name}"
 
 
-def test_connection_checks_belong_to_the_client(surface: ModuleType) -> None:
+def test_connection_checks_are_not_public(surface: ModuleType) -> None:
     import tinfoil
 
-    for name in CLIENT_NAMES:
+    for name in CONNECTION_CHECKS:
+        assert name not in surface.__all__, name
         assert not hasattr(surface, name), name
-        assert name in tinfoil.__all__, name
+        assert name not in tinfoil.__all__, name
+        assert not hasattr(tinfoil, name), name
 
 
 def test_the_package_is_typed() -> None:

@@ -1,5 +1,5 @@
-"""The TLS connection checks built on the verifier's SPKI fingerprint: the fingerprint of a connection's leaf and
-the key pin."""
+"""The private TLS connection checks built on the verifier's SPKI fingerprint: the fingerprint of a connection's
+leaf and the key pin."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 import pytest
 
-import tinfoil
 from tests import pki
 from tinfoil._pin import connection_cert_fp, pin_tls_key
 from tinfoil.verifier import LAYER_POLICY, UsageError, VerificationError, cert_pubkey_fp
@@ -23,11 +22,6 @@ class Connection:
     def getpeercert(self, binary_form: bool = False) -> bytes | None:
         assert binary_form
         return self.leaf
-
-
-def test_the_package_exports_the_checks() -> None:
-    assert tinfoil.connection_cert_fp is connection_cert_fp
-    assert tinfoil.pin_tls_key is pin_tls_key
 
 
 @pytest.mark.parametrize("key", [pki.p256(), pki.p384(), pki.rsa_key(), pki.ed25519_key()])
