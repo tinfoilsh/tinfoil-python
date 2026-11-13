@@ -1,7 +1,10 @@
 """OpenAI clients over the attested HTTP clients. Each is an ``openai`` client whose requests go through one of
 them, so every HTTP resource of the ``openai`` package works unchanged and no application data is sent before
-the enclave is verified. The one exception is the realtime resource: it opens a websocket of its own, outside
-``http_client``, so it is refused rather than left to bypass the attested transport."""
+the enclave is verified. The exceptions are the websocket entry points: the ``realtime`` resource and the
+``connect`` methods of ``responses``, ``beta.responses``, ``live``, ``live.sideband`` and ``live.forks``. Each
+opens a websocket of its own, which can't use the attested HTTP client, so each is refused with a
+ConfigurationError rather than left to bypass the attested transport, and so is the ``websocket_base_url``
+option that would point them elsewhere."""
 
 from __future__ import annotations
 
@@ -14,6 +17,10 @@ import httpx
 import openai
 from openai import Timeout
 from openai.resources.beta import AsyncBeta, Beta
+from openai.resources.beta.responses import AsyncResponses as AsyncBetaResponses
+from openai.resources.beta.responses import Responses as BetaResponses
+from openai.resources.live import AsyncForks, AsyncLive, AsyncSideband, Forks, Live, Sideband
+from openai.resources.responses import AsyncResponses, Responses
 
 from tinfoil._clients import (
     AsyncEnclaveHTTPClient,
@@ -39,18 +46,20 @@ _C = TypeVar("_C", bound=openai.AsyncOpenAI)
 HTTP_CLIENT_FIXED = "http_client is the attested HTTP client's and cannot be replaced"
 BASE_URL_FIXED = "base_url is the attested HTTP client's and cannot be replaced"
 DROP_IN_OPTIONS = "{name} takes only the openai package's options; {keys} belong to {route}"
-REALTIME_UNAVAILABLE = "realtime is not available over an attested client"
-"""The message of the ConfigurationError that accessing a realtime resource raises: its websocket would open
-outside the attested HTTP client, bypassing the origin guard, the TLS pin and EHBP."""
+WEBSOCKET_UNAVAILABLE = "{name} is not available over an attested client"
+"""The message of the ConfigurationError that a websocket entry point raises, naming it: a websocket can't use
+the attested HTTP client, so it would open outside it, bypassing the origin guard, the TLS pin and EHBP."""
+REALTIME_UNAVAILABLE = WEBSOCKET_UNAVAILABLE.format(name="realtime")
+"""The message of the ConfigurationError that accessing a realtime resource raises."""
 
 TRANSPORT_OPTION_UNSUPPORTED = (
     "the {key} option is not supported: the Tinfoil client owns the transport and base URL that requests go to"
 )
-_FORBIDDEN_TRANSPORT_OPTIONS = ("data_residency", "provider", "workload_identity")
-"""The ``openai`` client options that choose another base URL or send requests, such as a token exchange,
-through an HTTP client of their own: each is a ConfigurationError from every constructor, factory and copy, so
-that the guarantee that requests go through the attested client does not depend on the ``openai`` package's own
-checks. An option that is ``None`` is unset."""
+_FORBIDDEN_TRANSPORT_OPTIONS = ("data_residency", "provider", "websocket_base_url", "workload_identity")
+"""The ``openai`` client options that choose another base URL, including the one that websockets would connect
+to, or that send requests, such as a token exchange, through an HTTP client of their own: each is a
+ConfigurationError from every constructor, factory and copy, so that the guarantee that requests go through the
+attested client does not depend on the ``openai`` package's own checks. An option that is ``None`` is unset."""
 
 ROUTE_OPTIONS = frozenset(
     {"transport_mode", "base_url", "verifier", "verification_check", "user_cache_secret", "http_timeout"}
@@ -65,7 +74,6 @@ class _SharedOptions(TypedDict, total=False):
     organization: str | None
     project: str | None
     webhook_secret: str | None
-    websocket_base_url: str | httpx.URL | None
     timeout: float | httpx.Timeout | Timeout | None
     max_retries: int
     default_headers: Mapping[str, str] | None
@@ -75,8 +83,9 @@ class _SharedOptions(TypedDict, total=False):
 class OpenAIOptions(_SharedOptions, total=False):
     """The ``openai.OpenAI`` constructor options that the synchronous OpenAI clients accept by keyword: every
     option of the installed ``openai`` package except ``http_client`` and ``base_url``, which the attested
-    client fixes, and ``data_residency``, ``provider`` and ``workload_identity``, which would choose another base
-    URL or send a token exchange through an HTTP client other than the attested one, and which are refused.
+    client fixes, and ``data_residency``, ``provider``, ``websocket_base_url`` and ``workload_identity``, which
+    would choose another base URL or send a token exchange through an HTTP client other than the attested one,
+    and which are refused.
     ``timeout`` and ``max_retries`` are per request, as they are in the package; the attested client's own
     timeout is the ``http_timeout`` option. ``api_key`` may be a callable that returns the key."""
 
@@ -105,16 +114,116 @@ class AsyncOpenAICopyOptions(AsyncOpenAIOptions, _CopyOnlyOptions, total=False):
     """The options of ``copy`` and ``with_options`` on the asynchronous OpenAI clients."""
 
 
+def _no_websocket(name: str) -> NoReturn:
+    raise ConfigurationError(WEBSOCKET_UNAVAILABLE.format(name=name))
+
+
 def _no_realtime() -> NoReturn:
     raise ConfigurationError(REALTIME_UNAVAILABLE)
 
 
+# Each class below refuses a websocket entry point of its ``openai`` resource: the ``connect`` method, which
+# raises before it builds a connection manager, so before ``websockets`` is imported or any I/O happens, while
+# the resource's HTTP methods are left as they are. A ``connect`` that takes any arguments and never returns is
+# compatible with the one it overrides.
+
+
+class _Responses(Responses):
+    """``responses`` without its websocket ``connect``."""
+
+    def connect(self, *args: object, **kwargs: object) -> NoReturn:
+        _no_websocket("responses.connect")
+
+
+class _AsyncResponses(AsyncResponses):
+    """``_Responses`` for the asynchronous clients."""
+
+    def connect(self, *args: object, **kwargs: object) -> NoReturn:
+        _no_websocket("responses.connect")
+
+
+class _BetaResponses(BetaResponses):
+    """``beta.responses`` without its websocket ``connect``."""
+
+    def connect(self, *args: object, **kwargs: object) -> NoReturn:
+        _no_websocket("beta.responses.connect")
+
+
+class _AsyncBetaResponses(AsyncBetaResponses):
+    """``_BetaResponses`` for the asynchronous clients."""
+
+    def connect(self, *args: object, **kwargs: object) -> NoReturn:
+        _no_websocket("beta.responses.connect")
+
+
+class _Sideband(Sideband):
+    """``live.sideband`` without its websocket ``connect``, which is all that it has."""
+
+    def connect(self, *args: object, **kwargs: object) -> NoReturn:
+        _no_websocket("live.sideband.connect")
+
+
+class _AsyncSideband(AsyncSideband):
+    """``_Sideband`` for the asynchronous clients."""
+
+    def connect(self, *args: object, **kwargs: object) -> NoReturn:
+        _no_websocket("live.sideband.connect")
+
+
+class _Forks(Forks):
+    """``live.forks`` without its websocket ``connect``, which is all that it has."""
+
+    def connect(self, *args: object, **kwargs: object) -> NoReturn:
+        _no_websocket("live.forks.connect")
+
+
+class _AsyncForks(AsyncForks):
+    """``_Forks`` for the asynchronous clients."""
+
+    def connect(self, *args: object, **kwargs: object) -> NoReturn:
+        _no_websocket("live.forks.connect")
+
+
+class _Live(Live):
+    """``live`` without its websocket ``connect`` and with the refusing ``sideband`` and ``forks``."""
+
+    def connect(self, *args: object, **kwargs: object) -> NoReturn:
+        _no_websocket("live.connect")
+
+    @cached_property
+    def sideband(self) -> _Sideband:
+        return _Sideband(self._client)
+
+    @cached_property
+    def forks(self) -> _Forks:
+        return _Forks(self._client)
+
+
+class _AsyncLive(AsyncLive):
+    """``_Live`` for the asynchronous clients."""
+
+    def connect(self, *args: object, **kwargs: object) -> NoReturn:
+        _no_websocket("live.connect")
+
+    @cached_property
+    def sideband(self) -> _AsyncSideband:
+        return _AsyncSideband(self._client)
+
+    @cached_property
+    def forks(self) -> _AsyncForks:
+        return _AsyncForks(self._client)
+
+
 class _Beta(Beta):
-    """The ``beta`` resources without their realtime alias."""
+    """The ``beta`` resources without their realtime alias and with the refusing ``responses``."""
 
     @property
     def realtime(self) -> NoReturn:
         _no_realtime()
+
+    @cached_property
+    def responses(self) -> _BetaResponses:
+        return _BetaResponses(self._client)
 
 
 class _AsyncBeta(AsyncBeta):
@@ -123,6 +232,10 @@ class _AsyncBeta(AsyncBeta):
     @property
     def realtime(self) -> NoReturn:
         _no_realtime()
+
+    @cached_property
+    def responses(self) -> _AsyncBetaResponses:
+        return _AsyncBetaResponses(self._client)
 
 
 class _Closable(Protocol):
@@ -135,8 +248,9 @@ class _AsyncClosable(Protocol):
 
 class _AttestedOpenAI(openai.OpenAI):
     """An ``openai.OpenAI`` client over an attested HTTP client, ``_tinfoil``, which it closes with itself and
-    shares with its copies. Its realtime resource, and the ``beta`` alias, raise a ConfigurationError instead of
-    opening a websocket outside the attested HTTP client."""
+    shares with its copies. Its websocket entry points, the realtime resource, with its ``beta`` alias, and the
+    ``connect`` methods of ``responses``, ``beta.responses``, ``live``, ``live.sideband`` and ``live.forks``,
+    raise a ConfigurationError instead of opening a websocket outside the attested HTTP client."""
 
     _tinfoil: _Closable
 
@@ -147,6 +261,14 @@ class _AttestedOpenAI(openai.OpenAI):
     @cached_property
     def beta(self) -> _Beta:
         return _Beta(self)
+
+    @cached_property
+    def responses(self) -> _Responses:
+        return _Responses(self)
+
+    @cached_property
+    def live(self) -> _Live:
+        return _Live(self)
 
     def _shared(self) -> dict[str, object]:
         """What a copy's constructor receives besides the options: the attested client it shares."""
@@ -179,6 +301,14 @@ class _AsyncAttestedOpenAI(openai.AsyncOpenAI):
     @cached_property
     def beta(self) -> _AsyncBeta:
         return _AsyncBeta(self)
+
+    @cached_property
+    def responses(self) -> _AsyncResponses:
+        return _AsyncResponses(self)
+
+    @cached_property
+    def live(self) -> _AsyncLive:
+        return _AsyncLive(self)
 
     def _shared(self) -> dict[str, object]:
         return {"_http_client": self._tinfoil}
@@ -249,8 +379,9 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
     arguments are ``OpenAIOptions``, the ``openai`` package's, applied after
     it; ``http_client`` and ``base_url`` are the attested client's and
     cannot be replaced. ``copy`` and ``with_options`` share the attested
-    client, so closing a copy closes the original's too. The ``realtime``
-    resource, whose websocket would bypass the attested client, raises a
+    client, so closing a copy closes the original's too. The websocket
+    entry points, the ``realtime`` resource and the ``connect`` methods,
+    whose websockets would bypass the attested client, raise a
     ConfigurationError.
     """
 
@@ -299,7 +430,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
 
 class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
     """``EnclaveOpenAIClient`` for asyncio, built with ``await AsyncEnclaveOpenAIClient.create(...)``, which
-    takes the same arguments, with ``AsyncOpenAIOptions``. The ``realtime`` resource raises a
+    takes the same arguments, with ``AsyncOpenAIOptions``. The websocket entry points raise a
     ConfigurationError."""
 
     _tinfoil: AsyncEnclaveHTTPClient
@@ -352,8 +483,8 @@ class RouterOpenAIClient(_AttestedOpenAI):
     ``RouterHTTPClient``, ``http_timeout`` being its ``timeout``; the remaining keyword arguments are
     ``OpenAIOptions``, the ``openai`` package's, except ``http_client`` and ``base_url``, which the attested
     client fixes. ``copy`` and ``with_options`` share the attested client, so closing a copy closes the
-    original's too. The ``realtime`` resource, whose websocket would bypass the attested client, raises a
-    ConfigurationError."""
+    original's too. The websocket entry points, the ``realtime`` resource and the ``connect`` methods, whose
+    websockets would bypass the attested client, raise a ConfigurationError."""
 
     _tinfoil: RouterHTTPClient
 
@@ -393,7 +524,7 @@ class RouterOpenAIClient(_AttestedOpenAI):
 
 class AsyncRouterOpenAIClient(_AsyncAttestedOpenAI):
     """``RouterOpenAIClient`` for asyncio, built with ``await AsyncRouterOpenAIClient.create(...)``, with
-    ``AsyncOpenAIOptions``. The ``realtime`` resource raises a ConfigurationError."""
+    ``AsyncOpenAIOptions``. The websocket entry points raise a ConfigurationError."""
 
     _tinfoil: AsyncRouterHTTPClient
 
@@ -440,8 +571,9 @@ class GatewayOpenAIClient(_AttestedOpenAI):
     ``timeout``; the remaining keyword arguments are ``OpenAIOptions``, the ``openai`` package's, except
     ``http_client`` and ``base_url``, which the gateway client fixes: a ``base_url`` other than the gateway's
     is a ConfigurationError, since the gateway's base URL is its ``url`` option. ``copy`` and ``with_options``
-    share the gateway client, so closing a copy closes the original's too. The ``realtime`` resource, whose
-    websocket would bypass the gateway client, raises a ConfigurationError.
+    share the gateway client, so closing a copy closes the original's too. The websocket entry points, the
+    ``realtime`` resource and the ``connect`` methods, whose websockets would bypass the gateway client, raise a
+    ConfigurationError.
 
     Experimental: the gateway route is new, and this API may change or be
     removed in a later release.
@@ -488,7 +620,7 @@ class GatewayOpenAIClient(_AttestedOpenAI):
 
 class AsyncGatewayOpenAIClient(_AsyncAttestedOpenAI):
     """``GatewayOpenAIClient`` for asyncio, built with ``await AsyncGatewayOpenAIClient.create(...)``, with
-    ``AsyncOpenAIOptions``. The ``realtime`` resource raises a ConfigurationError.
+    ``AsyncOpenAIOptions``. The websocket entry points raise a ConfigurationError.
 
     Experimental: the gateway route is new, and this API may change or be
     removed in a later release.

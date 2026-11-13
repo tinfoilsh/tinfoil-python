@@ -1,5 +1,5 @@
 """The OpenAI wrappers: every request goes through the attested HTTP client to the route's URL, the caller's
-``http_client`` and ``base_url`` cannot replace it, the realtime resource is refused, copies keep the attested
+``http_client`` and ``base_url`` cannot replace it, the websocket entry points are refused, copies keep the attested
 client, a failed constructor closes the one it created, API errors pass through unchanged, and a client error
 raised in the transport reaches the caller unwrapped and unretried, since the library wraps and retries only
 the errors of its own HTTP stack. The options that would choose another base URL or an HTTP client of their own
@@ -7,13 +7,17 @@ are refused from every constructor, factory and copy, before any network I/O."""
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
-from collections.abc import Awaitable, Callable
+import sys
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import httpx
 import openai
 import pytest
+from openai._resource import AsyncAPIResource, SyncAPIResource
 from openai.providers import bedrock
 
 from tests.client.helpers import Recorder, response, verification
@@ -34,6 +38,7 @@ from tinfoil._openai import (
     REALTIME_UNAVAILABLE,
     ROUTE_OPTIONS,
     TRANSPORT_OPTION_UNSUPPORTED,
+    WEBSOCKET_UNAVAILABLE,
     AsyncClient,
     AsyncEnclaveOpenAIClient,
     AsyncGatewayOpenAIClient,
@@ -104,6 +109,9 @@ RESPONSE = (
 )
 
 
+LIVE_SESSION = b'{"session":{"id":"s1"},"transport":{"type":"webrtc","sdp":"v=0"}}'
+
+
 def realtime_of(holder: object) -> object:
     """The realtime resource of a client or of one of its resource groups; the access itself is what is refused."""
     return getattr(holder, "realtime")  # noqa: B009 - a plain attribute access would be a useless expression
@@ -115,6 +123,7 @@ def by_path(request: httpx.Request) -> httpx.Response:
         "/v1/embeddings": EMBEDDINGS,
         "/v1/audio/transcriptions": b'{"text":"hi"}',
         "/v1/responses": RESPONSE,
+        "/v1/live/sessions": LIVE_SESSION,
     }
     return response(200, bodies[request.url.path], {"Content-Type": "application/json"})
 
@@ -524,12 +533,19 @@ SUBJECT_TOKEN_IDENTITY = {
 TRANSPORT_OPTIONS: list[tuple[str, object]] = [
     ("data_residency", "us"),
     ("provider", bedrock(region="us-east-1", api_key="b")),
+    ("websocket_base_url", "wss://elsewhere.example/v1/"),
     ("workload_identity", SUBJECT_TOKEN_IDENTITY),
     ("workload_identity", {"type": "x509", "identity_provider_id": "idp", "service_account_id": "sa"}),
 ]
 """A value for each refused option: the subject-token identity is the one that the ``openai`` package itself
 accepts next to the attested base URL, exchanging the token through an HTTP client of its own."""
-TRANSPORT_OPTION_IDS = ["data_residency", "provider", "subject-token workload_identity", "x509 workload_identity"]
+TRANSPORT_OPTION_IDS = [
+    "data_residency",
+    "provider",
+    "websocket_base_url",
+    "subject-token workload_identity",
+    "x509 workload_identity",
+]
 UNSET_TRANSPORT_OPTIONS = dict.fromkeys(_FORBIDDEN_TRANSPORT_OPTIONS)
 ENTRIES = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
 
@@ -579,12 +595,12 @@ def refused(option: str) -> str:
 
 
 class TestTransportOptions:
-    """``data_residency``, ``provider`` and ``workload_identity`` would choose another base URL or send a token
-    exchange through an HTTP client of their own, so each is refused by name, before any network I/O, rather
-    than left to the ``openai`` package's own checks; ``None`` is unset."""
+    """``data_residency``, ``provider``, ``websocket_base_url`` and ``workload_identity`` would choose another
+    base URL or send a token exchange through an HTTP client of their own, so each is refused by name, before any
+    network I/O, rather than left to the ``openai`` package's own checks; ``None`` is unset."""
 
     def test_message_names_the_option(self) -> None:
-        assert _FORBIDDEN_TRANSPORT_OPTIONS == ("data_residency", "provider", "workload_identity")
+        assert _FORBIDDEN_TRANSPORT_OPTIONS == ("data_residency", "provider", "websocket_base_url", "workload_identity")
         assert refused("provider") == (
             "the provider option is not supported: the Tinfoil client owns the transport and base URL that "
             "requests go to"
@@ -696,4 +712,143 @@ class TestTransportOptions:
         assert request.url.params["v"] == "2"
         assert request.headers["X-Trace"] == "1"
         assert request.headers["OpenAI-Organization"] == "org-1"
+        await client.close()
+
+
+WEBSOCKET_CONNECTS: dict[str, dict[str, Any]] = {
+    "responses.connect": {},
+    "beta.responses.connect": {},
+    "live.connect": {},
+    "live.sideband.connect": {"session_id": "s"},
+    "live.forks.connect": {"session_id": "s"},
+}
+"""Each websocket ``connect`` method of the ``openai`` package, by its path from the client, with the arguments
+that it needs; the ``realtime`` resource, which opens a websocket too, is refused as a whole."""
+REALTIME_PATHS = ("realtime", "beta.realtime")
+
+
+def resolve(client: object, path: str) -> Any:
+    holder: Any = client
+    for name in path.split("."):
+        holder = getattr(holder, name)
+    return holder
+
+
+def connect_methods(holder: object, path: str = "") -> Iterator[str]:
+    """The paths of the ``connect`` methods under ``holder``, found by walking its resources, so that a websocket
+    entry point that a later ``openai`` release adds is listed here before it is refused. A resource whose access
+    is itself refused, such as ``realtime`` on an attested client, is skipped."""
+    for name in dir(type(holder)):
+        if name.startswith("_") or name in ("with_raw_response", "with_streaming_response"):
+            continue
+        member = inspect.getattr_static(type(holder), name)
+        child = f"{path}.{name}" if path else name
+        if name == "connect" and callable(member):
+            yield child
+        elif isinstance(member, (functools.cached_property, property)):
+            try:
+                value = getattr(holder, name)
+            except ConfigurationError:
+                continue
+            if isinstance(value, (SyncAPIResource, AsyncAPIResource)):
+                yield from connect_methods(value, child)
+
+
+@pytest.fixture
+def no_websockets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Makes ``websockets`` unimportable, whether or not it is installed, so that a refusal must come before the
+    ``openai`` package imports it."""
+    monkeypatch.setitem(sys.modules, "websockets", None)
+
+
+def assert_websockets_refused(client: openai.OpenAI | openai.AsyncOpenAI) -> None:
+    for path, arguments in WEBSOCKET_CONNECTS.items():
+        with pytest.raises(ConfigurationError) as err:
+            resolve(client, path)(**arguments)
+        assert str(err.value) == WEBSOCKET_UNAVAILABLE.format(name=path)
+    for path in REALTIME_PATHS:
+        with pytest.raises(ConfigurationError, match=REALTIME_UNAVAILABLE):
+            resolve(client, path)
+    assert set(connect_methods(client)) == set(WEBSOCKET_CONNECTS), "every reachable connect is refused above"
+
+
+class TestWebsockets:
+    """A websocket can't use the attested HTTP client, so every websocket entry point of the ``openai`` package
+    is refused, by name and before any network I/O, on every client and copy, while the HTTP methods of the same
+    resources still go through the attested transport."""
+
+    @pytest.mark.parametrize("cls", [openai.OpenAI, openai.AsyncOpenAI])
+    def test_the_inventory_is_every_connect_of_the_openai_package(self, cls: type[openai.OpenAI]) -> None:
+        client = cls(api_key="k")
+        assert set(connect_methods(client)) == set(WEBSOCKET_CONNECTS) | {f"{p}.connect" for p in REALTIME_PATHS}
+
+    def test_realtime_message_is_unchanged(self) -> None:
+        assert REALTIME_UNAVAILABLE == "realtime is not available over an attested client"
+        assert (
+            WEBSOCKET_UNAVAILABLE.format(name="live.connect") == "live.connect is not available over an attested client"
+        )
+
+    @pytest.mark.usefixtures("no_websockets")
+    @pytest.mark.parametrize("factory", sorted(SYNC_FACTORIES))
+    def test_each_entry_point_is_refused_on_each_client_and_copy(self, offline: Recorder, factory: str) -> None:
+        answering_discovery(offline)
+        client = SYNC_FACTORIES[factory](api_key="k", max_retries=0)
+        fetched = len(offline.requests)
+        for holder in (client, client.copy(), client.with_options(max_retries=1)):
+            assert_websockets_refused(holder)
+        assert len(offline.requests) == fetched, "nothing is sent"
+        client.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("no_websockets")
+    @pytest.mark.parametrize("factory", sorted(ASYNC_FACTORIES))
+    async def test_async_each_entry_point_is_refused_on_each_client_and_copy(
+        self, offline: Recorder, factory: str
+    ) -> None:
+        answering_discovery(offline)
+        client = await ASYNC_FACTORIES[factory](api_key="k", max_retries=0)
+        fetched = len(offline.requests)
+        for holder in (client, client.copy(), client.with_options(max_retries=1)):
+            assert_websockets_refused(holder)
+        assert len(offline.requests) == fetched, "nothing is sent"
+        await client.close()
+
+    @pytest.mark.parametrize("factory", sorted(SYNC_FACTORIES))
+    def test_http_methods_of_the_same_resources_go_through_the_attested_transport(
+        self, offline: Recorder, factory: str
+    ) -> None:
+        answering_discovery(offline)
+        client = SYNC_FACTORIES[factory](api_key="k", max_retries=0).with_options(max_retries=0)
+        recorder = recording(client)
+        session: Any = {"model": "m"}
+        assert client.responses.create(model="m", input="hi").output_text == "ok"
+        assert client.beta.responses.create(model="m", input="hi").id == "r1"
+        assert client.live.create(session=session, transport={"type": "webrtc", "sdp": "v=0"}).session.id == "s1"
+        host = httpx.URL(str(client.base_url)).host
+        assert [(r.url.host, r.url.path) for r in recorder.requests] == [
+            (host, "/v1/responses"),
+            (host, "/v1/responses"),
+            (host, "/v1/live/sessions"),
+        ]
+        client.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("factory", sorted(ASYNC_FACTORIES))
+    async def test_async_http_methods_of_the_same_resources_go_through_the_attested_transport(
+        self, offline: Recorder, factory: str
+    ) -> None:
+        answering_discovery(offline)
+        client = (await ASYNC_FACTORIES[factory](api_key="k", max_retries=0)).with_options(max_retries=0)
+        recorder = recording(client)
+        session: Any = {"model": "m"}
+        assert (await client.responses.create(model="m", input="hi")).output_text == "ok"
+        assert (await client.beta.responses.create(model="m", input="hi")).id == "r1"
+        created = await client.live.create(session=session, transport={"type": "webrtc", "sdp": "v=0"})
+        assert created.session.id == "s1"
+        host = httpx.URL(str(client.base_url)).host
+        assert [(r.url.host, r.url.path) for r in recorder.requests] == [
+            (host, "/v1/responses"),
+            (host, "/v1/responses"),
+            (host, "/v1/live/sessions"),
+        ]
         await client.close()
