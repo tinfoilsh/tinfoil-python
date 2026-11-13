@@ -682,7 +682,7 @@ def verify_qe_identity(collateral: TdxCollateral, trusted_roots: Sequence[Certif
         raise CollateralError(f"QeIdentity response verification failed: {err}") from err
 
 
-def check_collateral_expiration(collateral: TdxCollateral, now: datetime) -> None:
+def check_collateral_expiration(collateral: TdxCollateral, now: datetime) -> datetime:
     """Nothing in the collateral is past its end at ``now``: the two responses' next updates, every issuer
     certificate's notAfter, and the two CRLs' next updates."""
     tcb_next = collateral.tcb_info.tcb_info.next_update
@@ -691,22 +691,22 @@ def check_collateral_expiration(collateral: TdxCollateral, now: datetime) -> Non
     qe_next = collateral.qe_identity.enclave_identity.next_update
     if qe_next is None or now > qe_next:
         raise CollateralError("QeIdentity has expired")
-    if now > collateral.tcb_info_issuer_intermediate.not_valid_after_utc:
-        raise CollateralError("tcbInfo signing certificate has expired")
-    if now > collateral.tcb_info_issuer_root.not_valid_after_utc:
-        raise CollateralError("tcbInfo root certificate has expired")
-    if now > collateral.qe_identity_issuer_root.not_valid_after_utc:
-        raise CollateralError("QeIdentity root certificate has expired")
-    if now > collateral.qe_identity_issuer_intermediate.not_valid_after_utc:
-        raise CollateralError("QeIdentity signing certificate has expired")
-    if now > collateral.root_crl.crl.next_update:
-        raise CollateralError("root CA CRL has expired")
-    if now > collateral.pck_crl.crl.next_update:
-        raise CollateralError("PCK CRL has expired")
-    if now > collateral.pck_crl.issuer_intermediate.not_valid_after_utc:
-        raise CollateralError("PCK CRL signing certificate has expired")
-    if now > collateral.pck_crl.issuer_root.not_valid_after_utc:
-        raise CollateralError("PCK CRL root certificate has expired")
+    deadlines = (
+        (tcb_next, "tcbInfo"),
+        (qe_next, "QeIdentity"),
+        (collateral.tcb_info_issuer_intermediate.not_valid_after_utc, "tcbInfo signing certificate"),
+        (collateral.tcb_info_issuer_root.not_valid_after_utc, "tcbInfo root certificate"),
+        (collateral.qe_identity_issuer_root.not_valid_after_utc, "QeIdentity root certificate"),
+        (collateral.qe_identity_issuer_intermediate.not_valid_after_utc, "QeIdentity signing certificate"),
+        (collateral.root_crl.crl.next_update, "root CA CRL"),
+        (collateral.pck_crl.crl.next_update, "PCK CRL"),
+        (collateral.pck_crl.issuer_intermediate.not_valid_after_utc, "PCK CRL signing certificate"),
+        (collateral.pck_crl.issuer_root.not_valid_after_utc, "PCK CRL root certificate"),
+    )
+    for deadline, name in deadlines:
+        if now > deadline:
+            raise CollateralError(f"{name} has expired")
+    return min(deadline for deadline, _ in deadlines)
 
 
 # --- appraisal ---------------------------------------------------------------------

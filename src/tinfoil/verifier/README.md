@@ -60,12 +60,10 @@ caller must bind its traffic to them:
 - `verified.hpke_public_key`: encrypt request bodies to this key when the
   transport uses HPKE.
 - `verified.freshness_expires_at`: stop using the result at this instant
-  and verify a fresh document. It is `None` when no endorsed reference
-  value supplied an approval deadline, which happens when every reference
-  value was embedded by the caller, and also when a caller-authorized
-  config is combined with embedded runtime and platform references. Then
-  renewal is the caller's own policy, and `None` is not a promise that the
-  evidence stays valid.
+  and verify a fresh document. It is the earliest approval/freshness deadline
+  or current CPU collateral expiry, including when every reference is embedded.
+  Verifier-produced results always have a deadline; clients reject manually
+  constructed records whose deadline is `None`.
 
 ```python
 from datetime import UTC, datetime
@@ -73,7 +71,7 @@ from datetime import UTC, datetime
 
 def still_usable(verified: Verification) -> bool:
     expires = verified.freshness_expires_at
-    return expires is None or datetime.now(UTC) < expires
+    return expires is not None and datetime.now(UTC) < expires
 ```
 
 ### Archived documents

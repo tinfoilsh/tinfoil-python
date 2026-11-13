@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
-from tests.vectors import vector_group
+from tests.vectors import vector, vector_group
 from tinfoil.verifier._errors import (
     LAYER_ENVELOPE,
     LAYER_POLICY,
@@ -110,3 +110,31 @@ def test_full_verify_vectors(fixture: dict[str, Any]) -> None:
     assert (verified.config, verified.runtime, verified.platform) == (None, None, None), "v2 collateral"
     assert verified.code_tag != ""
     assert verified.config_repo == data["repo"].split("@")[0]
+
+
+@pytest.mark.parametrize(
+    ("group", "name", "deadline"),
+    [
+        ("golden", "golden-happy", datetime(2034, 12, 30, tzinfo=UTC)),
+        ("golden-tdx", "tdx-golden-happy", datetime(2030, 1, 1, tzinfo=UTC)),
+    ],
+)
+def test_hardware_bounds_cached_verification(group: str, name: str, deadline: datetime) -> None:
+    data = vector(group, name)["input"]
+    verifier = _build(
+        freshness_max_age=timedelta(days=20 * 365),
+        overrides=Overrides(
+            sigstore_root=base64.b64decode(data["sigstore_trusted_root_json_b64"]),
+            amd_root_pem=f"{data['ask_pem'].strip()}\n{data['amd_root_ca_pem'].strip()}\n".encode()
+            if data.get("ask_pem")
+            else None,
+            intel_root_pem=data["intel_sgx_root_pem"].encode() if data.get("intel_sgx_root_pem") else None,
+        ),
+    )
+    doc, nonce = base64.b64decode(data["document_b64"]), bytes.fromhex(data["nonce_hex"])
+    now = datetime.fromtimestamp(data["verification_time_unix"], UTC)
+    verified = verifier.verify_v3_at(doc, nonce, data["repo"], now)
+    assert verified.freshness_expires_at == deadline
+    with pytest.raises(VerificationError) as rejected:
+        verifier.verify_v3_at(doc, nonce, data["repo"], deadline + timedelta(seconds=1))
+    assert rejected.value.layer == LAYER_QUOTE

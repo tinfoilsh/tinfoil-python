@@ -623,13 +623,23 @@ def test_scoped_config_certificate_and_timestamp_bindings() -> None:
     assert check(
         as_json(world.certified_bundle(within_skew, certificate, leaf_key, world.now)), certificate.issuer
     ).approval_time == world.now + timedelta(seconds=59)
-    # The signature time itself must be inside the window.
+    # The approval expires even though the signature remains historically valid.
     with pytest.raises(ApprovalError, match="too old"):
         check(
             as_json(bundle),
             certificate.issuer,
             dataclasses.replace(registry_policy, now=world.now + DEFAULT_MAX_AGE + timedelta(hours=1)),
         )
+    historical = world.certified_bundle(within_skew, certificate, leaf_key, world.now)
+    after_signature_age = world.now + DEFAULT_MAX_AGE + timedelta(seconds=30)
+    assert (
+        check(
+            as_json(historical),
+            certificate.issuer,
+            dataclasses.replace(registry_policy, now=after_signature_age),
+        ).signature_time
+        == world.now
+    )
     # A v1 statement cannot be certified, and a registry outside the accepted set rejects.
     v1_bundle = as_json(world.certified_bundle(config_payload(world, world.now), certificate, leaf_key, world.now))
     with pytest.raises(ApprovalError, match="digest verification requires a v2 config endorsement"):
