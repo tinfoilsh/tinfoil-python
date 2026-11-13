@@ -33,7 +33,7 @@ chat_completion = client.chat.completions.create(
 print(chat_completion.choices[0].message.content)
 ```
 
-`create_client` discovers Tinfoil's router, verifies it and returns an `openai.OpenAI` subclass that sends every request over the attested connection. It takes the `openai` package's options (`api_key`, `timeout`, `max_retries`, `default_headers` and so on) and nothing else; the route options below belong to `RouterOpenAIClient`, which it is built on. The `openai` options that would choose another base URL or exchange a token outside the attested connection, `data_residency`, `provider` and `workload_identity`, raise `ConfigurationError` on every OpenAI client and copy. Every method and type of the OpenAI client is unchanged, except `realtime`, whose websocket would bypass the attested connection and is refused.
+`create_client` discovers Tinfoil's router, verifies it and returns an `openai.OpenAI` subclass that sends every request over the attested connection. It takes the `openai` package's options (`api_key`, `timeout`, `max_retries`, `default_headers` and so on) and nothing else; the route options below belong to `RouterOpenAIClient`, which it is built on. The `openai` options that would choose another base URL or exchange a token outside the attested connection, `data_residency`, `provider` and `workload_identity`, raise `ConfigurationError` on every OpenAI client and copy when they are set; a value of `None` counts as unset and is ignored. Every method and type of the OpenAI client is unchanged, except `realtime`, whose websocket would bypass the attested connection and is refused.
 
 ### Async
 
