@@ -48,11 +48,10 @@ OID_CONTENT_TYPE = "1.2.840.113549.1.9.3"
 OID_MESSAGE_DIGEST = "1.2.840.113549.1.9.4"
 OID_SIGNING_CERTIFICATE = "1.2.840.113549.1.9.16.2.12"
 OID_SIGNING_CERTIFICATE_V2 = "1.2.840.113549.1.9.16.2.47"
-OID_SHA1 = "1.3.14.3.2.26"
 OID_SHA384 = "2.16.840.1.101.3.4.2.2"
 OID_SHA512 = "2.16.840.1.101.3.4.2.3"
 DIRECTORY_NAME_TAG = 4
-CERTIFICATE_HASHES = {OID_SHA1: "sha1", OID_SHA256: "sha256", OID_SHA384: "sha384", OID_SHA512: "sha512"}
+CERTIFICATE_HASHES = {OID_SHA256: "sha256", OID_SHA384: "sha384", OID_SHA512: "sha512"}
 
 
 class TimestampError(ValueError):
@@ -314,10 +313,10 @@ def _check_certificate_binding(token_raw: bytes, signer: Certificate) -> None:
             if len(issuer_serial) != 2 or der.integer(issuer_serial[1]) != signer.serial_number:
                 raise TimestampError("timestamp certificate serial does not match signer")
             names = der.expect_sequence(issuer_serial[0], "GeneralNames")
-            if not any(
-                der.is_context(name, DIRECTORY_NAME_TAG)
-                and _explicit(name, DIRECTORY_NAME_TAG, "directoryName").raw == issuer_name(signer)
-                for name in names
+            if (
+                len(names) != 1
+                or not der.is_context(names[0], DIRECTORY_NAME_TAG)
+                or _explicit(names[0], DIRECTORY_NAME_TAG, "directoryName").raw != issuer_name(signer)
             ):
                 raise TimestampError("timestamp certificate issuer does not match signer")
     if OID_CONTENT_TYPE not in seen or not seen.intersection((OID_SIGNING_CERTIFICATE, OID_SIGNING_CERTIFICATE_V2)):
