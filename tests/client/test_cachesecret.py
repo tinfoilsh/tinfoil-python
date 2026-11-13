@@ -1,231 +1,127 @@
-"""Resolution of the user cache secret: the explicit option, the environment, the persisted file with its
-permission and file-type rules, the cross-process election and the in-memory fallback; and the body injection
-on its own."""
+"""Resolution of the user cache secret: the explicit option, then a random secret that is generated once per
+process, with no environment variable or file consulted; and the body injection on its own."""
 
 from __future__ import annotations
 
 import json
 import os
-import stat
 import subprocess
 import sys
-import textwrap
+import threading
 from pathlib import Path
 
 import pytest
 
 from tinfoil import _cachesecret
-from tinfoil._cachesecret import DIR_NAME, ENV, FILE_NAME, inject, path_eligible, resolve, scan_object
-from tinfoil._errors import ConfigurationError
+from tinfoil._cachesecret import inject, path_eligible, resolve, scan_object
+
+LEGACY_ENV = "TINFOIL_USER_CACHE_SECRET"
+"""The environment variable that earlier releases read; the SDK no longer looks at it."""
 
 
 @pytest.fixture
-def secret_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """A home directory with no environment value, so resolution falls through to the persisted secret."""
-    monkeypatch.delenv(ENV, raising=False)
+def fresh_process_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clears the per-process secret that the shared fixture pins, so that resolution generates one."""
+    monkeypatch.setattr(_cachesecret, "_process_secret", None)
+
+
+@pytest.fixture
+def legacy_sources(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """The variable and the secret file that earlier releases read, both set, in a temporary home directory. The
+    file is readable by others too, which earlier releases refused with a ConfigurationError."""
+    monkeypatch.setenv(LEGACY_ENV, "from-env")
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(_cachesecret, "_ephemeral_secret", None)
-    return tmp_path
-
-
-def secret_file(home: Path) -> Path:
-    return home / DIR_NAME / FILE_NAME
-
-
-def write_secret(home: Path, contents: str | bytes, *, mode: int = 0o600, dir_mode: int = 0o700) -> Path:
-    """A pre-existing secret file under ``home`` with the given modes, as another SDK would have left it."""
-    path = secret_file(home)
-    path.parent.mkdir(mode=dir_mode)
-    if isinstance(contents, bytes):
-        path.write_bytes(contents)
-    else:
-        path.write_text(contents)
-    path.chmod(mode)
-    path.parent.chmod(dir_mode)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    path = tmp_path / ".tinfoil" / "user_cache_secret"
+    path.parent.mkdir()
+    path.write_text("from-file")
+    path.chmod(0o644)
     return path
 
 
-class TestPrecedence:
-    def test_explicit_beats_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(ENV, "from-env")
+def is_generated(secret: str) -> bool:
+    return len(secret) == 64 and all(c in "0123456789abcdef" for c in secret)
+
+
+@pytest.mark.usefixtures("fresh_process_secret")
+class TestResolution:
+    def test_explicit_wins(self, legacy_sources: Path) -> None:
         assert resolve("explicit") == "explicit"
 
-    def test_explicit_empty_or_none_is_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(ENV, "from-env")
-        assert resolve("") == "from-env"
-        assert resolve(None) == "from-env"
+    def test_empty_or_none_selects_the_process_secret(self) -> None:
+        generated = resolve(None)
+        assert is_generated(generated), "256 random bits, hex-encoded"
+        assert resolve("") == generated
+        assert resolve(None) == generated, "the secret is generated once per process"
+        assert resolve("explicit") == "explicit", "the option still wins once a secret is generated"
 
-    def test_environment_beats_generation_and_touches_no_file(
-        self, secret_home: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(ENV, "from-env")
-        assert resolve(None) == "from-env"
-        assert not (secret_home / DIR_NAME).exists()
+    def test_reads_no_environment_variable_or_file(self, legacy_sources: Path) -> None:
+        generated = resolve(None)
+        assert is_generated(generated)
+        assert generated not in ("from-env", "from-file")
+        assert legacy_sources.read_text() == "from-file", "the file is left alone"
+        assert sorted(legacy_sources.parent.iterdir()) == [legacy_sources], "nothing is written beside it"
 
-    def test_environment_set_but_empty_falls_through(self, secret_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(ENV, "")
-        assert len(resolve(None)) == 64
-        assert secret_file(secret_home).exists()
+    def test_creates_no_file_in_an_empty_home(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        assert is_generated(resolve(None))
+        assert list(tmp_path.iterdir()) == []
 
+    def test_concurrent_first_use_agrees(self) -> None:
+        barrier = threading.Barrier(8)
+        results: list[str] = []
 
-class TestPersistence:
-    def test_generates_and_persists(self, secret_home: Path) -> None:
-        first = resolve(None)
-        assert len(first) == 64
-        assert all(c in "0123456789abcdef" for c in first)
-        path = secret_file(secret_home)
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
-        assert path.read_text() == first
-        assert resolve(None) == first, "a second resolution reuses the persisted secret"
-        assert sorted(path.parent.iterdir()) == [path], "no candidate file is left behind"
+        def run() -> None:
+            barrier.wait()
+            results.append(resolve(None))
 
-    def test_adopts_an_existing_file_trimming_whitespace(self, secret_home: Path) -> None:
-        write_secret(secret_home, " shared-secret\n　")
-        assert resolve(None) == "shared-secret"
+        threads = [threading.Thread(target=run) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(results) == 8
+        assert len(set(results)) == 1, "every thread adopts the one generated secret"
 
-    def test_preserves_separator_controls_in_the_value(self, secret_home: Path) -> None:
-        write_secret(secret_home, "\x1cvalue\x1f")
-        assert resolve(None) == "\x1cvalue\x1f"
-
-    def test_accepts_a_permissive_preexisting_directory(self, secret_home: Path) -> None:
-        path = write_secret(secret_home, "shared-secret", mode=0o600, dir_mode=0o777)
-        assert resolve(None) == "shared-secret"
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o777, "the directory's mode is not the file's"
-
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
-    @pytest.mark.parametrize("mode", [0o644, 0o660, 0o604, 0o640, 0o620, 0o602, 0o666])
-    def test_refuses_a_file_that_group_or_others_can_read_or_write(self, secret_home: Path, mode: int) -> None:
-        path = write_secret(secret_home, "shared-secret", mode=mode)
-        with pytest.raises(ConfigurationError) as err:
-            resolve(None)
-        assert str(path) in str(err.value), "the error names the file"
-        assert "0600" in str(err.value), "the error names the expected mode"
-        assert "shared-secret" not in str(err.value)
-        assert path.read_text() == "shared-secret", "the file is never rewritten"
-        assert stat.S_IMODE(path.stat().st_mode) == mode, "nor is its mode changed"
-        assert sorted(path.parent.iterdir()) == [path]
-
-    @pytest.mark.parametrize("mode", [0o600, 0o400])
-    def test_adopts_an_owner_only_file(self, secret_home: Path, mode: int) -> None:
-        path = write_secret(secret_home, "shared-secret", mode=mode)
-        assert resolve(None) == "shared-secret"
-        assert stat.S_IMODE(path.stat().st_mode) == mode
-
-    @pytest.mark.parametrize("contents", [b"", b"  \n", b"\xff\xfea"])
-    def test_unusable_existing_file_is_untouched(self, secret_home: Path, contents: bytes) -> None:
-        path = write_secret(secret_home, contents)
-        first = resolve(None)
-        assert len(first) == 64
-        assert resolve(None) == first, "the in-memory fallback is stable"
-        assert path.read_bytes() == contents
-
-    def test_rejects_a_secret_file_symlink_without_reading_the_target(self, secret_home: Path) -> None:
-        target = secret_home / "target"
-        target.write_text("target-secret")
-        path = secret_file(secret_home)
-        path.parent.mkdir(mode=0o700)
-        path.symlink_to(target)
-        resolved = resolve(None)
-        assert resolved
-        assert resolved != "target-secret"
-        assert target.read_text() == "target-secret"
-        assert path.is_symlink()
-
-    def test_rejects_a_cache_directory_symlink(self, secret_home: Path) -> None:
-        target = secret_home / "target"
-        target.mkdir()
-        (secret_home / DIR_NAME).symlink_to(target)
-        assert resolve(None)
-        assert list(target.iterdir()) == [], "nothing is written through the link"
-
-    def test_rejects_a_non_regular_secret_file(self, secret_home: Path) -> None:
-        path = secret_file(secret_home)
-        path.parent.mkdir(mode=0o700)
-        path.mkdir()
-        assert resolve(None)
-        assert path.is_dir()
-
-    @pytest.mark.skipif(os.name == "nt", reason="hard-link election is POSIX")
-    def test_concurrent_first_use_converges(self, secret_home: Path) -> None:
-        script = textwrap.dedent(
-            """
-            import sys
-            from tinfoil._cachesecret import resolve
-
-            sys.stdin.read(1)
-            print(resolve(None))
-            """
-        )
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+    def test_a_forked_child_keeps_the_secret_and_does_not_deadlock(self) -> None:
+        """A child forked while the lock is held gets a fresh lock, and keeps the parent's secret."""
+        script = """
+import os, signal
+from tinfoil._cachesecret import resolve
+import tinfoil._cachesecret as cachesecret
+parent = resolve(None)
+cachesecret._process_lock.acquire()
+pid = os.fork()
+if pid == 0:
+    signal.alarm(10)
+    os._exit(0 if resolve(None) == parent else 1)
+cachesecret._process_lock.release()
+_, status = os.waitpid(pid, 0)
+raise SystemExit(os.waitstatus_to_exitcode(status))
+"""
         env = os.environ.copy()
-        env["HOME"] = str(secret_home)
-        env.pop(ENV, None)
         source = str(Path(__file__).parents[2] / "src")
         env["PYTHONPATH"] = os.pathsep.join(value for value in (source, env.get("PYTHONPATH")) if value)
-        processes = [
-            subprocess.Popen(
-                [sys.executable, "-c", script],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-            )
-            for _ in range(8)
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=60)
+        assert result.returncode == 0, (result.returncode, result.stderr)
+
+    def test_each_process_generates_its_own(self, legacy_sources: Path) -> None:
+        """Two processes with the variable and the file of earlier releases both set get different secrets, so
+        neither source is read."""
+        script = "from tinfoil._cachesecret import resolve; print(resolve(None))"
+        env = os.environ.copy()
+        source = str(Path(__file__).parents[2] / "src")
+        env["PYTHONPATH"] = os.pathsep.join(value for value in (source, env.get("PYTHONPATH")) if value)
+        results = [
+            subprocess.run(
+                [sys.executable, "-c", script], capture_output=True, text=True, env=env, check=True, timeout=60
+            ).stdout.strip()
+            for _ in range(2)
         ]
-        # Every process is released before any is waited for, so they contend for the election at once. The
-        # input is flushed but the pipe is left open: communicate() closes it, and refuses one already closed.
-        for process in processes:
-            assert process.stdin is not None
-            process.stdin.write("x")
-            process.stdin.flush()
-        results: list[str] = []
-        for process in processes:
-            out, err = process.communicate(timeout=60)
-            assert process.returncode == 0, err
-            results.append(out.strip())
-        path = secret_file(secret_home)
-        assert len(set(results)) == 1, "every process adopts the elected value"
-        assert results[0] == path.read_text()
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        assert list(path.parent.iterdir()) == [path]
-
-    def test_hard_link_failure_uses_the_process_fallback(
-        self, secret_home: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def no_links(source: object, destination: object) -> None:
-            raise OSError("hard links unavailable")
-
-        monkeypatch.setattr(os, "link", no_links)
-        first = resolve(None)
-        assert len(first) == 64
-        assert resolve(None) == first
-        assert list((secret_home / DIR_NAME).iterdir()) == []
-
-    @pytest.mark.parametrize("home", [None, ""], ids=["unset", "empty"])
-    def test_falls_back_without_a_home(self, monkeypatch: pytest.MonkeyPatch, home: str | None) -> None:
-        monkeypatch.delenv(ENV, raising=False)
-        monkeypatch.setattr(_cachesecret, "_ephemeral_secret", None)
-        if home is None:
-            monkeypatch.delenv("HOME", raising=False)
-        else:
-            monkeypatch.setenv("HOME", home)
-        first = resolve(None)
-        assert first
-        assert resolve(None) == first
-
-    def test_falls_back_when_home_is_not_a_directory(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.delenv(ENV, raising=False)
-        home_file = tmp_path / "not-a-dir"
-        home_file.write_text("x")
-        monkeypatch.setenv("HOME", str(home_file))
-        assert resolve(None)
-
-    def test_falls_back_on_a_pathological_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(ENV, raising=False)
-        monkeypatch.setattr(_cachesecret, "secret_path", lambda: Path("nul\x00l") / FILE_NAME)
-        assert resolve(None)
+        assert all(is_generated(result) for result in results), results
+        assert results[0] != results[1]
 
 
 class TestInjection:
@@ -247,6 +143,15 @@ class TestInjection:
         assert inject(b"", "s") is None
         assert inject(b'{"a":"\\ud800"}', "s") == b'{"a":"\\ud800","user_cache_secret":"s"}'
         assert inject(b'{"a":1}', 'q"é') == b'{"a":1,"user_cache_secret":"q\\"\\u00e9"}'
+
+    def test_inject_preserves_the_rest_of_the_body(self) -> None:
+        body = b' {\n  "model" : "m",\t"n": 1.000000000000000000001, "big": 123456789012345678901234567890 }\n'
+        injected = inject(body, "s")
+        assert injected == (
+            b' {\n  "model" : "m",\t"n": 1.000000000000000000001, "big": 123456789012345678901234567890 '
+            b',"user_cache_secret":"s"}\n'
+        )
+        assert inject(b'{"user_cache_secret":"a","user_cache_secret":""}', "s") is None, "a repeated field is left"
 
     def test_path_eligible(self) -> None:
         assert path_eligible("POST", "/v1/chat/completions")

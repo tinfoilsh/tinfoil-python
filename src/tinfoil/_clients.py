@@ -352,12 +352,10 @@ class RouterHTTPClient(_AttestedClient):
     ``base_url`` is a proxy that forwards requests to the router discovery
     chooses, and requires ``"ehbp"``. A ``verifier`` that authorizes the
     config itself is refused, since the router is verified against its own
-    repository. ``user_cache_secret`` empty resolves the secret from
-    ``TINFOIL_USER_CACHE_SECRET`` or ``~/.tinfoil/user_cache_secret``, before
-    discovery: a secret file that group or others can read or write fails
-    the constructor without any network I/O, while a blank, invalid or
-    symlinked file falls back to an in-memory secret with a warning. The
-    other options are those of ``EnclaveHTTPClient``.
+    repository. ``user_cache_secret`` empty selects a random secret that is
+    generated once per process and shared by every client in it; pass a
+    value for a secret that is stable across processes. The other options
+    are those of ``EnclaveHTTPClient``.
     """
 
     def __init__(
@@ -372,8 +370,6 @@ class RouterHTTPClient(_AttestedClient):
     ) -> None:
         checked = _router_checks(transport_mode, base_url, verifier)
         mode = mode_for(transport_mode)
-        # The secret is resolved before discovery: a secret file that group or others can read or write fails
-        # the constructor before any router is probed, so no verified candidate is left behind.
         secret = _cachesecret.resolve(user_cache_secret)
         keyed = discover(
             verifier,
@@ -456,11 +452,11 @@ class GatewayHTTPClient:
     ``verifier`` is the policy for unpinned models; a pin's own verifier
     replaces it for that model. ``verification_check`` is called with each
     replica's verification; a replica it rejects is skipped for the next
-    replica of the model. ``user_cache_secret`` empty resolves the secret
-    from the environment or the persisted file; the gateway sees a cache
-    prefix keyed on it, never the secret. ``url`` is the gateway's base URL,
-    exposed as ``base_url`` with a trailing slash; None selects Tinfoil's
-    gateway. ``catalog`` is read on every request and
+    replica of the model. ``user_cache_secret`` empty selects the random
+    secret that is generated once per process, as on ``RouterHTTPClient``;
+    the gateway sees a cache prefix keyed on it, never the secret. ``url``
+    is the gateway's base URL, exposed as ``base_url`` with a trailing
+    slash; None selects Tinfoil's gateway. ``catalog`` is read on every request and
     must return an immutable mapping; None fetches the gateway's catalog
     when the client is created and refreshes it every 10 seconds while the
     client is used, keeping the last catalog when a refresh fails.

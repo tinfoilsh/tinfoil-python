@@ -218,7 +218,7 @@ except APIStatusError as err:
 
 ## Prompt cache scoping
 
-The router partitions prompt caches by API identity and a `user_cache_secret` that the client adds to eligible requests. The router and gateway clients, `create_client` included, take the secret from the `TINFOIL_USER_CACHE_SECRET` environment variable or from `~/.tinfoil/user_cache_secret`, generating and persisting one there if needed, which is suitable for single-user applications. Multi-user services should scope each request to its end user, with a per-request value or a client-level one on `RouterOpenAIClient`:
+The router partitions prompt caches by API identity and a `user_cache_secret` that the client adds to eligible requests. The router and gateway clients, `create_client` included, take the secret from the `user_cache_secret` option and otherwise use a random secret that is generated in memory once per process and shared by every client in it. The SDK reads no environment variable or file for the secret, so prompt-cache hits are not shared across processes unless the application passes a stable `user_cache_secret` itself. The exception is a process created with `os.fork` after its parent has generated the secret, for example by creating a client: it keeps the parent's secret, so prefork workers of one application share a cache namespace. Multi-user services should scope each request to its end user, with a per-request value or a client-level one on `RouterOpenAIClient`:
 
 ```python
 import os

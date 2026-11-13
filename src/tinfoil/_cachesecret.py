@@ -10,11 +10,15 @@ since other enclaves do not read the field:
 
 1. a non-empty per-request ``user_cache_secret`` field in the body,
 2. the client's ``user_cache_secret`` option,
-3. the ``TINFOIL_USER_CACHE_SECRET`` environment variable,
-4. a generated secret persisted at ``~/.tinfoil/user_cache_secret``
-   (mode 0600), shared with the other Tinfoil SDKs on the machine. An
-   existing file that group or others can read or write is refused with a
-   ConfigurationError rather than adopted, and is never rewritten.
+3. a random secret that is generated in memory once per process and shared by
+   every client in the process. A process created by ``os.fork`` after the
+   secret exists keeps its parent's secret, so prefork workers of one
+   application share a cache namespace, as they share an API identity.
+
+The SDK reads no environment variable or file for the secret. The generated
+secret lasts only as long as the process, so applications that want a
+stable secret across processes or machines pass ``user_cache_secret``
+themselves.
 
 Injection happens in the transport, before the body is sealed or sent over
 the pinned connection, so the secret is only ever visible to the verified
@@ -23,19 +27,13 @@ enclave.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
 import re
 import secrets
-import stat
-import tempfile
 import threading
 from dataclasses import dataclass
-from pathlib import Path
-
-from tinfoil._errors import ConfigurationError
 
 logger = logging.getLogger("tinfoil")
 
@@ -44,14 +42,6 @@ FIELD = "user_cache_secret"
 CACHE_SALT_FIELD = "cache_salt"
 """The field a gateway client derives from the secret instead of sending it."""
 MODEL_FIELD = "model"
-ENV = "TINFOIL_USER_CACHE_SECRET"
-"""The environment variable that provisions the secret. An empty value is treated as unset."""
-DIR_NAME = ".tinfoil"
-FILE_NAME = "user_cache_secret"
-_DIR_MODE = 0o700
-_FILE_MODE = 0o600
-"""The mode a persisted secret file is created with, and the most permissive mode an existing one may have."""
-
 _PATHS = ("/chat/completions", "/completions", "/responses")
 """The OpenAI-compatible endpoints whose bodies carry the field, matched by suffix so that custom base URLs with
 a path prefix or without a /v1 root qualify. Other endpoints do not prefix-cache and may reject unknown
@@ -60,40 +50,6 @@ fields."""
 # The whitespace JSON allows around the top-level value (RFC 8259); str.strip's default would also accept
 # characters that a strict parser rejects.
 _JSON_WHITESPACE = " \t\n\r"
-
-# The Unicode White_Space property, shared by the other SDK runtimes. str.strip's default additionally removes
-# U+001C through U+001F, which are secret data.
-_UNICODE_WHITESPACE = "".join(
-    chr(code)
-    for code in (
-        0x0009,
-        0x000A,
-        0x000B,
-        0x000C,
-        0x000D,
-        0x0020,
-        0x0085,
-        0x00A0,
-        0x1680,
-        0x2000,
-        0x2001,
-        0x2002,
-        0x2003,
-        0x2004,
-        0x2005,
-        0x2006,
-        0x2007,
-        0x2008,
-        0x2009,
-        0x200A,
-        0x2028,
-        0x2029,
-        0x202F,
-        0x205F,
-        0x3000,
-    )
-)
-
 
 _DECODER = json.JSONDecoder()
 """Decodes member keys only; a key is a string, which never nests."""
@@ -289,16 +245,11 @@ def _skip(text: str, index: int) -> int:
 
 
 def resolve(explicit: str | None) -> str:
-    """The client-level secret: a non-empty ``explicit`` value wins, then a non-empty environment value, then the
-    persisted or generated secret. Persistence and generation failures fall back as documented on the helpers
-    below; the one failure that raises is a persisted file that group or others can read or write, which is a
-    ConfigurationError."""
+    """The client-level secret: a non-empty ``explicit`` value wins, otherwise the secret that this process
+    generated, which is the same for every client in the process."""
     if explicit:
         return explicit
-    env = os.environ.get(ENV)
-    if env:
-        return env
-    return _load_or_generate()
+    return _process_secret_value()
 
 
 def _new_secret() -> str:
@@ -312,206 +263,34 @@ def _new_secret() -> str:
         return ""
 
 
-_ephemeral_lock = threading.Lock()
-_ephemeral_secret: str | None = None
+_process_lock = threading.Lock()
+_process_secret: str | None = None
 
 
-def _ephemeral_secret_value() -> str:
-    """The process-lifetime fallback for when the secret cannot be persisted. It still isolates this process's
-    cache namespace, but continuity is lost on restart, so the fallback warns once per process."""
-    global _ephemeral_secret
-    with _ephemeral_lock:
-        if _ephemeral_secret is None:
-            secret = _new_secret()
-            if secret:
-                logger.warning(
-                    "tinfoil: could not persist the user cache secret; using an in-memory secret, so prompt-cache "
-                    "continuity resets when this process exits (set %s or the user_cache_secret option to pin one)",
-                    ENV,
-                )
-            _ephemeral_secret = secret
-        return _ephemeral_secret
+def _reset_lock_after_fork() -> None:
+    """Gives a forked child a fresh lock, since the fork may have happened while another thread held it. The
+    child keeps the parent's secret."""
+    global _process_lock
+    _process_lock = threading.Lock()
 
 
-def secret_path() -> Path | None:
-    """The persisted-secret path, or None when no home directory is available. Only the home environment variable
-    is consulted (HOME, or USERPROFILE on Windows), and unset or empty counts as no home, so a daemon with a
-    scrubbed environment gets the in-memory fallback."""
-    home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")
-    if not home:
-        return None
-    return Path(home) / DIR_NAME / FILE_NAME
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_lock_after_fork)
 
 
-def _load_or_generate() -> str:
-    """The secret persisted under the home directory, generating and persisting one on first use. When the home
-    directory is unavailable or unwritable, the in-memory fallback."""
-    path = secret_path()
-    if path is None:
-        return _ephemeral_secret_value()
-    # ValueError alongside OSError throughout: a pathological path, such as an embedded NUL in the home
-    # variable, surfaces as ValueError, and an unusable home must not fail client construction.
-    try:
-        if os.name == "nt":
-            try:
-                parent_stat = os.lstat(path.parent)
-            except FileNotFoundError:
-                parent_stat = None
-            if parent_stat is not None and not _is_plain_directory(parent_stat):
-                return _ephemeral_secret_value()
-        path.parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
-        if os.name == "nt":
-            if not _is_plain_directory(os.lstat(path.parent)):
-                return _ephemeral_secret_value()
-        else:
-            os.close(_open_directory(path.parent))
-    except (OSError, ValueError):
-        return _ephemeral_secret_value()
-
-    existing, usable = _read(path)
-    if not usable:
-        return _ephemeral_secret_value()
-    if existing is not None:
-        return existing
-    secret = _new_secret()
-    if not secret:
-        return ""
-    return _persist(path, secret)
-
-
-def _is_plain_directory(path_stat: os.stat_result) -> bool:
-    return stat.S_ISDIR(path_stat.st_mode) and not _is_windows_reparse_point(path_stat)
-
-
-def _read(path: Path) -> tuple[str | None, bool]:
-    """``(secret, usable)`` with surrounding whitespace trimmed. A missing file is usable; a blank or invalid
-    UTF-8 file is unusable and stays untouched. A file that group or others can read or write is a
-    ConfigurationError."""
-    fd, usable = _open(path)
-    if fd is None:
-        return None, usable
-    try:
-        with os.fdopen(fd, "rb") as secret_file:
-            fd = None
-            secret = secret_file.read().decode("utf-8").strip(_UNICODE_WHITESPACE)
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None, False
-    finally:
-        if fd is not None:
-            _close_quietly(fd)
-    return (secret, True) if secret else (None, False)
-
-
-def _open(path: Path) -> tuple[int | None, bool]:
-    """A descriptor for the secret file, or None and whether a missing file was the reason. The file must be a
-    regular file reached without following a symbolic link and, where modes are meaningful, one that only its
-    owner can read or write; a more permissive file is refused with a ConfigurationError, since another account
-    could read or replace the secret, and is left as it is."""
-    if os.name == "nt":
-        try:
-            path_stat = os.lstat(path)
-        except FileNotFoundError:
-            return None, True
-        except (OSError, ValueError):
-            return None, False
-        if not stat.S_ISREG(path_stat.st_mode) or _is_windows_reparse_point(path_stat):
-            return None, False
-    flags = os.O_RDONLY
-    if os.name != "nt":
-        no_follow = getattr(os, "O_NOFOLLOW", None)
-        if no_follow is None:  # pragma: no cover - every supported POSIX platform has it
-            return None, False
-        flags |= no_follow | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
-    try:
-        fd = os.open(path, flags)
-    except FileNotFoundError:
-        return None, True
-    except (OSError, ValueError):
-        return None, False
-    try:
-        mode = os.fstat(fd).st_mode
-        if not stat.S_ISREG(mode):
-            os.close(fd)
-            return None, False
-    except (OSError, ValueError):
-        _close_quietly(fd)
-        return None, False
-    if os.name != "nt" and stat.S_IMODE(mode) & ~_FILE_MODE:
-        _close_quietly(fd)
-        raise ConfigurationError(
-            f"user cache secret file {path} has mode {stat.S_IMODE(mode):04o}, which lets group or others read or "
-            f"write it; expected mode {_FILE_MODE:04o} (set {ENV} or the user_cache_secret option to bypass the file)"
-        )
-    return fd, True
-
-
-def _is_windows_reparse_point(path_stat: os.stat_result) -> bool:
-    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    file_attributes = getattr(path_stat, "st_file_attributes", 0)
-    return bool(reparse_point and file_attributes & reparse_point)
-
-
-def _open_directory(path: Path) -> int:
-    directory = getattr(os, "O_DIRECTORY", None)
-    no_follow = getattr(os, "O_NOFOLLOW", None)
-    if directory is None or no_follow is None:  # pragma: no cover - every supported POSIX platform has them
-        raise OSError("secure directory open flags are unavailable")
-    fd = os.open(path, os.O_RDONLY | directory | no_follow | getattr(os, "O_CLOEXEC", 0))
-    try:
-        if not stat.S_ISDIR(os.fstat(fd).st_mode):
-            raise OSError("cache secret parent is not a directory")
-    except (OSError, ValueError):
-        _close_quietly(fd)
-        raise
-    return fd
-
-
-def _persist(path: Path, secret: str) -> str:
-    """Elects one complete secret across concurrent processes: a complete candidate is written to a unique
-    temporary file, then linked to the destination; when the destination already exists, its value is adopted."""
-    candidate_path: Path | None = None
-    candidate_fd: int | None = None
-    try:
-        candidate_fd, candidate_name = tempfile.mkstemp(prefix=f"{FILE_NAME}.", suffix=".tmp", dir=path.parent)
-        candidate_path = Path(candidate_name)
-        try:
-            candidate = os.fdopen(candidate_fd, "w", encoding="utf-8")
-            candidate_fd = None
-            with candidate:
-                candidate.write(secret)
-        except (OSError, ValueError):
-            return _ephemeral_secret_value()
-        try:
-            os.link(candidate_path, path)
-        except FileExistsError:
-            pass
-        except (OSError, ValueError):
-            return _ephemeral_secret_value()
-        persisted, usable = _read(path)
-        if not usable or persisted is None:
-            return _ephemeral_secret_value()
-        return persisted
-    except (OSError, ValueError):
-        return _ephemeral_secret_value()
-    finally:
-        if candidate_fd is not None:
-            _close_quietly(candidate_fd)
-        if candidate_path is not None:
-            with contextlib.suppress(OSError, ValueError):
-                candidate_path.unlink(missing_ok=True)
-
-
-def _close_quietly(fd: int) -> None:
-    with contextlib.suppress(OSError):
-        os.close(fd)
+def _process_secret_value() -> str:
+    """The secret that this process generates on first use and keeps for its lifetime. It isolates the
+    process's cache namespace; prompt-cache continuity resets when the process exits."""
+    global _process_secret
+    with _process_lock:
+        if _process_secret is None:
+            _process_secret = _new_secret()
+        return _process_secret
 
 
 __all__ = [
     "CACHE_SALT_FIELD",
-    "DIR_NAME",
-    "ENV",
     "FIELD",
-    "FILE_NAME",
     "MODEL_FIELD",
     "Member",
     "has_duplicates",
@@ -519,5 +298,4 @@ __all__ = [
     "path_eligible",
     "resolve",
     "scan_object",
-    "secret_path",
 ]
