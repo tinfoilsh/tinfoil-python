@@ -12,6 +12,7 @@ import inspect
 import json
 import sys
 from collections.abc import Awaitable, Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -21,7 +22,7 @@ from openai._resource import AsyncAPIResource, SyncAPIResource
 from openai.providers import bedrock
 
 from tests.client.helpers import Recorder, response, verification
-from tinfoil import _fetch
+from tinfoil import _cachesecret, _fetch
 from tinfoil._clients import (
     AsyncEnclaveHTTPClient,
     AsyncGatewayHTTPClient,
@@ -434,6 +435,51 @@ class TestErrors:
         enclave.chat.completions.create(**params, extra_body={"user_cache_secret": ""})
         assert [body["user_cache_secret"] for body in received] == ["client-level", "end-user-7", "client-level"]
         enclave.close()
+
+    def test_clients_without_the_option_share_one_generated_secret(
+        self, offline: Recorder, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Router and gateway clients built without ``user_cache_secret`` send the secret that the process
+        generated, the same for each, with the variable and the file that earlier releases read both set; the
+        option and a per-request field still win."""
+        monkeypatch.setattr(_cachesecret, "_process_secret", None)
+        monkeypatch.setenv("TINFOIL_USER_CACHE_SECRET", "from-env")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        secret_file = tmp_path / ".tinfoil" / "user_cache_secret"
+        secret_file.parent.mkdir()
+        secret_file.write_text("from-file")
+        secret_file.chmod(0o600)
+        answering_discovery(offline)
+        received: list[dict[str, Any]] = []
+
+        def chat(request: httpx.Request) -> httpx.Response:
+            received.append(json.loads(request.read()))
+            return response(200, CHAT, {"Content-Type": "application/json"})
+
+        first = create_client(api_key="k", max_retries=0)
+        second = RouterOpenAIClient(api_key="k", max_retries=0)
+        pinned = RouterOpenAIClient(user_cache_secret="client-level", api_key="k", max_retries=0)
+        gateway = GatewayOpenAIClient(
+            url="https://gateway.example/v1/",
+            catalog=lambda: {"m": CatalogEntry("tinfoilsh/m", ("a.example",))},
+            api_key="k",
+        )
+        params: dict[str, Any] = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        for client in (first, second, pinned):
+            below_the_attested_transport(client, chat)
+            client.chat.completions.create(**params)
+        first.chat.completions.create(**params, extra_body={"user_cache_secret": "end-user-7"})
+        generated = received[0]["user_cache_secret"]
+        assert len(generated) == 64
+        assert generated not in ("from-env", "from-file")
+        assert [body["user_cache_secret"] for body in received] == [generated, generated, "client-level", "end-user-7"]
+        gateway_transport: Any = gateway.http_client._transport
+        assert gateway_transport.secret == generated, "the gateway client shares the process secret"
+        assert secret_file.read_text() == "from-file"
+        for client in (first, second, pinned):
+            client.close()
+        gateway.close()
 
 
 @pytest.mark.asyncio
