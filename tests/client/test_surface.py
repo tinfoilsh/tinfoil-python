@@ -248,5 +248,6 @@ def test_submodules_import() -> None:
         "_url",
         "_types",
         "_keys",
+        "_pin",
     ):
         importlib.import_module(f"tinfoil.{name}")
