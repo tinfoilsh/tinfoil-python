@@ -116,7 +116,8 @@ class Verification:
     freshness_expires_at: datetime | None = None
     """The earliest approval or current CPU collateral deadline. Cached verification must not authorize requests
     at or after this time. Hardware bounds the result even when every reference is embedded; verifying the same
-    evidence again does not extend its lifetime."""
+    evidence again does not extend its lifetime. Verifier-produced results always have a deadline; None is allowed
+    for manually constructed records, which clients reject as unusable."""
     config: ConfigVerification | None = None
     """The config bound to hardware; None for verification against a code release, which has no config."""
     runtime: ArtifactVerification | None = None

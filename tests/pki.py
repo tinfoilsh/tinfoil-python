@@ -137,6 +137,24 @@ def certificate(
     return Issued(_sign(builder, signer, pss=pss), key)
 
 
+def reissue(
+    template: x509.Certificate, key: PrivateKey, issuer: Issued | None = None, *, not_after: datetime, pss: bool = False
+) -> Issued:
+    """Preserve a certificate's profile while replacing its key and expiration."""
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(template.subject)
+        .issuer_name(template.issuer)
+        .public_key(key.public_key())
+        .serial_number(max(1, template.serial_number))
+        .not_valid_before(template.not_valid_before_utc)
+        .not_valid_after(not_after)
+    )
+    for extension in template.extensions:
+        builder = builder.add_extension(extension.value, extension.critical)
+    return Issued(_sign(builder, issuer.key if issuer else key, pss=pss), key)
+
+
 def chain(key_factory: str = "p256", *, pss: bool = False) -> tuple[Issued, Issued, Issued]:
     """A root, an intermediate and a signing leaf, all with keys of one kind."""
     factories: dict[str, Callable[[], PrivateKey]] = {

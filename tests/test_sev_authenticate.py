@@ -9,8 +9,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 
+from tests import pki
 from tests import sev_fixtures as fx
+from tests.lib.test_sev_chain import material
 from tinfoil.verifier._document.collateral.collateral import CPUEndorsements
 from tinfoil.verifier._document.collateral.sev import AMDCRL, AMDVCEK
 from tinfoil.verifier._document.document import SEVSNP_REPORT_V1_FORMAT, TDX_QUOTE_V1_FORMAT, CpuEvidence
@@ -346,3 +350,35 @@ def test_report_layout_fixes_the_measurement_size() -> None:
 
 def test_evidence_format_constant_matches_the_document() -> None:
     assert fx.happy_case().document.cpu_evidence().format == SEVSNP_REPORT_V1_FORMAT
+
+
+@pytest.mark.parametrize("source", ["vcek", "ask", "ark", "crl"])
+def test_verified_collateral_bounds_quote_lifetime(source: str) -> None:
+    templates = material()
+    now = pki.AT
+    deadline, later = now + timedelta(hours=1), now + timedelta(days=1)
+
+    def end(name: str) -> datetime:
+        return deadline if source == name else later
+
+    ark = pki.reissue(templates.ark, pki.rsa_key(), not_after=end("ark"), pss=True)
+    ask = pki.reissue(templates.ask, pki.rsa_key(), ark, not_after=end("ask"), pss=True)
+    key = pki.p384()
+    vcek = pki.reissue(templates.vcek, key, ask, not_after=end("vcek"), pss=True)
+    report = bytearray(templates.case.document.cpu_evidence().report)
+    r, s = utils.decode_dss_signature(key.sign(bytes(report[: abi.SIGNATURE_OFFSET]), ec.ECDSA(hashes.SHA384())))
+    report[abi.SIGNATURE_OFFSET : abi.SIGNATURE_OFFSET + abi.ECDSA_P384_SHA384_SIGNATURE_SIZE] = r.to_bytes(
+        abi.ECDSA_RS_SIZE, "little"
+    ) + s.to_bytes(abi.ECDSA_RS_SIZE, "little")
+    pem = b"".join(pki.load(cert.der).public_bytes(serialization.Encoding.PEM) for cert in (ask, ark))
+    evidence = sev.Evidence(
+        report=bytes(report),
+        vcek_der=vcek.der,
+        cert_chain_pem=pem.decode(),
+        crl_der=pki.crl(ark, this_update=now - timedelta(hours=1), next_update=end("crl"), pss=True),
+    )
+    options = sev.Options(test_only_root_pem=pem)
+    assert authenticate_sev(evidence, now, options).expires_at == deadline
+    assert authenticate_sev(evidence, deadline, options).expires_at == deadline
+    with pytest.raises(SevAuthenticationError):
+        authenticate_sev(evidence, deadline + timedelta(seconds=1), options)

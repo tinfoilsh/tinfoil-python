@@ -670,7 +670,7 @@ def test_pck_tcb_below_every_level_rejects() -> None:
     rejects(BASE.with_(extension_value=tb.sgx_extension(tcb=tb.tcb_attribute(pce_svn=10))), "no matching TCB level")
 
 
-@pytest.mark.parametrize("source", ["tcb", "qe", "root_crl", "pck_crl"])
+@pytest.mark.parametrize("source", ["tcb", "qe", "root_crl", "pck_crl", "pck"])
 def test_verified_collateral_bounds_quote_lifetime(source: str) -> None:
     lifetime = timedelta(hours=1)
     deadline = tb.NOW + lifetime
@@ -679,9 +679,16 @@ def test_verified_collateral_bounds_quote_lifetime(source: str) -> None:
         "qe": {"qe_identity": tb.qe_identity_object(next_update=deadline)},
         "root_crl": {"root_crl_window": (timedelta(days=-1), lifetime)},
         "pck_crl": {"pck_crl_window": (timedelta(days=-1), lifetime)},
+        "pck": {},
     }
     scenario = BASE.with_(**variants[source])
-    assert run(scenario).expires_at == deadline
-    assert run(scenario, deadline).expires_at == deadline
+    evidence = scenario.evidence()
+    if source == "pck":
+        pck = scenario.pck()
+        short = pki.reissue(pki.load(pck.der), pck.key, scenario.intel.platform_ca, not_after=deadline)
+        chain = b"".join(scenario.intel.pem(cert) for cert in (short, scenario.intel.platform_ca, scenario.intel.root))
+        evidence = Evidence(quote=tb.quote_bytes(scenario.pck_key, chain), pcs=scenario.responses())
+    assert authenticate(evidence, tb.NOW, ROOT).expires_at == deadline
+    assert authenticate(evidence, deadline, ROOT).expires_at == deadline
     with pytest.raises(TdxAuthenticationError):
-        run(scenario, deadline + timedelta(seconds=1))
+        authenticate(evidence, deadline + timedelta(seconds=1), ROOT)
