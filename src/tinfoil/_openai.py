@@ -12,8 +12,7 @@ from typing import Any, NoReturn, Protocol, Self, TypedDict, TypeVar, Unpack
 
 import httpx
 import openai
-from openai import DataResidency, Timeout
-from openai.auth import WorkloadIdentity, X509WorkloadIdentity
+from openai import Timeout
 from openai.resources.beta import AsyncBeta, Beta
 
 from tinfoil._clients import (
@@ -44,6 +43,15 @@ REALTIME_UNAVAILABLE = "realtime is not available over an attested client"
 """The message of the ConfigurationError that accessing a realtime resource raises: its websocket would open
 outside the attested HTTP client, bypassing the origin guard, the TLS pin and EHBP."""
 
+TRANSPORT_OPTION_UNSUPPORTED = (
+    "the {key} option is not supported: the Tinfoil client owns the transport and base URL that requests go to"
+)
+_FORBIDDEN_TRANSPORT_OPTIONS = ("data_residency", "provider", "workload_identity")
+"""The ``openai`` client options that choose another base URL or send requests, such as a token exchange,
+through an HTTP client of their own: each is a ConfigurationError from every constructor, factory and copy, so
+that the guarantee that requests go through the attested client does not depend on the ``openai`` package's own
+checks. An option that is ``None`` is unset."""
+
 ROUTE_OPTIONS = frozenset(
     {"transport_mode", "base_url", "verifier", "verification_check", "user_cache_secret", "http_timeout"}
 )
@@ -54,13 +62,10 @@ class _SharedOptions(TypedDict, total=False):
     """The ``openai`` client options whose types are the same for the synchronous and asynchronous clients."""
 
     admin_api_key: str | None
-    workload_identity: WorkloadIdentity | X509WorkloadIdentity | None
     organization: str | None
     project: str | None
     webhook_secret: str | None
     websocket_base_url: str | httpx.URL | None
-    provider: object | None
-    data_residency: DataResidency | None
     timeout: float | httpx.Timeout | Timeout | None
     max_retries: int
     default_headers: Mapping[str, str] | None
@@ -70,8 +75,10 @@ class _SharedOptions(TypedDict, total=False):
 class OpenAIOptions(_SharedOptions, total=False):
     """The ``openai.OpenAI`` constructor options that the synchronous OpenAI clients accept by keyword: every
     option of the installed ``openai`` package except ``http_client`` and ``base_url``, which the attested
-    client fixes. ``timeout`` and ``max_retries`` are per request, as they are in the package; the attested
-    client's own timeout is the ``http_timeout`` option. ``api_key`` may be a callable that returns the key."""
+    client fixes, and ``data_residency``, ``provider`` and ``workload_identity``, which would choose another base
+    URL or send a token exchange through an HTTP client other than the attested one, and which are refused.
+    ``timeout`` and ``max_retries`` are per request, as they are in the package; the attested client's own
+    timeout is the ``http_timeout`` option. ``api_key`` may be a callable that returns the key."""
 
     api_key: str | Callable[[], str] | None
 
@@ -145,11 +152,11 @@ class _AttestedOpenAI(openai.OpenAI):
         """What a copy's constructor receives besides the options: the attested client it shares."""
         return {"_http_client": self._tinfoil}
 
-    # The method it overrides also takes base_url and http_client, which the attested client fixes, so this one
-    # accepts fewer options than its supertype's.
+    # The method it overrides also takes base_url and http_client, which the attested client fixes, and the
+    # transport options, which are refused, so this one accepts fewer options than its supertype's.
     def copy(self, **kwargs: Unpack[OpenAICopyOptions]) -> Self:  # type: ignore[override]
         """A client with ``kwargs`` applied over this one's options, sharing its attested client."""
-        return super().copy(**_copy_options(kwargs, self._shared()))
+        return super().copy(**_copy_options(_without_transport_options(kwargs), self._shared()))
 
     with_options = copy  # type: ignore[assignment]
 
@@ -178,7 +185,7 @@ class _AsyncAttestedOpenAI(openai.AsyncOpenAI):
 
     def copy(self, **kwargs: Unpack[AsyncOpenAICopyOptions]) -> Self:  # type: ignore[override]
         """A client with ``kwargs`` applied over this one's options, sharing its attested client."""
-        return super().copy(**_copy_options(kwargs, self._shared()))
+        return super().copy(**_copy_options(_without_transport_options(kwargs), self._shared()))
 
     with_options = copy  # type: ignore[assignment]
 
@@ -195,8 +202,9 @@ def _openai_options(
     """``kwargs`` with the attested HTTP client and its base URL; an ``http_client`` or ``base_url`` in
     ``kwargs`` is a ConfigurationError unless it is the attested client's own, which a copy passes back. The
     per-request ``timeout`` keeps the ``openai`` package's own default unless the caller sets it: the attested
-    client's timeout, which ``http_timeout`` sets, is not adopted in its place."""
-    options: dict[str, Any] = dict(kwargs)
+    client's timeout, which ``http_timeout`` sets, is not adopted in its place. A transport option that is set
+    is a ConfigurationError, as it is from ``_without_transport_options``."""
+    options = _without_transport_options(kwargs)
     supplied = options.pop("http_client", None)
     if supplied is not None and supplied is not http_client:
         raise ConfigurationError(HTTP_CLIENT_FIXED)
@@ -205,6 +213,16 @@ def _openai_options(
         raise ConfigurationError(BASE_URL_FIXED)
     options.setdefault("timeout", openai.DEFAULT_TIMEOUT)
     return {**options, "http_client": http_client, "base_url": base_url}
+
+
+def _without_transport_options(kwargs: Mapping[str, object]) -> dict[str, Any]:
+    """``kwargs`` without the unset transport options; one that is set is a ConfigurationError naming it. Each
+    constructor, factory and copy calls this before any network I/O, and ``_openai_options`` calls it again for
+    every ``openai`` client built, so that no path reaches the ``openai`` constructor with one set."""
+    for key in _FORBIDDEN_TRANSPORT_OPTIONS:
+        if kwargs.get(key) is not None:
+            raise ConfigurationError(TRANSPORT_OPTION_UNSUPPORTED.format(key=key))
+    return {key: value for key, value in kwargs.items() if key not in _FORBIDDEN_TRANSPORT_OPTIONS}
 
 
 def _copy_options(kwargs: Mapping[str, object], shared: Mapping[str, object]) -> dict[str, Any]:
@@ -252,6 +270,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
         _http_client: EnclaveHTTPClient | None = None,
         **openai_kwargs: Unpack[OpenAIOptions],
     ) -> None:
+        _without_transport_options(openai_kwargs)
         owned = _http_client is None
         if _http_client is None:
             _http_client = EnclaveHTTPClient(
@@ -308,6 +327,7 @@ class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
         http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         **openai_kwargs: Unpack[AsyncOpenAIOptions],
     ) -> Self:
+        _without_transport_options(openai_kwargs)
         http_client = await AsyncEnclaveHTTPClient.create(
             host,
             repo,
@@ -349,6 +369,7 @@ class RouterOpenAIClient(_AttestedOpenAI):
         _http_client: RouterHTTPClient | None = None,
         **openai_kwargs: Unpack[OpenAIOptions],
     ) -> None:
+        _without_transport_options(openai_kwargs)
         owned = _http_client is None
         if _http_client is None:
             _http_client = RouterHTTPClient(
@@ -397,6 +418,7 @@ class AsyncRouterOpenAIClient(_AsyncAttestedOpenAI):
         http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         **openai_kwargs: Unpack[AsyncOpenAIOptions],
     ) -> Self:
+        _without_transport_options(openai_kwargs)
         http_client = await AsyncRouterHTTPClient.create(
             transport_mode=transport_mode,
             base_url=base_url,
@@ -441,6 +463,7 @@ class GatewayOpenAIClient(_AttestedOpenAI):
         _http_client: GatewayHTTPClient | None = None,
         **openai_kwargs: Unpack[OpenAIOptions],
     ) -> None:
+        _without_transport_options(openai_kwargs)
         owned = _http_client is None
         if _http_client is None:
             _http_client = GatewayHTTPClient(
@@ -495,6 +518,7 @@ class AsyncGatewayOpenAIClient(_AsyncAttestedOpenAI):
         http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         **openai_kwargs: Unpack[AsyncOpenAIOptions],
     ) -> Self:
+        _without_transport_options(openai_kwargs)
         http_client = await AsyncGatewayHTTPClient.create(
             model_pins=model_pins,
             pinned_models_only=pinned_models_only,
