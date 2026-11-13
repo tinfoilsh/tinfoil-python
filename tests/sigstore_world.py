@@ -53,6 +53,7 @@ _OID_SIGNED_DATA = "1.2.840.113549.1.7.2"
 _OID_TST_INFO = "1.2.840.113549.1.9.16.1.4"
 _OID_CONTENT_TYPE = "1.2.840.113549.1.9.3"
 _OID_MESSAGE_DIGEST = "1.2.840.113549.1.9.4"
+_OID_SIGNING_CERTIFICATE_V2 = "1.2.840.113549.1.9.16.2.47"
 _OID_ECDSA_SHA256 = "1.2.840.10045.4.3.2"
 
 
@@ -263,6 +264,10 @@ class World:
         signed_attributes = set_of(
             seq(oid(_OID_CONTENT_TYPE), set_of(oid(_OID_TST_INFO))),
             seq(oid(_OID_MESSAGE_DIGEST), set_of(octet_string(hashlib.sha256(tst_info).digest()))),
+            seq(
+                oid(_OID_SIGNING_CERTIFICATE_V2),
+                set_of(seq(seq(seq(octet_string(hashlib.sha256(self.tsa_leaf.der).digest()))))),
+            ),
         )
         leaf = x509.load_der_x509_certificate(self.tsa_leaf.der)
         key = self.tsa_leaf.key
