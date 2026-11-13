@@ -82,6 +82,7 @@ class Evidence:
 class Quote:
     """A signature-verified TDX quote, not yet compared against any expected value."""
 
+    expires_at: datetime
     identity: str
     """The machines-map lookup key: PPID, lowercase hex."""
     measurement: TDX
@@ -162,7 +163,7 @@ def _authenticate(evidence: Evidence, now: datetime, root: Certificate) -> Quote
 
     roots = (root,)
     verify_pck_certificate_chain(chain, roots, collateral.root_crl.crl, collateral.pck_crl.crl, now)
-    check_collateral_expiration(collateral, now)
+    collateral_expiry = check_collateral_expiration(collateral, now)
     verify_tcb_info(collateral, roots, now)
     verify_qe_identity(collateral, roots, now)
     verify_quote_signatures(quote, evidence.quote, chain.pck_cert)
@@ -185,6 +186,13 @@ def _authenticate(evidence: Evidence, now: datetime, root: Certificate) -> Quote
     except ValueError as err:
         raise TdxAuthenticationError(f"TDX quote measurement registers: {err}") from err
     return Quote(
+        expires_at=min(
+            collateral_expiry,
+            root.not_valid_after_utc,
+            chain.pck_cert.not_valid_after_utc,
+            chain.intermediate_cert.not_valid_after_utc,
+            chain.root_cert.not_valid_after_utc,
+        ),
         identity=machine,
         measurement=measurement,
         tcb_evaluation_data_number=evaluation,

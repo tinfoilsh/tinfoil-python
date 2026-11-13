@@ -727,8 +727,8 @@ class ConfigVerifier:
         """Verify a certified (v2) registry endorsement.
 
         Requires root keys and an issuer certificate. After the shared
-        checks: the bundle's one signature timestamp verifies and falls
-        within the window; the signing certificate verifies against the
+        checks: the bundle's one signature timestamp verifies and is not
+        beyond the future bound; the signing certificate verifies against the
         issuer at that time; its registry id equals the signed one; the
         certified bundle verifies; the inner timestamp verifies and does
         not follow the signature timestamp by more than
@@ -779,10 +779,8 @@ class ConfigVerifier:
             if statement.predicate_type != CONFIG_PREDICATE_TYPE_V2:
                 raise ApprovalError("certified registry endorsement requires a v2 statement")
             signed_at = self._signature_time(parsed)
-            try:
-                time_policy.verify(signed_at)
-            except TimePolicyError as err:
-                raise ApprovalError(str(err)) from err
+            if signed_at > time_policy.latest:
+                raise ApprovalError("signature timestamp is in the future")
             material = parsed.material
             certificate_der = material.certificate if isinstance(material, CertificateMaterial) else b""
             certificate, issuer = verify_signing_certificate(certificate_der, issuer_der, self._root_keys, signed_at)

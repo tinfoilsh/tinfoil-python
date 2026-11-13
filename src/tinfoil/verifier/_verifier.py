@@ -241,12 +241,8 @@ class Verifier:
         The caller owns both expectations that cannot come from the
         document: the nonce it generated, and any additional workload
         constraints. On success it must bind traffic to the returned keys
-        and enforce a non-None ``freshness_expires_at``. A None deadline
-        means that no endorsed reference supplied an approval time, as when
-        every reference is embedded or a caller-authorized config is
-        combined with an embedded runtime and platform; the caller then
-        owns renewal and cache lifetime, and None is not a guarantee of
-        unlimited evidence validity.
+        and enforce ``freshness_expires_at``. Hardware collateral bounds
+        the result even when every reference is embedded.
         """
         # The only clock read.
         return self.verify_v3_at(doc, nonce, repo, datetime.now(UTC))
@@ -463,7 +459,9 @@ def _verify_v3(trust: TrustPolicy, doc_bytes: bytes, nonce: bytes, repo: str, no
         code_measurement=assembled.code_measurement,
         enclave_measurement=authenticated.measurement,
         crypto_material=doc.crypto_material_items(),
-        freshness_expires_at=refs.freshness_expires_at,
+        freshness_expires_at=min(refs.freshness_expires_at, authenticated.quote.expires_at)
+        if refs.freshness_expires_at is not None
+        else authenticated.quote.expires_at,
         config=refs.config,
         runtime=refs.artifact if refs.config is not None else None,
         platform=refs.platform,

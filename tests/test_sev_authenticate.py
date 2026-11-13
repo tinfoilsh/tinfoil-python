@@ -217,6 +217,7 @@ def test_production_turin_captures(host: str) -> None:
     chain.verify_vcek_chain(vcek, roots.ask, roots.ark, capture.captured_at)
     chain.verify_report_signature(report, vcek)
     verified = sev.Quote(
+        expires_at=vcek.not_valid_after_utc,
         identity=report.chip_id.hex(),
         measurement=SEVSNP(launch=report.measurement),
         product_line=roots.product_line,

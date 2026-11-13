@@ -88,6 +88,7 @@ class AmdRoots:
 class Quote:
     """A signature-verified SEV-SNP report, not yet compared against any expected value."""
 
+    expires_at: datetime
     identity: str
     """The machines-map lookup key: CHIP_ID, lowercase hex."""
     measurement: SEVSNP
@@ -295,6 +296,12 @@ def authenticate(evidence: Evidence, now: datetime, options: Options | None = No
     if len(report.measurement) != REGISTER_SIZE:
         raise SevAuthenticationError(f"report measurement must be {REGISTER_SIZE} bytes, got {len(report.measurement)}")
     return Quote(
+        expires_at=min(
+            chain.vcek.not_valid_after_utc,
+            chain.ask.not_valid_after_utc,
+            chain.ark.not_valid_after_utc,
+            crl.next_update,
+        ),
         identity=machine,
         measurement=SEVSNP(launch=report.measurement),
         product_line=product_line,

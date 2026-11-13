@@ -150,6 +150,7 @@ def test_platform_measurements_read_the_quote_body() -> None:
     quote = run(BASE)
     other = tb.Scenario(body=tb.body_bytes(mr_td=bytes([0xEE]) * 48, rtmrs=(bytes([0xEE]) * 48, *tb.RTMRS[1:])))
     swapped = Quote(
+        expires_at=quote.expires_at,
         identity=quote.identity,
         measurement=quote.measurement,
         tcb_evaluation_data_number=quote.tcb_evaluation_data_number,
@@ -667,3 +668,20 @@ def test_pck_tcb_below_every_level_rejects() -> None:
     lower[0] = 4
     rejects(BASE.with_(extension_value=tb.sgx_extension(tcb=tb.tcb_attribute(components=bytes(lower)))), "no matching")
     rejects(BASE.with_(extension_value=tb.sgx_extension(tcb=tb.tcb_attribute(pce_svn=10))), "no matching TCB level")
+
+
+@pytest.mark.parametrize("source", ["tcb", "qe", "root_crl", "pck_crl"])
+def test_verified_collateral_bounds_quote_lifetime(source: str) -> None:
+    lifetime = timedelta(hours=1)
+    deadline = tb.NOW + lifetime
+    variants: dict[str, dict[str, Any]] = {
+        "tcb": {"tcb_info": tb.tcb_info_object(next_update=deadline)},
+        "qe": {"qe_identity": tb.qe_identity_object(next_update=deadline)},
+        "root_crl": {"root_crl_window": (timedelta(days=-1), lifetime)},
+        "pck_crl": {"pck_crl_window": (timedelta(days=-1), lifetime)},
+    }
+    scenario = BASE.with_(**variants[source])
+    assert run(scenario).expires_at == deadline
+    assert run(scenario, deadline).expires_at == deadline
+    with pytest.raises(TdxAuthenticationError):
+        run(scenario, deadline + timedelta(seconds=1))

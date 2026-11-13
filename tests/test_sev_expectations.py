@@ -150,6 +150,7 @@ def box2_quote() -> tuple[sev.Quote, Report]:
     vcek = parse_certificate(fx.box2_turin_vcek())
     pinned = trusted_roots(product_from_report(report), None)
     verified = sev.Quote(
+        expires_at=vcek.not_valid_after_utc,
         identity=identity(report.chip_id),
         measurement=SEVSNP(launch=report.measurement),
         product_line=pinned.product_line,
