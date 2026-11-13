@@ -16,10 +16,10 @@ from typing import Any
 import httpcore
 import httpx
 
-from tinfoil._errors import ConfigurationError, attestation_error, wrap_attestation
+from tinfoil._errors import ConfigurationError, wrap_attestation
 from tinfoil._keys import PeerLacksKeyError
-from tinfoil._pin import pin_tls_key
-from tinfoil.verifier import UsageError, VerificationError
+from tinfoil._pin import connection_cert_fp
+from tinfoil.verifier import UsageError
 
 CERT_MISMATCH = "enclave certificate does not match the attested key; re-verify the enclave"
 NO_TLS = "TLS transport mode requires an HTTPS request"
@@ -244,19 +244,16 @@ def is_certificate_error(err: BaseException) -> bool:
 
 
 def _pin(fingerprint: str) -> PinCheck:
-    """The pin check for ``fingerprint``, which must be a SHA-256 SPKI fingerprint as lowercase hex."""
-    try:
-        check = pin_tls_key(fingerprint)
-    except UsageError as err:
-        raise attestation_error(err) from err
+    """The pin check for ``fingerprint``, the SPKI fingerprint that a verification endorses. It runs after the
+    handshake and before the first byte is written, in addition to the certificate checks of the TLS context."""
 
     def checked(connection: ssl.SSLSocket | ssl.SSLObject) -> None:
         try:
-            check(connection)
-        except VerificationError as err:
-            raise PinMismatchError(CERT_MISMATCH) from err
+            got = connection_cert_fp(connection)
         except UsageError as err:
             raise PinMismatchError(NO_PEER_CERTIFICATE) from err
+        if got != fingerprint:
+            raise PinMismatchError(CERT_MISMATCH)
 
     return checked
 

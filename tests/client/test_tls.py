@@ -84,13 +84,6 @@ def test_plaintext_is_refused_before_connecting(server: TLSServer) -> None:
     assert server.connections == []
 
 
-def test_malformed_fingerprint_is_an_attestation_error() -> None:
-    with pytest.raises(AttestationError, match="lowercase hex"):
-        PinnedTransport("not-a-fingerprint")
-    with pytest.raises(AttestationError):
-        AsyncPinnedTransport("")
-
-
 def test_network_errors_are_not_certificate_errors(server: TLSServer) -> None:
     server.close()
     with (

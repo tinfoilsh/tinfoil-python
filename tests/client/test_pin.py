@@ -1,5 +1,5 @@
-"""The private TLS connection checks built on the verifier's SPKI fingerprint: the fingerprint of a connection's
-leaf and the key pin."""
+"""The private TLS connection check built on the verifier's SPKI fingerprint: the fingerprint of a connection's
+leaf, and the pinned transport's comparison of it with the endorsed fingerprint."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ from dataclasses import dataclass
 import pytest
 
 from tests import pki
-from tinfoil._pin import connection_cert_fp, pin_tls_key
-from tinfoil.verifier import LAYER_POLICY, UsageError, VerificationError, cert_pubkey_fp
+from tinfoil._pin import connection_cert_fp
+from tinfoil._tls import CERT_MISMATCH, NO_PEER_CERTIFICATE, PinMismatchError, _pin
+from tinfoil.verifier import UsageError, cert_pubkey_fp
 
 
 @dataclass(frozen=True)
@@ -37,36 +38,15 @@ def test_connection_cert_fp_rejects_a_connection_without_a_peer_certificate() ->
         connection_cert_fp(Connection(None))  # type: ignore[arg-type]
 
 
-def test_pin_tls_key() -> None:
+def test_pin_accepts_the_endorsed_key_and_rejects_another() -> None:
     issued = pki.certificate("leaf", pki.p256())
-    fp = cert_pubkey_fp(issued.der)
-    pin_tls_key(fp)(Connection(issued.der))  # type: ignore[arg-type]
-    with pytest.raises(VerificationError) as rejected:
-        pin_tls_key("00" * 32)(Connection(issued.der))  # type: ignore[arg-type]
-    assert rejected.value.layer == LAYER_POLICY
-    assert fp in str(rejected.value)
-    with pytest.raises(UsageError, match="no peer certificates"):
-        pin_tls_key(fp)(Connection(None))  # type: ignore[arg-type]
+    _pin(cert_pubkey_fp(issued.der))(Connection(issued.der))  # type: ignore[arg-type]
+    with pytest.raises(PinMismatchError, match=CERT_MISMATCH):
+        _pin("00" * 32)(Connection(issued.der))  # type: ignore[arg-type]
 
 
-def test_pin_tls_key_rejects_a_peer_certificate_that_does_not_parse() -> None:
-    # The leaf is the peer's evidence: one that does not parse is a policy rejection, not a caller's mistake.
+@pytest.mark.parametrize("leaf", [None, b"", b"not a certificate"])
+def test_pin_rejects_a_peer_certificate_that_it_cannot_read(leaf: bytes | None) -> None:
     fp = cert_pubkey_fp(pki.certificate("leaf", pki.p256()).der)
-    with pytest.raises(VerificationError) as rejected:
-        pin_tls_key(fp)(Connection(b"not a certificate"))  # type: ignore[arg-type]
-    assert rejected.value.layer == LAYER_POLICY
-    assert "peer certificate" in str(rejected.value)
-
-
-def test_pin_tls_key_rejects_a_malformed_fingerprint_when_built() -> None:
-    # The pin is checked once, so that a record without an endorsed TLS key, or a fingerprint in another form,
-    # cannot be mistaken for a mismatch on every connection.
-    issued = pki.certificate("leaf", pki.p256())
-    fp = cert_pubkey_fp(issued.der)
-    for bad in (None, b"", 42):
-        with pytest.raises(UsageError, match="lowercase hex string"):
-            pin_tls_key(bad)  # type: ignore[arg-type]
-    for malformed in ("", fp[:-2], fp + "00", fp.upper(), fp[:-1] + "g", "sha256:" + fp[7:]):
-        with pytest.raises(UsageError, match="32 bytes as lowercase hex"):
-            pin_tls_key(malformed)
-    pin_tls_key(fp)(Connection(issued.der))  # type: ignore[arg-type]
+    with pytest.raises(PinMismatchError, match=NO_PEER_CERTIFICATE):
+        _pin(fp)(Connection(leaf))  # type: ignore[arg-type]
