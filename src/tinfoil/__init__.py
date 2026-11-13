@@ -6,9 +6,11 @@ asynchronous clients are built with ``await Cls.create(...)``, which is
 where they verify, since their constructor raises. Every request is bound
 to the keys of the current verification. The verifier that appraises the
 attestation documents is the ``verifier`` subpackage; its records and
-errors are not re-exported here. ``pin_tls_key`` and ``connection_cert_fp``
-check that a TLS connection that the caller opens presents the key that a
-verification endorses. The client modules load on first use, so that
+errors are not re-exported here. For a TLS connection that the caller opens,
+``pin_tls_key`` is the check: it rejects a connection that does not present
+the key that a verification endorses. ``connection_cert_fp`` only reports the
+fingerprint of the presented key and compares nothing. The client modules
+load on first use, so that
 importing the ``verifier`` subpackage alone stays light.
 """
 

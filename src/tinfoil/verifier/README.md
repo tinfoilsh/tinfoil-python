@@ -17,7 +17,8 @@ pip install tinfoil
 from tinfoil.verifier import Verifier, random_nonce
 ```
 
-Everything documented here is importable from `tinfoil.verifier`; the
+Every name documented here is importable from `tinfoil.verifier`, except
+the `tinfoil.`-qualified client names that it points to; the
 `_`-prefixed submodules are implementation detail and may change without
 notice.
 
