@@ -176,6 +176,7 @@ options: OpenAIOptions = {{
 }}
 async_options: AsyncOpenAIOptions = {{"api_key": async_key, "default_headers": {{"X-Trace": "1"}}}}
 overrides: OpenAICopyOptions = {{"set_default_headers": {{}}, "timeout": 1.0}}
+other_options: OpenAIOptions = {{"organization": "o", "default_query": {{"v": 1}}, "websocket_base_url": None}}
 
 
 async def consume() -> None:
@@ -198,9 +199,13 @@ MISTAKES = (
     'EnclaveOpenAIClient("enclave.example", api_key="k")',
     'GatewayOpenAIClient(api_key="k").with_options(base_url="https://elsewhere.example/")',
     "create_client(api_key=async_key)",
+    'create_client(api_key="k", data_residency="us")',
+    "RouterOpenAIClient(provider=None)",
+    'EnclaveOpenAIClient("enclave.example", None, workload_identity=None).with_options(workload_identity=None)',
 )
 """Consumer mistakes, one per line of the probe: a misspelled option, a route option on the drop-in client, the
-fixed ``http_client`` and ``base_url``, a missing ``repo`` and an awaitable key on a synchronous client."""
+fixed ``http_client`` and ``base_url``, a missing ``repo``, an awaitable key on a synchronous client, and the
+transport options that ``OpenAIOptions`` leaves out, even when they are ``None``."""
 
 
 def _mypy(probe: Path) -> subprocess.CompletedProcess[str]:

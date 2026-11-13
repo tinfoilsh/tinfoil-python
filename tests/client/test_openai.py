@@ -2,27 +2,38 @@
 ``http_client`` and ``base_url`` cannot replace it, the realtime resource is refused, copies keep the attested
 client, a failed constructor closes the one it created, API errors pass through unchanged, and a client error
 raised in the transport reaches the caller unwrapped and unretried, since the library wraps and retries only
-the errors of its own HTTP stack."""
+the errors of its own HTTP stack. The options that would choose another base URL or an HTTP client of their own
+are refused from every constructor, factory and copy, before any network I/O."""
 
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 import openai
 import pytest
+from openai.providers import bedrock
 
 from tests.client.helpers import Recorder, response, verification
 from tinfoil import _fetch
-from tinfoil._clients import AsyncEnclaveHTTPClient, EnclaveHTTPClient, GatewayHTTPClient, RouterHTTPClient
+from tinfoil._clients import (
+    AsyncEnclaveHTTPClient,
+    AsyncGatewayHTTPClient,
+    EnclaveHTTPClient,
+    GatewayHTTPClient,
+    RouterHTTPClient,
+)
 from tinfoil._errors import AttestationError, ConfigurationError, TinfoilError, tinfoil_error
 from tinfoil._gateway import CatalogEntry
 from tinfoil._openai import (
+    _FORBIDDEN_TRANSPORT_OPTIONS,
     BASE_URL_FIXED,
     DROP_IN_OPTIONS,
     REALTIME_UNAVAILABLE,
     ROUTE_OPTIONS,
+    TRANSPORT_OPTION_UNSUPPORTED,
     AsyncClient,
     AsyncEnclaveOpenAIClient,
     AsyncGatewayOpenAIClient,
@@ -503,3 +514,186 @@ async def test_async_wrappers(offline: Recorder) -> None:
     with pytest.raises(ConfigurationError, match=REALTIME_UNAVAILABLE):
         realtime_of(drop_in)
     await drop_in.close()
+
+
+SUBJECT_TOKEN_IDENTITY = {
+    "identity_provider_id": "idp",
+    "service_account_id": "sa",
+    "provider": {"token_type": "jwt", "get_token": lambda: "subject-token"},
+}
+TRANSPORT_OPTIONS: list[tuple[str, object]] = [
+    ("data_residency", "us"),
+    ("provider", bedrock(region="us-east-1", api_key="b")),
+    ("workload_identity", SUBJECT_TOKEN_IDENTITY),
+    ("workload_identity", {"type": "x509", "identity_provider_id": "idp", "service_account_id": "sa"}),
+]
+"""A value for each refused option: the subject-token identity is the one that the ``openai`` package itself
+accepts next to the attested base URL, exchanging the token through an HTTP client of its own."""
+TRANSPORT_OPTION_IDS = ["data_residency", "provider", "subject-token workload_identity", "x509 workload_identity"]
+UNSET_TRANSPORT_OPTIONS = dict.fromkeys(_FORBIDDEN_TRANSPORT_OPTIONS)
+ENTRIES = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
+
+SYNC_FACTORIES: dict[str, Callable[..., openai.OpenAI]] = {
+    "EnclaveOpenAIClient": lambda **kw: EnclaveOpenAIClient("enclave.example", "org/repo", transport_mode="ehbp", **kw),
+    "RouterOpenAIClient": lambda **kw: RouterOpenAIClient(transport_mode="ehbp", **kw),
+    "GatewayOpenAIClient": lambda **kw: GatewayOpenAIClient(
+        url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
+    ),
+    "Client": lambda **kw: Client(**kw),
+    "create_client": lambda **kw: create_client(**kw),
+}
+ASYNC_FACTORIES: dict[str, Callable[..., Awaitable[openai.AsyncOpenAI]]] = {
+    "AsyncEnclaveOpenAIClient": lambda **kw: AsyncEnclaveOpenAIClient.create(
+        "enclave.example", "org/repo", transport_mode="ehbp", **kw
+    ),
+    "AsyncRouterOpenAIClient": lambda **kw: AsyncRouterOpenAIClient.create(transport_mode="ehbp", **kw),
+    "AsyncGatewayOpenAIClient": lambda **kw: AsyncGatewayOpenAIClient.create(
+        url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
+    ),
+    "AsyncClient": lambda **kw: AsyncClient.create(**kw),
+    "create_async_client": lambda **kw: create_async_client(**kw),
+}
+
+
+def answering_discovery(offline: Recorder) -> None:
+    offline.handler = lambda request: (
+        response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
+    )
+
+
+def recording(client: openai.OpenAI | openai.AsyncOpenAI) -> Recorder:
+    """A recorder under the attested transport, or, for a gateway client, in place of the gateway client's own
+    transport, which the ``openai`` client must send through."""
+    holder: Any = client
+    assert client._client is holder.http_client.http_client, "the openai client sends through the attested one"
+    if not isinstance(holder.http_client, (GatewayHTTPClient, AsyncGatewayHTTPClient)):
+        return below_the_attested_transport(client, by_path)
+    recorder = Recorder(by_path)
+    inner: Any = client._client
+    inner._transport = recorder.async_transport if isinstance(client, openai.AsyncOpenAI) else recorder.transport
+    return recorder
+
+
+def refused(option: str) -> str:
+    return TRANSPORT_OPTION_UNSUPPORTED.format(key=option)
+
+
+class TestTransportOptions:
+    """``data_residency``, ``provider`` and ``workload_identity`` would choose another base URL or send a token
+    exchange through an HTTP client of their own, so each is refused by name, before any network I/O, rather
+    than left to the ``openai`` package's own checks; ``None`` is unset."""
+
+    def test_message_names_the_option(self) -> None:
+        assert _FORBIDDEN_TRANSPORT_OPTIONS == ("data_residency", "provider", "workload_identity")
+        assert refused("provider") == (
+            "the provider option is not supported: the Tinfoil client owns the transport and base URL that "
+            "requests go to"
+        )
+
+    @pytest.mark.parametrize("factory", sorted(SYNC_FACTORIES))
+    @pytest.mark.parametrize(("option", "value"), TRANSPORT_OPTIONS, ids=TRANSPORT_OPTION_IDS)
+    def test_constructors_refuse_each_option_before_any_io(
+        self, offline: Recorder, factory: str, option: str, value: object
+    ) -> None:
+        with pytest.raises(ConfigurationError) as err:
+            SYNC_FACTORIES[factory](api_key="k", **foreign(**{option: value}))
+        assert str(err.value) == refused(option)
+        with pytest.raises(ConfigurationError, match=f"the {option} option"):
+            SYNC_FACTORIES[factory](**foreign(**{option: value}))  # without an api_key too
+        assert offline.requests == [], "nothing is fetched, verified or exchanged"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("factory", sorted(ASYNC_FACTORIES))
+    @pytest.mark.parametrize(("option", "value"), TRANSPORT_OPTIONS, ids=TRANSPORT_OPTION_IDS)
+    async def test_async_factories_refuse_each_option_before_any_io(
+        self, offline: Recorder, factory: str, option: str, value: object
+    ) -> None:
+        with pytest.raises(ConfigurationError) as err:
+            await ASYNC_FACTORIES[factory](api_key="k", **foreign(**{option: value}))
+        assert str(err.value) == refused(option)
+        assert offline.requests == []
+
+    @pytest.mark.parametrize("factory", sorted(SYNC_FACTORIES))
+    def test_copies_refuse_each_option(self, offline: Recorder, factory: str) -> None:
+        answering_discovery(offline)
+        client = SYNC_FACTORIES[factory](api_key="k", max_retries=0)
+        fetched = len(offline.requests)
+        for option, value in TRANSPORT_OPTIONS:
+            for copy in (client.copy, client.with_options):
+                with pytest.raises(ConfigurationError) as err:
+                    copy(**foreign(**{option: value}))
+                assert str(err.value) == refused(option)
+        assert len(offline.requests) == fetched
+        copied = client.with_options(**foreign(**UNSET_TRANSPORT_OPTIONS))
+        assert copied.base_url == client.base_url
+        client.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("factory", sorted(ASYNC_FACTORIES))
+    async def test_async_copies_refuse_each_option(self, offline: Recorder, factory: str) -> None:
+        answering_discovery(offline)
+        client = await ASYNC_FACTORIES[factory](api_key="k", max_retries=0)
+        fetched = len(offline.requests)
+        for option, value in TRANSPORT_OPTIONS:
+            for copy in (client.copy, client.with_options):
+                with pytest.raises(ConfigurationError) as err:
+                    copy(**foreign(**{option: value}))
+                assert str(err.value) == refused(option)
+        assert len(offline.requests) == fetched
+        assert client.with_options(**foreign(**UNSET_TRANSPORT_OPTIONS)).base_url == client.base_url
+        await client.close()
+
+    @pytest.mark.parametrize("factory", sorted(SYNC_FACTORIES))
+    def test_none_is_unset_and_other_options_go_through_the_attested_transport(
+        self, offline: Recorder, factory: str
+    ) -> None:
+        answering_discovery(offline)
+        client = SYNC_FACTORIES[factory](
+            api_key="k",
+            organization="org-1",
+            default_headers={"X-Trace": "1"},
+            default_query={"v": "2"},
+            timeout=3.0,
+            max_retries=0,
+            **foreign(**UNSET_TRANSPORT_OPTIONS),
+        )
+        assert client.timeout == 3.0
+        assert client.workload_identity is None
+        copied = client.with_options(default_headers={"X-Copy": "1"}, max_retries=1)
+        assert copied.max_retries == 1
+        recorder = recording(client)
+        messages: list[Any] = [{"role": "user", "content": "hi"}]
+        copied.chat.completions.create(model="m", messages=messages)
+        [request] = recorder.requests
+        assert request.url.host == httpx.URL(str(client.base_url)).host
+        assert request.url.params["v"] == "2"
+        assert (request.headers["X-Trace"], request.headers["X-Copy"]) == ("1", "1")
+        assert request.headers["OpenAI-Organization"] == "org-1"
+        assert request.headers["Authorization"] == "Bearer k"
+        client.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("factory", sorted(ASYNC_FACTORIES))
+    async def test_async_none_is_unset_and_other_options_go_through_the_attested_transport(
+        self, offline: Recorder, factory: str
+    ) -> None:
+        answering_discovery(offline)
+        client = await ASYNC_FACTORIES[factory](
+            api_key="k",
+            organization="org-1",
+            default_headers={"X-Trace": "1"},
+            default_query={"v": "2"},
+            timeout=3.0,
+            max_retries=0,
+            **foreign(**UNSET_TRANSPORT_OPTIONS),
+        )
+        assert client.timeout == 3.0
+        recorder = recording(client)
+        messages: list[Any] = [{"role": "user", "content": "hi"}]
+        await client.with_options(max_retries=0).chat.completions.create(model="m", messages=messages)
+        [request] = recorder.requests
+        assert request.url.host == httpx.URL(str(client.base_url)).host
+        assert request.url.params["v"] == "2"
+        assert request.headers["X-Trace"] == "1"
+        assert request.headers["OpenAI-Organization"] == "org-1"
+        await client.close()
