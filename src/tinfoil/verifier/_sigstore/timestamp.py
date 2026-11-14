@@ -4,8 +4,9 @@ authorities at the token's own genTime.
 The CMS signature check is delegated to ``rfc3161-client``; the token's
 fields are read here from the strict DER tree, and the checks that the
 library does not make (status, policy, TSTInfo version, size bounds, the
-signer's profile, the chain to the authority and the authority's validity
-window at genTime) are made here.
+signer's profile, the chain to the authority, that the token carries no
+certificate from outside that chain, and the authority's validity window
+at genTime) are made here.
 """
 
 from __future__ import annotations
@@ -216,6 +217,10 @@ def _verify_under_authority(
     signer_info = signer_infos[0]
     sid_issuer = signer_info.issuer.public_bytes()
     sid_serial = signer_info.serial_number
+    # The library trusts every certificate the token carries and may verify the signature under any of them.
+    trusted = {certificate.public_bytes(serialization.Encoding.DER) for certificate in authority.chain}
+    if not trusted.issuperset(wire.signed_data.certificates):
+        raise TimestampError("the token carries a certificate outside the authority's chain")
     embedded = [parse_certificate(raw) for raw in sorted(wire.signed_data.certificates)]
     candidates = embedded if embedded else [authority.chain[0]]
     signer = next((c for c in candidates if issuer_name(c) == sid_issuer and c.serial_number == sid_serial), None)
