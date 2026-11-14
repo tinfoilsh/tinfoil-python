@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -251,8 +252,17 @@ class World:
 
     # -- timestamps ---------------------------------------------------------------
 
-    def timestamp(self, data: bytes, at: datetime, policy: str = SIGSTORE_TIMESTAMP_POLICY) -> bytes:
-        """A granted DER TimeStampResp over ``data`` at ``at``, signed by the timestamp authority."""
+    def timestamp(
+        self,
+        data: bytes,
+        at: datetime,
+        policy: str = SIGSTORE_TIMESTAMP_POLICY,
+        *,
+        signing_key: ec.EllipticCurvePrivateKey | None = None,
+        extra_certificates: Sequence[bytes] = (),
+    ) -> bytes:
+        """A granted DER TimeStampResp over ``data`` at ``at``, signed by the timestamp authority. ``signing_key``
+        signs in place of the authority's key, and ``extra_certificates`` are carried beside its certificate."""
         tst_info = seq(
             integer(1),
             oid(policy),
@@ -265,7 +275,7 @@ class World:
             seq(oid(_OID_MESSAGE_DIGEST), set_of(octet_string(hashlib.sha256(tst_info).digest()))),
         )
         leaf = x509.load_der_x509_certificate(self.tsa_leaf.der)
-        key = self.tsa_leaf.key
+        key = signing_key or self.tsa_leaf.key
         assert isinstance(key, ec.EllipticCurvePrivateKey)
         signer_info = seq(
             integer(1),
@@ -279,7 +289,7 @@ class World:
             integer(3),
             set_of(seq(oid(_OID_SHA256))),
             seq(oid(_OID_TST_INFO), explicit(0, octet_string(tst_info))),
-            tlv(0xA0, self.tsa_leaf.der),
+            tlv(0xA0, b"".join(sorted([self.tsa_leaf.der, *extra_certificates]))),
             set_of(signer_info),
         )
         token = seq(oid(_OID_SIGNED_DATA), explicit(0, signed_data))

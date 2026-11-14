@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from rfc3161_client import VerificationError, VerifierBuilder, decode_timestamp_response
 
@@ -209,6 +210,56 @@ def test_library_claims_every_handed_certificate_is_a_trust_anchor() -> None:
         )
     with pytest.raises(ts.TimestampError, match="no trusted timestamp authority"):
         ts.verify_timestamp(root, response, data)
+
+
+FORGERY_ATTEMPTS = 32
+
+
+def test_token_cannot_supply_its_own_signer() -> None:
+    """A token that names the authority's signer but carries a look-alike certificate holding another key is
+    rejected. The look-alike has the signer's serial and its issuer's name in another letter case, which
+    ``rfc3161-client`` matches to the signer identifier and then verifies the signature under. Which of two
+    same-named issuers the library tries first varies with the certificates, hence the attempts. Should a release
+    stop accepting such tokens, this test fails, and the wrapper's check can go."""
+    world = World()
+    life = timedelta(days=30)
+    real = x509.load_der_x509_certificate(world.tsa_leaf.der)
+    variant = x509.Name([x509.NameAttribute(a.oid, str(a.value).upper()) for a in real.issuer])
+    assert variant.public_bytes() != real.issuer.public_bytes()
+    data = b"timestamped"
+    at = world.now - timedelta(hours=1)
+    root = world.trusted_root()
+    assert ts.verify_timestamp(root, world.timestamp(data, at), data) == at
+    for _ in range(FORGERY_ATTEMPTS):
+        rogue_ca_key, rogue_key = pki.p256(), pki.p256()
+        rogue_ca_id = x509.SubjectKeyIdentifier.from_public_key(rogue_ca_key.public_key())
+        builder = x509.CertificateBuilder().not_valid_before(world.now - life).not_valid_after(world.now + life)
+        rogue_ca = (
+            builder.subject_name(variant)
+            .issuer_name(variant)
+            .public_key(rogue_ca_key.public_key())
+            .serial_number(5)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(rogue_ca_id, critical=False)
+            .sign(rogue_ca_key, hashes.SHA256())
+        )
+        rogue_signer = (
+            builder.subject_name(pki.name("a"))
+            .issuer_name(variant)
+            .public_key(rogue_key.public_key())
+            .serial_number(real.serial_number)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.TIME_STAMPING]), critical=True)
+            .add_extension(x509.AuthorityKeyIdentifier(rogue_ca_id.digest, None, None), critical=False)
+            .sign(rogue_ca_key, hashes.SHA256())
+        )
+        embedded = [certificate.public_bytes(serialization.Encoding.DER) for certificate in (rogue_signer, rogue_ca)]
+        forged = world.timestamp(data, at, signing_key=rogue_key, extra_certificates=embedded)
+        if library_verifies(root, forged, data):
+            break
+    else:
+        pytest.fail("the library no longer verifies under a certificate the token carries")
+    with pytest.raises(ts.TimestampError, match="outside the authority's chain"):
+        ts.verify_timestamp(root, forged, data)
 
 
 def test_authorities_are_tried_in_order_and_windows_apply() -> None:
