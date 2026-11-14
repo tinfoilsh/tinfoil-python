@@ -5,7 +5,7 @@ The client verifies enclaves with version 3 of Tinfoil's attestation format, thr
 | 0.15 | v3 |
 | --- | --- |
 | `TinfoilAI(api_key=k)` | `create_client(api_key=k)` |
-| `TinfoilAI(enclave=host, repo=r, api_key=k)` | `EnclaveOpenAIClient(host, r, api_key=k)`. `host` and `repo` are positional and required. |
+| `TinfoilAI(enclave=host, repo=r, api_key=k)` | `EnclaveOpenAIClient(host, r, api_key=k)`. `host` and `repo` are positional and required. `repo` is a GitHub repository and is satisfied only by that repository's signed release; for an enclave published in the config registry, pass `None` and `registry_project=p` (`project=p` on `EnclaveHTTPClient`), which is satisfied only by a registry approval. |
 | `AsyncTinfoilAI(...)` | `await create_async_client(...)` for the router, `await AsyncEnclaveOpenAIClient.create(host, r, ...)` for one enclave. Every asynchronous client is built with `await Cls.create(...)`, since the constructor verifies. |
 | `client.chat`, `client.embeddings`, `client.audio` | Unchanged, and every other resource of the `openai` package with them, except the websocket entry points: `realtime`, its `beta.realtime` alias and the `connect` methods of `responses`, `beta.responses`, `live`, `live.sideband` and `live.forks` raise `ConfigurationError`, because a websocket can't use the attested HTTP client and would bypass the attested connection. The `websocket_base_url` option is refused for the same reason when it is set; `None` counts as unset. |
 | `client.client` | The client itself: it is an `openai.OpenAI`. |
@@ -22,7 +22,7 @@ The client verifies enclaves with version 3 of Tinfoil's attestation format, thr
 | `timeout=` on `TinfoilAI` | `timeout=`, which is the `openai` package's per-request timeout, and `http_timeout=`, the attested client's: the attestation fetch and requests through `http_client`. The HTTP clients call the latter `timeout=`. |
 | `get_verification_document()`, `VerificationDocument` | `client.http_client.current`, a `tinfoil.verifier.Verification` with `code_tag`, `code_digest`, `config_repo`, `enclave_measurement`, `tls_public_key_fp`, `hpke_public_key`, `freshness_expires_at`, `metadata.verified_at` and `to_json()`. It is `None` before the first verification; `ensure_verified()` always returns one. |
 | `ValueError` on bad options | `ConfigurationError`, beside `AttestationError` (the enclave could not be trusted) and `NetworkError` (attestation material could not be fetched). All three subclass `TinfoilError`. The `openai` package's errors are unchanged, and re-exported from `tinfoil`. |
-| `tinfoil.attestation`, `tinfoil.sigstore`, `tinfoil.github` | `tinfoil.verifier`: `Verifier().verify_v3(document, nonce, repo)` returns a `Verification` or raises `VerificationError`. |
+| `tinfoil.attestation`, `tinfoil.sigstore`, `tinfoil.github` | `tinfoil.verifier`: `Verifier().verify_v3(document, nonce, repo, project=project)` returns a `Verification` or raises `VerificationError`. `repo` pins a GitHub repository and `project` a config registry project; either may be `None`. |
 
 ## Examples
 

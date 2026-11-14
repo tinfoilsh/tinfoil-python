@@ -46,7 +46,11 @@ def test_construction_checks_config() -> None:
     with pytest.raises(ConfigurationError):
         Enclave("enclave.example", "not a reference")
     Enclave("enclave.example")
+    with pytest.raises(ConfigurationError):
+        Enclave("enclave.example", "org/repo", project="not a reference")
     with pytest.raises(ConfigurationError, match="config authorizer"):
+        Enclave("enclave.example", project="org/project", verifier=authorizer())
+    with pytest.raises(ConfigurationError, match="verifies registry collateral only"):
         Enclave("enclave.example", "org/repo", verifier=authorizer())
     with pytest.raises(ConfigurationError, match="host is required"):
         Enclave("", "org/repo")
@@ -58,7 +62,10 @@ def test_construction_checks_config() -> None:
     enclave = Enclave("enclave.example", "org/repo", relay="relay.example", verifier=shared)
     assert enclave.verifier is shared, "enclaves share the caller's verifier"
     assert enclave.relay == "relay.example"
-    assert Enclave("enclave.example", None).repo == ""
+    unpinned = Enclave("enclave.example", None)
+    assert (unpinned.repo, unpinned.project) == ("", "")
+    both = Enclave("enclave.example", "org/repo", project="org/project@v1")
+    assert (both.repo, both.project) == ("org/repo", "org/project@v1")
 
 
 @pytest.mark.parametrize(

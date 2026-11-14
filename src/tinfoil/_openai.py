@@ -375,7 +375,9 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
 
     ``host``, ``repo`` and the keyword options up to ``http_timeout`` are
     those of ``EnclaveHTTPClient``, which is created first and verifies the
-    enclave; ``http_timeout`` is its ``timeout``. The remaining keyword
+    enclave; ``registry_project`` is its ``project``, since ``project`` here
+    is the ``openai`` package's option, and ``http_timeout`` is its
+    ``timeout``. The remaining keyword
     arguments are ``OpenAIOptions``, the ``openai`` package's, applied after
     it; ``http_client`` and ``base_url`` are the attested client's and
     cannot be replaced. ``copy`` and ``with_options`` share the attested
@@ -392,6 +394,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
         host: str,
         repo: str | None,
         *,
+        registry_project: str | None = None,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
         verifier: Verifier | None = None,
@@ -407,6 +410,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
             _http_client = EnclaveHTTPClient(
                 host,
                 repo,
+                project=registry_project,
                 transport_mode=transport_mode,
                 base_url=base_url,
                 verifier=verifier,
@@ -425,7 +429,12 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
         return self._tinfoil
 
     def _shared(self) -> dict[str, object]:
-        return {"host": self._tinfoil.enclave, "repo": self._tinfoil.repo, "_http_client": self._tinfoil}
+        return {
+            "host": self._tinfoil.enclave,
+            "repo": self._tinfoil.repo,
+            "registry_project": self._tinfoil.project,
+            "_http_client": self._tinfoil,
+        }
 
 
 class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
@@ -450,6 +459,7 @@ class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
         host: str,
         repo: str | None,
         *,
+        registry_project: str | None = None,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
         verifier: Verifier | None = None,
@@ -462,6 +472,7 @@ class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
         http_client = await AsyncEnclaveHTTPClient.create(
             host,
             repo,
+            project=registry_project,
             transport_mode=transport_mode,
             base_url=base_url,
             verifier=verifier,

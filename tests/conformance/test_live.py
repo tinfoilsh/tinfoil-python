@@ -92,15 +92,17 @@ FACTS = {
 class VerifierDouble:
     """Stands in for the public verifier: records every call and answers with a fixed outcome."""
 
-    calls: list[tuple[bytes, bytes, str, datetime | None]]
+    calls: list[tuple[bytes, bytes, str, str | None, datetime | None]]
     outcome: Verification | Exception
 
-    def verify_v3(self, doc: bytes, nonce: bytes, repo: str) -> Verification:
-        type(self).calls.append((doc, nonce, repo, None))
+    def verify_v3(self, doc: bytes, nonce: bytes, repo: str, *, project: str | None = None) -> Verification:
+        type(self).calls.append((doc, nonce, repo, project, None))
         return self._answer()
 
-    def verify_v3_at(self, doc: bytes, nonce: bytes, repo: str, verification_time: datetime) -> Verification:
-        type(self).calls.append((doc, nonce, repo, verification_time))
+    def verify_v3_at(
+        self, doc: bytes, nonce: bytes, repo: str, verification_time: datetime, *, project: str | None = None
+    ) -> Verification:
+        type(self).calls.append((doc, nonce, repo, project, verification_time))
         return self._answer()
 
     def _answer(self) -> Verification:
@@ -163,8 +165,19 @@ def test_live_verify_accepts_through_the_public_verifier(
     host, nonce = fetched[0]
     assert host == HOST
     assert len(nonce) == 32
-    assert double.calls == [(DOCUMENT, nonce, REPO, None)]
+    assert double.calls == [(DOCUMENT, nonce, REPO, REPO, None)]
     assert dialed == [HOST]
+
+
+@pytest.mark.parametrize("project", ["", "org/project"])
+def test_live_verify_passes_a_project_member_as_given(
+    project: str, double: type[VerifierDouble], fetched: list[tuple[str, bytes]], dialed: list[str]
+) -> None:
+    """Without a project member the repo names the workload in either namespace; with one, even an empty one, the
+    two pins are the request's."""
+    result = adapter.run(adapter.STAGE_LIVE_VERIFY, {**REQUEST, "project": project})
+    assert result.exit_code == adapter.EXIT_ACCEPTED, result
+    assert [(call[2], call[3]) for call in double.calls] == [(REPO, project)]
 
 
 def test_live_verify_uses_a_fresh_nonce_per_run(
@@ -187,6 +200,8 @@ def test_live_verify_uses_a_fresh_nonce_per_run(
         {"host": HOST, "repo": ""},
         {"host": None, "repo": REPO},
         {"host": 1, "repo": REPO},
+        {"host": HOST, "repo": REPO, "project": None},
+        {"host": HOST, "repo": REPO, "project": 1},
     ],
 )
 def test_live_verify_rejects_a_malformed_request_before_any_connection(
@@ -322,7 +337,11 @@ def test_verify_stage_without_roots_uses_the_public_verifier(double: type[Verifi
     result = adapter.run(adapter.STAGE_VERIFY, raw)
     assert result.exit_code == adapter.EXIT_ACCEPTED, result
     assert result.output["outputs"] == FACTS
-    assert double.calls == [(b"{}", NONCE, REPO, datetime.fromtimestamp(1_700_000_000, UTC))]
+    assert double.calls == [(b"{}", NONCE, REPO, REPO, datetime.fromtimestamp(1_700_000_000, UTC))]
+    for project in ("", "org/project"):
+        double.calls.clear()
+        assert adapter.run(adapter.STAGE_VERIFY, {**raw, "project": project}).exit_code == adapter.EXIT_ACCEPTED
+        assert [(call[2], call[3]) for call in double.calls] == [(REPO, project)]
 
 
 def test_verify_stage_with_an_injected_root_bypasses_the_public_verifier(double: type[VerifierDouble]) -> None:
@@ -369,7 +388,7 @@ def test_capture_freezes_an_accepted_document_at_the_capture_time(
     # The frozen input is exactly what was verified, pinned to the capture instant.
     decoded = adapter.Input.from_json(fixture_input)
     assert decoded.document == DOCUMENT
-    assert double.calls == [(DOCUMENT, NONCE, REPO, datetime.fromtimestamp(captured_at, UTC))]
+    assert double.calls == [(DOCUMENT, NONCE, REPO, REPO, datetime.fromtimestamp(captured_at, UTC))]
     # And it replays as an accept through the stage.
     assert adapter.run(adapter.STAGE_VERIFY, fixture_input).exit_code == adapter.EXIT_ACCEPTED
 

@@ -150,7 +150,7 @@ def freshness_expiration(max_age: timedelta, *approved_at: datetime | None) -> d
 
 def reference_pins(trust: TrustPolicy, ref: str) -> ConfigPolicy:
     """The config pins that ``ref`` sets under the policy, or a UsageError when verification rejects ``ref``
-    whatever the document. Every check of that kind belongs here, so that ``check_repo_verifiability`` makes it
+    whatever the document. Every check of that kind belongs here, so that ``check_pin_verifiability`` makes it
     too."""
     registry_ids = trust.config_registry_ids
     if registry_ids is None and trust.config_keys is None:

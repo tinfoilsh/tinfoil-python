@@ -69,7 +69,7 @@ def offline(monkeypatch: pytest.MonkeyPatch) -> Recorder:
     recorder = Recorder(lambda _: response(200, b"doc"))
     monkeypatch.setattr(_fetch, "_TRANSPORT", recorder.transport)
     monkeypatch.setattr(_fetch, "_ASYNC_TRANSPORT", recorder.async_transport)
-    monkeypatch.setattr(Verifier, "verify_v3", lambda self, doc, nonce, repo: verification("ab" * 32))
+    monkeypatch.setattr(Verifier, "verify_v3", lambda self, doc, nonce, repo, project=None: verification("ab" * 32))
     return recorder
 
 
@@ -142,6 +142,25 @@ class TestConstruction:
         client.close()
         with pytest.raises(ConfigurationError, match="closed"):
             client.http_client.ensure_verified()
+
+    def test_registry_project_is_separate_from_the_openai_project(self, offline: Recorder) -> None:
+        client = EnclaveOpenAIClient(
+            "enclave.example",
+            "org/repo",
+            registry_project="org/project",
+            transport_mode="ehbp",
+            api_key="k",
+            project="proj_123",
+        )
+        assert (client.http_client.repo, client.http_client.project) == ("org/repo", "org/project")
+        assert client.project == "proj_123"
+        copy = client.with_options(max_retries=0)
+        assert copy.http_client is client.http_client
+        assert copy.project == "proj_123"
+        assert through(copy)[0].headers["OpenAI-Project"] == "proj_123"
+        client.close()
+        with pytest.raises(ConfigurationError):
+            EnclaveOpenAIClient("enclave.example", None, registry_project="not a reference", api_key="k")
 
     def test_router_and_gateway_clients(self, offline: Recorder) -> None:
         offline.handler = lambda request: (

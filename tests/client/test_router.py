@@ -17,7 +17,7 @@ from tinfoil import _fetch, _router
 from tinfoil._enclave import Enclave
 from tinfoil._errors import ConfigurationError, NetworkError, network_error
 from tinfoil._router import (
-    DEFAULT_ROUTER_REPO,
+    DEFAULT_ROUTER_NAME,
     DEFAULT_ROUTER_URL,
     FALLBACK_HOST,
     discover,
@@ -51,7 +51,12 @@ def probing(verdicts: dict[str, Exception | None], probes: list[str]) -> Callabl
             return verification(enclave.host)
 
         test_enclave = Enclave(
-            enclave.host, enclave.repo, verifier=enclave.verifier, verification_check=enclave._check, _fetch=fetch
+            enclave.host,
+            enclave.repo,
+            project=enclave.project,
+            verifier=enclave.verifier,
+            verification_check=enclave._check,
+            _fetch=fetch,
         )
         return AttestedTransport(test_enclave, FakeMode())
 
@@ -99,7 +104,7 @@ def test_discovery_probes_each_router_once_and_falls_back(atc: Recorder) -> None
     atc.handler = lambda _: response(200, b'["a.example", "b.example"]')
     keyed = discover(None, None, probing({}, probes))
     assert keyed.enclave.host == FALLBACK_HOST
-    assert keyed.enclave.repo == DEFAULT_ROUTER_REPO
+    assert (keyed.enclave.repo, keyed.enclave.project) == (DEFAULT_ROUTER_NAME, DEFAULT_ROUTER_NAME)
     assert probes == ["a.example", "b.example"], "one candidate probe per router, no retry"
     assert keyed.current is None, "discovery leaves its fallback unverified"
     assert [str(r.url) for r in atc.requests] == [DEFAULT_ROUTER_URL]
@@ -138,7 +143,7 @@ def test_discovery_bounds_total_probe_time(atc: Recorder, monkeypatch: pytest.Mo
             time.sleep(0.25)  # an unreachable router
             raise network_error("unreachable")
 
-        return AttestedTransport(Enclave(enclave.host, enclave.repo, _fetch=fetch), FakeMode())
+        return AttestedTransport(Enclave(enclave.host, enclave.repo, project=enclave.project, _fetch=fetch), FakeMode())
 
     start = time.monotonic()
     keyed = discover(None, None, new_transport)
@@ -168,7 +173,11 @@ async def test_cancelled_discovery_closes_the_candidate_in_flight(atc: Recorder)
             await asyncio.Event().wait()  # a router that never answers
             raise AssertionError("unreachable")
 
-        built.append(AsyncAttestedTransport(Enclave(enclave.host, enclave.repo, _fetch_async=fetch), AsyncFakeMode()))
+        built.append(
+            AsyncAttestedTransport(
+                Enclave(enclave.host, enclave.repo, project=enclave.project, _fetch_async=fetch), AsyncFakeMode()
+            )
+        )
         return built[-1]
 
     discovery = asyncio.create_task(discover_async(None, None, new_transport))
@@ -188,7 +197,9 @@ def test_interrupted_discovery_closes_the_candidate_in_flight(atc: Recorder) -> 
         def fetch() -> Verification:
             raise KeyboardInterrupt
 
-        built.append(AttestedTransport(Enclave(enclave.host, enclave.repo, _fetch=fetch), FakeMode()))
+        built.append(
+            AttestedTransport(Enclave(enclave.host, enclave.repo, project=enclave.project, _fetch=fetch), FakeMode())
+        )
         return built[-1]
 
     with pytest.raises(KeyboardInterrupt):
@@ -210,7 +221,9 @@ async def test_discovery_async(atc: Recorder) -> None:
                 raise network_error("down")
             return verification(enclave.host)
 
-        return AsyncAttestedTransport(Enclave(enclave.host, enclave.repo, _fetch_async=fetch), AsyncFakeMode())
+        return AsyncAttestedTransport(
+            Enclave(enclave.host, enclave.repo, project=enclave.project, _fetch_async=fetch), AsyncFakeMode()
+        )
 
     keyed = await discover_async(None, None, new_transport)
     assert keyed.enclave.host == "b.example"

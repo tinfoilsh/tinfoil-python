@@ -38,6 +38,7 @@ class Network:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.requests: list[httpx.Request] = []
         self.documents: dict[str, Verification | Exception] = {}
+        self.pins: list[tuple[str | None, str | None]] = []
         self.handler: Handler = lambda _: response(200, b"ok")
         self.ehbp = EHBPServer()
         for module, name in (
@@ -59,7 +60,8 @@ class Network:
             return response(200, document.code_tag.encode())
         return self.handler(request)
 
-    def verify(self, doc: bytes, nonce: bytes, repo: str | None) -> Verification:
+    def verify(self, doc: bytes, nonce: bytes, repo: str | None, *, project: str | None = None) -> Verification:
+        self.pins.append((repo, project))
         for document in self.documents.values():
             if isinstance(document, Verification) and document.code_tag.encode() == doc:
                 return document
@@ -112,6 +114,11 @@ class TestEnclaveClient:
             ("invalid repository", ("enclave.example", "not a reference", {})),
             ("config authorizer with a repository pin", ("enclave.example", "org/repo", {"verifier": authorizer()})),
             (
+                "config authorizer with a project pin",
+                ("enclave.example", None, {"project": "org/project", "verifier": authorizer()}),
+            ),
+            ("invalid project", ("enclave.example", "org/repo", {"project": "not a reference"})),
+            (
                 "userinfo in the base URL",
                 (
                     "enclave.example",
@@ -157,20 +164,31 @@ class TestEnclaveClient:
         assert network.hosts() == ["enclave.example"]
         client.close()
 
-    def test_reports_its_enclave_repo_and_base_url(self, network: Network) -> None:
+    def test_reports_its_enclave_pin_and_base_url(self, network: Network) -> None:
         repo = "org/repo@v1@sha256:" + "a" * 64
+        project = "org/project@v2"
         network.serve("enclave.example:8443")
         client = EnclaveHTTPClient(
-            "enclave.example:8443", repo, transport_mode="ehbp", base_url="https://proxy.example/v1"
+            "enclave.example:8443", repo, project=project, transport_mode="ehbp", base_url="https://proxy.example/v1"
         )
         assert client.enclave == "enclave.example:8443", "the enclave, not the proxy"
-        assert client.repo == repo
+        assert (client.repo, client.project) == (repo, project)
+        assert network.pins == [(repo, project)], "the verifier receives each pin in its own namespace"
         assert client.base_url == "https://proxy.example/v1/"
         assert client._attested.openai_url == "https://proxy.example/v1/"
         client.close()
         network.serve("enclave.example")
         with EnclaveHTTPClient("enclave.example", None, transport_mode="ehbp") as plain:
-            assert plain.repo == ""
+            assert (plain.repo, plain.project) == ("", "")
+            assert network.pins[-1] == ("", "")
+        network.serve("enclave.example")
+        with EnclaveHTTPClient("enclave.example", "org/repo", transport_mode="ehbp") as repository:
+            assert (repository.repo, repository.project) == ("org/repo", "")
+            assert network.pins[-1] == ("org/repo", ""), "a repository pin never doubles as a project pin"
+        network.serve("enclave.example")
+        with EnclaveHTTPClient("enclave.example", None, project="org/project", transport_mode="ehbp") as registry:
+            assert (registry.repo, registry.project) == ("", "org/project")
+            assert network.pins[-1] == ("", "org/project")
             assert plain.base_url == "https://enclave.example/"
             assert plain._attested.openai_url == "https://enclave.example/v1/"
 
@@ -317,7 +335,10 @@ class TestRouterClient:
         chosen = network.serve("b.example")
         client = RouterHTTPClient(transport_mode="ehbp", base_url="http://localhost:8080/v1/", user_cache_secret="s")
         assert client.enclave == "b.example"
-        assert client.repo == _router.DEFAULT_ROUTER_REPO
+        assert (client.repo, client.project) == (_router.DEFAULT_ROUTER_NAME, _router.DEFAULT_ROUTER_NAME)
+        assert set(network.pins) == {(_router.DEFAULT_ROUTER_NAME, _router.DEFAULT_ROUTER_NAME)}, (
+            "every candidate is verified against the router's name in both namespaces"
+        )
         assert client.current is chosen
         assert client.base_url == "http://localhost:8080/v1/"
         assert network.hosts() == ["atc.tinfoil.sh", "a.example", "b.example"], (
@@ -405,6 +426,7 @@ class TestGatewayClient:
         client = GatewayHTTPClient(url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s")
         verified = client.ensure_verified("m")
         assert verified.code_tag == "replica.example"
+        assert network.pins == [("tinfoilsh/m", "tinfoilsh/m")], "a model reference is pinned in both namespaces"
         fetched = network.requests[-1]
         assert fetched.url.host == "gateway.example", "attestation is fetched through the gateway"
         assert fetched.url.params["enclave"] == "replica.example"

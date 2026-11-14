@@ -14,8 +14,9 @@ from tinfoil._transport import AsyncAttestedTransport, AttestedTransport
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
 from tinfoil.verifier import Verifier
 
-DEFAULT_ROUTER_REPO = "tinfoilsh/confidential-model-router"
-"""The repository every router is verified against."""
+# The router is published under one name in both namespaces, each owned by Tinfoil.
+DEFAULT_ROUTER_NAME = "tinfoilsh/confidential-model-router"
+"""The GitHub repository and the registry project every router is verified against."""
 DEFAULT_ROUTER_URL = "https://atc.tinfoil.sh/routers"
 """Where the router list is fetched from."""
 FALLBACK_HOST = "inference.tinfoil.sh"
@@ -78,7 +79,9 @@ def discover(
     ``verifier`` and passes ``check``, and otherwise for the fallback host, which it leaves to be verified on
     first use. None selects the default policy and accepts every router. It stops trying routers after
     ``DISCOVERY_TIMEOUT`` seconds."""
-    fallback = Enclave(FALLBACK_HOST, DEFAULT_ROUTER_REPO, verifier=verifier, verification_check=check)
+    fallback = Enclave(
+        FALLBACK_HOST, DEFAULT_ROUTER_NAME, project=DEFAULT_ROUTER_NAME, verifier=verifier, verification_check=check
+    )
     deadline = time.monotonic() + DISCOVERY_TIMEOUT
     try:
         routers = fetch_routers(timeout=timeout, deadline=deadline)
@@ -115,7 +118,9 @@ async def discover_async(
 ) -> AsyncAttestedTransport:
     """``discover`` on the event loop. The task's cancellation ends discovery with it, without a fallback, and
     closes the candidate it was probing."""
-    fallback = Enclave(FALLBACK_HOST, DEFAULT_ROUTER_REPO, verifier=verifier, verification_check=check)
+    fallback = Enclave(
+        FALLBACK_HOST, DEFAULT_ROUTER_NAME, project=DEFAULT_ROUTER_NAME, verifier=verifier, verification_check=check
+    )
     deadline = time.monotonic() + DISCOVERY_TIMEOUT
     try:
         routers = await fetch_routers_async(timeout=timeout, deadline=deadline)
@@ -144,13 +149,15 @@ def _candidate(router: str, fallback: Enclave, check: VerificationCheck | None) 
     """``router`` as an enclave verified like the fallback, or None for an entry that is not a host: the list is
     untrusted, so a malformed entry is skipped rather than failing discovery."""
     try:
-        return Enclave(router, fallback.repo, verifier=fallback.verifier, verification_check=check)
+        return Enclave(
+            router, fallback.repo, project=fallback.project, verifier=fallback.verifier, verification_check=check
+        )
     except ConfigurationError:
         return None
 
 
 __all__ = [
-    "DEFAULT_ROUTER_REPO",
+    "DEFAULT_ROUTER_NAME",
     "DEFAULT_ROUTER_URL",
     "DISCOVERY_TIMEOUT",
     "FALLBACK_HOST",

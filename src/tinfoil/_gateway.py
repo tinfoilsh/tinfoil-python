@@ -546,9 +546,11 @@ class _Shared(Generic[_T]):
             return [self.enclaves.pop(replica) for replica in evicted]
 
     def enclave_for(self, replica: _Replica) -> Enclave:
+        # Model references are confined to the owner whose names Tinfoil holds in both namespaces.
         return Enclave(
             replica.host,
             replica.ref,
+            project=replica.ref,
             relay=self.relay,
             verifier=self.policy.verifier_for(replica),
             verification_check=self.check,

@@ -1,7 +1,8 @@
 """Appraisal of attestation documents.
 
-Given a document, the nonce the caller bound it to and the repository the
-caller trusts, a ``Verifier`` decides what the document proves. It opens no
+Given a document, the nonce the caller bound it to and the repository or
+registry project the caller trusts, a ``Verifier`` decides what the document
+proves. It opens no
 connections and keeps no state between calls, so fetching documents, caching
 a verification and enforcing its expiry all belong to the caller.
 
@@ -63,6 +64,11 @@ from tinfoil.verifier._verification import (
     VerificationMetadata,
 )
 from tinfoil.verifier._x509.certificate import X509Error
+
+REGISTRY_COLLATERAL_NEEDS_PROJECT = (
+    "document carries config registry collateral, but only a GitHub repository is pinned"
+)
+REPOSITORY_COLLATERAL_NEEDS_REPO = "document carries GitHub repository collateral, but no GitHub repository is pinned"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -150,7 +156,8 @@ class Verifier:
         ``config_authorizer``: caller policy that replaces config
         endorsement verification; it decides on the config bytes and the
         verifier still authenticates the runtime, the platform and the
-        hardware. ``verify_v3`` then requires an empty ``repo``.
+        hardware. ``verify_v3`` then requires an empty ``project`` and
+        refuses a ``repo`` passed alone.
 
         ``embedded_references``: caller-trusted config, runtime manifest
         or platform artifact that replace endorsement and renewal checks
@@ -191,7 +198,7 @@ class Verifier:
     @property
     def caller_authorizes_config(self) -> bool:
         """Whether the caller supplies the config, with an embedded config, or authorizes it, with a config
-        authorizer, instead of a repository pin authenticating it."""
+        authorizer, instead of a pin authenticating it."""
         return self._trust.embedded.config is not None or self._trust.config_authorizer is not None
 
     def __repr__(self) -> str:
@@ -200,43 +207,54 @@ class Verifier:
             f"caller_authorizes_config={self.caller_authorizes_config!r})"
         )
 
-    def check_repo_verifiability(self, repo: str | None) -> None:
-        """Check that this verifier can verify an enclave against the repository pin ``repo``, without a document or
-        network I/O, so that a caller can reject a pin before fetching a document.
+    def check_pin_verifiability(self, repo: str | None, *, project: str | None = None) -> None:
+        """Check that this verifier can verify an enclave against ``repo``, a GitHub repository, and ``project``, a
+        config registry project, without a document or network I/O, so that a caller can reject a pin before
+        fetching a document. Either may be empty or None, which means the same.
 
-        Raises UsageError when ``repo`` is non-empty and is not an
-        ``org/project[@revision][@sha256:digest]`` reference; when ``repo``
+        Raises UsageError when ``repo`` or ``project`` is non-empty and
+        malformed; when ``repo`` is set alone and this verifier verifies
+        registry collateral only, through an embedded reference, explicit
+        signing keys, registry IDs or a config authorizer; when ``project``
         is set and this verifier has a config authorizer, which cannot
-        authenticate a repository pin; or when this verifier has an embedded
-        config whose name or digest ``repo`` does not match. ``verify_v3``
-        rejects every such ``repo``, whatever the document.
+        authenticate a project pin; or when this verifier has an embedded
+        config whose name or digest ``project`` does not match.
+        ``verify_v3`` rejects every such pin, whatever the document.
 
-        An empty ``repo``, or None, which means the same, pins no
-        repository and passes this check: v3 collateral then accepts
-        configs authorized by the verifier's configured config trust (the public or caller registry,
-        caller signing keys, an authorizer, or an embedded config). It can still
-        fail once the document is in hand. v2 collateral requires a
-        repository pin, so ``verify_v3`` raises UsageError for an empty
-        ``repo`` on a v2 document; and v3 collateral also requires the repo
-        and revision to be valid config identity components, such as
-        lowercase slugs, which v2 collateral does not, so that check waits
-        for the document.
+        It can still reject a pin that passes: registry collateral also
+        requires the project and revision to be valid config identity
+        components, such as lowercase slugs, and that check waits for the
+        document.
         """
-        reference_pins(self._trust, _repo(repo))
+        repo, project = _reference("repository", repo), _reference("project", project)
+        if repo != "":
+            _repository_pin(repo)
+            if project == "" and requires_config_collateral(self._trust):
+                raise UsageError(
+                    "configured trust verifies registry collateral only, which a GitHub repository pin cannot match"
+                )
+        reference_pins(self._trust, project)
 
-    def verify_v3(self, doc: bytes, nonce: bytes, repo: str | None) -> Verification:
+    def verify_v3(self, doc: bytes, nonce: bytes, repo: str | None, *, project: str | None = None) -> Verification:
         """Appraise a nonce-bound v3 attestation document, with whichever collateral format (v2 or v3) the document
         carries, at the current time.
 
-        ``repo`` pins the expected repository or registry project as
-        ``org/project[@revision][@sha256:digest]``. An empty ``repo``, or
-        None, which means the same, pins no repository: v3 collateral then
-        accepts configs authorized by the verifier's configured config trust (the public or caller registry,
-        caller signing keys, an authorizer, or an embedded config), and
-        v2 collateral, which requires a repository pin, is a UsageError. An
-        embedded config instead authorizes its exact caller-supplied bytes.
-        A config authorizer requires an empty ``repo`` and owns config
-        authorization.
+        ``repo`` pins a GitHub repository as
+        ``owner/name[@tag][@sha256:digest]`` and ``project`` a config
+        registry project as ``org/project[@revision][@sha256:digest]``. The
+        two namespaces are unrelated: the same name can belong to different
+        owners in each, so only a document carrying that repository's signed
+        release satisfies ``repo``, and only one carrying a registry
+        approval of that project satisfies ``project``. The document's
+        collateral decides which applies, a document whose collateral the
+        pin does not cover is rejected, and setting both accepts either.
+        Empty, or None, which means the same, leaves that part unset. With
+        neither set, registry collateral accepts configs authorized by the
+        verifier's configured config trust (the public or caller registry,
+        caller signing keys, an authorizer, or an embedded config). An
+        embedded config authorizes its exact caller-supplied bytes, and a
+        config authorizer owns config authorization and requires an empty
+        ``project``.
 
         The caller owns both expectations that cannot come from the
         document: the nonce it generated, and any additional workload
@@ -245,14 +263,15 @@ class Verifier:
         the result even when every reference is embedded.
         """
         # The only clock read.
-        return self.verify_v3_at(doc, nonce, repo, datetime.now(UTC))
+        return self.verify_v3_at(doc, nonce, repo, datetime.now(UTC), project=project)
 
-    def verify_v3_at(self, doc: bytes, nonce: bytes, repo: str | None, verification_time: datetime) -> Verification:
+    def verify_v3_at(
+        self, doc: bytes, nonce: bytes, repo: str | None, verification_time: datetime, *, project: str | None = None
+    ) -> Verification:
         """``verify_v3`` for an archived document. ``verification_time`` replaces the current time in every
         time-bound check: the freshness witnesses and approvals, and the vendor certificate and CRL validity windows
         of the CPU evidence. ``metadata.verified_at`` reports it, and a naive or missing time is a UsageError.
-        ``repo`` means what it means to ``verify_v3``: an empty ``repo``, or None, pins no repository, which v3
-        collateral accepts and v2 collateral rejects with a UsageError.
+        ``repo`` and ``project`` mean what they mean to ``verify_v3``.
 
         The caller must authenticate ``verification_time`` independently,
         for example from a trusted timestamp recorded when the document was
@@ -270,16 +289,31 @@ class Verifier:
             raise UsageError("document must be bytes")
         if not isinstance(nonce, bytes | bytearray | memoryview):
             raise UsageError("nonce must be bytes")
-        return _verify_v3(trust, bytes(doc), bytes(nonce), _repo(repo), verification_time)
+        return _verify_v3(
+            trust,
+            bytes(doc),
+            bytes(nonce),
+            _reference("repository", repo),
+            _reference("project", project),
+            verification_time,
+        )
 
 
-def _repo(repo: str | None) -> str:
-    """The repository pin as a string: None means no pin, like ``""``; anything but a string is a UsageError."""
-    if repo is None:
+def _reference(what: str, ref: str | None) -> str:
+    """A pin as a string: None means no pin, like ``""``; anything but a string is a UsageError."""
+    if ref is None:
         return ""
-    if not isinstance(repo, str):
-        raise UsageError("repository reference must be a string or None")
-    return repo
+    if not isinstance(ref, str):
+        raise UsageError(f"{what} reference must be a string or None")
+    return ref
+
+
+def _repository_pin(repo: str) -> Reference:
+    """The parts of a GitHub repository pin; a string that is not a reference is a UsageError."""
+    try:
+        return _parse_reference(repo)
+    except ReleaseReferenceError as err:
+        raise UsageError(str(err)) from err
 
 
 def _key_tuple(what: str, keys: Sequence[PublicKey] | None) -> tuple[PublicKey, ...] | None:
@@ -427,7 +461,9 @@ def _layer(layer: str) -> Iterator[None]:
         raise VerificationError(layer, str(err)) from err
 
 
-def _verify_v3(trust: TrustPolicy, doc_bytes: bytes, nonce: bytes, repo: str, now: datetime) -> Verification:
+def _verify_v3(
+    trust: TrustPolicy, doc_bytes: bytes, nonce: bytes, repo: str, project: str, now: datetime
+) -> Verification:
     """The pipeline: envelope, reference values, CPU evidence, policy; then the record."""
     with _layer(LAYER_ENVELOPE):
         try:
@@ -437,11 +473,21 @@ def _verify_v3(trust: TrustPolicy, doc_bytes: bytes, nonce: bytes, repo: str, no
 
     # Reference values and CPU evidence are appraised against the same instant.
     with _layer(LAYER_PROVENANCE):
+        # A malformed pin is the caller's mistake whichever collateral the document carries.
+        code_pin = _repository_pin(repo) if repo != "" else None
+        reference_pins(trust, project)
+
         collateral_format = doc.collateral_format()
         if collateral_format == FORMAT_V3:
-            refs = config_references(trust, doc, repo, now)
+            if project == "" and code_pin is not None:
+                raise ReferencesError(REGISTRY_COLLATERAL_NEEDS_PROJECT)
+            refs = config_references(trust, doc, project, now)
         elif collateral_format == FORMAT_V2:
-            refs = _code_references(trust, doc, repo, now)
+            if requires_config_collateral(trust):
+                raise ReferencesError(f"configured trust requires {FORMAT_V3}")
+            if code_pin is None:
+                raise ReferencesError(REPOSITORY_COLLATERAL_NEEDS_REPO)
+            refs = _code_references(trust, doc, code_pin, now)
         else:
             raise ReferencesError(f"unsupported collateral format {collateral_format!r}")
 
@@ -471,17 +517,10 @@ def _verify_v3(trust: TrustPolicy, doc_bytes: bytes, nonce: bytes, repo: str, no
     )
 
 
-def _code_references(trust: TrustPolicy, doc: Document, repo: str, now: datetime) -> EndorsementResult:
-    """Resolve v2 collateral: the code release and the platform endorsements, each with its freshness witness
-    appraised at ``now``. v2 collateral requires a repository pin, so an invalid or empty ``repo`` (what None
-    normalizes to) is a UsageError."""
-    if requires_config_collateral(trust):
-        raise ReferencesError(f"configured trust requires {FORMAT_V3}")
+def _code_references(trust: TrustPolicy, doc: Document, pin: Reference, now: datetime) -> EndorsementResult:
+    """Resolve v2 collateral against the repository ``pin``: the code release and the platform endorsements, each
+    with its freshness witness appraised at ``now``."""
     code_ref = doc.sigstore_code()
-    try:
-        pin = _parse_reference(repo)
-    except ReleaseReferenceError as err:
-        raise UsageError(str(err)) from err
     code = trust.endorsements.authenticate_code(code_ref.bundle, pin, code_ref.tag, code_ref.digest)
     platform_ref = doc.sigstore_platform()
     try:

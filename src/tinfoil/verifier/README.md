@@ -2,7 +2,7 @@
 
 Offline verification of Tinfoil enclave attestation documents. The verifier
 takes a document that you fetched, the nonce that you bound it to and the
-repository that you trust, and returns the facts that the document proved:
+repository or registry project that you trust, and returns the facts that the document proved:
 the endorsed TLS key fingerprint and HPKE public key, the measured registers
 and the deadline after which the result must not be reused. It opens no
 connections and keeps no state.
@@ -24,8 +24,8 @@ notice.
 ## Fetch, then verify
 
 Verification is three steps: generate a nonce, fetch the document for that
-nonce from the enclave, and verify it against the repository that you expect
-the enclave to run. The verifier does not fetch; any HTTP client works.
+nonce from the enclave, and verify it against the repository or registry
+project that you expect the enclave to run. The verifier does not fetch; any HTTP client works.
 
 ```python
 import urllib.request
@@ -33,22 +33,35 @@ import urllib.request
 from tinfoil.verifier import Verification, Verifier, random_nonce
 
 
-def fetch_and_verify(host: str, repo: str | None) -> Verification:
+def fetch_and_verify(host: str, repo: str | None, project: str | None) -> Verification:
     nonce = random_nonce()
     url = f"https://{host}/.well-known/tinfoil-attestation?nonce={nonce.hex()}"
     with urllib.request.urlopen(url, timeout=10) as response:
         document = response.read()
-    return Verifier().verify_v3(document, nonce, repo)
+    return Verifier().verify_v3(document, nonce, repo, project=project)
 ```
 
-`repo` is `org/repo`, optionally pinned to a revision or a digest as
-`org/repo@v1.2.3` or `org/repo@sha256:<hex>`. An empty string or `None`
-pins no repository. A document that carries v3 collateral is then accepted
-on any config that the verifier's configured config trust authorizes: the
-public registry by default, or, when the verifier was built with one, the
-caller's config signing keys, config authorizer or embedded config. One that
-carries v2 collateral requires a repository pin, so the call is a
-`UsageError`.
+`repo` is a GitHub repository, `owner/name`, and `project` a config registry
+project, `org/project`; each is optionally pinned to a revision or a digest
+as `org/project@v1.2.3` or `org/project@sha256:<hex>`. The two namespaces
+are unrelated, and the same name can belong to different owners in each, so
+a pin in one is never satisfied by the other: `repo` only by a document
+that carries that repository's signed release (v2 collateral), and
+`project` only by one that carries a registry approval of that project (v3
+collateral). Set the one the enclave is published under; setting both
+accepts either. A document whose collateral the pin does not cover is a
+`VerificationError` at the provenance layer.
+
+An empty string or `None` leaves that part unset. With neither set, a
+document that carries v3 collateral is accepted on any config that the
+verifier's configured config trust authorizes: the public registry by
+default, or, when the verifier was built with one, the caller's config
+signing keys, config authorizer or embedded config. One that carries v2
+collateral requires a repository pin and is rejected.
+
+`check_pin_verifiability(repo, project=project)` raises the `UsageError`
+that `verify_v3` would raise for that pin whatever the document, so that a
+caller can refuse a pin before fetching anything.
 
 A successful return is not the end of the caller's job. The returned
 `Verification` proves facts about the enclave that served the document; the
@@ -227,9 +240,9 @@ subclasses that call for different responses:
 from tinfoil.verifier import LAYER_PROVENANCE, UsageError, VerificationError, Verifier
 
 
-def classify(document: bytes, nonce: bytes, repo: str | None) -> str:
+def classify(document: bytes, nonce: bytes, project: str | None) -> str:
     try:
-        Verifier().verify_v3(document, nonce, repo)
+        Verifier().verify_v3(document, nonce, None, project=project)
     except UsageError as err:
         return f"bug in the caller: {err.message}"
     except VerificationError as err:
