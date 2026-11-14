@@ -66,6 +66,7 @@ def test_capabilities_shape() -> None:
         {**_WELL_FORMED, "nonce_hex": " abcd"},  # whitespace
         {**_WELL_FORMED, "nonce_hex": "0xabcd"},  # prefix
         {**_WELL_FORMED, "repo": None},  # null is not an absent member
+        {**_WELL_FORMED, "project": None},
         {**_WELL_FORMED, "verification_time_unix": None},
         {**_WELL_FORMED, "signing_keys_pem": None},
         {**_WELL_FORMED, "extra": 1},  # unknown member
@@ -163,6 +164,7 @@ def test_input_decodes_every_member() -> None:
     assert decoded.document == b"{}"
     assert decoded.nonce == bytes(32)
     assert decoded.repo == "tinfoilsh/confidential-model-router"
+    assert decoded.project == "tinfoilsh/confidential-model-router", "without a project member, repo names both"
     assert decoded.amd_chain_pem == b"ASK\nARK\n"
     assert decoded.intel_root_pem == b"ROOT\n"
     assert decoded.sigstore_trusted_root == b"{}"
@@ -186,6 +188,7 @@ def test_absent_members_select_defaults() -> None:
     assert decoded.document is None
     assert decoded.nonce is None
     assert decoded.repo == ""
+    assert decoded.project == ""
     assert decoded.amd_chain_pem is None
     assert decoded.intel_root_pem is None
     assert decoded.sigstore_trusted_root is None

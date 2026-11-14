@@ -98,7 +98,7 @@ print(transcription.text)
 
 ## Talking to one enclave
 
-`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and the repository that it must be running; the client verifies the enclave against that repository before it returns.
+`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and what it must be running; the client verifies the enclave against that pin before it returns. The second argument, `repo`, is a GitHub repository, and the keyword `project` (`registry_project` on the OpenAI clients, where `project` is the `openai` package's option) is a config registry project. The two namespaces are unrelated, and the same name can belong to different owners in each, so set the one the enclave is published under: a repository is satisfied only by that repository's signed release, and a project only by a registry approval. Setting both accepts either.
 
 ```python
 import os
@@ -274,7 +274,7 @@ with create_client(api_key=os.environ["TINFOIL_API_KEY"]) as client:
 
 ## Verifying attestation documents yourself
 
-The verifier that every client uses is its own package, `tinfoil.verifier`. It appraises an attestation document that you fetched against the repository that you trust and returns the facts that it proved; it opens no connections. See [its README](src/tinfoil/verifier/README.md) for the API.
+The verifier that every client uses is its own package, `tinfoil.verifier`. It appraises an attestation document that you fetched against the repository or registry project that you trust and returns the facts that it proved; it opens no connections. See [its README](src/tinfoil/verifier/README.md) for the API.
 
 ```python
 from tinfoil.verifier import Verifier, random_nonce

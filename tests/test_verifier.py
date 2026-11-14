@@ -161,9 +161,18 @@ def test_verify_v3_rejects_bad_repo() -> None:
         v.verify_v3(raw, nonce, "not a repo reference")
 
 
+def test_malformed_pin_is_a_usage_error_whatever_the_collateral() -> None:
+    v = Verifier()
+    for format_ in (None, FORMAT_V2, FORMAT_V3):
+        raw, nonce, _ = vf.embedded_document(format_)
+        for repo, project in (("not a reference", "org/project"), ("org/project", "not a reference")):
+            with pytest.raises(UsageError, match="invalid release reference"):
+                v.verify_v3(raw, nonce, repo, project=project)
+
+
 def test_v2_collateral_requires_a_repository_pin() -> None:
     """v2 collateral is verified against a code release, so a document that carries it needs a repository pin: None
-    and "" both mean no pin and are a UsageError there, where v3 collateral would accept them."""
+    and "" both mean no pin and are rejected at the provenance layer there, where v3 collateral would accept them."""
     v = Verifier()
     code = vf.reference_entry(
         "code", SIGSTORE_CODE_V1_FORMAT, {"repo": "", "tag": "", "digest": "digest", "sigstore_bundle": {}}
@@ -171,10 +180,12 @@ def test_v2_collateral_requires_a_repository_pin() -> None:
     raw, nonce, parsed = vf.embedded_document(None, code)
     assert parsed.collateral_format() == FORMAT_V2
     for repo in (None, ""):
-        with pytest.raises(UsageError, match="invalid release reference '': want owner/name"):
+        with pytest.raises(VerificationError, match="no GitHub repository is pinned") as live:
             v.verify_v3(raw, nonce, repo)
-        with pytest.raises(UsageError, match="invalid release reference '': want owner/name"):
+        rejected_at(live.value, LAYER_PROVENANCE)
+        with pytest.raises(VerificationError, match="no GitHub repository is pinned") as archived:
             v.verify_v3_at(raw, nonce, repo, NOW)
+        rejected_at(archived.value, LAYER_PROVENANCE)
 
 
 def test_verify_rejects_an_unbuilt_verifier() -> None:
@@ -200,36 +211,43 @@ def test_verify_v3_at_requires_an_aware_instant() -> None:
         v.verify_v3_at(raw, nonce[:-1], "", NOW)
 
 
-def test_repo_must_be_a_string_before_any_layer_runs() -> None:
-    """A repository reference that is neither a string nor None is a UsageError from every entry point, raised
-    before the envelope is opened, rather than a provenance-layer verification error or a TypeError."""
+def test_pin_must_be_a_string_before_any_layer_runs() -> None:
+    """A repository or project reference that is neither a string nor None is a UsageError from every entry point,
+    raised before the envelope is opened, rather than a provenance-layer verification error or a TypeError."""
     v = Verifier()
+    for project in (123, b"org/project", ["org/project"]):
+        with pytest.raises(UsageError, match="project reference must be a string or None"):
+            v.check_pin_verifiability(None, project=project)  # type: ignore[arg-type]
+        with pytest.raises(UsageError, match="project reference must be a string or None"):
+            v.verify_v3_at(b"not a document", bytes(NONCE_SIZE), None, NOW, project=project)  # type: ignore[arg-type]
+        with pytest.raises(UsageError, match="project reference must be a string or None"):
+            v.verify_v3(b"not a document", bytes(NONCE_SIZE), None, project=project)  # type: ignore[arg-type]
     for repo in (123, b"org/repo", ["org/repo"]):
         with pytest.raises(UsageError, match="repository reference must be a string or None"):
-            v.check_repo_verifiability(repo)  # type: ignore[arg-type]
+            v.check_pin_verifiability(repo)  # type: ignore[arg-type]
         with pytest.raises(UsageError, match="repository reference must be a string or None"):
             v.verify_v3_at(b"not a document", bytes(NONCE_SIZE), repo, NOW)  # type: ignore[arg-type]
         with pytest.raises(UsageError, match="repository reference must be a string or None"):
             v.verify_v3(b"not a document", bytes(NONCE_SIZE), repo)  # type: ignore[arg-type]
 
 
-def test_repo_none_means_no_pin() -> None:
-    """None and "" are the same repository pin: none. Both pass the verifiability check, both reach the envelope
+def test_none_means_no_pin() -> None:
+    """None and "" are the same pin: none. Both pass the verifiability check, both reach the envelope
     layer, and a config authorizer, which accepts no pin, accepts both."""
     v = Verifier()
-    v.check_repo_verifiability(None)
-    v.check_repo_verifiability("")
-    for repo in (None, ""):
+    v.check_pin_verifiability(None)
+    v.check_pin_verifiability("", project="")
+    for pin in (None, ""):
         with pytest.raises(VerificationError) as envelope:
-            v.verify_v3_at(b"not a document", bytes(NONCE_SIZE), repo, NOW)
+            v.verify_v3_at(b"not a document", bytes(NONCE_SIZE), pin, NOW, project=pin)
         rejected_at(envelope.value, LAYER_ENVELOPE)
         with pytest.raises(VerificationError) as live:
-            v.verify_v3(b"not a document", bytes(NONCE_SIZE), repo)
+            v.verify_v3(b"not a document", bytes(NONCE_SIZE), pin, project=pin)
         rejected_at(live.value, LAYER_ENVELOPE)
     authorizing = Verifier(config_authorizer=authorize_all)
-    authorizing.check_repo_verifiability(None)
+    authorizing.check_pin_verifiability(None, project=None)
     with pytest.raises(UsageError, match="cannot authenticate repository"):
-        authorizing.check_repo_verifiability("org/project")
+        authorizing.check_pin_verifiability(None, project="org/project")
 
 
 def test_errors_name_their_layer() -> None:
@@ -332,17 +350,42 @@ def test_verify_appraises_cpu_evidence_at_the_verification_instant() -> None:
 
 
 def test_collateral_version_selects_verification() -> None:
+    """The document's collateral decides which part of the pin applies, and a pin in one namespace is never
+    satisfied by collateral from the other."""
     v = Verifier()
-    for format_, want in (
-        (None, SIGSTORE_CODE_V1_FORMAT),
-        (FORMAT_V2, SIGSTORE_CODE_V1_FORMAT),
-        (FORMAT_V3, CONFIG_ID),
-    ):
+    name = "org/project"
+    repository_only, no_repository = "only a GitHub repository is pinned", "no GitHub repository is pinned"
+    cases: list[tuple[str, str | None, str | None, str | None, str]] = [
+        ("repository collateral, repository", FORMAT_V2, name, None, SIGSTORE_CODE_V1_FORMAT),
+        ("unversioned collateral, repository", None, name, None, SIGSTORE_CODE_V1_FORMAT),
+        ("repository collateral, project", FORMAT_V2, None, name, no_repository),
+        ("unversioned collateral, project", None, None, name, no_repository),
+        ("repository collateral, no pin", FORMAT_V2, None, None, no_repository),
+        ("unversioned collateral, no pin", None, None, None, no_repository),
+        ("repository collateral, both", FORMAT_V2, name, name, SIGSTORE_CODE_V1_FORMAT),
+        ("registry collateral, project", FORMAT_V3, None, name, CONFIG_ID),
+        ("registry collateral, repository", FORMAT_V3, name, None, repository_only),
+        ("registry collateral, no pin", FORMAT_V3, None, None, CONFIG_ID),
+        ("registry collateral, both", FORMAT_V3, name, name, CONFIG_ID),
+    ]
+    for case, format_, repo, project, want in cases:
         raw, nonce, _ = vf.embedded_document(format_)
         with pytest.raises(VerificationError, match=want) as rejected:
-            v.verify_v3(raw, nonce, "org/project")
+            v.verify_v3(raw, nonce, repo, project=project)
         rejected_at(rejected.value, LAYER_PROVENANCE)
-        assert isinstance(rejected.value.__cause__, NotFoundError)
+        # A pin that the collateral covers reaches the reference values, which the document lacks.
+        assert isinstance(rejected.value.__cause__, NotFoundError) == (want in (SIGSTORE_CODE_V1_FORMAT, CONFIG_ID)), (
+            case
+        )
+
+
+def test_repository_collateral_under_registry_only_trust_keeps_its_error() -> None:
+    v = Verifier(embedded_references=vf.embedded_inputs())
+    raw, nonce, _ = vf.embedded_document(FORMAT_V2)
+    for repo, project in ((None, None), (None, "org/project@v1"), ("org/project", "org/project@v1")):
+        with pytest.raises(VerificationError, match="configured trust requires") as rejected:
+            v.verify_v3(raw, nonce, repo, project=project)
+        rejected_at(rejected.value, LAYER_PROVENANCE)
 
 
 def test_unknown_collateral_format_never_reaches_the_reference_values() -> None:
@@ -359,11 +402,11 @@ def test_unknown_collateral_format_never_reaches_the_reference_values() -> None:
 def test_config_reference_pins() -> None:
     v = Verifier()
     raw, nonce, _ = vf.embedded_document(FORMAT_V3)
-    repo = "org/project"
+    project = "org/project"
     digest = "ab" * 32
-    for ref in ("", repo, repo + "@v1", repo + "@sha256:" + digest, repo + "@v1@sha256:" + digest):
+    for ref in ("", project, project + "@v1", project + "@sha256:" + digest, project + "@v1@sha256:" + digest):
         with pytest.raises(VerificationError) as rejected:
-            v.verify_v3(raw, nonce, ref)
+            v.verify_v3(raw, nonce, None, project=ref)
         assert isinstance(rejected.value.__cause__, NotFoundError), "valid pins must reach endorsement verification"
     for ref in (
         "/org/project",
@@ -374,38 +417,56 @@ def test_config_reference_pins() -> None:
         "org/project@v1@v2",
     ):
         with pytest.raises(UsageError):
-            v.verify_v3(raw, nonce, ref)
+            v.verify_v3(raw, nonce, None, project=ref)
 
 
 def test_v3_collateral_requires_config_identity_pins() -> None:
     v = Verifier()
-    v.check_repo_verifiability("Org/My_Repo")
+    v.check_pin_verifiability(None, project="Org/My_Repo")
     raw, nonce, _ = vf.embedded_document(FORMAT_V3)
     with pytest.raises(UsageError, match="identity"):
-        v.verify_v3(raw, nonce, "Org/My_Repo")
+        v.verify_v3(raw, nonce, None, project="Org/My_Repo")
 
 
-def test_check_repo_verifiability() -> None:
+def test_check_pin_verifiability() -> None:
     inputs = vf.embedded_inputs()
-    cases: list[tuple[str, dict[str, Any], str, bool]] = [
-        ("defaults with a pin", {}, "org/repo@v1", True),
-        ("defaults with a pin only v2 collateral accepts", {}, "Org/My_Repo", True),
-        ("defaults without a pin", {}, "", True),
-        ("defaults with a malformed pin", {}, "not a reference", False),
-        ("embedded config without a pin", {"embedded_references": inputs}, "", True),
-        ("embedded config with its own pin", {"embedded_references": inputs}, "org/project@v1", True),
-        ("embedded config with another pin", {"embedded_references": inputs}, "org/repo", False),
-        ("config authorizer without a pin", {"config_authorizer": authorize_all}, "", True),
-        ("config authorizer with a pin", {"config_authorizer": authorize_all}, "org/repo", False),
+    embedded: dict[str, Any] = {"embedded_references": inputs}
+    authorizer: dict[str, Any] = {"config_authorizer": authorize_all}
+    registry_only: list[tuple[str, dict[str, Any]]] = [
+        ("embedded config", embedded),
+        ("config authorizer", authorizer),
+        ("config signing keys", {"config_signing_keys": public_signing_keys()}),
+        ("freshness signing keys", {"freshness_signing_keys": public_signing_keys()}),
+        ("config registry IDs", {"config_registry_ids": [PUBLIC_REGISTRY_ID]}),
     ]
-    for name, options, ref, valid in cases:
+    cases: list[tuple[str, dict[str, Any], str | None, str | None, bool]] = [
+        ("defaults with a project", {}, None, "org/repo@v1", True),
+        ("defaults with a repository", {}, "Org/My_Repo", None, True),
+        ("defaults with both", {}, "Org/My_Repo", "org/project", True),
+        ("defaults without a pin", {}, None, None, True),
+        ("defaults with empty pins", {}, "", "", True),
+        ("defaults with a malformed project", {}, None, "not a reference", False),
+        ("defaults with a malformed repository", {}, "not a reference", None, False),
+        ("defaults with a malformed repository beside a project", {}, "not a reference", "org/project", False),
+        ("embedded config without a pin", embedded, None, None, True),
+        ("embedded config with its own project", embedded, None, "org/project@v1", True),
+        ("embedded config with another project", embedded, None, "org/repo", False),
+        ("embedded config with its own project and a repository", embedded, "org/project", "org/project@v1", True),
+        ("config authorizer without a pin", authorizer, None, None, True),
+        ("config authorizer with a project", authorizer, None, "org/repo", False),
+        ("config authorizer with both", authorizer, "org/repo", "org/repo", False),
+        *((f"{name} with a repository alone", options, "org/project", None, False) for name, options in registry_only),
+    ]
+    for name, options, repo, project, valid in cases:
         v = Verifier(**options)
         if valid:
-            v.check_repo_verifiability(ref)
+            v.check_pin_verifiability(repo, project=project)
         else:
             with pytest.raises(UsageError):
-                v.check_repo_verifiability(ref)
+                v.check_pin_verifiability(repo, project=project)
         assert name
+    with pytest.raises(UsageError, match="verifies registry collateral only"):
+        Verifier(**embedded).check_pin_verifiability("org/project")
 
 
 def test_caller_authorizes_config() -> None:
@@ -556,12 +617,12 @@ def test_embedded_config_reference_without_config_bytes() -> None:
     reference = EmbeddedConfigReference(name=vf.EMBEDDED_CONFIG_NAME, digest=digest, runtime=runtime)
     v = Verifier(embedded_references=dataclasses.replace(inputs, config=reference))
     assert v.caller_authorizes_config is True
-    v.check_repo_verifiability("")
-    v.check_repo_verifiability("org/project@v1@sha256:" + digest)
+    v.check_pin_verifiability(None, project="")
+    v.check_pin_verifiability(None, project="org/project@v1@sha256:" + digest)
     with pytest.raises(UsageError):
-        v.check_repo_verifiability("org/project@v2")
+        v.check_pin_verifiability(None, project="org/project@v2")
     with pytest.raises(UsageError):
-        v.check_repo_verifiability("org/project@sha256:" + "ab" * 32)
+        v.check_pin_verifiability(None, project="org/project@sha256:" + "ab" * 32)
     raw, nonce, doc = vf.embedded_document(FORMAT_V3)
     refs = config_references(trust_of(v), doc, "org/project@v1", NOW)
     assert isinstance(refs.quote, ConfigReferenceValues)
@@ -569,7 +630,7 @@ def test_embedded_config_reference_without_config_bytes() -> None:
     assert refs.artifact.digest == runtime.digest
     for ref in ("org/project@v1", ""):
         with pytest.raises(VerificationError) as rejected:
-            v.verify_v3(raw, nonce, ref)
+            v.verify_v3(raw, nonce, None, project=ref)
         rejected_at(rejected.value, LAYER_QUOTE)
     for bad in (
         dataclasses.replace(reference, digest=""),
@@ -602,7 +663,7 @@ def test_embedded_references_preserve_bindings() -> None:
     assert refs.config.approval_time is None
     assert refs.freshness_expires_at is None
     with pytest.raises(VerificationError) as pinned:
-        v.verify_v3(raw, nonce, "org/project@v1")
+        v.verify_v3(raw, nonce, None, project="org/project@v1")
     rejected_at(pinned.value, LAYER_QUOTE)
     with pytest.raises(VerificationError) as unpinned:
         v.verify_v3(raw, nonce, "")
@@ -615,7 +676,7 @@ def test_embedded_references_cannot_override_pins() -> None:
     raw, nonce, _ = vf.embedded_document(FORMAT_V3)
     for ref in ("other/project", "org/project@v2", "org/project@sha256:" + "00" * 32):
         with pytest.raises(UsageError, match="does not match the caller's pins"):
-            v.verify_v3(raw, nonce, ref)
+            v.verify_v3(raw, nonce, None, project=ref)
     assert inputs.runtime is not None
     with pytest.raises(UsageError, match="digest pin"):
         Verifier(embedded_references=dataclasses.replace(inputs, runtime=inputs.runtime + b"\n"))
@@ -624,7 +685,7 @@ def test_embedded_references_cannot_override_pins() -> None:
     unnamed = dataclasses.replace(inputs, config=dataclasses.replace(inputs.config, name=""))
     v = Verifier(embedded_references=unnamed)
     with pytest.raises(UsageError, match="does not match the caller's pins"):
-        v.verify_v3(raw, nonce, "org/project")
+        v.verify_v3(raw, nonce, None, project="org/project")
     with pytest.raises(VerificationError) as rejected:
         v.verify_v3(raw, nonce, "")
     rejected_at(rejected.value, LAYER_QUOTE)
@@ -851,7 +912,7 @@ def test_config_trust_requires_endorsements() -> None:
     v = Verifier(config_signing_keys=keys, freshness_signing_keys=keys)
     raw, nonce, _ = vf.embedded_document(FORMAT_V3)
     with pytest.raises(VerificationError, match=CONFIG_ID) as rejected:
-        v.verify_v3(raw, nonce, "org/project")
+        v.verify_v3(raw, nonce, None, project="org/project")
     rejected_at(rejected.value, LAYER_PROVENANCE)
     assert isinstance(rejected.value.__cause__, NotFoundError)
 
@@ -885,7 +946,7 @@ def test_digest_endorsement_binds_quote_and_runtime_without_config() -> None:
     assert refs.config.reference == reference
     assert refs.freshness_expires_at == world.now + v.freshness_max_age
     with pytest.raises(VerificationError) as rejected:
-        v.verify_v3_at(raw, nonce, "org/project@v1", world.now)
+        v.verify_v3_at(raw, nonce, None, world.now, project="org/project@v1")
     rejected_at(rejected.value, LAYER_QUOTE)
     with pytest.raises(ReferencesError, match="pinned identity"):
         config_references(trust_of(v), doc, "org/other", world.now)

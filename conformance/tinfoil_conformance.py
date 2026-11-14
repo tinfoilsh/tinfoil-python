@@ -149,6 +149,7 @@ _INPUT_MEMBERS = frozenset(
         "document_b64",
         "nonce_hex",
         "repo",
+        "project",
         "amd_root_ca_pem",
         "ask_pem",
         "intel_sgx_root_pem",
@@ -172,7 +173,7 @@ class MalformedInput(ValueError):
 class Input:
     """A decoded adapter Input.
 
-    Document stages read ``document``, ``nonce`` and ``repo``; the approval
+    Document stages read ``document``, ``nonce``, ``repo`` and ``project``; the approval
     stage reads ``bundle_json``, ``signing_keys_pem`` and ``artifact_digest``;
     the timestamp stage reads ``timestamp_response`` and ``timestamp_input``.
     Absent trust roots select the embedded production roots. Which members a
@@ -183,6 +184,8 @@ class Input:
     document: bytes | None
     nonce: bytes | None
     repo: str
+    # Inputs that predate separate pins have no project member; repo then names the workload in either namespace.
+    project: str
     # The ASK then the ARK, PEM-encoded, in the AMD KDS cert_chain layout.
     amd_chain_pem: bytes | None
     intel_root_pem: bytes | None
@@ -230,11 +233,13 @@ class Input:
         bundle = _string(data, "bundle_json_b64")
         tsr = _string(data, "timestamp_response_b64")
         tsi = _string(data, "timestamp_input_b64")
+        repo = _string(data, "repo")
 
         return cls(
             document=_base64(document, "document_b64") if document else None,
             nonce=_hex(nonce, "nonce_hex") if nonce else None,
-            repo=_string(data, "repo"),
+            repo=repo,
+            project=_string(data, "project") if "project" in data else repo,
             amd_chain_pem=f"{ask.strip()}\n{amd_root.strip()}\n".encode() if amd_root else None,
             intel_root_pem=intel_root.encode() if intel_root else None,
             sigstore_trusted_root=_base64(sigstore_root, "sigstore_trusted_root_json_b64") if sigstore_root else None,
@@ -377,7 +382,9 @@ def _verify(decoded: Input) -> Result:
         return _malformed(stage)
     appraisal = decoded.verification_time or datetime.now(UTC)
     try:
-        verified = verifier.verify_v3_at(decoded.document or b"", decoded.nonce or b"", decoded.repo, appraisal)
+        verified = verifier.verify_v3_at(
+            decoded.document or b"", decoded.nonce or b"", decoded.repo, appraisal, project=decoded.project
+        )
     except UsageError:
         return _malformed(stage)
     except VerificationError as err:
@@ -640,7 +647,9 @@ def _live_verify(raw: Any) -> Result:
     one.
 
     The request is ``{"host": ..., "repo": ...}``, both non-empty strings
-    and the host a bare host with an optional port; anything else is
+    and the host a bare host with an optional port, with an optional
+    ``"project"`` string; without it ``repo`` names the workload in either
+    namespace. Anything else is
     malformed input, found before any connection. A document that cannot
     be fetched, or an enclave that cannot be dialed for the channel
     binding, gives no verdict. The verifier's errors map as in the
@@ -652,7 +661,7 @@ def _live_verify(raw: Any) -> Result:
     request = _live_request(raw)
     if request is None:
         return _malformed(stage)
-    host, repo = request
+    host, repo, project = request
     try:
         _authority(host)
     except ValueError as err:
@@ -664,7 +673,7 @@ def _live_verify(raw: Any) -> Result:
     except (FetchError, httpx.HTTPError, OSError, ValueError) as err:
         return _internal(stage, f"fetching attestation from {host}: {err}")
     try:
-        verified = verifier.verify_v3(document_bytes, nonce, repo)
+        verified = verifier.verify_v3(document_bytes, nonce, repo, project=project)
     except UsageError as err:
         return _malformed(stage, str(err))
     except VerificationError as err:
@@ -684,14 +693,17 @@ def _live_verify(raw: Any) -> Result:
     return Result({"stage": stage, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
 
 
-def _live_request(raw: Any) -> tuple[str, str] | None:
-    """The host and repo of a live-verify request, or None when it is not one."""
+def _live_request(raw: Any) -> tuple[str, str, str] | None:
+    """The host, repo and project of a live-verify request, or None when it is not one."""
     if not isinstance(raw, Mapping):
         return None
     host, repo = raw.get("host"), raw.get("repo")
     if not isinstance(host, str) or not isinstance(repo, str) or not host or not repo:
         return None
-    return host, repo
+    project = raw.get("project", repo)
+    if not isinstance(project, str):
+        return None
+    return host, repo, project
 
 
 def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
