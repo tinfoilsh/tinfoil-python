@@ -44,14 +44,6 @@ TST_INFO_VERSION = 1
 OID_SHA256 = "2.16.840.1.101.3.4.2.1"
 OID_SIGNED_DATA = "1.2.840.113549.1.7.2"
 OID_TST_INFO = "1.2.840.113549.1.9.16.1.4"
-OID_CONTENT_TYPE = "1.2.840.113549.1.9.3"
-OID_MESSAGE_DIGEST = "1.2.840.113549.1.9.4"
-OID_SIGNING_CERTIFICATE = "1.2.840.113549.1.9.16.2.12"
-OID_SIGNING_CERTIFICATE_V2 = "1.2.840.113549.1.9.16.2.47"
-OID_SHA384 = "2.16.840.1.101.3.4.2.2"
-OID_SHA512 = "2.16.840.1.101.3.4.2.3"
-DIRECTORY_NAME_TAG = 4
-CERTIFICATE_HASHES = {OID_SHA256: "sha256", OID_SHA384: "sha384", OID_SHA512: "sha512"}
 
 
 class TimestampError(ValueError):
@@ -229,10 +221,6 @@ def _verify_under_authority(
     signer = next((c for c in candidates if issuer_name(c) == sid_issuer and c.serial_number == sid_serial), None)
     if signer is None:
         raise TimestampError("the token's signer certificate was not found")
-    try:
-        _check_certificate_binding(parsed.token_raw, signer)
-    except der.DerError as err:
-        raise TimestampError(f"timestamp certificate binding: {err}") from err
     constraints = basic_constraints(signer)
     if constraints is not None and constraints[0]:
         raise TimestampError("the signing certificate is a certificate authority")
@@ -251,76 +239,6 @@ def _verify_under_authority(
         builder.build().verify(wire, hashed_message)
     except VerificationError as err:
         raise TimestampError(f"the timestamp signature does not verify: {err}") from err
-
-
-def _check_certificate_binding(token_raw: bytes, signer: Certificate) -> None:
-    content = der.expect_sequence(der.decode(token_raw), "TimeStampToken")
-    data = der.expect_sequence(_explicit(content[1], 0, "SignedData"), "SignedData")
-    if not der.is_universal(data[-1], der.TAG_SET):
-        raise TimestampError("SignedData must end in signerInfos")
-    signers = der.children(data[-1])
-    if len(signers) != 1:
-        raise TimestampError("timestamp requires exactly one signer")
-    fields = der.expect_sequence(signers[0], "SignerInfo")
-    if len(fields) < 4 or not der.is_context(fields[3], 0):
-        raise TimestampError("timestamp requires signed attributes")
-    seen: set[str] = set()
-    for attribute in der.children(fields[3]):
-        parts = der.expect_sequence(attribute, "Attribute")
-        if len(parts) != 2 or not der.is_universal(parts[1], der.TAG_SET):
-            raise TimestampError("invalid timestamp signed attribute")
-        oid = der.object_identifier(parts[0])
-        if oid not in (OID_SIGNING_CERTIFICATE, OID_SIGNING_CERTIFICATE_V2, OID_CONTENT_TYPE, OID_MESSAGE_DIGEST):
-            continue
-        if oid in seen:
-            raise TimestampError("duplicate timestamp signing-certificate attribute")
-        seen.add(oid)
-        values = der.children(parts[1])
-        if len(values) != 1:
-            raise TimestampError("signing-certificate attribute must have one value")
-        if oid == OID_CONTENT_TYPE:
-            if der.object_identifier(values[0]) != OID_TST_INFO:
-                raise TimestampError("timestamp signed content-type must be id-ct-TSTInfo")
-            continue
-        if oid == OID_MESSAGE_DIGEST:
-            continue
-        value = der.expect_sequence(values[0], "SigningCertificate")
-        if not 1 <= len(value) <= 2:
-            raise TimestampError("invalid signing-certificate attribute")
-        certs = der.expect_sequence(value[0], "SigningCertificate certs")
-        if not certs:
-            raise TimestampError("signing-certificate attribute has no certificates")
-        cert_id = der.expect_sequence(certs[0], "ESSCertID")
-        algorithm = "sha1" if oid == OID_SIGNING_CERTIFICATE else "sha256"
-        if oid == OID_SIGNING_CERTIFICATE_V2 and cert_id and der.is_universal(cert_id[0], der.TAG_SEQUENCE):
-            identifier = der.expect_sequence(cert_id[0], "ESSCertIDv2 hashAlgorithm")
-            cert_id = cert_id[1:]
-            if not 1 <= len(identifier) <= 2 or (
-                len(identifier) == 2 and not der.is_universal(identifier[1], der.TAG_NULL)
-            ):
-                raise TimestampError("invalid certificate hash algorithm parameters")
-            hash_oid = der.object_identifier(identifier[0])
-            if hash_oid not in CERTIFICATE_HASHES:
-                raise TimestampError("unsupported certificate hash algorithm")
-            algorithm = CERTIFICATE_HASHES[hash_oid]
-        if not 1 <= len(cert_id) <= 2:
-            raise TimestampError("invalid timestamp certificate identifier")
-        digest = hashlib.new(algorithm, signer.public_bytes(serialization.Encoding.DER), usedforsecurity=False).digest()
-        if der.octet_string(cert_id[0]) != digest:
-            raise TimestampError("timestamp certificate hash does not match signer")
-        if len(cert_id) == 2:
-            issuer_serial = der.expect_sequence(cert_id[1], "IssuerSerial")
-            if len(issuer_serial) != 2 or der.integer(issuer_serial[1]) != signer.serial_number:
-                raise TimestampError("timestamp certificate serial does not match signer")
-            names = der.expect_sequence(issuer_serial[0], "GeneralNames")
-            if (
-                len(names) != 1
-                or not der.is_context(names[0], DIRECTORY_NAME_TAG)
-                or _explicit(names[0], DIRECTORY_NAME_TAG, "directoryName").raw != issuer_name(signer)
-            ):
-                raise TimestampError("timestamp certificate issuer does not match signer")
-    if OID_CONTENT_TYPE not in seen or not seen.intersection((OID_SIGNING_CERTIFICATE, OID_SIGNING_CERTIFICATE_V2)):
-        raise TimestampError("timestamp lacks required signed attributes")
 
 
 def _dedupe(certificates: list[Certificate], *, exclude: Certificate) -> list[Certificate]:
