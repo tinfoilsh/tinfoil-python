@@ -99,8 +99,8 @@ class Enclave:
                 raise ConfigurationError(f"invalid host {authority!r}: want a host with an optional port")
         if verifier is None:
             verifier = Verifier()
-        repo = repo or ""
-        project = project or ""
+        repo = "" if repo is None else repo
+        project = "" if project is None else project
         try:
             verifier.check_pin_verifiability(repo, project=project)
         except VerifyError as err:

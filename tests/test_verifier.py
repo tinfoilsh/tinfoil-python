@@ -172,7 +172,7 @@ def test_malformed_pin_is_a_usage_error_whatever_the_collateral() -> None:
 
 def test_v2_collateral_requires_a_repository_pin() -> None:
     """v2 collateral is verified against a code release, so a document that carries it needs a repository pin: None
-    and "" both mean no pin and are rejected at the provenance layer there, where v3 collateral would accept them."""
+    and "" both mean no pin and are a UsageError there, where v3 collateral would accept them."""
     v = Verifier()
     code = vf.reference_entry(
         "code", SIGSTORE_CODE_V1_FORMAT, {"repo": "", "tag": "", "digest": "digest", "sigstore_bundle": {}}
@@ -180,12 +180,10 @@ def test_v2_collateral_requires_a_repository_pin() -> None:
     raw, nonce, parsed = vf.embedded_document(None, code)
     assert parsed.collateral_format() == FORMAT_V2
     for repo in (None, ""):
-        with pytest.raises(VerificationError, match="no GitHub repository is pinned") as live:
+        with pytest.raises(UsageError, match="invalid release reference '': want owner/name"):
             v.verify_v3(raw, nonce, repo)
-        rejected_at(live.value, LAYER_PROVENANCE)
-        with pytest.raises(VerificationError, match="no GitHub repository is pinned") as archived:
+        with pytest.raises(UsageError, match="invalid release reference '': want owner/name"):
             v.verify_v3_at(raw, nonce, repo, NOW)
-        rejected_at(archived.value, LAYER_PROVENANCE)
 
 
 def test_verify_rejects_an_unbuilt_verifier() -> None:
@@ -354,14 +352,12 @@ def test_collateral_version_selects_verification() -> None:
     satisfied by collateral from the other."""
     v = Verifier()
     name = "org/project"
-    repository_only, no_repository = "only a GitHub repository is pinned", "no GitHub repository is pinned"
+    repository_only, no_repository = "only a GitHub repository is pinned", "only a registry project is pinned"
     cases: list[tuple[str, str | None, str | None, str | None, str]] = [
         ("repository collateral, repository", FORMAT_V2, name, None, SIGSTORE_CODE_V1_FORMAT),
         ("unversioned collateral, repository", None, name, None, SIGSTORE_CODE_V1_FORMAT),
         ("repository collateral, project", FORMAT_V2, None, name, no_repository),
         ("unversioned collateral, project", None, None, name, no_repository),
-        ("repository collateral, no pin", FORMAT_V2, None, None, no_repository),
-        ("unversioned collateral, no pin", None, None, None, no_repository),
         ("repository collateral, both", FORMAT_V2, name, name, SIGSTORE_CODE_V1_FORMAT),
         ("registry collateral, project", FORMAT_V3, None, name, CONFIG_ID),
         ("registry collateral, repository", FORMAT_V3, name, None, repository_only),

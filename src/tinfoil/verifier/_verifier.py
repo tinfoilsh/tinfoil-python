@@ -68,7 +68,9 @@ from tinfoil.verifier._x509.certificate import X509Error
 REGISTRY_COLLATERAL_NEEDS_PROJECT = (
     "document carries config registry collateral, but only a GitHub repository is pinned"
 )
-REPOSITORY_COLLATERAL_NEEDS_REPO = "document carries GitHub repository collateral, but no GitHub repository is pinned"
+REPOSITORY_COLLATERAL_NEEDS_REPO = (
+    "document carries GitHub repository collateral, but only a registry project is pinned"
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -486,7 +488,9 @@ def _verify_v3(
             if requires_config_collateral(trust):
                 raise ReferencesError(f"configured trust requires {FORMAT_V3}")
             if code_pin is None:
-                raise ReferencesError(REPOSITORY_COLLATERAL_NEEDS_REPO)
+                if project != "":
+                    raise ReferencesError(REPOSITORY_COLLATERAL_NEEDS_REPO)
+                code_pin = _repository_pin(repo)
             refs = _code_references(trust, doc, code_pin, now)
         else:
             raise ReferencesError(f"unsupported collateral format {collateral_format!r}")

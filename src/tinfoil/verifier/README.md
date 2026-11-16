@@ -47,8 +47,8 @@ as `org/project@v1.2.3` or `org/project@sha256:<hex>`. The two namespaces
 are unrelated, and the same name can belong to different owners in each, so
 a pin in one is never satisfied by the other: `repo` only by a document
 that carries that repository's signed release (v2 collateral), and
-`project` only by one that carries a registry approval of that project (v3
-collateral). Set the one the enclave is published under; setting both
+`project` only by one that carries v3 collateral whose config approval, or
+the caller's embedded config, matches that project. Set the one the enclave is published under; setting both
 accepts either. A document whose collateral the pin does not cover is a
 `VerificationError` at the provenance layer.
 
@@ -57,11 +57,14 @@ document that carries v3 collateral is accepted on any config that the
 verifier's configured config trust authorizes: the public registry by
 default, or, when the verifier was built with one, the caller's config
 signing keys, config authorizer or embedded config. One that carries v2
-collateral requires a repository pin and is rejected.
+collateral requires a repository pin, so it is a `UsageError`.
 
 `check_pin_verifiability(repo, project=project)` raises the `UsageError`
 that `verify_v3` would raise for that pin whatever the document, so that a
-caller can refuse a pin before fetching anything.
+caller can refuse a pin before fetching anything. It is not the whole check:
+v3 collateral also requires the project and revision to be valid config
+identity components, which waits for the document, so `verify_v3` can still
+raise a `UsageError` for a pin that passed.
 
 A successful return is not the end of the caller's job. The returned
 `Verification` proves facts about the enclave that served the document; the

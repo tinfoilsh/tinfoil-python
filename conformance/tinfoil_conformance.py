@@ -697,11 +697,11 @@ def _live_request(raw: Any) -> tuple[str, str, str] | None:
     """The host, repo and project of a live-verify request, or None when it is not one."""
     if not isinstance(raw, Mapping):
         return None
-    host, repo = raw.get("host"), raw.get("repo")
-    if not isinstance(host, str) or not isinstance(repo, str) or not host or not repo:
+    host, repo = raw.get("host"), raw.get("repo", "")
+    if not isinstance(host, str) or not isinstance(repo, str) or not host:
         return None
     project = raw.get("project", repo)
-    if not isinstance(project, str):
+    if not isinstance(project, str) or not (repo or project):
         return None
     return host, repo, project
 
