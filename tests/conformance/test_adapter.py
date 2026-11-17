@@ -164,7 +164,7 @@ def test_input_decodes_every_member() -> None:
     assert decoded.document == b"{}"
     assert decoded.nonce == bytes(32)
     assert decoded.repo == "tinfoilsh/confidential-model-router"
-    assert decoded.project == "tinfoilsh/confidential-model-router", "without a project member, repo names both"
+    assert decoded.project == "", "a project is named only by its own member"
     assert decoded.amd_chain_pem == b"ASK\nARK\n"
     assert decoded.intel_root_pem == b"ROOT\n"
     assert decoded.sigstore_trusted_root == b"{}"

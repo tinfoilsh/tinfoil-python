@@ -164,7 +164,7 @@ def test_live_verify_accepts_through_the_public_verifier(
     host, nonce = fetched[0]
     assert host == HOST
     assert len(nonce) == 32
-    assert double.calls == [(DOCUMENT, nonce, REPO, REPO, None)]
+    assert double.calls == [(DOCUMENT, nonce, REPO, "", None)]
     assert dialed == [HOST]
 
 
@@ -172,8 +172,7 @@ def test_live_verify_accepts_through_the_public_verifier(
 def test_live_verify_passes_a_project_member_as_given(
     project: str, double: type[VerifierDouble], fetched: list[tuple[str, bytes]], dialed: list[str]
 ) -> None:
-    """Without a project member the repo names the workload in either namespace; with one, even an empty one, the
-    two pins are the request's."""
+    """The two pins are the request's own members."""
     result = adapter.run(adapter.STAGE_LIVE_VERIFY, {**REQUEST, "project": project})
     assert result.exit_code == adapter.EXIT_ACCEPTED, result
     assert [(call[2], call[3]) for call in double.calls] == [(REPO, project)]
@@ -336,7 +335,7 @@ def test_verify_stage_without_roots_uses_the_public_verifier(double: type[Verifi
     result = adapter.run(adapter.STAGE_VERIFY, raw)
     assert result.exit_code == adapter.EXIT_ACCEPTED, result
     assert result.output["outputs"] == FACTS
-    assert double.calls == [(b"{}", NONCE, REPO, REPO, datetime.fromtimestamp(1_700_000_000, UTC))]
+    assert double.calls == [(b"{}", NONCE, REPO, "", datetime.fromtimestamp(1_700_000_000, UTC))]
     for project in ("", "org/project"):
         double.calls.clear()
         assert adapter.run(adapter.STAGE_VERIFY, {**raw, "project": project}).exit_code == adapter.EXIT_ACCEPTED
@@ -387,7 +386,7 @@ def test_capture_freezes_an_accepted_document_at_the_capture_time(
     # The frozen input is exactly what was verified, pinned to the capture instant.
     decoded = adapter.Input.from_json(fixture_input)
     assert decoded.document == DOCUMENT
-    assert double.calls == [(DOCUMENT, NONCE, REPO, REPO, datetime.fromtimestamp(captured_at, UTC))]
+    assert double.calls == [(DOCUMENT, NONCE, REPO, "", datetime.fromtimestamp(captured_at, UTC))]
     # And it replays as an accept through the stage.
     assert adapter.run(adapter.STAGE_VERIFY, fixture_input).exit_code == adapter.EXIT_ACCEPTED
 

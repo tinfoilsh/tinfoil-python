@@ -185,7 +185,6 @@ class Input:
     document: bytes | None
     nonce: bytes | None
     repo: str
-    # Without a project member, repo names both.
     project: str
     # The ASK then the ARK, PEM-encoded, in the AMD KDS cert_chain layout.
     amd_chain_pem: bytes | None
@@ -240,7 +239,7 @@ class Input:
             document=_base64(document, "document_b64") if document else None,
             nonce=_hex(nonce, "nonce_hex") if nonce else None,
             repo=repo,
-            project=_string(data, "project") if "project" in data else repo,
+            project=_string(data, "project") if "project" in data else "",
             amd_chain_pem=f"{ask.strip()}\n{amd_root.strip()}\n".encode() if amd_root else None,
             intel_root_pem=intel_root.encode() if intel_root else None,
             sigstore_trusted_root=_base64(sigstore_root, "sigstore_trusted_root_json_b64") if sigstore_root else None,
@@ -649,8 +648,7 @@ def _live_verify(raw: Any) -> Result:
 
     The request is ``{"host": ..., "repo": ...}``, both non-empty strings
     and the host a bare host with an optional port, with an optional
-    ``"project"`` string; without it ``repo`` names the workload in either
-    namespace. Anything else is
+    ``"project"`` string. Anything else is
     malformed input, found before any connection. A document that cannot
     be fetched, or an enclave that cannot be dialed for the channel
     binding, gives no verdict. The verifier's errors map as in the
@@ -701,7 +699,7 @@ def _live_request(raw: Any) -> tuple[str, str, str] | None:
     host, repo = raw.get("host"), raw.get("repo", "")
     if not isinstance(host, str) or not isinstance(repo, str) or not host:
         return None
-    project = raw.get("project", repo)
+    project = raw.get("project", "")
     if not isinstance(project, str) or not (repo or project):
         return None
     return host, repo, project
