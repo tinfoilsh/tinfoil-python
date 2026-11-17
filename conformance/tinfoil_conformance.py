@@ -5,7 +5,8 @@ Test tooling, not part of the published package. Run from a source checkout:
     uv run python conformance/tinfoil_conformance.py <stage>     Input JSON on stdin, Output JSON on stdout
     uv run python conformance/tinfoil_conformance.py capabilities
     uv run python conformance/tinfoil_conformance.py live-verify {"host": ..., "repo": ..., "project": ...} on stdin
-    uv run python conformance/tinfoil_conformance.py capture --host H [--repo R] [--project P] [--id I] [--out F] [--nonce HEX]
+    uv run python conformance/tinfoil_conformance.py capture --host H [--repo R] [--project P] [--id I] [--out F]
+        [--nonce HEX]
 
 The exit code is the verdict that the suite reads; stdout is diagnostic. The
 contract is tinfoil-conformance ``docs/CONFORMANCE_ADAPTER_SPEC.md`` v1.2.0.
