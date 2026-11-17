@@ -455,6 +455,10 @@ def _verify_v3(
     trust: TrustPolicy, doc_bytes: bytes, nonce: bytes, repo: str, project: str, now: datetime
 ) -> Verification:
     """The pipeline: envelope, reference values, CPU evidence, policy; then the record."""
+    # A malformed pin is a usage error for any document.
+    code_pin = _repository_pin(repo) if repo != "" else None
+    reference_pins(trust, project)
+
     with _layer(LAYER_ENVELOPE):
         try:
             doc = parse(doc_bytes, nonce)
@@ -463,10 +467,6 @@ def _verify_v3(
 
     # Reference values and CPU evidence are appraised against the same instant.
     with _layer(LAYER_PROVENANCE):
-        # A malformed pin is a usage error for any document.
-        code_pin = _repository_pin(repo) if repo != "" else None
-        reference_pins(trust, project)
-
         collateral_format = doc.collateral_format()
         if collateral_format == FORMAT_V3:
             if project == "" and code_pin is not None:

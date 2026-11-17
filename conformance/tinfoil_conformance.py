@@ -4,8 +4,8 @@ Test tooling, not part of the published package. Run from a source checkout:
 
     uv run python conformance/tinfoil_conformance.py <stage>     Input JSON on stdin, Output JSON on stdout
     uv run python conformance/tinfoil_conformance.py capabilities
-    uv run python conformance/tinfoil_conformance.py live-verify {"host": ..., "repo": ...} on stdin
-    uv run python conformance/tinfoil_conformance.py capture --host H --repo R [--id I] [--out F] [--nonce HEX]
+    uv run python conformance/tinfoil_conformance.py live-verify {"host": ..., "repo": ..., "project": ...} on stdin
+    uv run python conformance/tinfoil_conformance.py capture --host H [--repo R] [--project P] [--id I] [--out F] [--nonce HEX]
 
 The exit code is the verdict that the suite reads; stdout is diagnostic. The
 contract is tinfoil-conformance ``docs/CONFORMANCE_ADAPTER_SPEC.md`` v1.2.0.
@@ -646,9 +646,9 @@ def _live_verify(raw: Any) -> Result:
     ``Verifier`` with the embedded roots at the current time, then the TLS key on the wire against the endorsed
     one.
 
-    The request is ``{"host": ..., "repo": ...}``, both non-empty strings
-    and the host a bare host with an optional port, with an optional
-    ``"project"`` string. Anything else is
+    The request is ``{"host": ..., "repo": ..., "project": ...}``: the host
+    a bare host with an optional port, and at least one of ``repo`` and
+    ``project`` a non-empty string. Anything else is
     malformed input, found before any connection. A document that cannot
     be fetched, or an enclave that cannot be dialed for the channel
     binding, gives no verdict. The verifier's errors map as in the
