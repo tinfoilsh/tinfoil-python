@@ -48,8 +48,9 @@ or `org/project@sha256:<hex>`. Neither is satisfied by the other's collateral:
 a document the pin does not cover is a `VerificationError` at the provenance
 layer. Anything but a `Pin`, such as a bare string, is a `UsageError`.
 
-`Pin()` accepts any config that the verifier's trust authorizes: the public
-registry by default. A document that carries a repository release then has
+`Pin(unpinned=True)` accepts any config that the verifier's trust authorizes:
+the public registry by default; a pin that names nothing, such as `Pin()` or
+`Pin(repo="")`, is a `UsageError`. A document that carries a repository release then has
 nothing to be verified against, so it is a `UsageError`.
 
 `check_pin_verifiability(pin)` raises the `UsageError` that `verify_v3` would
@@ -233,7 +234,7 @@ subclasses that call for different responses:
 from tinfoil.verifier import LAYER_PROVENANCE, Pin, UsageError, VerificationError, Verifier
 
 
-def classify(document: bytes, nonce: bytes, project: str | None) -> str:
+def classify(document: bytes, nonce: bytes, project: str) -> str:
     try:
         Verifier().verify_v3(document, nonce, Pin(project=project))
     except UsageError as err:

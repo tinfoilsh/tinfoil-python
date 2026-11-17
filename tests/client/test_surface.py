@@ -205,7 +205,8 @@ MISTAKES = (
     "create_client(api_key=async_key)",
     'create_client(api_key="k", data_residency="us")',
     "RouterOpenAIClient(provider=None)",
-    'EnclaveOpenAIClient("enclave.example", Pin(), workload_identity=None).with_options(workload_identity=None)',
+    'EnclaveOpenAIClient("enclave.example", Pin(unpinned=True), workload_identity=None)'
+    ".with_options(workload_identity=None)",
     'create_client(api_key="k", websocket_base_url=None)',
 )
 """Consumer mistakes, one per line of the probe: a misspelled option, a route option on the drop-in client, the

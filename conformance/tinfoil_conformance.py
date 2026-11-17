@@ -383,9 +383,9 @@ def _verify(decoded: Input) -> Result:
         return _malformed(stage)
     appraisal = decoded.verification_time or datetime.now(UTC)
     try:
-        verified = verifier.verify_v3_at(
-            decoded.document or b"", decoded.nonce or b"", Pin(repo=decoded.repo, project=decoded.project), appraisal
-        )
+        # An input that names neither a repository nor a project asks for no pin.
+        pin = Pin(repo=decoded.repo, project=decoded.project, unpinned=not (decoded.repo or decoded.project))
+        verified = verifier.verify_v3_at(decoded.document or b"", decoded.nonce or b"", pin, appraisal)
     except UsageError:
         return _malformed(stage)
     except VerificationError as err:

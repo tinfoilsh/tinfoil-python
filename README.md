@@ -98,7 +98,7 @@ print(transcription.text)
 
 ## Talking to one enclave
 
-`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and what it must be running; the client verifies the enclave against that pin before it returns. The second argument is a `Pin`: `Pin(repo=...)` for a GitHub repository, `Pin(project=...)` for a config registry project, or both to accept either; neither is satisfied by the other's collateral. A bare string is a `ConfigurationError`.
+`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and what it must be running; the client verifies the enclave against that pin before it returns. The second argument is a `Pin`: `Pin(repo=...)` for a GitHub repository, `Pin(project=...)` for a config registry project, or both to accept either; neither is satisfied by the other's collateral. A bare string is a `ConfigurationError`, and so is a pin that names nothing, such as `Pin()` or `Pin(repo="")`; `Pin(unpinned=True)` accepts any config the verifier's trust authorizes.
 
 ```python
 import os

@@ -196,9 +196,9 @@ class TestEnclaveClient:
         assert client._attested.openai_url == "https://proxy.example/v1/"
         client.close()
         network.serve("enclave.example")
-        with EnclaveHTTPClient("enclave.example", Pin(), transport_mode="ehbp") as plain:
-            assert plain.pin == Pin()
-            assert network.pins[-1] == Pin()
+        with EnclaveHTTPClient("enclave.example", Pin(unpinned=True), transport_mode="ehbp") as plain:
+            assert plain.pin == Pin(unpinned=True)
+            assert network.pins[-1] == Pin(unpinned=True)
         network.serve("enclave.example")
         with EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp") as repository:
             assert repository.pin == Pin(repo="org/repo")
