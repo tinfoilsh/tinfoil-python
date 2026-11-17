@@ -709,8 +709,8 @@ def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
     """Fetch a live enclave's document and, only if the full-verify stage accepts it under the embedded roots at
     the capture time, freeze it as a fixture pinned to that time.
 
-    ``--host`` (a bare host with an optional port) and ``--repo`` are
-    required; ``--id`` names the fixture, ``--out`` is the file to write
+    ``--host`` (a bare host with an optional port) is required, with
+    ``--repo``, ``--project`` or both as the pin; ``--id`` names the fixture, ``--out`` is the file to write
     (stdout by default) and ``--nonce`` fixes the challenge as lowercase hex
     (fresh and random by default). Invalid flags are found before any
     connection. A document that the verifier does not accept is never
@@ -719,7 +719,7 @@ def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
     options = _capture_options(args)
     if options is None:
         stderr.write(
-            "usage: tinfoil_conformance.py capture --host <enclave> --repo <owner/name>"
+            "usage: tinfoil_conformance.py capture --host <enclave> [--repo <owner/name>] [--project <org/project>]"
             " [--id ..] [--out ..] [--nonce ..]\n"
         )
         return EXIT_MALFORMED
@@ -752,6 +752,8 @@ def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
         "repo": options["repo"],
         "verification_time_unix": capture_unix,
     }
+    if options["project"]:
+        fixture_input["project"] = options["project"]
     result = run(STAGE_VERIFY, fixture_input)
     if result.exit_code != EXIT_ACCEPTED:
         rejection = result.output.get("rejection") or {}
@@ -777,8 +779,8 @@ def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
 
 def _capture_options(args: list[str]) -> dict[str, str] | None:
     """The capture flags as ``--name value`` or ``--name=value`` pairs; None for an unknown flag, a missing value
-    or an absent host or repo."""
-    options = {"host": "", "repo": "", "id": DEFAULT_CAPTURE_ID, "out": "", "nonce": ""}
+    an absent host, or neither a repo nor a project."""
+    options = {"host": "", "repo": "", "project": "", "id": DEFAULT_CAPTURE_ID, "out": "", "nonce": ""}
     remaining = list(args)
     while remaining:
         flag = remaining.pop(0)
@@ -792,7 +794,7 @@ def _capture_options(args: list[str]) -> dict[str, str] | None:
                 return None
             value = remaining.pop(0)
         options[name] = value
-    if not options["host"] or not options["repo"]:
+    if not options["host"] or not (options["repo"] or options["project"]):
         return None
     return options
 

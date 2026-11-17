@@ -402,6 +402,25 @@ def test_capture_writes_to_stdout_by_default_with_a_fresh_nonce_and_the_given_id
     assert len(fetched[0][1]) == 32
 
 
+def test_capture_freezes_a_project_pin_when_one_is_given(
+    double: type[VerifierDouble], fetched: list[tuple[str, bytes]]
+) -> None:
+    project = "org/project"
+    code, stdout, _ = _capture(["--host", HOST, "--project", project])
+    assert code == adapter.EXIT_ACCEPTED
+    fixture_input = json.loads(stdout)["input"]
+    assert (fixture_input["repo"], fixture_input["project"]) == ("", project)
+    assert [(call[2], call[3]) for call in double.calls] == [("", project)]
+    double.calls.clear()
+    code, stdout, _ = _capture(["--host", HOST, "--repo", REPO, "--project", project])
+    assert code == adapter.EXIT_ACCEPTED
+    assert [(call[2], call[3]) for call in double.calls] == [(REPO, project)]
+    # The frozen fixture replays with the same pin.
+    double.calls.clear()
+    assert adapter.run(adapter.STAGE_VERIFY, json.loads(stdout)["input"]).exit_code == adapter.EXIT_ACCEPTED
+    assert [(call[2], call[3]) for call in double.calls] == [(REPO, project)]
+
+
 def test_capture_refuses_to_freeze_a_rejected_document(
     double: type[VerifierDouble], fetched: list[tuple[str, bytes]], tmp_path: Path
 ) -> None:
@@ -436,6 +455,7 @@ def test_capture_gives_no_verdict_when_the_fetch_fails(
         [],
         ["--host", HOST],
         ["--repo", REPO],
+        ["--project", "org/project"],
         ["--host", HOST, "--repo"],
         ["--host", HOST, "--repo", REPO, "--bogus", "x"],
         ["--host", HOST, "--repo", REPO, "positional"],
