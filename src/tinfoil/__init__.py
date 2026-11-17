@@ -5,8 +5,8 @@ gateway clients verify each model's replica on its first request. The
 asynchronous clients are built with ``await Cls.create(...)``, which is
 where they verify, since their constructor raises. Every request is bound
 to the keys of the current verification. The verifier that appraises the
-attestation documents is the ``verifier`` subpackage; its records and
-errors are not re-exported here. The client modules load on first use, so
+attestation documents is the ``verifier`` subpackage; of its names only
+``Pin`` is re-exported here. The client modules load on first use, so
 that importing the ``verifier`` subpackage alone stays light.
 """
 
@@ -74,6 +74,7 @@ if TYPE_CHECKING:
         TransportMode,
         VerificationCheck,
     )
+    from tinfoil.verifier import Pin
 
 __version__ = sdk_version()
 """The version of this package, as installed."""
@@ -116,6 +117,7 @@ __all__ = [
     "OpenAIError",
     "OpenAIOptions",
     "PermissionDeniedError",
+    "Pin",
     "RateLimitError",
     "ReplicaVerification",
     "RouterHTTPClient",
@@ -205,6 +207,7 @@ _MODULE_OF: dict[str, str] = {
             "tinfoil._types",
             ("DEFAULT_HTTP_TIMEOUT", "DEFAULT_TRANSPORT_MODE", "TimeoutTypes", "TransportMode", "VerificationCheck"),
         ),
+        ("tinfoil.verifier", ("Pin",)),
     )
     for name in names
 }

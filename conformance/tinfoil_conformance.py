@@ -4,8 +4,9 @@ Test tooling, not part of the published package. Run from a source checkout:
 
     uv run python conformance/tinfoil_conformance.py <stage>     Input JSON on stdin, Output JSON on stdout
     uv run python conformance/tinfoil_conformance.py capabilities
-    uv run python conformance/tinfoil_conformance.py live-verify {"host": ..., "repo": ...} on stdin
-    uv run python conformance/tinfoil_conformance.py capture --host H --repo R [--id I] [--out F] [--nonce HEX]
+    uv run python conformance/tinfoil_conformance.py live-verify {"host": ..., "repo": ..., "project": ...} on stdin
+    uv run python conformance/tinfoil_conformance.py capture --host H [--repo R] [--project P] [--id I] [--out F]
+        [--nonce HEX]
 
 The exit code is the verdict that the suite reads; stdout is diagnostic. The
 contract is tinfoil-conformance ``docs/CONFORMANCE_ADAPTER_SPEC.md`` v1.2.0.
@@ -52,6 +53,7 @@ from tinfoil._pin import connection_cert_fp
 from tinfoil._sdkinfo import attestation_headers
 from tinfoil.verifier import (
     NONCE_SIZE,
+    Pin,
     UsageError,
     VerificationError,
     Verifier,
@@ -149,6 +151,7 @@ _INPUT_MEMBERS = frozenset(
         "document_b64",
         "nonce_hex",
         "repo",
+        "project",
         "amd_root_ca_pem",
         "ask_pem",
         "intel_sgx_root_pem",
@@ -172,7 +175,7 @@ class MalformedInput(ValueError):
 class Input:
     """A decoded adapter Input.
 
-    Document stages read ``document``, ``nonce`` and ``repo``; the approval
+    Document stages read ``document``, ``nonce``, ``repo`` and ``project``; the approval
     stage reads ``bundle_json``, ``signing_keys_pem`` and ``artifact_digest``;
     the timestamp stage reads ``timestamp_response`` and ``timestamp_input``.
     Absent trust roots select the embedded production roots. Which members a
@@ -183,6 +186,7 @@ class Input:
     document: bytes | None
     nonce: bytes | None
     repo: str
+    project: str
     # The ASK then the ARK, PEM-encoded, in the AMD KDS cert_chain layout.
     amd_chain_pem: bytes | None
     intel_root_pem: bytes | None
@@ -230,11 +234,13 @@ class Input:
         bundle = _string(data, "bundle_json_b64")
         tsr = _string(data, "timestamp_response_b64")
         tsi = _string(data, "timestamp_input_b64")
+        repo = _string(data, "repo")
 
         return cls(
             document=_base64(document, "document_b64") if document else None,
             nonce=_hex(nonce, "nonce_hex") if nonce else None,
-            repo=_string(data, "repo"),
+            repo=repo,
+            project=_string(data, "project") if "project" in data else "",
             amd_chain_pem=f"{ask.strip()}\n{amd_root.strip()}\n".encode() if amd_root else None,
             intel_root_pem=intel_root.encode() if intel_root else None,
             sigstore_trusted_root=_base64(sigstore_root, "sigstore_trusted_root_json_b64") if sigstore_root else None,
@@ -377,7 +383,9 @@ def _verify(decoded: Input) -> Result:
         return _malformed(stage)
     appraisal = decoded.verification_time or datetime.now(UTC)
     try:
-        verified = verifier.verify_v3_at(decoded.document or b"", decoded.nonce or b"", decoded.repo, appraisal)
+        verified = verifier.verify_v3_at(
+            decoded.document or b"", decoded.nonce or b"", Pin(repo=decoded.repo, project=decoded.project), appraisal
+        )
     except UsageError:
         return _malformed(stage)
     except VerificationError as err:
@@ -639,8 +647,9 @@ def _live_verify(raw: Any) -> Result:
     ``Verifier`` with the embedded roots at the current time, then the TLS key on the wire against the endorsed
     one.
 
-    The request is ``{"host": ..., "repo": ...}``, both non-empty strings
-    and the host a bare host with an optional port; anything else is
+    The request is ``{"host": ..., "repo": ..., "project": ...}``: the host
+    a bare host with an optional port, and at least one of ``repo`` and
+    ``project`` a non-empty string. Anything else is
     malformed input, found before any connection. A document that cannot
     be fetched, or an enclave that cannot be dialed for the channel
     binding, gives no verdict. The verifier's errors map as in the
@@ -652,7 +661,7 @@ def _live_verify(raw: Any) -> Result:
     request = _live_request(raw)
     if request is None:
         return _malformed(stage)
-    host, repo = request
+    host, repo, project = request
     try:
         _authority(host)
     except ValueError as err:
@@ -664,7 +673,7 @@ def _live_verify(raw: Any) -> Result:
     except (FetchError, httpx.HTTPError, OSError, ValueError) as err:
         return _internal(stage, f"fetching attestation from {host}: {err}")
     try:
-        verified = verifier.verify_v3(document_bytes, nonce, repo)
+        verified = verifier.verify_v3(document_bytes, nonce, Pin(repo=repo, project=project))
     except UsageError as err:
         return _malformed(stage, str(err))
     except VerificationError as err:
@@ -684,22 +693,25 @@ def _live_verify(raw: Any) -> Result:
     return Result({"stage": stage, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
 
 
-def _live_request(raw: Any) -> tuple[str, str] | None:
-    """The host and repo of a live-verify request, or None when it is not one."""
+def _live_request(raw: Any) -> tuple[str, str, str] | None:
+    """The host, repo and project of a live-verify request, or None when it is not one."""
     if not isinstance(raw, Mapping):
         return None
-    host, repo = raw.get("host"), raw.get("repo")
-    if not isinstance(host, str) or not isinstance(repo, str) or not host or not repo:
+    host, repo = raw.get("host"), raw.get("repo", "")
+    if not isinstance(host, str) or not isinstance(repo, str) or not host:
         return None
-    return host, repo
+    project = raw.get("project", "")
+    if not isinstance(project, str) or not (repo or project):
+        return None
+    return host, repo, project
 
 
 def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
     """Fetch a live enclave's document and, only if the full-verify stage accepts it under the embedded roots at
     the capture time, freeze it as a fixture pinned to that time.
 
-    ``--host`` (a bare host with an optional port) and ``--repo`` are
-    required; ``--id`` names the fixture, ``--out`` is the file to write
+    ``--host`` (a bare host with an optional port) is required, with
+    ``--repo``, ``--project`` or both as the pin; ``--id`` names the fixture, ``--out`` is the file to write
     (stdout by default) and ``--nonce`` fixes the challenge as lowercase hex
     (fresh and random by default). Invalid flags are found before any
     connection. A document that the verifier does not accept is never
@@ -708,7 +720,7 @@ def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
     options = _capture_options(args)
     if options is None:
         stderr.write(
-            "usage: tinfoil_conformance.py capture --host <enclave> --repo <owner/name>"
+            "usage: tinfoil_conformance.py capture --host <enclave> [--repo <owner/name>] [--project <org/project>]"
             " [--id ..] [--out ..] [--nonce ..]\n"
         )
         return EXIT_MALFORMED
@@ -741,6 +753,8 @@ def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
         "repo": options["repo"],
         "verification_time_unix": capture_unix,
     }
+    if options["project"]:
+        fixture_input["project"] = options["project"]
     result = run(STAGE_VERIFY, fixture_input)
     if result.exit_code != EXIT_ACCEPTED:
         rejection = result.output.get("rejection") or {}
@@ -766,8 +780,8 @@ def capture(args: list[str], stdout: TextIO, stderr: TextIO) -> int:
 
 def _capture_options(args: list[str]) -> dict[str, str] | None:
     """The capture flags as ``--name value`` or ``--name=value`` pairs; None for an unknown flag, a missing value
-    or an absent host or repo."""
-    options = {"host": "", "repo": "", "id": DEFAULT_CAPTURE_ID, "out": "", "nonce": ""}
+    an absent host, or neither a repo nor a project."""
+    options = {"host": "", "repo": "", "project": "", "id": DEFAULT_CAPTURE_ID, "out": "", "nonce": ""}
     remaining = list(args)
     while remaining:
         flag = remaining.pop(0)
@@ -781,7 +795,7 @@ def _capture_options(args: list[str]) -> dict[str, str] | None:
                 return None
             value = remaining.pop(0)
         options[name] = value
-    if not options["host"] or not options["repo"]:
+    if not options["host"] or not (options["repo"] or options["project"]):
         return None
     return options
 

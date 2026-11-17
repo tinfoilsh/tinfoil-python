@@ -17,7 +17,7 @@ from tinfoil.verifier._errors import (
     VerificationError,
 )
 from tinfoil.verifier._measurement import SEVSNP, Expected, ExpectedSEVSNP, Measurement
-from tinfoil.verifier._verifier import Overrides, _build
+from tinfoil.verifier._verifier import Overrides, Pin, _build
 
 STAGE = "verify-attestation-v3"
 GROUPS = ("golden", "golden-tdx", "freshness", "real-frozen")
@@ -72,14 +72,14 @@ def test_full_verify_vectors(fixture: dict[str, Any]) -> None:
     now = datetime.fromtimestamp(data["verification_time_unix"], UTC)
     if not expected["accepted"] and expected["code"] != "ENVELOPE_REJECTED":
         with pytest.raises(VerificationError) as rejected:
-            verifier.verify_v3_at(doc, nonce, data["repo"], now)
+            verifier.verify_v3_at(doc, nonce, Pin(repo=data["repo"]), now)
         assert CODES[rejected.value.layer] == expected["code"]
         assert rejected.value.__cause__ is not None
         return
     verified = None
     rejected_layer = None
     try:
-        verified = verifier.verify_v3_at(doc, nonce, data["repo"], now)
+        verified = verifier.verify_v3_at(doc, nonce, Pin(repo=data["repo"]), now)
     except VerificationError as err:
         rejected_layer = err.layer
     if verified is None:
@@ -133,8 +133,8 @@ def test_hardware_bounds_cached_verification(group: str, name: str, deadline: da
     )
     doc, nonce = base64.b64decode(data["document_b64"]), bytes.fromhex(data["nonce_hex"])
     now = datetime.fromtimestamp(data["verification_time_unix"], UTC)
-    verified = verifier.verify_v3_at(doc, nonce, data["repo"], now)
+    verified = verifier.verify_v3_at(doc, nonce, Pin(repo=data["repo"]), now)
     assert verified.freshness_expires_at == deadline
     with pytest.raises(VerificationError) as rejected:
-        verifier.verify_v3_at(doc, nonce, data["repo"], deadline + timedelta(seconds=1))
+        verifier.verify_v3_at(doc, nonce, Pin(repo=data["repo"]), deadline + timedelta(seconds=1))
     assert rejected.value.layer == LAYER_QUOTE

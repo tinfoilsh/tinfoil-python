@@ -98,16 +98,16 @@ print(transcription.text)
 
 ## Talking to one enclave
 
-`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and the repository that it must be running; the client verifies the enclave against that repository before it returns.
+`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and what it must be running; the client verifies the enclave against that pin before it returns. The second argument is a `Pin`: `Pin(repo=...)` for a GitHub repository, `Pin(project=...)` for a config registry project, or both to accept either; neither is satisfied by the other's collateral. A bare string is a `ConfigurationError`.
 
 ```python
 import os
 
-from tinfoil import EnclaveOpenAIClient
+from tinfoil import EnclaveOpenAIClient, Pin
 
 client = EnclaveOpenAIClient(
     "inference.tinfoil.sh",
-    "tinfoilsh/confidential-model-router",
+    Pin(repo="tinfoilsh/confidential-model-router", project="tinfoilsh/confidential-model-router"),
     api_key=os.environ["TINFOIL_API_KEY"],
 )
 chat_completion = client.chat.completions.create(
@@ -119,9 +119,12 @@ chat_completion = client.chat.completions.create(
 For requests outside the OpenAI API, `EnclaveHTTPClient` verifies the same enclave and exposes an `httpx.Client` whose requests reach only it; a request to any other origin is refused. Build URLs from `base_url`, which ends in a slash:
 
 ```python
-from tinfoil import EnclaveHTTPClient
+from tinfoil import EnclaveHTTPClient, Pin
 
-client = EnclaveHTTPClient("inference.tinfoil.sh", "tinfoilsh/confidential-model-router")
+client = EnclaveHTTPClient(
+    "inference.tinfoil.sh",
+    Pin(repo="tinfoilsh/confidential-model-router", project="tinfoilsh/confidential-model-router"),
+)
 
 response = client.http_client.get(client.base_url + "v1/models", timeout=30)
 print(response.status_code, response.text)
@@ -274,7 +277,7 @@ with create_client(api_key=os.environ["TINFOIL_API_KEY"]) as client:
 
 ## Verifying attestation documents yourself
 
-The verifier that every client uses is its own package, `tinfoil.verifier`. It appraises an attestation document that you fetched against the repository that you trust and returns the facts that it proved; it opens no connections. See [its README](src/tinfoil/verifier/README.md) for the API.
+The verifier that every client uses is its own package, `tinfoil.verifier`. It appraises an attestation document that you fetched against the repository or registry project that you trust and returns the facts that it proved; it opens no connections. See [its README](src/tinfoil/verifier/README.md) for the API.
 
 ```python
 from tinfoil.verifier import Verifier, random_nonce

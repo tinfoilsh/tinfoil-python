@@ -62,7 +62,7 @@ from tinfoil._url import (
     validate_tls_base_url,
     with_trailing_slash,
 )
-from tinfoil.verifier import Verification, Verifier
+from tinfoil.verifier import Pin, Verification, Verifier
 
 ROUTER_PROXY_NEEDS_EHBP = 'a base URL is a proxy when discovering the router, which requires the "ehbp" transport mode'
 ROUTER_NEEDS_REPO = "caller-authorized config requires an explicit enclave"
@@ -135,10 +135,9 @@ class _AttestedClient:
         return self._attested.keyed.enclave.host
 
     @property
-    def repo(self) -> str:
-        """The repository the enclave is verified against, with any tag or digest pins. Empty when the
-        verifier authorizes the config instead."""
-        return self._attested.keyed.enclave.repo
+    def pin(self) -> Pin:
+        """The pin the enclave is verified against."""
+        return self._attested.keyed.enclave.pin
 
     @property
     def current(self) -> Verification | None:
@@ -196,9 +195,9 @@ class _AsyncAttestedClient:
         return self._attested.keyed.enclave.host
 
     @property
-    def repo(self) -> str:
-        """The repository the enclave is verified against, with any tag or digest pins."""
-        return self._attested.keyed.enclave.repo
+    def pin(self) -> Pin:
+        """The pin the enclave is verified against."""
+        return self._attested.keyed.enclave.pin
 
     @property
     def current(self) -> Verification | None:
@@ -230,30 +229,29 @@ class _AsyncAttestedClient:
 
 def _enclave_parts(
     host: str,
-    repo: str | None,
+    pin: Pin,
     transport_mode: TransportMode,
     base_url: str | None,
     verifier: Verifier | None,
     verification_check: VerificationCheck | None,
 ) -> tuple[Enclave, str]:
     """The checks an enclave client makes before any network I/O, in order: the host, the transport mode, the
-    base URL and the repository."""
+    base URL and the pin."""
     if not host:
         raise ConfigurationError("enclave host is required")
     mode_for(transport_mode)
     checked = validate_base_url(base_url) if base_url else ""
-    enclave = Enclave(host, repo, verifier=verifier, verification_check=verification_check)
+    enclave = Enclave(host, pin, verifier=verifier, verification_check=verification_check)
     return enclave, checked
 
 
 class EnclaveHTTPClient(_AttestedClient):
     """An ``httpx`` client whose requests reach only one attested enclave.
 
-    ``host`` is the enclave, with an optional port, and ``repo`` the
-    repository it is verified against, ``owner/name[@tag][@sha256:digest]``;
-    both are required, and an empty or None ``repo`` accepts configs
+    ``host`` is the enclave, with an optional port, and ``pin`` the ``Pin`` it
+    is verified against; both are required. ``Pin()`` accepts configs
     authorized by ``verifier``, which defaults to public registry trust,
-    so passing None is an explicit choice. ``transport_mode`` defaults to
+    so passing it is an explicit choice. ``transport_mode`` defaults to
     ``"tls"``. ``base_url`` is a path on the enclave's own HTTPS origin, or
     a proxy on another origin, which requires ``"ehbp"``; requests to a
     proxy carry ``X-Tinfoil-Enclave-Url`` so it can forward them. A proxy
@@ -276,7 +274,7 @@ class EnclaveHTTPClient(_AttestedClient):
     def __init__(
         self,
         host: str,
-        repo: str | None,
+        pin: Pin,
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
@@ -285,7 +283,7 @@ class EnclaveHTTPClient(_AttestedClient):
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
-        enclave, checked = _enclave_parts(host, repo, transport_mode, base_url, verifier, verification_check)
+        enclave, checked = _enclave_parts(host, pin, transport_mode, base_url, verifier, verification_check)
         keyed = AttestedTransport(enclave, mode_for(transport_mode), timeout=timeout)
         self._attested = _Attested(keyed, transport_mode, checked, user_cache_secret or "")
         try:
@@ -308,7 +306,7 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
     async def create(
         cls,
         host: str,
-        repo: str | None,
+        pin: Pin,
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
@@ -317,7 +315,7 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
-        enclave, checked = _enclave_parts(host, repo, transport_mode, base_url, verifier, verification_check)
+        enclave, checked = _enclave_parts(host, pin, transport_mode, base_url, verifier, verification_check)
         keyed = AsyncAttestedTransport(enclave, async_mode_for(transport_mode), timeout=timeout)
         client = cls(_attested=_AsyncAttested(keyed, transport_mode, checked, user_cache_secret or ""))
         try:
@@ -330,7 +328,7 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
 
 def _router_checks(transport_mode: TransportMode, base_url: str | None, verifier: Verifier | None) -> str:
     """The checks a router client makes before discovery, in order: the transport mode, the base URL, which is a
-    proxy and so requires EHBP, and the verifier, which must verify against the router's repository."""
+    proxy and so requires EHBP, and the verifier, which must verify against the router's pin."""
     mode_for(transport_mode)
     checked = ""
     if base_url:

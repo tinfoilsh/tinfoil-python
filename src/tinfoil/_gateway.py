@@ -61,7 +61,7 @@ from tinfoil._transport import (
     _cancelling,
 )
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
-from tinfoil.verifier import Verification, Verifier, parse_reference
+from tinfoil.verifier import Pin, Verification, Verifier, parse_reference
 
 DEFAULT_GATEWAY_URL = "https://inference-gateway.tinfoil.sh/v1/"
 """Tinfoil's gateway, the base URL a gateway client uses when none is given."""
@@ -546,9 +546,10 @@ class _Shared(Generic[_T]):
             return [self.enclaves.pop(replica) for replica in evicted]
 
     def enclave_for(self, replica: _Replica) -> Enclave:
+        # Tinfoil owns model names in both namespaces.
         return Enclave(
             replica.host,
-            replica.ref,
+            Pin(repo=replica.ref, project=replica.ref),
             relay=self.relay,
             verifier=self.policy.verifier_for(replica),
             verification_check=self.check,

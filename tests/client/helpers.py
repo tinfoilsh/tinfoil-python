@@ -42,6 +42,7 @@ from tinfoil.verifier import (
     SEVSNP,
     CryptoMaterialItem,
     ExpectedSEVSNP,
+    Pin,
     SoftwareIdentity,
     Verification,
     VerificationMetadata,
@@ -101,7 +102,7 @@ def fake_enclave(
     async def fetch_async() -> Verification:
         return fetch()
 
-    return Enclave(host, repo, verification_check=check, _fetch=fetch, _fetch_async=fetch_async)
+    return Enclave(host, Pin(repo=repo), verification_check=check, _fetch=fetch, _fetch_async=fetch_async)
 
 
 def response(status: int = 200, content: bytes = b"", headers: dict[str, str] | None = None) -> httpx.Response:

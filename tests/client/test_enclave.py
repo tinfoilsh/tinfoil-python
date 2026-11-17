@@ -32,6 +32,7 @@ from tinfoil.verifier import (
     KEY_SPKI_FP_SHA256_V1_FORMAT,
     KEY_X25519_HPKE_V1_FORMAT,
     CryptoMaterialItem,
+    Pin,
     Verification,
     VerificationError,
     Verifier,
@@ -44,21 +45,35 @@ def authorizer() -> Verifier:
 
 def test_construction_checks_config() -> None:
     with pytest.raises(ConfigurationError):
-        Enclave("enclave.example", "not a reference")
-    Enclave("enclave.example")
+        Enclave("enclave.example", Pin(repo="not a reference"))
+    Enclave("enclave.example", Pin())
+    for not_a_pin in ("org/repo", "", None, ("org/repo", "org/project")):
+        with pytest.raises(ConfigurationError, match=r"pin must be a Pin: pass Pin\(repo=...\)"):
+            Enclave("enclave.example", not_a_pin)  # type: ignore[arg-type]
+    with pytest.raises(ConfigurationError, match="pin repository must be a string or None"):
+        Enclave("enclave.example", Pin(repo=123))  # type: ignore[arg-type]
+    with pytest.raises(ConfigurationError, match="pin project must be a string or None"):
+        Enclave("enclave.example", Pin(project=b"org/project"))  # type: ignore[arg-type]
+    with pytest.raises(ConfigurationError):
+        Enclave("enclave.example", Pin(repo="org/repo", project="not a reference"))
     with pytest.raises(ConfigurationError, match="config authorizer"):
-        Enclave("enclave.example", "org/repo", verifier=authorizer())
+        Enclave("enclave.example", Pin(project="org/project"), verifier=authorizer())
+    with pytest.raises(ConfigurationError, match="verifies registry collateral only"):
+        Enclave("enclave.example", Pin(repo="org/repo"), verifier=authorizer())
     with pytest.raises(ConfigurationError, match="host is required"):
-        Enclave("", "org/repo")
+        Enclave("", Pin(repo="org/repo"))
     with pytest.raises(ConfigurationError, match="invalid host"):
-        Enclave("https://enclave.example", "org/repo")
+        Enclave("https://enclave.example", Pin(repo="org/repo"))
     with pytest.raises(ConfigurationError, match="invalid host"):
-        Enclave("enclave.example", "org/repo", relay="relay.example/path")
+        Enclave("enclave.example", Pin(repo="org/repo"), relay="relay.example/path")
     shared = Verifier(freshness_max_age=timedelta(hours=1))
-    enclave = Enclave("enclave.example", "org/repo", relay="relay.example", verifier=shared)
+    enclave = Enclave("enclave.example", Pin(repo="org/repo"), relay="relay.example", verifier=shared)
     assert enclave.verifier is shared, "enclaves share the caller's verifier"
     assert enclave.relay == "relay.example"
-    assert Enclave("enclave.example", None).repo == ""
+    unpinned = Enclave("enclave.example", Pin())
+    assert unpinned.pin == Pin()
+    both = Enclave("enclave.example", Pin(repo="org/repo", project="org/project@v1"))
+    assert both.pin == Pin(repo="org/repo", project="org/project@v1")
 
 
 @pytest.mark.parametrize(
@@ -256,7 +271,7 @@ class TestDeadline:
             await asyncio.sleep(0.1)
             return verification("key")
 
-        enclave = Enclave(HOST, "org/repo", _fetch_async=fetch)
+        enclave = Enclave(HOST, Pin(repo="org/repo"), _fetch_async=fetch)
         with pytest.raises(NetworkError, match=DEADLINE_EXCEEDED):
             await enclave.verify_once_async(deadline=time.monotonic() + 0.02)
         assert (await enclave.verify_once_async(deadline=time.monotonic() + 5)).code_tag == "key"
@@ -329,7 +344,7 @@ def test_rejected_document_is_an_attestation_error(monkeypatch: pytest.MonkeyPat
     recorder = Recorder(lambda _: response(200, b"{}"))
     monkeypatch.setattr(_fetch, "_TRANSPORT", recorder.transport)
     with pytest.raises(AttestationError) as err:
-        Enclave("enclave.example", "org/repo").verify()
+        Enclave("enclave.example", Pin(repo="org/repo")).verify()
     assert isinstance(err.value.__cause__, VerificationError), "the verifier's error remains the cause"
     assert str(err.value) == str(err.value.__cause__), "the message is the verifier's own, without a prefix"
     assert len(recorder.requests) == 2, "a rejected document is fetched once more"
@@ -339,7 +354,7 @@ def test_unreachable_enclave_is_a_network_error(monkeypatch: pytest.MonkeyPatch)
     recorder = Recorder(lambda _: response(503))
     monkeypatch.setattr(_fetch, "_TRANSPORT", recorder.transport)
     with pytest.raises(NetworkError) as err:
-        Enclave("enclave.example", "org/repo").verify()
+        Enclave("enclave.example", Pin(repo="org/repo")).verify()
     assert str(err.value) == err.value.message
     assert "503" in err.value.message
     assert len(recorder.requests) == 2

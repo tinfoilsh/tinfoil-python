@@ -24,6 +24,7 @@ from tinfoil.verifier import (
     CRYPTO_MATERIAL_ID_TLS,
     KEY_SPKI_FP_SHA256_V1_FORMAT,
     KEY_X25519_HPKE_V1_FORMAT,
+    Pin,
     Verification,
     Verifier,
     VerifyError,
@@ -64,25 +65,21 @@ class Enclave:
 
     ``host`` is the enclave, a host with an optional port. ``relay``, when
     set, is a host that fetches attestation from the enclave on the
-    client's behalf. ``repo`` pins a repository or registry project,
-    ``org/project[@revision][@sha256:digest]``; empty accepts the configs
-    that the verifier's configured config trust authorizes: the public or
-    the caller's registry, the caller's signing keys, a config authorizer
-    or an embedded config. ``verifier`` is the policy, which several
-    enclaves can share; None selects the defaults.
+    client's behalf. ``pin`` is the ``Pin`` it is verified against. ``verifier``
+    is the policy, which several enclaves can share; None selects the defaults.
     ``verification_check``, when set, is called with each verification
     that passes the verifier; raising rejects it without a retry.
 
-    Construction checks ``repo`` against the verifier's rules for a
-    repository pin and does no network I/O.
+    Construction checks ``pin`` against the verifier's rules and does no
+    network I/O.
     """
 
-    __slots__ = ("_check", "_fetch", "_fetch_async", "host", "relay", "repo", "verifier")
+    __slots__ = ("_check", "_fetch", "_fetch_async", "host", "pin", "relay", "verifier")
 
     def __init__(
         self,
         host: str,
-        repo: str | None = None,
+        pin: Pin,
         *,
         relay: str = "",
         verifier: Verifier | None = None,
@@ -97,14 +94,13 @@ class Enclave:
                 raise ConfigurationError(f"invalid host {authority!r}: want a host with an optional port")
         if verifier is None:
             verifier = Verifier()
-        repo = repo or ""
         try:
-            verifier.check_repo_verifiability(repo)
+            verifier.check_pin_verifiability(pin)
         except VerifyError as err:
             raise from_verify(err) from err
         self.host = host
         self.relay = relay
-        self.repo = repo
+        self.pin = pin
         self.verifier = verifier
         self._check = verification_check
         self._fetch = _fetch
@@ -201,7 +197,7 @@ class Enclave:
 
     def _verify_document(self, doc: bytes, nonce: bytes) -> Verification:
         try:
-            verified = self.verifier.verify_v3(doc, nonce, self.repo)
+            verified = self.verifier.verify_v3(doc, nonce, self.pin)
         except VerifyError as err:
             raise from_verify(err) from err
         validate_transport_keys(verified)
