@@ -111,8 +111,6 @@ def test_verify_stage_reports_usage_errors_as_malformed_and_rejections_by_layer(
     assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": "ENVELOPE_REJECTED"}}
     result = adapter.run(stage, {**_WELL_FORMED, "document_b64": ""})
     assert result.output["rejection"] == {"code": "ENVELOPE_REJECTED"}
-    result = adapter.run(stage, {**_WELL_FORMED, "repo": ""})
-    assert result.output["rejection"] == {"code": "ENVELOPE_REJECTED"}, "an input that names nothing asks for no pin"
     from tests import document_builder
 
     _, raw = document_builder.build(document_builder.test_nonce(), collateral_entries=[])

@@ -71,8 +71,6 @@ REGISTRY_COLLATERAL_NEEDS_PROJECT = (
 REPOSITORY_COLLATERAL_NEEDS_REPO = (
     "document carries GitHub repository collateral, but only a registry project is pinned"
 )
-PIN_NAMES_NOTHING = "pin names nothing: set repo, project, or unpinned to accept any authorized config"
-PIN_UNPINNED_NAMES = "an unpinned pin cannot also name a repository or project"
 PIN_REQUIRED = (
     "pin must be a Pin: pass Pin(repo=...) for a GitHub repository or Pin(project=...) for a registry project"
 )
@@ -81,15 +79,14 @@ PIN_REQUIRED = (
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Pin:
     """What an enclave must be running. ``repo`` and ``project`` are separate namespaces with unrelated owners,
-    so neither is satisfied by the other's collateral. Setting both accepts either. A pin must set ``repo``,
-    ``project`` or ``unpinned``: ``Pin()`` is a UsageError. None and "" both leave a part unset."""
+    so neither is satisfied by the other's collateral. Setting both accepts either; ``Pin()`` accepts any config
+    the verifier's trust authorizes, and is a UsageError under default config trust. None and "" both leave a part
+    unset."""
 
     repo: str | None = None
     """A GitHub repository, ``owner/name[@tag][@sha256:digest]``."""
     project: str | None = None
     """A config registry project, ``org/project[@revision][@sha256:digest]``."""
-    unpinned: bool = False
-    """Accepts any config the verifier's trust authorizes. It excludes ``repo`` and ``project``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -230,11 +227,12 @@ class Verifier:
 
     def check_pin_verifiability(self, pin: Pin) -> None:
         """Raise UsageError, without a document or network I/O, for a pin that ``verify_v3`` rejects whatever the
-        document: one that is not a ``Pin``, one that names nothing without being unpinned, a malformed reference,
-        a ``repo`` set alone when this verifier verifies registry collateral only, or a ``project`` that its config
-        authorizer or embedded config cannot match. A pin that passes can still be rejected once the document shows
-        the project is not a valid config identity."""
+        document: one that is not a ``Pin``, a malformed reference, a ``repo`` set alone when this verifier
+        verifies registry collateral only, or a ``project`` that its config authorizer or embedded config cannot
+        match. A pin that passes can still be rejected once the document shows the project is not a valid config
+        identity."""
         repo, project = _pin_parts(pin)
+        _require_pin(self._trust, repo, project)
         if repo != "":
             _repository_pin(repo)
             if project == "" and requires_config_collateral(self._trust):
@@ -283,23 +281,25 @@ class Verifier:
         if not isinstance(nonce, bytes | bytearray | memoryview):
             raise UsageError("nonce must be bytes")
         repo, project = _pin_parts(pin)
+        _require_pin(trust, repo, project)
         return _verify_v3(trust, bytes(doc), bytes(nonce), repo, project, verification_time)
 
 
 def _pin_parts(pin: Pin) -> tuple[str, str]:
-    """The parts of ``pin``, "" when unset. A bare string is a UsageError, not an empty pin, and so is a pin that
-    names nothing without being unpinned, or that is unpinned and names something."""
+    """The parts of ``pin``, "" when unset. A bare string is a UsageError, not an empty pin."""
     if not isinstance(pin, Pin):
         raise UsageError(PIN_REQUIRED)
-    repo, project = _reference("repository", pin.repo), _reference("project", pin.project)
-    if not isinstance(pin.unpinned, bool):
-        raise UsageError("pin unpinned must be a bool")
-    named = repo != "" or project != ""
-    if pin.unpinned and named:
-        raise UsageError(PIN_UNPINNED_NAMES)
-    if not pin.unpinned and not named:
-        raise UsageError(PIN_NAMES_NOTHING)
-    return repo, project
+    return _reference("repository", pin.repo), _reference("project", pin.project)
+
+
+def _require_pin(trust: TrustPolicy, repo: str, project: str) -> None:
+    """Refuse a pin that names nothing under default config trust, which would accept any config in the public
+    registry."""
+    if repo or project or trust.embedded.config is not None or trust.config_authorizer is not None:
+        return
+    if trust.config_keys is not None or trust.config_registry_ids is not None:
+        return
+    raise UsageError("pin names nothing: set repo or project, or configure the verifier's config trust")
 
 
 def _reference(what: str, ref: str | None) -> str:

@@ -249,9 +249,8 @@ class EnclaveHTTPClient(_AttestedClient):
     """An ``httpx`` client whose requests reach only one attested enclave.
 
     ``host`` is the enclave, with an optional port, and ``pin`` the ``Pin`` it
-    is verified against; both are required. ``Pin(unpinned=True)`` accepts configs
-    authorized by ``verifier``, which defaults to public registry trust,
-    so passing it is an explicit choice. ``transport_mode`` defaults to
+    is verified against; both are required. ``Pin()`` is a
+    ``ConfigurationError`` unless ``verifier`` configures its own config trust. ``transport_mode`` defaults to
     ``"tls"``. ``base_url`` is a path on the enclave's own HTTPS origin, or
     a proxy on another origin, which requires ``"ehbp"``; requests to a
     proxy carry ``X-Tinfoil-Enclave-Url`` so it can forward them. A proxy

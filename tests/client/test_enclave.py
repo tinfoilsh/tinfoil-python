@@ -46,12 +46,8 @@ def authorizer() -> Verifier:
 def test_construction_checks_config() -> None:
     with pytest.raises(ConfigurationError):
         Enclave("enclave.example", Pin(repo="not a reference"))
-    Enclave("enclave.example", Pin(unpinned=True))
-    for names_nothing in (Pin(), Pin(repo=None), Pin(repo=""), Pin(repo="", project="")):
-        with pytest.raises(ConfigurationError, match="pin names nothing"):
-            Enclave("enclave.example", names_nothing)
-    with pytest.raises(ConfigurationError, match="unpinned pin cannot also name"):
-        Enclave("enclave.example", Pin(repo="org/repo", unpinned=True))
+    with pytest.raises(ConfigurationError, match="pin names nothing"):
+        Enclave("enclave.example", Pin())
     for not_a_pin in ("org/repo", "", None, ("org/repo", "org/project")):
         with pytest.raises(ConfigurationError, match=r"pin must be a Pin: pass Pin\(repo=...\)"):
             Enclave("enclave.example", not_a_pin)  # type: ignore[arg-type]
@@ -75,8 +71,8 @@ def test_construction_checks_config() -> None:
     enclave = Enclave("enclave.example", Pin(repo="org/repo"), relay="relay.example", verifier=shared)
     assert enclave.verifier is shared, "enclaves share the caller's verifier"
     assert enclave.relay == "relay.example"
-    unpinned = Enclave("enclave.example", Pin(unpinned=True))
-    assert unpinned.pin == Pin(unpinned=True)
+    unpinned = Enclave("enclave.example", Pin(), verifier=authorizer())
+    assert unpinned.pin == Pin()
     both = Enclave("enclave.example", Pin(repo="org/repo", project="org/project@v1"))
     assert both.pin == Pin(repo="org/repo", project="org/project@v1")
 

@@ -349,7 +349,7 @@ def main() -> None:
     key: PublicKey = load_public_key(PEM)
     keyed = Verifier(config_signing_keys=[load_public_key(PEM)], freshness_signing_keys=[key])
     assert repr(keyed).startswith("Verifier(")
-    keyed.check_pin_verifiability(Pin(unpinned=True))
+    keyed.check_pin_verifiability(Pin())
     try:
         parse_reference("not a reference")
     except UsageError as err:
