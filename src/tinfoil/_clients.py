@@ -136,8 +136,7 @@ class _AttestedClient:
 
     @property
     def pin(self) -> Pin:
-        """The GitHub repository and the config registry project the enclave is verified against, with any tag,
-        revision or digest pins. A part is empty or None when it is not pinned."""
+        """The pin the enclave is verified against."""
         return self._attested.keyed.enclave.pin
 
     @property
@@ -197,7 +196,7 @@ class _AsyncAttestedClient:
 
     @property
     def pin(self) -> Pin:
-        """The GitHub repository and the config registry project the enclave is verified against."""
+        """The pin the enclave is verified against."""
         return self._attested.keyed.enclave.pin
 
     @property
@@ -249,13 +248,8 @@ def _enclave_parts(
 class EnclaveHTTPClient(_AttestedClient):
     """An ``httpx`` client whose requests reach only one attested enclave.
 
-    ``host`` is the enclave, with an optional port. ``pin`` is the ``Pin`` it is
-    verified against: ``Pin(repo=...)`` names a GitHub repository,
-    ``owner/name[@tag][@sha256:digest]``, and ``Pin(project=...)`` a config
-    registry project, ``org/project[@revision][@sha256:digest]``. The same
-    name can belong to different owners in each, so set the one the enclave
-    is published under; setting both accepts either. ``host`` and ``pin``
-    are required, and ``Pin()`` accepts configs
+    ``host`` is the enclave, with an optional port, and ``pin`` the ``Pin`` it
+    is verified against; both are required. ``Pin()`` accepts configs
     authorized by ``verifier``, which defaults to public registry trust,
     so passing it is an explicit choice. ``transport_mode`` defaults to
     ``"tls"``. ``base_url`` is a path on the enclave's own HTTPS origin, or

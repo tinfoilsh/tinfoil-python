@@ -98,7 +98,7 @@ print(transcription.text)
 
 ## Talking to one enclave
 
-`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and what it must be running; the client verifies the enclave against that pin before it returns. The second argument is a `Pin`: `Pin(repo=...)` names a GitHub repository and `Pin(project=...)` a config registry project. A bare string is refused with a `ConfigurationError`, and `Pin()` pins nothing. The two namespaces are unrelated, and the same name can belong to different owners in each, so set the one the enclave is published under: a repository is satisfied only by that repository's signed release, and a project only by a registry approval of it or by a matching config you embedded. Setting both accepts either.
+`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and what it must be running; the client verifies the enclave against that pin before it returns. The second argument is a `Pin`: `Pin(repo=...)` for a GitHub repository, `Pin(project=...)` for a config registry project, or both to accept either; neither is satisfied by the other's collateral. A bare string is a `ConfigurationError`.
 
 ```python
 import os

@@ -14,10 +14,10 @@ from tinfoil._transport import AsyncAttestedTransport, AttestedTransport
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
 from tinfoil.verifier import Pin, Verifier
 
-# The router is published under one name in both namespaces, each owned by Tinfoil.
+# Tinfoil owns the router's name in both namespaces.
 DEFAULT_ROUTER_NAME = "tinfoilsh/confidential-model-router"
 DEFAULT_ROUTER_PIN = Pin(repo=DEFAULT_ROUTER_NAME, project=DEFAULT_ROUTER_NAME)
-"""The GitHub repository and the registry project every router is verified against."""
+"""The pin every router is verified against."""
 DEFAULT_ROUTER_URL = "https://atc.tinfoil.sh/routers"
 """Where the router list is fetched from."""
 FALLBACK_HOST = "inference.tinfoil.sh"

@@ -65,18 +65,13 @@ class Enclave:
 
     ``host`` is the enclave, a host with an optional port. ``relay``, when
     set, is a host that fetches attestation from the enclave on the
-    client's behalf. ``pin`` is a ``Pin`` of a GitHub repository,
-    ``owner/name[@tag][@sha256:digest]``, a config registry
-    project, ``org/project[@revision][@sha256:digest]``, or both; ``Pin()`` accepts
-    the configs that the verifier's configured config trust authorizes: the public or
-    the caller's registry, the caller's signing keys, a config authorizer
-    or an embedded config. ``verifier`` is the policy, which several
-    enclaves can share; None selects the defaults.
+    client's behalf. ``pin`` is the ``Pin`` it is verified against. ``verifier``
+    is the policy, which several enclaves can share; None selects the defaults.
     ``verification_check``, when set, is called with each verification
     that passes the verifier; raising rejects it without a retry.
 
-    Construction checks ``pin`` against the verifier's rules for a pin and
-    does no network I/O.
+    Construction checks ``pin`` against the verifier's rules and does no
+    network I/O.
     """
 
     __slots__ = ("_check", "_fetch", "_fetch_async", "host", "pin", "relay", "verifier")

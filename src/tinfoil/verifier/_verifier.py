@@ -78,16 +78,9 @@ PIN_REQUIRED = (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Pin:
-    """What an enclave must be running: a GitHub repository, a config registry project, or both.
-
-    The two namespaces are unrelated, and the same name can belong to
-    different owners in each, so the parts are set by keyword only. Only a
-    document carrying that repository's signed release satisfies ``repo``,
-    and only one carrying a registry approval of that project, or a matching
-    config the caller embedded, satisfies ``project``. Setting both accepts
-    either. Empty, or None, which means the same, leaves a part unset, and
-    ``Pin()`` pins nothing.
-    """
+    """What an enclave must be running. ``repo`` and ``project`` are separate namespaces with unrelated owners,
+    so neither is satisfied by the other's collateral. Setting both accepts either; ``Pin()`` accepts any config
+    the verifier's trust authorizes. None and "" both leave a part unset."""
 
     repo: str | None = None
     """A GitHub repository, ``owner/name[@tag][@sha256:digest]``."""
@@ -232,24 +225,11 @@ class Verifier:
         )
 
     def check_pin_verifiability(self, pin: Pin) -> None:
-        """Check that this verifier can verify an enclave against ``pin``, without a document or network I/O, so
-        that a caller can reject a pin before fetching a document. Either part may be empty or None, which means
-        the same.
-
-        Raises UsageError when ``pin`` is not a ``Pin``; when ``repo`` or ``project`` is non-empty and
-        malformed; when ``repo`` is set alone and this verifier verifies
-        registry collateral only, through an embedded reference, explicit
-        signing keys, registry IDs or a config authorizer; when ``project``
-        is set and this verifier has a config authorizer, which cannot
-        authenticate a project pin; or when this verifier has an embedded
-        config whose name or digest ``project`` does not match.
-        ``verify_v3`` rejects every such pin, whatever the document.
-
-        It can still reject a pin that passes: registry collateral also
-        requires the project and revision to be valid config identity
-        components, such as lowercase slugs, and that check waits for the
-        document.
-        """
+        """Raise UsageError, without a document or network I/O, for a pin that ``verify_v3`` rejects whatever the
+        document: one that is not a ``Pin``, a malformed reference, a ``repo`` set alone when this verifier
+        verifies registry collateral only, or a ``project`` that its config authorizer or embedded config cannot
+        match. A pin that passes can still be rejected once the document shows the project is not a valid config
+        identity."""
         repo, project = _pin_parts(pin)
         if repo != "":
             _repository_pin(repo)
@@ -263,23 +243,9 @@ class Verifier:
         """Appraise a nonce-bound v3 attestation document, with whichever collateral format (v2 or v3) the document
         carries, at the current time.
 
-        ``pin`` is a ``Pin``; anything else, such as a bare reference string,
-        is a UsageError. Its ``repo`` pins a GitHub repository as
-        ``owner/name[@tag][@sha256:digest]`` and its ``project`` a config
-        registry project as ``org/project[@revision][@sha256:digest]``. The
-        two namespaces are unrelated: the same name can belong to different
-        owners in each, so only a document carrying that repository's signed
-        release satisfies ``repo``, and only one carrying a registry
-        approval of that project satisfies ``project``. The document's
-        collateral decides which applies, a document whose collateral the
-        pin does not cover is rejected, and setting both accepts either.
-        Empty, or None, which means the same, leaves that part unset. With
-        neither set, registry collateral accepts configs authorized by the
-        verifier's configured config trust (the public or caller registry,
-        caller signing keys, an authorizer, or an embedded config). An
-        embedded config authorizes its exact caller-supplied bytes, and a
-        config authorizer owns config authorization and requires an empty
-        ``project``.
+        The document's collateral decides which part of ``pin`` applies.
+        Anything but a ``Pin``, such as a bare reference string, is a
+        UsageError.
 
         The caller owns both expectations that cannot come from the
         document: the nonce it generated, and any additional workload
@@ -317,8 +283,7 @@ class Verifier:
 
 
 def _pin_parts(pin: Pin) -> tuple[str, str]:
-    """The repository and project of ``pin`` as strings, "" for one that is unset. Anything but a ``Pin`` is a
-    UsageError, so that a bare reference string is not read as an empty pin."""
+    """The parts of ``pin``, "" when unset. A bare string is a UsageError, not an empty pin."""
     if not isinstance(pin, Pin):
         raise UsageError(PIN_REQUIRED)
     return _reference("repository", pin.repo), _reference("project", pin.project)
@@ -498,7 +463,7 @@ def _verify_v3(
 
     # Reference values and CPU evidence are appraised against the same instant.
     with _layer(LAYER_PROVENANCE):
-        # A malformed pin is the caller's mistake whichever collateral the document carries.
+        # A malformed pin is a usage error for any document.
         code_pin = _repository_pin(repo) if repo != "" else None
         reference_pins(trust, project)
 

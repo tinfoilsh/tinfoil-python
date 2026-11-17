@@ -185,7 +185,7 @@ class Input:
     document: bytes | None
     nonce: bytes | None
     repo: str
-    # Inputs that predate separate pins have no project member; repo then names the workload in either namespace.
+    # Without a project member, repo names both.
     project: str
     # The ASK then the ARK, PEM-encoded, in the AMD KDS cert_chain layout.
     amd_chain_pem: bytes | None
