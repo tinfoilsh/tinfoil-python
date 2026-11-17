@@ -51,6 +51,7 @@ EXPECTED_ALL = (
     "ExpectedTDX",
     "Layer",
     "Measurement",
+    "Pin",
     "PublicKey",
     "Reference",
     "ReferenceSource",
@@ -236,6 +237,7 @@ from {module} import (
     ExpectedTDX,
     Layer,
     Measurement,
+    Pin,
     PublicKey,
     Reference,
     ReferenceSource,
@@ -320,8 +322,8 @@ def main() -> None:
     assert verifier.pinned_registers == expected
     assert verifier.freshness_max_age == timedelta(days=1)
     assert not verifier.caller_authorizes_config
-    verifier.check_pin_verifiability("org/repo")
-    verifier.check_pin_verifiability(None, project="org/project@v1")
+    verifier.check_pin_verifiability(Pin(repo="org/repo"))
+    verifier.check_pin_verifiability(Pin(project="org/project@v1"))
     embedded = EmbeddedReferences(
         config=EmbeddedConfigReference(
             digest="00" * 32, runtime=RuntimeReference(repo="tinfoilsh/cvmimage", tag="v1.0.0", digest="00" * 32)
@@ -347,7 +349,7 @@ def main() -> None:
     key: PublicKey = load_public_key(PEM)
     keyed = Verifier(config_signing_keys=[load_public_key(PEM)], freshness_signing_keys=[key])
     assert repr(keyed).startswith("Verifier(")
-    keyed.check_pin_verifiability(None)
+    keyed.check_pin_verifiability(Pin())
     try:
         parse_reference("not a reference")
     except UsageError as err:
@@ -355,7 +357,7 @@ def main() -> None:
     else:
         fail("a malformed reference parsed")
     try:
-        verifier.verify_v3_at(b"", nonce, None, datetime.now(UTC), project="org/project")
+        verifier.verify_v3_at(b"", nonce, Pin(project="org/project"), datetime.now(UTC))
     except VerificationError as err:
         layer: Layer = err.layer
         assert layer == LAYER_ENVELOPE

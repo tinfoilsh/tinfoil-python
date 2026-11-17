@@ -97,7 +97,7 @@ from tinfoil.verifier._verification import (
     VerificationMetadata,
     crypto_material_data,
 )
-from tinfoil.verifier._verifier import Verifier, parse_reference
+from tinfoil.verifier._verifier import Pin, Verifier, parse_reference
 
 __all__ = [
     "CRYPTO_MATERIAL_ID_HPKE",
@@ -130,6 +130,7 @@ __all__ = [
     "ExpectedTDX",
     "Layer",
     "Measurement",
+    "Pin",
     "PublicKey",
     "Reference",
     "ReferenceSource",

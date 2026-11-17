@@ -39,7 +39,7 @@ from tinfoil._types import (
     TransportMode,
     VerificationCheck,
 )
-from tinfoil.verifier import Verifier
+from tinfoil.verifier import Pin, Verifier
 
 _C = TypeVar("_C", bound=openai.AsyncOpenAI)
 
@@ -373,11 +373,9 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
     """An ``openai.OpenAI`` client whose requests go through an ``EnclaveHTTPClient``, to ``base_url`` or, when
     that is unset, the enclave's ``/v1/`` API.
 
-    ``host``, ``repo`` and the keyword options up to ``http_timeout`` are
+    ``host``, ``pin`` and the keyword options up to ``http_timeout`` are
     those of ``EnclaveHTTPClient``, which is created first and verifies the
-    enclave; ``registry_project`` is its ``project``, since ``project`` here
-    is the ``openai`` package's option, and ``http_timeout`` is its
-    ``timeout``. The remaining keyword
+    enclave; ``http_timeout`` is its ``timeout``. The remaining keyword
     arguments are ``OpenAIOptions``, the ``openai`` package's, applied after
     it; ``http_client`` and ``base_url`` are the attested client's and
     cannot be replaced. ``copy`` and ``with_options`` share the attested
@@ -392,9 +390,8 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
     def __init__(
         self,
         host: str,
-        repo: str | None,
+        pin: Pin,
         *,
-        registry_project: str | None = None,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
         verifier: Verifier | None = None,
@@ -409,8 +406,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
         if _http_client is None:
             _http_client = EnclaveHTTPClient(
                 host,
-                repo,
-                project=registry_project,
+                pin,
                 transport_mode=transport_mode,
                 base_url=base_url,
                 verifier=verifier,
@@ -429,12 +425,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
         return self._tinfoil
 
     def _shared(self) -> dict[str, object]:
-        return {
-            "host": self._tinfoil.enclave,
-            "repo": self._tinfoil.repo,
-            "registry_project": self._tinfoil.project,
-            "_http_client": self._tinfoil,
-        }
+        return {"host": self._tinfoil.enclave, "pin": self._tinfoil.pin, "_http_client": self._tinfoil}
 
 
 class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
@@ -457,9 +448,8 @@ class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
     async def create(
         cls,
         host: str,
-        repo: str | None,
+        pin: Pin,
         *,
-        registry_project: str | None = None,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
         verifier: Verifier | None = None,
@@ -471,8 +461,7 @@ class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
         _without_transport_options(openai_kwargs)
         http_client = await AsyncEnclaveHTTPClient.create(
             host,
-            repo,
-            project=registry_project,
+            pin,
             transport_mode=transport_mode,
             base_url=base_url,
             verifier=verifier,

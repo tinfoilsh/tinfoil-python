@@ -33,6 +33,7 @@ from tinfoil.verifier import (
     SEVSNP,
     CryptoMaterialItem,
     ExpectedSEVSNP,
+    Pin,
     SoftwareIdentity,
     UsageError,
     Verification,
@@ -92,17 +93,15 @@ FACTS = {
 class VerifierDouble:
     """Stands in for the public verifier: records every call and answers with a fixed outcome."""
 
-    calls: list[tuple[bytes, bytes, str, str | None, datetime | None]]
+    calls: list[tuple[bytes, bytes, str | None, str | None, datetime | None]]
     outcome: Verification | Exception
 
-    def verify_v3(self, doc: bytes, nonce: bytes, repo: str, *, project: str | None = None) -> Verification:
-        type(self).calls.append((doc, nonce, repo, project, None))
+    def verify_v3(self, doc: bytes, nonce: bytes, pin: Pin) -> Verification:
+        type(self).calls.append((doc, nonce, pin.repo, pin.project, None))
         return self._answer()
 
-    def verify_v3_at(
-        self, doc: bytes, nonce: bytes, repo: str, verification_time: datetime, *, project: str | None = None
-    ) -> Verification:
-        type(self).calls.append((doc, nonce, repo, project, verification_time))
+    def verify_v3_at(self, doc: bytes, nonce: bytes, pin: Pin, verification_time: datetime) -> Verification:
+        type(self).calls.append((doc, nonce, pin.repo, pin.project, verification_time))
         return self._answer()
 
     def _answer(self) -> Verification:

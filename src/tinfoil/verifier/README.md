@@ -30,18 +30,20 @@ project that you expect the enclave to run. The verifier does not fetch; any HTT
 ```python
 import urllib.request
 
-from tinfoil.verifier import Verification, Verifier, random_nonce
+from tinfoil.verifier import Pin, Verification, Verifier, random_nonce
 
 
-def fetch_and_verify(host: str, repo: str | None, project: str | None) -> Verification:
+def fetch_and_verify(host: str, pin: Pin) -> Verification:
     nonce = random_nonce()
     url = f"https://{host}/.well-known/tinfoil-attestation?nonce={nonce.hex()}"
     with urllib.request.urlopen(url, timeout=10) as response:
         document = response.read()
-    return Verifier().verify_v3(document, nonce, repo, project=project)
+    return Verifier().verify_v3(document, nonce, pin)
 ```
 
-`repo` is a GitHub repository, `owner/name`, and `project` a config registry
+The pin is a `Pin`, whose parts are set by keyword only: `Pin(repo=...)`,
+`Pin(project=...)` or both. Anything else, such as a bare reference string,
+is a `UsageError`. `repo` is a GitHub repository, `owner/name`, and `project` a config registry
 project, `org/project`; each is optionally pinned to a revision or a digest
 as `org/project@v1.2.3` or `org/project@sha256:<hex>`. The two namespaces
 are unrelated, and the same name can belong to different owners in each, so
@@ -52,14 +54,14 @@ the caller's embedded config, matches that project. Set the one the enclave is p
 accepts either. A document whose collateral the pin does not cover is a
 `VerificationError` at the provenance layer.
 
-An empty string or `None` leaves that part unset. With neither set, a
+An empty string or `None` leaves that part unset. With neither set, as in `Pin()`, a
 document that carries v3 collateral is accepted on any config that the
 verifier's configured config trust authorizes: the public registry by
 default, or, when the verifier was built with one, the caller's config
 signing keys, config authorizer or embedded config. One that carries v2
 collateral requires a repository pin, so it is a `UsageError`.
 
-`check_pin_verifiability(repo, project=project)` raises the `UsageError`
+`check_pin_verifiability(pin)` raises the `UsageError`
 that `verify_v3` would raise for that pin whatever the document, so that a
 caller can refuse a pin before fetching anything. It is not the whole check:
 v3 collateral also requires the project and revision to be valid config
@@ -100,7 +102,7 @@ was received:
 from datetime import UTC, datetime
 
 received_at = datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
-verified = Verifier().verify_v3_at(archived_document, archived_nonce, "org/repo", received_at)
+verified = Verifier().verify_v3_at(archived_document, archived_nonce, Pin(repo="org/repo"), received_at)
 ```
 
 Authenticate that instant yourself. Every time-bound check, from the
@@ -240,12 +242,12 @@ subclasses that call for different responses:
   `str(err)` is `"<layer>: <message>"`.
 
 ```python
-from tinfoil.verifier import LAYER_PROVENANCE, UsageError, VerificationError, Verifier
+from tinfoil.verifier import LAYER_PROVENANCE, Pin, UsageError, VerificationError, Verifier
 
 
 def classify(document: bytes, nonce: bytes, project: str | None) -> str:
     try:
-        Verifier().verify_v3(document, nonce, None, project=project)
+        Verifier().verify_v3(document, nonce, Pin(project=project))
     except UsageError as err:
         return f"bug in the caller: {err.message}"
     except VerificationError as err:

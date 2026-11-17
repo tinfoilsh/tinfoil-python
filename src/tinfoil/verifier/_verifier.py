@@ -71,6 +71,28 @@ REGISTRY_COLLATERAL_NEEDS_PROJECT = (
 REPOSITORY_COLLATERAL_NEEDS_REPO = (
     "document carries GitHub repository collateral, but only a registry project is pinned"
 )
+PIN_REQUIRED = (
+    "pin must be a Pin: pass Pin(repo=...) for a GitHub repository or Pin(project=...) for a registry project"
+)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Pin:
+    """What an enclave must be running: a GitHub repository, a config registry project, or both.
+
+    The two namespaces are unrelated, and the same name can belong to
+    different owners in each, so the parts are set by keyword only. Only a
+    document carrying that repository's signed release satisfies ``repo``,
+    and only one carrying a registry approval of that project, or a matching
+    config the caller embedded, satisfies ``project``. Setting both accepts
+    either. Empty, or None, which means the same, leaves a part unset, and
+    ``Pin()`` pins nothing.
+    """
+
+    repo: str | None = None
+    """A GitHub repository, ``owner/name[@tag][@sha256:digest]``."""
+    project: str | None = None
+    """A config registry project, ``org/project[@revision][@sha256:digest]``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -209,12 +231,12 @@ class Verifier:
             f"caller_authorizes_config={self.caller_authorizes_config!r})"
         )
 
-    def check_pin_verifiability(self, repo: str | None, *, project: str | None = None) -> None:
-        """Check that this verifier can verify an enclave against ``repo``, a GitHub repository, and ``project``, a
-        config registry project, without a document or network I/O, so that a caller can reject a pin before
-        fetching a document. Either may be empty or None, which means the same.
+    def check_pin_verifiability(self, pin: Pin) -> None:
+        """Check that this verifier can verify an enclave against ``pin``, without a document or network I/O, so
+        that a caller can reject a pin before fetching a document. Either part may be empty or None, which means
+        the same.
 
-        Raises UsageError when ``repo`` or ``project`` is non-empty and
+        Raises UsageError when ``pin`` is not a ``Pin``; when ``repo`` or ``project`` is non-empty and
         malformed; when ``repo`` is set alone and this verifier verifies
         registry collateral only, through an embedded reference, explicit
         signing keys, registry IDs or a config authorizer; when ``project``
@@ -228,7 +250,7 @@ class Verifier:
         components, such as lowercase slugs, and that check waits for the
         document.
         """
-        repo, project = _reference("repository", repo), _reference("project", project)
+        repo, project = _pin_parts(pin)
         if repo != "":
             _repository_pin(repo)
             if project == "" and requires_config_collateral(self._trust):
@@ -237,12 +259,13 @@ class Verifier:
                 )
         reference_pins(self._trust, project)
 
-    def verify_v3(self, doc: bytes, nonce: bytes, repo: str | None, *, project: str | None = None) -> Verification:
+    def verify_v3(self, doc: bytes, nonce: bytes, pin: Pin) -> Verification:
         """Appraise a nonce-bound v3 attestation document, with whichever collateral format (v2 or v3) the document
         carries, at the current time.
 
-        ``repo`` pins a GitHub repository as
-        ``owner/name[@tag][@sha256:digest]`` and ``project`` a config
+        ``pin`` is a ``Pin``; anything else, such as a bare reference string,
+        is a UsageError. Its ``repo`` pins a GitHub repository as
+        ``owner/name[@tag][@sha256:digest]`` and its ``project`` a config
         registry project as ``org/project[@revision][@sha256:digest]``. The
         two namespaces are unrelated: the same name can belong to different
         owners in each, so only a document carrying that repository's signed
@@ -265,15 +288,13 @@ class Verifier:
         the result even when every reference is embedded.
         """
         # The only clock read.
-        return self.verify_v3_at(doc, nonce, repo, datetime.now(UTC), project=project)
+        return self.verify_v3_at(doc, nonce, pin, datetime.now(UTC))
 
-    def verify_v3_at(
-        self, doc: bytes, nonce: bytes, repo: str | None, verification_time: datetime, *, project: str | None = None
-    ) -> Verification:
+    def verify_v3_at(self, doc: bytes, nonce: bytes, pin: Pin, verification_time: datetime) -> Verification:
         """``verify_v3`` for an archived document. ``verification_time`` replaces the current time in every
         time-bound check: the freshness witnesses and approvals, and the vendor certificate and CRL validity windows
         of the CPU evidence. ``metadata.verified_at`` reports it, and a naive or missing time is a UsageError.
-        ``repo`` and ``project`` mean what they mean to ``verify_v3``.
+        ``pin`` means what it means to ``verify_v3``.
 
         The caller must authenticate ``verification_time`` independently,
         for example from a trusted timestamp recorded when the document was
@@ -291,22 +312,24 @@ class Verifier:
             raise UsageError("document must be bytes")
         if not isinstance(nonce, bytes | bytearray | memoryview):
             raise UsageError("nonce must be bytes")
-        return _verify_v3(
-            trust,
-            bytes(doc),
-            bytes(nonce),
-            _reference("repository", repo),
-            _reference("project", project),
-            verification_time,
-        )
+        repo, project = _pin_parts(pin)
+        return _verify_v3(trust, bytes(doc), bytes(nonce), repo, project, verification_time)
+
+
+def _pin_parts(pin: Pin) -> tuple[str, str]:
+    """The repository and project of ``pin`` as strings, "" for one that is unset. Anything but a ``Pin`` is a
+    UsageError, so that a bare reference string is not read as an empty pin."""
+    if not isinstance(pin, Pin):
+        raise UsageError(PIN_REQUIRED)
+    return _reference("repository", pin.repo), _reference("project", pin.project)
 
 
 def _reference(what: str, ref: str | None) -> str:
-    """A pin as a string: None means no pin, like ``""``; anything but a string is a UsageError."""
+    """A part of a pin as a string: None means unset, like ``""``; anything but a string is a UsageError."""
     if ref is None:
         return ""
     if not isinstance(ref, str):
-        raise UsageError(f"{what} reference must be a string or None")
+        raise UsageError(f"pin {what} must be a string or None: pass Pin(repo=...) or Pin(project=...)")
     return ref
 
 

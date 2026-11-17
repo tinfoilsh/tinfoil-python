@@ -98,16 +98,16 @@ print(transcription.text)
 
 ## Talking to one enclave
 
-`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and what it must be running; the client verifies the enclave against that pin before it returns. The second argument, `repo`, is a GitHub repository, and the keyword `project` (`registry_project` on the OpenAI clients, where `project` is the `openai` package's option) is a config registry project. The two namespaces are unrelated, and the same name can belong to different owners in each, so set the one the enclave is published under: a repository is satisfied only by that repository's signed release, and a project only by a registry approval of it or by a matching config you embedded. Setting both accepts either.
+`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and what it must be running; the client verifies the enclave against that pin before it returns. The second argument is a `Pin`: `Pin(repo=...)` names a GitHub repository and `Pin(project=...)` a config registry project. A bare string is refused with a `ConfigurationError`, and `Pin()` pins nothing. The two namespaces are unrelated, and the same name can belong to different owners in each, so set the one the enclave is published under: a repository is satisfied only by that repository's signed release, and a project only by a registry approval of it or by a matching config you embedded. Setting both accepts either.
 
 ```python
 import os
 
-from tinfoil import EnclaveOpenAIClient
+from tinfoil import EnclaveOpenAIClient, Pin
 
 client = EnclaveOpenAIClient(
     "inference.tinfoil.sh",
-    "tinfoilsh/confidential-model-router",
+    Pin(repo="tinfoilsh/confidential-model-router"),
     api_key=os.environ["TINFOIL_API_KEY"],
 )
 chat_completion = client.chat.completions.create(
@@ -119,9 +119,9 @@ chat_completion = client.chat.completions.create(
 For requests outside the OpenAI API, `EnclaveHTTPClient` verifies the same enclave and exposes an `httpx.Client` whose requests reach only it; a request to any other origin is refused. Build URLs from `base_url`, which ends in a slash:
 
 ```python
-from tinfoil import EnclaveHTTPClient
+from tinfoil import EnclaveHTTPClient, Pin
 
-client = EnclaveHTTPClient("inference.tinfoil.sh", "tinfoilsh/confidential-model-router")
+client = EnclaveHTTPClient("inference.tinfoil.sh", Pin(repo="tinfoilsh/confidential-model-router"))
 
 response = client.http_client.get(client.base_url + "v1/models", timeout=30)
 print(response.status_code, response.text)

@@ -52,6 +52,7 @@ from tinfoil._pin import connection_cert_fp
 from tinfoil._sdkinfo import attestation_headers
 from tinfoil.verifier import (
     NONCE_SIZE,
+    Pin,
     UsageError,
     VerificationError,
     Verifier,
@@ -383,7 +384,7 @@ def _verify(decoded: Input) -> Result:
     appraisal = decoded.verification_time or datetime.now(UTC)
     try:
         verified = verifier.verify_v3_at(
-            decoded.document or b"", decoded.nonce or b"", decoded.repo, appraisal, project=decoded.project
+            decoded.document or b"", decoded.nonce or b"", Pin(repo=decoded.repo, project=decoded.project), appraisal
         )
     except UsageError:
         return _malformed(stage)
@@ -673,7 +674,7 @@ def _live_verify(raw: Any) -> Result:
     except (FetchError, httpx.HTTPError, OSError, ValueError) as err:
         return _internal(stage, f"fetching attestation from {host}: {err}")
     try:
-        verified = verifier.verify_v3(document_bytes, nonce, repo, project=project)
+        verified = verifier.verify_v3(document_bytes, nonce, Pin(repo=repo, project=project))
     except UsageError as err:
         return _malformed(stage, str(err))
     except VerificationError as err:

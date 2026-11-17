@@ -5,13 +5,13 @@ The client verifies enclaves with version 3 of Tinfoil's attestation format, thr
 | 0.15 | v3 |
 | --- | --- |
 | `TinfoilAI(api_key=k)` | `create_client(api_key=k)` |
-| `TinfoilAI(enclave=host, repo=r, api_key=k)` | `EnclaveOpenAIClient(host, r, api_key=k)`. `host` and `repo` are positional and required. `repo` is a GitHub repository and is satisfied only by that repository's signed release; for an enclave published in the config registry, pass `None` and `registry_project=p` (`project=p` on `EnclaveHTTPClient`), which is satisfied only by a registry approval of it or by a matching config you embedded. |
-| `AsyncTinfoilAI(...)` | `await create_async_client(...)` for the router, `await AsyncEnclaveOpenAIClient.create(host, r, ...)` for one enclave. Every asynchronous client is built with `await Cls.create(...)`, since the constructor verifies. |
+| `TinfoilAI(enclave=host, repo=r, api_key=k)` | `EnclaveOpenAIClient(host, Pin(repo=r), api_key=k)`. `host` and the pin are positional and required, and the pin is a `tinfoil.Pin`, whose parts are set by keyword only. `Pin(repo=r)` is a GitHub repository and is satisfied only by that repository's signed release; for an enclave published in the config registry, pass `Pin(project=p)`, which is satisfied only by a registry approval of it or by a matching config you embedded. `Pin(repo=r, project=p)` accepts either and `Pin()` pins nothing. A caller of an earlier v3 release that passed a string converts `EnclaveHTTPClient(host, "org/app")` to `EnclaveHTTPClient(host, Pin(repo="org/app"))`, and likewise for `EnclaveOpenAIClient`, the asynchronous `create` methods and `verify_v3`; a bare string or `None` is refused with a `ConfigurationError` (a `UsageError` from the verifier), never read as an empty pin. The clients' `repo` property is `pin`. |
+| `AsyncTinfoilAI(...)` | `await create_async_client(...)` for the router, `await AsyncEnclaveOpenAIClient.create(host, Pin(repo=r), ...)` for one enclave. Every asynchronous client is built with `await Cls.create(...)`, since the constructor verifies. |
 | `client.chat`, `client.embeddings`, `client.audio` | Unchanged, and every other resource of the `openai` package with them, except the websocket entry points: `realtime`, its `beta.realtime` alias and the `connect` methods of `responses`, `beta.responses`, `live`, `live.sideband` and `live.forks` raise `ConfigurationError`, because a websocket can't use the attested HTTP client and would bypass the attested connection. The `websocket_base_url` option is refused for the same reason when it is set; `None` counts as unset. |
 | `client.client` | The client itself: it is an `openai.OpenAI`. |
 | `client.enclave` | `client.http_client.enclave` |
-| `NewSecureClient().get(url, headers, timeout)`, `.post(...)` | `RouterHTTPClient()`, or `EnclaveHTTPClient(host, repo)`, then `c.http_client.get(c.base_url + "v1/...", headers=..., timeout=...)`, which returns an `httpx.Response`. `http_client` is an `httpx.Client` with every method, and `base_url` ends in a slash. |
-| `SecureClient`, `make_secure_http_client()`, `make_secure_async_http_client()` | `EnclaveHTTPClient(host, repo).http_client` and `(await AsyncEnclaveHTTPClient.create(host, repo)).http_client`. |
+| `NewSecureClient().get(url, headers, timeout)`, `.post(...)` | `RouterHTTPClient()`, or `EnclaveHTTPClient(host, Pin(repo=repo))`, then `c.http_client.get(c.base_url + "v1/...", headers=..., timeout=...)`, which returns an `httpx.Response`. `http_client` is an `httpx.Client` with every method, and `base_url` ends in a slash. |
+| `SecureClient`, `make_secure_http_client()`, `make_secure_async_http_client()` | `EnclaveHTTPClient(host, Pin(repo=repo)).http_client` and `(await AsyncEnclaveHTTPClient.create(host, Pin(repo=repo))).http_client`. |
 | `SecureClient.verify()`, `assert_request_allowed()` | `ensure_verified()` returns a verification that is valid now and `reverify()` forces a fresh one; the origin guard is built into `http_client`, which refuses requests to any other origin. |
 | `get_router_address(platform)` | Removed. `RouterHTTPClient()` and `create_client()` discover, verify and keep the router; `.enclave` on the HTTP client names it. |
 | `measurement=` | `verifier=Verifier(pinned_registers=ExpectedSEVSNP(...))` or `ExpectedTDX(...)` pins registers on top of the repository's release; `embedded_references=` on the `Verifier` supplies an embedded config instead of an endorsed one. Both are `tinfoil.verifier` names. |
@@ -22,7 +22,7 @@ The client verifies enclaves with version 3 of Tinfoil's attestation format, thr
 | `timeout=` on `TinfoilAI` | `timeout=`, which is the `openai` package's per-request timeout, and `http_timeout=`, the attested client's: the attestation fetch and requests through `http_client`. The HTTP clients call the latter `timeout=`. |
 | `get_verification_document()`, `VerificationDocument` | `client.http_client.current`, a `tinfoil.verifier.Verification` with `code_tag`, `code_digest`, `config_repo`, `enclave_measurement`, `tls_public_key_fp`, `hpke_public_key`, `freshness_expires_at`, `metadata.verified_at` and `to_json()`. It is `None` before the first verification; `ensure_verified()` always returns one. |
 | `ValueError` on bad options | `ConfigurationError`, beside `AttestationError` (the enclave could not be trusted) and `NetworkError` (attestation material could not be fetched). All three subclass `TinfoilError`. The `openai` package's errors are unchanged, and re-exported from `tinfoil`. |
-| `tinfoil.attestation`, `tinfoil.sigstore`, `tinfoil.github` | `tinfoil.verifier`: `Verifier().verify_v3(document, nonce, repo, project=project)` returns a `Verification` or raises `VerificationError`. `repo` pins a GitHub repository and `project` a config registry project; either may be `None`. |
+| `tinfoil.attestation`, `tinfoil.sigstore`, `tinfoil.github` | `tinfoil.verifier`: `Verifier().verify_v3(document, nonce, Pin(repo=repo, project=project))` returns a `Verification` or raises `VerificationError`. `repo` pins a GitHub repository and `project` a config registry project; either may be `None`. |
 
 ## Examples
 
@@ -45,11 +45,11 @@ One enclave, with the verification read back:
 ```python
 import os
 
-from tinfoil import EnclaveOpenAIClient
+from tinfoil import EnclaveOpenAIClient, Pin
 
 client = EnclaveOpenAIClient(
     "inference.tinfoil.sh",
-    "tinfoilsh/confidential-model-router",
+    Pin(repo="tinfoilsh/confidential-model-router"),
     api_key=os.environ["TINFOIL_API_KEY"],
 )
 verified = client.http_client.ensure_verified()
@@ -72,13 +72,13 @@ Pinned registers, in place of `measurement=`:
 ```python
 import os
 
-from tinfoil import EnclaveOpenAIClient
+from tinfoil import EnclaveOpenAIClient, Pin
 from tinfoil.verifier import Verifier, parse_expected_sevsnp
 
 launch = os.environ["EXPECTED_LAUNCH_MEASUREMENT"]  # 96 hex characters
 client = EnclaveOpenAIClient(
     "inference.tinfoil.sh",
-    "tinfoilsh/confidential-model-router",
+    Pin(repo="tinfoilsh/confidential-model-router"),
     verifier=Verifier(pinned_registers=parse_expected_sevsnp(launch)),
     api_key=os.environ["TINFOIL_API_KEY"],
 )
