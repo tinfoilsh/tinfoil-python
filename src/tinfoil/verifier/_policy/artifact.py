@@ -341,6 +341,9 @@ def _validate(artifact: Artifact) -> None:
             raise PolicyError(f"{prefix}: unknown policy {_quote(policy_name)}")
         if not _LOWER_HEX.fullmatch(identifier):
             raise PolicyError(f"{prefix}: identifier is not lowercase hex")
+        # An all-zero identifier names no one machine.
+        if identifier.strip("0") == "":
+            raise PolicyError(f"{prefix}: identifier must not be all zeros")
         if named.platform == PLATFORM_SEV_SNP and len(identifier) != _SEV_IDENTIFIER_HEX_LEN:
             raise PolicyError(
                 f"{prefix}: sev-snp identifier must be {_SEV_IDENTIFIER_HEX_LEN} hex chars, got {len(identifier)}"

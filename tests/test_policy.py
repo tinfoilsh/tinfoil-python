@@ -634,9 +634,17 @@ def test_machine_identifier_checks() -> None:
     def long_tdx_id(tree: Tree) -> None:
         tree["machines"][INF7_PPID + "00"] = tree["machines"].pop(INF7_PPID)
 
+    def zero_sev_id(tree: Tree) -> None:
+        tree["machines"]["0" * len(BOX2_TURIN_ID)] = tree["machines"].pop(BOX2_TURIN_ID)
+
+    def zero_tdx_id(tree: Tree) -> None:
+        tree["machines"]["0" * len(INF7_PPID)] = tree["machines"].pop(INF7_PPID)
+
     raises_parse(mutated(uppercase_id), r"identifier is not lowercase hex")
     raises_parse(mutated(short_sev_id), r"sev-snp identifier must be 128 hex chars, got 64")
     raises_parse(mutated(long_tdx_id), r"tdx identifier must be 32 hex chars, got 34")
+    raises_parse(mutated(zero_sev_id), r"identifier must not be all zeros")
+    raises_parse(mutated(zero_tdx_id), r"identifier must not be all zeros")
 
 
 def test_policy_block_mismatches() -> None:
