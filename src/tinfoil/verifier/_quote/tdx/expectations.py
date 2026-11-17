@@ -14,6 +14,7 @@ from tinfoil.verifier._quote.tdx.lib.abi import (
     REPORT_DATA_SIZE,
 )
 from tinfoil.verifier._quote.tdx.lib.validate import (
+    TD_ATTRIBUTES_DEBUG_BIT,
     HeaderOptions,
     PolicyOptions,
     TdQuoteBodyOptions,
@@ -72,7 +73,10 @@ def assemble(policy: TDXPolicy, measurement: TDX, report_data: bytes, config_id:
 def validate(expectations: Expectations, quote: Quote) -> None:
     """Compare a quote against the assembled expected state: the library validation plus the collateral floor
     (the quote's evaluation number must reach the policy minimum). This is the only TDX enforcement entry point,
-    so no subset of the policy can be applied."""
+    so no subset of the policy can be applied. A debuggable TD is refused whatever the endorsed policy says."""
+    td_attributes = int.from_bytes(quote.quote.td_quote_body.td_attributes, "little")
+    if td_attributes & TD_ATTRIBUTES_DEBUG_BIT:
+        raise TdxPolicyError("TD quote reports a debuggable TD")
     try:
         validate_tdx_policy(quote.quote, expectations.options)
     except TdxValidationError as err:

@@ -15,6 +15,7 @@ from tinfoil.verifier._policy import PLATFORM_TDX, TDXPolicy, parse
 from tinfoil.verifier._quote.tdx.authenticate import Options, Quote, authenticate
 from tinfoil.verifier._quote.tdx.expectations import TdxPolicyError, _options, assemble, validate
 from tinfoil.verifier._quote.tdx.lib.abi import QuoteV4
+from tinfoil.verifier._quote.tdx.lib.validate import TD_ATTRIBUTES_DEBUG_BIT
 
 FIXTURE = Path(__file__).parent / "testdata" / "platform-endorsements.json"
 # A production identifier, public by design in the endorsement artifact.
@@ -179,6 +180,20 @@ def test_assemble_checks_the_binding_sizes(authenticated: Quote) -> None:
         assemble(matching_policy(authenticated), code, bytes(63), bytes(48))
     with pytest.raises(TdxPolicyError, match="config id must be 48 bytes"):
         assemble(matching_policy(authenticated), code, bytes(64), bytes(47))
+
+
+def test_debuggable_td_is_refused_even_when_the_policy_matches(authenticated: Quote) -> None:
+    quote = replace(authenticated, tcb_evaluation_data_number=5)
+    body = quote.quote.td_quote_body
+    code = TDX(mrtd=body.mr_td, rtmr0=body.rtmrs[0], rtmr1=body.rtmrs[1], rtmr2=body.rtmrs[2], rtmr3=body.rtmrs[3])
+    assert not body.td_attributes[0] & TD_ATTRIBUTES_DEBUG_BIT
+    attributes = bytes([body.td_attributes[0] | TD_ATTRIBUTES_DEBUG_BIT]) + body.td_attributes[1:]
+    debug = with_body(quote, td_attributes=attributes)
+    policy = matching_policy(debug)
+    assert policy.td_attributes == attributes.hex()
+    with pytest.raises(TdxPolicyError, match="TD quote reports a debuggable TD"):
+        validate(assemble(policy, code, body.report_data, bytes(48)), debug)
+    validate(assemble(matching_policy(quote), code, body.report_data, bytes(48)), quote)
 
 
 def test_fixed_bits_are_enforced_even_when_the_policy_matches(authenticated: Quote) -> None:

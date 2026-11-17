@@ -97,8 +97,7 @@ class TestValidateTdAttributes:
         validate_td_attributes(EXPECTED_TD_ATTRIBUTES)
 
     def test_debug_bit_is_a_fixed0_bit(self):
-        """The DEBUG bit is among the supported bits; whether a debug TD is acceptable is the policy's exact
-        TD_ATTRIBUTES match to decide."""
+        """The DEBUG bit is among the supported bits; the expectations refuse a debug TD."""
         validate_td_attributes(struct.pack("<Q", TD_ATTRIBUTES_DEBUG_BIT))
 
     def test_unauthorized_bits_rejected(self):
