@@ -455,32 +455,40 @@ def _parse_enclave_identity(value: _json.JsonValue) -> EnclaveIdentity:
     )
 
 
-def _parse_response(body: bytes, what: str) -> _json.JsonObject:
-    """Strictly decode a response body: invalid JSON, a non-object body and a duplicate member name at any depth
-    reject."""
+TCB_INFO_MEMBER = "tcbInfo"
+ENCLAVE_IDENTITY_MEMBER = "enclaveIdentity"
+_SIGNATURE_MEMBER = "signature"
+
+
+def _parse_response(body: bytes, what: str, signed: str) -> _json.JsonObject:
+    """Strictly decode a response body: invalid JSON, a non-object body, a duplicate member name at any depth and
+    any members but ``signed`` and the signature reject."""
     try:
         value = _json.strict_parse(body)
     except _json.JsonError as err:
         raise CollateralError(f"unable to unmarshal {what} response: {err}") from err
     if not isinstance(value, _json.JsonObject):
         raise CollateralError(f"{what} response is not a JSON object")
+    if set(value) != {signed, _SIGNATURE_MEMBER}:
+        raise CollateralError(f"{what} response must contain exactly the '{signed}' and '{_SIGNATURE_MEMBER}' members")
     return value
 
 
 def parse_tcb_info_response(body: bytes) -> TdxTcbInfo:
     """Decode a TCB Info response. The id, version and levels are checked at verification, not here."""
-    data = _parse_response(body, "tcbInfo")
+    data = _parse_response(body, "tcbInfo", TCB_INFO_MEMBER)
     return TdxTcbInfo(
-        tcb_info=_parse_tcb_info(_present(data, "tcbInfo")), signature=_string(data, "signature", "TCB Info response")
+        tcb_info=_parse_tcb_info(_present(data, TCB_INFO_MEMBER)),
+        signature=_string(data, _SIGNATURE_MEMBER, "TCB Info response"),
     )
 
 
 def parse_qe_identity_response(body: bytes) -> QeIdentity:
     """Decode a QE Identity response. The id, version and levels are checked at verification, not here."""
-    data = _parse_response(body, "QeIdentity")
+    data = _parse_response(body, "QeIdentity", ENCLAVE_IDENTITY_MEMBER)
     return QeIdentity(
-        enclave_identity=_parse_enclave_identity(_present(data, "enclaveIdentity")),
-        signature=_string(data, "signature", "QE Identity response"),
+        enclave_identity=_parse_enclave_identity(_present(data, ENCLAVE_IDENTITY_MEMBER)),
+        signature=_string(data, _SIGNATURE_MEMBER, "QE Identity response"),
     )
 
 
