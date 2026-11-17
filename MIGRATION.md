@@ -49,7 +49,7 @@ from tinfoil import EnclaveOpenAIClient, Pin
 
 client = EnclaveOpenAIClient(
     "inference.tinfoil.sh",
-    Pin(repo="tinfoilsh/confidential-model-router"),
+    Pin(repo="tinfoilsh/confidential-model-router", project="tinfoilsh/confidential-model-router"),
     api_key=os.environ["TINFOIL_API_KEY"],
 )
 verified = client.http_client.ensure_verified()
@@ -78,7 +78,7 @@ from tinfoil.verifier import Verifier, parse_expected_sevsnp
 launch = os.environ["EXPECTED_LAUNCH_MEASUREMENT"]  # 96 hex characters
 client = EnclaveOpenAIClient(
     "inference.tinfoil.sh",
-    Pin(repo="tinfoilsh/confidential-model-router"),
+    Pin(repo="tinfoilsh/confidential-model-router", project="tinfoilsh/confidential-model-router"),
     verifier=Verifier(pinned_registers=parse_expected_sevsnp(launch)),
     api_key=os.environ["TINFOIL_API_KEY"],
 )

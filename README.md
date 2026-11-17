@@ -107,7 +107,7 @@ from tinfoil import EnclaveOpenAIClient, Pin
 
 client = EnclaveOpenAIClient(
     "inference.tinfoil.sh",
-    Pin(repo="tinfoilsh/confidential-model-router"),
+    Pin(repo="tinfoilsh/confidential-model-router", project="tinfoilsh/confidential-model-router"),
     api_key=os.environ["TINFOIL_API_KEY"],
 )
 chat_completion = client.chat.completions.create(
@@ -121,7 +121,7 @@ For requests outside the OpenAI API, `EnclaveHTTPClient` verifies the same encla
 ```python
 from tinfoil import EnclaveHTTPClient, Pin
 
-client = EnclaveHTTPClient("inference.tinfoil.sh", Pin(repo="tinfoilsh/confidential-model-router"))
+client = EnclaveHTTPClient("inference.tinfoil.sh", Pin(repo="tinfoilsh/confidential-model-router", project="tinfoilsh/confidential-model-router"))
 
 response = client.http_client.get(client.base_url + "v1/models", timeout=30)
 print(response.status_code, response.text)
