@@ -166,7 +166,9 @@ class TestConstruction:
             with pytest.raises(ConfigurationError, match="pin must be a Pin"):
                 EnclaveOpenAIClient("enclave.example", not_a_pin, api_key="k", project="proj_123")  # type: ignore[arg-type]
         with pytest.raises(TypeError, match="registry_project"):
-            EnclaveOpenAIClient("enclave.example", Pin(), api_key="k", **foreign(registry_project="org/project"))
+            EnclaveOpenAIClient(
+                "enclave.example", Pin(repo="o/r"), api_key="k", **foreign(registry_project="org/project")
+            )
 
     def test_router_and_gateway_clients(self, offline: Recorder) -> None:
         offline.handler = lambda request: (
@@ -370,10 +372,10 @@ class TestConstruction:
         with pytest.raises(TypeError, match="host"):
             EnclaveOpenAIClient(api_key="k")  # type: ignore[call-arg]
         assert offline.requests == []
-        client = EnclaveOpenAIClient("enclave.example", Pin(), transport_mode="ehbp", api_key="k")
+        client = EnclaveOpenAIClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k")
         copied = client.with_options(max_retries=0)
         assert copied.http_client is client.http_client
-        assert (copied.http_client.enclave, copied.http_client.pin) == ("enclave.example", Pin())
+        assert (copied.http_client.enclave, copied.http_client.pin) == ("enclave.example", Pin(repo="org/repo"))
         client.close()
 
     @pytest.mark.parametrize("option", sorted(ROUTE_OPTIONS))

@@ -48,9 +48,9 @@ or `org/project@sha256:<hex>`. Neither is satisfied by the other's collateral:
 a document the pin does not cover is a `VerificationError` at the provenance
 layer. Anything but a `Pin`, such as a bare string, is a `UsageError`.
 
-`Pin()` accepts any config that the verifier's trust authorizes: the public
-registry by default. A document that carries a repository release then has
-nothing to be verified against, so it is a `UsageError`.
+`Pin()` accepts any config that the verifier's trust authorizes. Under default
+config trust it is a `UsageError`; it needs an embedded config, a config
+authorizer, config signing keys or `config_registry_ids`.
 
 `check_pin_verifiability(pin)` raises the `UsageError` that `verify_v3` would
 raise for that pin whatever the document, so that a caller can refuse a pin

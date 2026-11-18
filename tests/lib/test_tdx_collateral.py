@@ -178,8 +178,8 @@ class TestParseTcbInfoResponse:
         )
         info = parse_tcb_info_response(body).tcb_info
         assert info == TcbInfo(pce_id=tb.PCEID)
-        assert parse_tcb_info_response(b'{"signature":"ab"}').tcb_info == TcbInfo()
-        assert parse_tcb_info_response(b"{}").signature == ""
+        assert parse_tcb_info_response(b'{"tcbInfo":null,"signature":"ab"}').tcb_info == TcbInfo()
+        assert parse_tcb_info_response(b'{"tcbInfo":{},"signature":null}').signature == ""
 
     def test_null_members(self) -> None:
         """Null reads as absent for plain members and is an error for hex and status members."""
@@ -310,6 +310,21 @@ class TestParseTcbInfoResponse:
         with pytest.raises(CollateralError):
             parse_tcb_info_response(body)
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"{}",
+            b'{"signature":"ab"}',
+            b'{"tcbInfo":{}}',
+            b'{"tcbInfo":{},"signature":"","extra":1}',
+            b'{"tcbInfo":{},"signature":"","enclaveIdentity":{}}',
+            b'{"TcbInfo":{},"signature":""}',
+        ],
+    )
+    def test_response_has_exactly_the_signed_member_and_the_signature(self, body: bytes) -> None:
+        with pytest.raises(CollateralError, match="must contain exactly the 'tcbInfo' and 'signature' members"):
+            parse_tcb_info_response(body)
+
 
 class TestParseQeIdentityResponse:
     def test_parses_every_member(self) -> None:
@@ -325,7 +340,20 @@ class TestParseQeIdentityResponse:
         assert identity.tcb_levels[0].tcb_status == TcbStatus.UP_TO_DATE
 
     def test_absent_members_keep_zero_values(self) -> None:
-        assert parse_qe_identity_response(b'{"enclaveIdentity":{}}').enclave_identity == EnclaveIdentity()
+        body = b'{"enclaveIdentity":{},"signature":""}'
+        assert parse_qe_identity_response(body).enclave_identity == EnclaveIdentity()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b'{"enclaveIdentity":{}}',
+            b'{"enclaveIdentity":{},"signature":"","extra":1}',
+            b'{"tcbInfo":{},"signature":""}',
+        ],
+    )
+    def test_response_has_exactly_the_signed_member_and_the_signature(self, body: bytes) -> None:
+        with pytest.raises(CollateralError, match="must contain exactly the 'enclaveIdentity' and 'signature' members"):
+            parse_qe_identity_response(body)
 
     @pytest.mark.parametrize(
         ("members", "match"),

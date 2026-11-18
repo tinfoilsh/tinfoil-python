@@ -80,7 +80,8 @@ PIN_REQUIRED = (
 class Pin:
     """What an enclave must be running. ``repo`` and ``project`` are separate namespaces with unrelated owners,
     so neither is satisfied by the other's collateral. Setting both accepts either; ``Pin()`` accepts any config
-    the verifier's trust authorizes. None and "" both leave a part unset."""
+    the verifier's trust authorizes, and is a UsageError under default config trust. None and "" both leave a part
+    unset."""
 
     repo: str | None = None
     """A GitHub repository, ``owner/name[@tag][@sha256:digest]``."""
@@ -226,11 +227,12 @@ class Verifier:
 
     def check_pin_verifiability(self, pin: Pin) -> None:
         """Raise UsageError, without a document or network I/O, for a pin that ``verify_v3`` rejects whatever the
-        document: one that is not a ``Pin``, a malformed reference, a ``repo`` set alone when this verifier
-        verifies registry collateral only, or a ``project`` that its config authorizer or embedded config cannot
-        match. A pin that passes can still be rejected once the document shows the project is not a valid config
-        identity."""
+        document: one that is not a ``Pin``, one that names nothing under default config trust, a malformed
+        reference, a ``repo`` set alone when this verifier verifies registry collateral only, or a ``project`` that
+        its config authorizer or embedded config cannot match. A pin that passes can still be rejected once the
+        document shows the project is not a valid config identity."""
         repo, project = _pin_parts(pin)
+        _require_pin(self._trust, repo, project)
         if repo != "":
             _repository_pin(repo)
             if project == "" and requires_config_collateral(self._trust):
@@ -279,6 +281,7 @@ class Verifier:
         if not isinstance(nonce, bytes | bytearray | memoryview):
             raise UsageError("nonce must be bytes")
         repo, project = _pin_parts(pin)
+        _require_pin(trust, repo, project)
         return _verify_v3(trust, bytes(doc), bytes(nonce), repo, project, verification_time)
 
 
@@ -287,6 +290,16 @@ def _pin_parts(pin: Pin) -> tuple[str, str]:
     if not isinstance(pin, Pin):
         raise UsageError(PIN_REQUIRED)
     return _reference("repository", pin.repo), _reference("project", pin.project)
+
+
+def _require_pin(trust: TrustPolicy, repo: str, project: str) -> None:
+    """Refuse a pin that names nothing under default config trust, which would accept any config in the public
+    registry."""
+    if repo or project or trust.embedded.config is not None or trust.config_authorizer is not None:
+        return
+    if trust.config_keys is not None or trust.config_registry_ids is not None:
+        return
+    raise UsageError("pin names nothing: set repo or project, or configure the verifier's config trust")
 
 
 def _reference(what: str, ref: str | None) -> str:

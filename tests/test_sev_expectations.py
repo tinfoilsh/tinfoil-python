@@ -275,6 +275,19 @@ def test_config_bound_enforces_config_and_platform_constraints() -> None:
         sev.validate(legacy, with_report(verified, replace(report, guest_svn=guest_svn_floor - 1)))
 
 
+def test_debuggable_guest_is_refused_even_when_the_policy_matches() -> None:
+    verified, report = box2_quote()
+    policy = fx.sev_policy(verified.identity)
+    debug_policy = replace(policy, guest_policy=replace(policy.guest_policy, debug=True))
+    debug_report = replace(report, policy=report.policy | (1 << abi.POLICY_DEBUG_BIT))
+    expected = sev.assemble(debug_policy, verified, report.measurement, report.report_data)
+    assert expected.want_guest_policy.debug
+    with pytest.raises(sev.SevPolicyError, match="SEV report allows the guest to be debugged"):
+        sev.validate(expected, with_report(verified, debug_report))
+    with pytest.raises(sev.SevPolicyError, match="guest policy does not match"):
+        sev.validate(expected, verified)
+
+
 def test_strict_equality_rejects_what_the_maximum_masks_allow() -> None:
     """A capability the policy permits but the report lacks passes the maximum-mask comparison and fails the exact
     one; a feature the policy forbids fails the mask first."""

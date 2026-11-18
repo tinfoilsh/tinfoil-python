@@ -172,7 +172,7 @@ def test_malformed_pin_is_a_usage_error_whatever_the_collateral() -> None:
 
 def test_v2_collateral_requires_a_repository_pin() -> None:
     """v2 collateral is verified against a code release, so a document that carries it needs a repository pin: None
-    and "" both mean no pin and are a UsageError there, where v3 collateral would accept them."""
+    and "" both mean no pin and are a UsageError."""
     v = Verifier()
     code = vf.reference_entry(
         "code", SIGSTORE_CODE_V1_FORMAT, {"repo": "", "tag": "", "digest": "digest", "sigstore_bundle": {}}
@@ -180,9 +180,9 @@ def test_v2_collateral_requires_a_repository_pin() -> None:
     raw, nonce, parsed = vf.embedded_document(None, code)
     assert parsed.collateral_format() == FORMAT_V2
     for repo in (None, ""):
-        with pytest.raises(UsageError, match="invalid release reference '': want owner/name"):
+        with pytest.raises(UsageError, match="pin names nothing"):
             v.verify_v3(raw, nonce, Pin(repo=repo))
-        with pytest.raises(UsageError, match="invalid release reference '': want owner/name"):
+        with pytest.raises(UsageError, match="pin names nothing"):
             v.verify_v3_at(raw, nonce, Pin(repo=repo), NOW)
 
 
@@ -258,8 +258,13 @@ def test_pin_is_frozen_and_keyword_only() -> None:
 
 def test_none_means_no_pin() -> None:
     """None and "" are the same pin: none. Both pass the verifiability check, both reach the envelope
-    layer, and a config authorizer, which accepts no pin, accepts both."""
-    v = Verifier()
+    layer, and a config authorizer, which accepts no pin, accepts both. Default config trust refuses both."""
+    for pin in (Pin(), Pin(repo="", project="")):
+        with pytest.raises(UsageError, match="pin names nothing"):
+            Verifier().check_pin_verifiability(pin)
+        with pytest.raises(UsageError, match="pin names nothing"):
+            Verifier().verify_v3_at(b"not a document", bytes(NONCE_SIZE), pin, NOW)
+    v = Verifier(config_registry_ids=[PUBLIC_REGISTRY_ID])
     v.check_pin_verifiability(Pin())
     v.check_pin_verifiability(Pin(repo="", project=""))
     for part in (None, ""):
@@ -388,7 +393,6 @@ def test_collateral_version_selects_verification() -> None:
         ("repository collateral, both", FORMAT_V2, name, name, SIGSTORE_CODE_V1_FORMAT),
         ("registry collateral, project", FORMAT_V3, None, name, CONFIG_ID),
         ("registry collateral, repository", FORMAT_V3, name, None, repository_only),
-        ("registry collateral, no pin", FORMAT_V3, None, None, CONFIG_ID),
         ("registry collateral, both", FORMAT_V3, name, name, CONFIG_ID),
     ]
     for case, format_, repo, project, want in cases:
@@ -427,7 +431,7 @@ def test_config_reference_pins() -> None:
     raw, nonce, _ = vf.embedded_document(FORMAT_V3)
     project = "org/project"
     digest = "ab" * 32
-    for ref in ("", project, project + "@v1", project + "@sha256:" + digest, project + "@v1@sha256:" + digest):
+    for ref in (project, project + "@v1", project + "@sha256:" + digest, project + "@v1@sha256:" + digest):
         with pytest.raises(VerificationError) as rejected:
             v.verify_v3(raw, nonce, Pin(project=ref))
         assert isinstance(rejected.value.__cause__, NotFoundError), "valid pins must reach endorsement verification"
@@ -466,8 +470,8 @@ def test_check_pin_verifiability() -> None:
         ("defaults with a project", {}, None, "org/repo@v1", True),
         ("defaults with a repository", {}, "Org/My_Repo", None, True),
         ("defaults with both", {}, "Org/My_Repo", "org/project", True),
-        ("defaults without a pin", {}, None, None, True),
-        ("defaults with empty pins", {}, "", "", True),
+        ("defaults without a pin", {}, None, None, False),
+        ("defaults with empty pins", {}, "", "", False),
         ("defaults with a malformed project", {}, None, "not a reference", False),
         ("defaults with a malformed repository", {}, "not a reference", None, False),
         ("defaults with a malformed repository beside a project", {}, "not a reference", "org/project", False),

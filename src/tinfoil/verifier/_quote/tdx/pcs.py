@@ -10,6 +10,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from tinfoil.verifier._document.collateral.tdx import PCSResponse
 from tinfoil.verifier._quote.tdx.lib.collateral import (
+    ENCLAVE_IDENTITY_MEMBER,
+    TCB_INFO_MEMBER,
     CollateralError,
     PckCrl,
     QeIdentity,
@@ -36,8 +38,6 @@ CA_PLATFORM = "platform"
 CA_PROCESSOR = "processor"
 
 _TCB_EVALUATION_PARAMETER = "tcbEvaluationDataNumber"
-_TCB_INFO_MEMBER = "tcbInfo"
-_ENCLAVE_IDENTITY_MEMBER = "enclaveIdentity"
 
 
 class PCSReplayError(ValueError):
@@ -177,7 +177,7 @@ class PCSReplay:
                 captured.header(HEADER_TCB_INFO_ISSUER_CHAIN), HEADER_TCB_INFO_ISSUER_CHAIN
             )
             tcb_info = parse_tcb_info_response(captured.body)
-            body = top_level_member(captured.body, _TCB_INFO_MEMBER)
+            body = top_level_member(captured.body, TCB_INFO_MEMBER)
         except CollateralError as err:
             raise PCSReplayError(f"unable to receive tcbInfo: {err}") from err
         return tcb_info, body, chain
@@ -194,7 +194,7 @@ class PCSReplay:
                 captured.header(HEADER_QE_IDENTITY_ISSUER_CHAIN), HEADER_QE_IDENTITY_ISSUER_CHAIN
             )
             identity = parse_qe_identity_response(captured.body)
-            body = top_level_member(captured.body, _ENCLAVE_IDENTITY_MEMBER)
+            body = top_level_member(captured.body, ENCLAVE_IDENTITY_MEMBER)
         except CollateralError as err:
             raise PCSReplayError(f"unable to receive QeIdentity: {err}") from err
         return identity, body, chain

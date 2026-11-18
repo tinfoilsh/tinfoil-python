@@ -250,6 +250,19 @@ def test_collateral_loads_every_part() -> None:
     assert collateral.tcb_info_issuer_intermediate.serial_number == 3
 
 
+@pytest.mark.parametrize(("member", "what"), [("tcbInfo", "tcbInfo"), ("enclaveIdentity", "QeIdentity")])
+def test_signed_response_with_another_member_rejects(member: str, what: str) -> None:
+    """A member beside the signed one and the signature leaves the signature valid, and the response is refused."""
+    opening = b'{"' + member.encode() + b'":'
+    responses = tuple(
+        tb.response(r.url, r.body[:-1] + b',"extra":1}', dict(r.headers)) if r.body.startswith(opening) else r
+        for r in tb.Scenario().responses()
+    )
+    assert responses != tb.Scenario().responses()
+    with pytest.raises(PCSReplayError, match=f"unable to receive {what}: .* must contain exactly the '{member}'"):
+        PCSReplay(responses, tb.NOW).collateral(tb.FMSPC, "platform")
+
+
 def test_root_crl_comes_from_the_qe_identity_issuer_root() -> None:
     other_url = "https://certificates.example/other.der"
     scenario = tb.Scenario(intel=tb.intel_pki(root_crl_url=other_url))

@@ -195,10 +195,8 @@ class TestEnclaveClient:
         assert client.base_url == "https://proxy.example/v1/"
         assert client._attested.openai_url == "https://proxy.example/v1/"
         client.close()
-        network.serve("enclave.example")
-        with EnclaveHTTPClient("enclave.example", Pin(), transport_mode="ehbp") as plain:
-            assert plain.pin == Pin()
-            assert network.pins[-1] == Pin()
+        with pytest.raises(ConfigurationError, match="pin names nothing"):
+            EnclaveHTTPClient("enclave.example", Pin(), transport_mode="ehbp")
         network.serve("enclave.example")
         with EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp") as repository:
             assert repository.pin == Pin(repo="org/repo")
@@ -207,8 +205,8 @@ class TestEnclaveClient:
         with EnclaveHTTPClient("enclave.example", Pin(project="org/project"), transport_mode="ehbp") as registry:
             assert registry.pin == Pin(project="org/project")
             assert network.pins[-1] == Pin(project="org/project")
-            assert plain.base_url == "https://enclave.example/"
-            assert plain._attested.openai_url == "https://enclave.example/v1/"
+            assert registry.base_url == "https://enclave.example/"
+            assert registry._attested.openai_url == "https://enclave.example/v1/"
 
     def test_requests_go_through_every_layer(self, network: Network) -> None:
         network.serve("enclave.example")

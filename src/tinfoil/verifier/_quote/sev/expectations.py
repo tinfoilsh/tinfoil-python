@@ -87,7 +87,8 @@ def validate(expectations: Expectations, quote: Quote) -> None:
     The guest policy is compared with the ABI version taken from the
     report (the version is a floor, enforced by the options); PLATFORM_INFO
     is compared exactly; the report must be launched without an author key
-    or ID block.
+    or ID block. A guest policy that allows debugging is refused whatever
+    the endorsed policy says.
     """
     report = quote.report
     try:
@@ -103,6 +104,9 @@ def validate(expectations: Expectations, quote: Quote) -> None:
         got_policy = parse_snp_policy(report.policy)
     except AbiError as err:
         raise SevPolicyError(f"parsing report guest policy: {err}") from err
+    # Refused whatever the endorsed policy says.
+    if got_policy.debug:
+        raise SevPolicyError("SEV report allows the guest to be debugged")
     want_policy = replace(
         expectations.want_guest_policy, abi_major=got_policy.abi_major, abi_minor=got_policy.abi_minor
     )
