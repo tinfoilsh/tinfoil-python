@@ -201,13 +201,19 @@ class TestValidateReport:
         ):
             validate_report(fx.make_report(committed_build=20), exts, BASE_OPTIONS)
         validate_report(fx.make_report(committed_build=20), exts, provisional)
-        with pytest.raises(ValidationError, match="committed build number 22 is greater"):
+        with pytest.raises(
+            ValidationError, match=r"committed firmware version 1\.55 build 22 is later than the current version"
+        ):
             validate_report(fx.make_report(committed_build=22), exts, provisional)
         with pytest.raises(ValidationError, match=r"committed API version \(1.54\) does not match"):
             validate_report(fx.make_report(committed_minor=54), exts, BASE_OPTIONS)
         validate_report(fx.make_report(committed_minor=54), exts, provisional)
-        with pytest.raises(ValidationError, match=r"committed API version \(1.56\) is greater"):
-            validate_report(fx.make_report(committed_minor=56), exts, provisional)
+        # An earlier API version is earlier whatever its build, and a later one later.
+        validate_report(fx.make_report(committed_minor=54, committed_build=255), exts, provisional)
+        with pytest.raises(
+            ValidationError, match=r"committed firmware version 1\.56 build 0 is later than the current version"
+        ):
+            validate_report(fx.make_report(committed_minor=56, committed_build=0), exts, provisional)
 
     def test_tcb_relationships(self) -> None:
         exts = fx.genoa_extensions()

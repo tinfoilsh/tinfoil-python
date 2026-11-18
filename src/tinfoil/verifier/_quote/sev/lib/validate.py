@@ -246,15 +246,12 @@ def validate_version(report: Report, options: ValidationOptions) -> None:
                 f"current API version ({report.current_major}.{report.current_minor})"
             )
     else:
-        if build_cmp > 0:
+        committed = (report.committed_major << 16) | (report.committed_minor << 8) | report.committed_build
+        if committed > current:
             raise ValidationError(
-                f"committed build number {report.committed_build} is greater than the current build number "
-                f"{report.current_build}"
-            )
-        if version_cmp > 0:
-            raise ValidationError(
-                f"committed API version ({report.committed_major}.{report.committed_minor}) is greater than the "
-                f"current API version ({report.current_major}.{report.current_minor})"
+                f"committed firmware version {report.committed_major}.{report.committed_minor} build "
+                f"{report.committed_build} is later than the current version {report.current_major}."
+                f"{report.current_minor} build {report.current_build}"
             )
 
 
