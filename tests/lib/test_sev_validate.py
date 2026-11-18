@@ -176,23 +176,22 @@ class TestValidateReport:
             )
 
     def test_minimum_build_and_version(self) -> None:
+        """The floor is one version, ordered by API major, minor, then build. The report is 1.55 build 21."""
         exts = fx.genoa_extensions()
-        validate_report(fx.make_report(), exts, ValidationOptions(guest_policy=SnpPolicy(smt=True), minimum_build=21))
-        with pytest.raises(ValidationError, match=r"firmware build number 21 is less than the required minimum 25"):
-            validate_report(
-                fx.make_report(), exts, ValidationOptions(guest_policy=SnpPolicy(smt=True), minimum_build=25)
-            )
-        validate_report(
-            fx.make_report(), exts, ValidationOptions(guest_policy=SnpPolicy(smt=True), minimum_version=(1 << 8) | 55)
-        )
+
+        def floor(version: int, build: int) -> ValidationOptions:
+            return ValidationOptions(guest_policy=SnpPolicy(smt=True), minimum_version=version, minimum_build=build)
+
+        for version, build in (((1 << 8) | 55, 21), ((1 << 8) | 54, 255), (0, 25)):
+            validate_report(fx.make_report(), exts, floor(version, build))
         with pytest.raises(
-            ValidationError, match=r"firmware API version \(1.55\) is less than the required minimum \(1.64\)"
+            ValidationError, match=r"firmware version 1\.55 build 21 is below the endorsed minimum 1\.55 build 25"
         ):
-            validate_report(
-                fx.make_report(),
-                exts,
-                ValidationOptions(guest_policy=SnpPolicy(smt=True), minimum_version=(1 << 8) | 64),
-            )
+            validate_report(fx.make_report(), exts, floor((1 << 8) | 55, 25))
+        with pytest.raises(
+            ValidationError, match=r"firmware version 1\.55 build 21 is below the endorsed minimum 1\.64 build 0"
+        ):
+            validate_report(fx.make_report(), exts, floor((1 << 8) | 64, 0))
 
     def test_committed_must_equal_current_unless_provisional(self) -> None:
         exts = fx.genoa_extensions()
@@ -202,13 +201,19 @@ class TestValidateReport:
         ):
             validate_report(fx.make_report(committed_build=20), exts, BASE_OPTIONS)
         validate_report(fx.make_report(committed_build=20), exts, provisional)
-        with pytest.raises(ValidationError, match="committed build number 22 is greater"):
+        with pytest.raises(
+            ValidationError, match=r"committed firmware version 1\.55 build 22 is later than the current version"
+        ):
             validate_report(fx.make_report(committed_build=22), exts, provisional)
         with pytest.raises(ValidationError, match=r"committed API version \(1.54\) does not match"):
             validate_report(fx.make_report(committed_minor=54), exts, BASE_OPTIONS)
         validate_report(fx.make_report(committed_minor=54), exts, provisional)
-        with pytest.raises(ValidationError, match=r"committed API version \(1.56\) is greater"):
-            validate_report(fx.make_report(committed_minor=56), exts, provisional)
+        # An earlier API version is earlier whatever its build, and a later one later.
+        validate_report(fx.make_report(committed_minor=54, committed_build=255), exts, provisional)
+        with pytest.raises(
+            ValidationError, match=r"committed firmware version 1\.56 build 0 is later than the current version"
+        ):
+            validate_report(fx.make_report(committed_minor=56, committed_build=0), exts, provisional)
 
     def test_tcb_relationships(self) -> None:
         exts = fx.genoa_extensions()

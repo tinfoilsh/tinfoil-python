@@ -221,15 +221,14 @@ def _require_le(lower: TCBParts, lower_desc: str, higher: TCBParts, higher_desc:
 
 
 def validate_version(report: Report, options: ValidationOptions) -> None:
-    """Check the firmware build and API version floors and the committed-versus-current relationship."""
-    if options.minimum_build > report.current_build:
+    """Check the firmware version floor and the committed-versus-current relationship."""
+    # AMD orders firmware by API major, then minor, then the build within that API version; each is one byte.
+    current = (report.current_major << 16) | (report.current_minor << 8) | report.current_build
+    if current < ((options.minimum_version << 8) | options.minimum_build):
         raise ValidationError(
-            f"firmware build number {report.current_build} is less than the required minimum {options.minimum_build}"
-        )
-    if options.minimum_version > ((report.current_major << 8) | report.current_minor):
-        raise ValidationError(
-            f"firmware API version ({report.current_major}.{report.current_minor}) is less than the required "
-            f"minimum ({options.minimum_version >> 8}.{options.minimum_version & 0xFF})"
+            f"firmware version {report.current_major}.{report.current_minor} build {report.current_build} is below "
+            f"the endorsed minimum {options.minimum_version >> 8}.{options.minimum_version & 0xFF} build "
+            f"{options.minimum_build}"
         )
     build_cmp = report.committed_build - report.current_build
     version_cmp = compare_byte_versions(
@@ -247,15 +246,12 @@ def validate_version(report: Report, options: ValidationOptions) -> None:
                 f"current API version ({report.current_major}.{report.current_minor})"
             )
     else:
-        if build_cmp > 0:
+        committed = (report.committed_major << 16) | (report.committed_minor << 8) | report.committed_build
+        if committed > current:
             raise ValidationError(
-                f"committed build number {report.committed_build} is greater than the current build number "
-                f"{report.current_build}"
-            )
-        if version_cmp > 0:
-            raise ValidationError(
-                f"committed API version ({report.committed_major}.{report.committed_minor}) is greater than the "
-                f"current API version ({report.current_major}.{report.current_minor})"
+                f"committed firmware version {report.committed_major}.{report.committed_minor} build "
+                f"{report.committed_build} is later than the current version {report.current_major}."
+                f"{report.current_minor} build {report.current_build}"
             )
 
 
