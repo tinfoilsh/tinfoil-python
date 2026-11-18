@@ -227,10 +227,10 @@ class Verifier:
 
     def check_pin_verifiability(self, pin: Pin) -> None:
         """Raise UsageError, without a document or network I/O, for a pin that ``verify_v3`` rejects whatever the
-        document: one that is not a ``Pin``, a malformed reference, a ``repo`` set alone when this verifier
-        verifies registry collateral only, or a ``project`` that its config authorizer or embedded config cannot
-        match. A pin that passes can still be rejected once the document shows the project is not a valid config
-        identity."""
+        document: one that is not a ``Pin``, one that names nothing under default config trust, a malformed
+        reference, a ``repo`` set alone when this verifier verifies registry collateral only, or a ``project`` that
+        its config authorizer or embedded config cannot match. A pin that passes can still be rejected once the
+        document shows the project is not a valid config identity."""
         repo, project = _pin_parts(pin)
         _require_pin(self._trust, repo, project)
         if repo != "":
