@@ -59,7 +59,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: tinfoilsh/tinfoil-conformance
-          ref: 60ce654d2f7381b09669ae7327514ca4dc45c43d
+          ref: a90d0a51182992f5f62a5a147dee87b520e5d117
           path: tinfoil-conformance
           persist-credentials: false
 
