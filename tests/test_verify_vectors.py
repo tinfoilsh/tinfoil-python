@@ -14,6 +14,7 @@ from tinfoil.verifier._errors import (
     LAYER_POLICY,
     LAYER_PROVENANCE,
     LAYER_QUOTE,
+    UsageError,
     VerificationError,
 )
 from tinfoil.verifier._measurement import SEVSNP, Expected, ExpectedSEVSNP, Measurement
@@ -70,6 +71,10 @@ def test_full_verify_vectors(fixture: dict[str, Any]) -> None:
     doc = base64.b64decode(data["document_b64"])
     nonce = bytes.fromhex(data["nonce_hex"])
     now = datetime.fromtimestamp(data["verification_time_unix"], UTC)
+    if not expected["accepted"] and expected["code"] == "MALFORMED_INPUT":
+        with pytest.raises(UsageError):
+            verifier.verify_v3_at(doc, nonce, Pin(repo=data["repo"]), now)
+        return
     if not expected["accepted"] and expected["code"] != "ENVELOPE_REJECTED":
         with pytest.raises(VerificationError) as rejected:
             verifier.verify_v3_at(doc, nonce, Pin(repo=data["repo"]), now)
