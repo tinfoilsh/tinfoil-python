@@ -128,7 +128,7 @@ class ReplicaVerification:
     reference: str
     """The repository reference the replica was verified against."""
     pinned_model: str
-    """The pinned model the verification serves, or empty when the model was not pinned."""
+    """The pinned model the verification serves."""
     verification: Verification
 
 
@@ -190,7 +190,7 @@ class _Replica:
 
     host: str
     ref: str
-    model: str = ""
+    model: str
 
 
 class _Policy:
@@ -234,9 +234,10 @@ class _Policy:
         return entry.hosts, _Replica(host="", ref=pin.repo, model=model)
 
     def verifier_for(self, replica: _Replica) -> Verifier:
-        verifier = self.pins[replica.model].verifier
-        assert verifier is not None
-        return verifier
+        pin = self.pins.get(replica.model)
+        if pin is None or pin.verifier is None:
+            raise ConfigurationError(f'model "{replica.model}" is not pinned')
+        return pin.verifier
 
 
 def rank(hosts: tuple[str, ...] | list[str], prefix: str, first: str) -> list[str]:

@@ -396,6 +396,11 @@ class TestGatewayClient:
         assert network.requests == []
         assert "hunter2" not in str(err.value), "a refused gateway URL is never echoed"
 
+    def test_requires_model_pins(self, network: Network) -> None:
+        with pytest.raises(ConfigurationError, match="at least one model pin"):
+            GatewayHTTPClient(url="https://gateway.example/v1/")
+        assert network.requests == [], "a client without pins is refused before the catalog is fetched"
+
     def test_refused_gateway_url_is_not_echoed(self, network: Network) -> None:
         with pytest.raises(ConfigurationError) as err:
             GatewayHTTPClient(model_pins=PINS, url="https://u:hunter2@gateway.example/v1/", catalog=dict)
@@ -490,6 +495,11 @@ async def test_async_clients(network: Network) -> None:
     router = await AsyncRouterHTTPClient.create(transport_mode="ehbp", user_cache_secret="s")
     assert router.enclave == "router.example"
     await router.close()
+
+    requests = len(network.requests)
+    with pytest.raises(ConfigurationError, match="at least one model pin"):
+        await AsyncGatewayHTTPClient.create(url="https://gateway.example/v1/")
+    assert len(network.requests) == requests, "a client without pins is refused before the catalog is fetched"
 
     entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("replica.example",))}
     network.serve("replica.example")

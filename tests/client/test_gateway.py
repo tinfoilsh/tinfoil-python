@@ -754,11 +754,11 @@ class TestVerifications:
     def test_names_replica_hosts_in_order(self) -> None:
         seal = seal_transport(lambda _: httpx.MockTransport(fixed_response(204)))
         for host in ("b.example", "a.example"):
-            seal._transport(_Replica(host, "tinfoilsh/model")).keyed.ensure_verified()
+            seal._transport(_Replica(host, "tinfoilsh/model", MODEL)).keyed.ensure_verified()
         got = seal.verifications()
         assert [v.host for v in got] == ["a.example", "b.example"]
         assert got[0].reference == "tinfoilsh/model"
-        assert got[0].pinned_model == ""
+        assert got[0].pinned_model == MODEL
         assert seal_transport(lambda _: httpx.MockTransport(fixed_response(204))).verifications() == []
 
     def test_ensure_verified_falls_over(self) -> None:
@@ -851,7 +851,7 @@ class TestVerifications:
 
         def use() -> None:
             arrived.wait()
-            results.append(seal._transport(_Replica("a.example", "tinfoilsh/test")))
+            results.append(seal._transport(_Replica("a.example", "tinfoilsh/test", MODEL)))
 
         threads = [threading.Thread(target=use) for _ in range(2)]
         for thread in threads:
@@ -1216,4 +1216,4 @@ async def test_async_gateway_transport() -> None:
     await seal.aclose()
     with pytest.raises(ConfigurationError, match="closed"):
         await seal.models()
-    assert replace(_Replica("a", "r"), host="b") == _Replica("b", "r")
+    assert replace(_Replica("a", "r", "m"), host="b") == _Replica("b", "r", "m")

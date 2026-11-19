@@ -140,10 +140,10 @@ def test_gateway() -> None:
     published = fetch_catalog(host)
     assert published, "the gateway publishes a catalog with usable entries"
     pins = {model: ModelPin(entry.repo) for model, entry in published.items()}
-    with GatewayHTTPClient(model_pins=pins, user_cache_secret=CACHE_SECRET) as gateway:
+    # The client reads the snapshot its pins were built from, so the two cannot drift apart.
+    with GatewayHTTPClient(model_pins=pins, catalog=lambda: published, user_cache_secret=CACHE_SECRET) as gateway:
         models = gateway.models()
-        assert models
-        # The client's own catalog decides what it serves; a separately fetched snapshot may already differ.
+        assert models == sorted(published)
         model = models[0]
         verified = gateway.ensure_verified(model)
         assert verified.hpke_public_key

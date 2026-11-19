@@ -312,6 +312,11 @@ class TestConstruction:
             assert json.loads(recorder.bodies[0])["user_cache_secret"] == secret, "the body passed the secret layer"
             client.close()
 
+    def test_gateway_client_requires_model_pins(self, offline: Recorder) -> None:
+        with pytest.raises(ConfigurationError, match="at least one model pin"):
+            GatewayOpenAIClient(url="https://gateway.example/v1/", api_key="k")
+        assert offline.requests == [], "a client without pins is refused before the catalog is fetched"
+
     def test_gateway_client_refuses_a_base_url(self, offline: Recorder) -> None:
         """The gateway's base URL is its ``url`` option: a ``base_url`` is refused rather than dropped, from the
         constructor and from copies alike, while a copy passing the gateway's own back is accepted."""
@@ -555,6 +560,13 @@ async def test_async_responses_go_through_the_attested_transport(offline: Record
         assert [(r.url.host, r.url.path) for r in recorder.requests] == [(host, "/v1/responses")]
         assert json.loads(recorder.bodies[0])["user_cache_secret"] == secret
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_gateway_client_requires_model_pins(offline: Recorder) -> None:
+    with pytest.raises(ConfigurationError, match="at least one model pin"):
+        await AsyncGatewayOpenAIClient.create(url="https://gateway.example/v1/", api_key="k")
+    assert offline.requests == [], "a client without pins is refused before the catalog is fetched"
 
 
 @pytest.mark.asyncio
