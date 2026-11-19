@@ -31,7 +31,7 @@ from tinfoil._clients import (
     RouterHTTPClient,
 )
 from tinfoil._errors import AttestationError, ConfigurationError, TinfoilError, tinfoil_error
-from tinfoil._gateway import CatalogEntry
+from tinfoil._gateway import CatalogEntry, ModelPin
 from tinfoil._openai import (
     _FORBIDDEN_TRANSPORT_OPTIONS,
     BASE_URL_FIXED,
@@ -55,6 +55,7 @@ from tinfoil._types import DEFAULT_HTTP_TIMEOUT
 from tinfoil.verifier import Pin, Verifier
 
 MODELS = b'{"object":"list","data":[]}'
+PINS = {"m": ModelPin("tinfoilsh/m")}
 
 
 def foreign(**options: Any) -> dict[str, Any]:
@@ -182,6 +183,7 @@ class TestConstruction:
         assert [str(r.url) for r in through(router)] == ["https://proxy.example/v1/models"]
         router.close()
         gateway = GatewayOpenAIClient(
+            model_pins=PINS,
             url="https://gateway.example/v1/",
             catalog=lambda: {"m": CatalogEntry("tinfoilsh/m", ("a.example",))},
             api_key="k",
@@ -196,7 +198,7 @@ class TestConstruction:
         with pytest.raises(ConfigurationError):
             RouterOpenAIClient(transport_mode="quic", api_key="k")  # type: ignore[arg-type]
         with pytest.raises(ConfigurationError):
-            GatewayOpenAIClient(url="http://gateway.example/v1/", catalog=dict, api_key="k")
+            GatewayOpenAIClient(model_pins=PINS, url="http://gateway.example/v1/", catalog=dict, api_key="k")
         assert offline.requests == []
 
     def test_callers_http_client_and_base_url_cannot_replace_the_attested_ones(self, offline: Recorder) -> None:
@@ -316,13 +318,16 @@ class TestConstruction:
         entries = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
         with pytest.raises(ConfigurationError) as err:
             GatewayOpenAIClient(
+                model_pins=PINS,
                 url="https://gateway.example/v1/",
                 catalog=lambda: entries,
                 api_key="k",
                 **foreign(base_url="https://other.example/v1/"),
             )
         assert str(err.value) == BASE_URL_FIXED
-        gateway = GatewayOpenAIClient(url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k")
+        gateway = GatewayOpenAIClient(
+            model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k"
+        )
         for copy in (gateway.copy, gateway.with_options):
             with pytest.raises(ConfigurationError, match="base_url"):
                 copy(**foreign(base_url="https://other.example/v1/"))
@@ -508,6 +513,7 @@ class TestErrors:
         second = RouterOpenAIClient(api_key="k", max_retries=0)
         pinned = RouterOpenAIClient(user_cache_secret="client-level", api_key="k", max_retries=0)
         gateway = GatewayOpenAIClient(
+            model_pins=PINS,
             url="https://gateway.example/v1/",
             catalog=lambda: {"m": CatalogEntry("tinfoilsh/m", ("a.example",))},
             api_key="k",
@@ -556,6 +562,7 @@ async def test_async_gateway_client_refuses_a_base_url(offline: Recorder) -> Non
     entries = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
     with pytest.raises(ConfigurationError) as err:
         await AsyncGatewayOpenAIClient.create(
+            model_pins=PINS,
             url="https://gateway.example/v1/",
             catalog=lambda: entries,
             api_key="k",
@@ -563,7 +570,7 @@ async def test_async_gateway_client_refuses_a_base_url(offline: Recorder) -> Non
         )
     assert str(err.value) == BASE_URL_FIXED
     gateway = await AsyncGatewayOpenAIClient.create(
-        url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k"
+        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k"
     )
     with pytest.raises(ConfigurationError, match="base_url"):
         gateway.with_options(**foreign(base_url="https://other.example/v1/"))
@@ -656,7 +663,7 @@ SYNC_FACTORIES: dict[str, Callable[..., openai.OpenAI]] = {
     ),
     "RouterOpenAIClient": lambda **kw: RouterOpenAIClient(transport_mode="ehbp", **kw),
     "GatewayOpenAIClient": lambda **kw: GatewayOpenAIClient(
-        url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
+        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
     ),
     "Client": lambda **kw: Client(**kw),
     "create_client": lambda **kw: create_client(**kw),
@@ -667,7 +674,7 @@ ASYNC_FACTORIES: dict[str, Callable[..., Awaitable[openai.AsyncOpenAI]]] = {
     ),
     "AsyncRouterOpenAIClient": lambda **kw: AsyncRouterOpenAIClient.create(transport_mode="ehbp", **kw),
     "AsyncGatewayOpenAIClient": lambda **kw: AsyncGatewayOpenAIClient.create(
-        url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
+        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
     ),
     "AsyncClient": lambda **kw: AsyncClient.create(**kw),
     "create_async_client": lambda **kw: create_async_client(**kw),

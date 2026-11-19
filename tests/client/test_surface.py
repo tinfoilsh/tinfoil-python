@@ -154,6 +154,7 @@ from tinfoil import (
     Client,
     EnclaveOpenAIClient,
     GatewayOpenAIClient,
+    ModelPin,
     OpenAICopyOptions,
     OpenAIOptions,
     Pin,
@@ -184,7 +185,9 @@ async def consume() -> None:
     pin = Pin(repo="org/repo", project="org/project")
     enclave = EnclaveOpenAIClient("enclave.example", pin, transport_mode="ehbp", http_timeout=5.0, **options)
     router = RouterOpenAIClient(user_cache_secret="s", api_key="k", organization="o", project="p")
-    gateway = GatewayOpenAIClient(url="https://gateway.example/v1/", api_key="k", max_retries=1)
+    gateway = GatewayOpenAIClient(
+        model_pins={{"m": ModelPin("tinfoilsh/m")}}, url="https://gateway.example/v1/", api_key="k", max_retries=1
+    )
     drop_in: Client = create_client(**options)
     again: Client = drop_in.with_options(**overrides).copy(max_retries=2, set_default_query={{"v": 1}})
     async_drop_in = await AsyncClient.create(**async_options)
@@ -201,7 +204,7 @@ MISTAKES = (
     'EnclaveOpenAIClient("enclave.example", api_key="k")',
     'EnclaveOpenAIClient("enclave.example", "org/repo", api_key="k")',
     'Pin("org/repo")',
-    'GatewayOpenAIClient(api_key="k").with_options(base_url="https://elsewhere.example/")',
+    'GatewayOpenAIClient(model_pins={"m": ModelPin("tinfoilsh/m")}, api_key="k").with_options(base_url="https://elsewhere.example/")',
     "create_client(api_key=async_key)",
     'create_client(api_key="k", data_residency="us")',
     "RouterOpenAIClient(provider=None)",

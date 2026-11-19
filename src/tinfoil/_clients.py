@@ -444,9 +444,9 @@ class GatewayHTTPClient:
     replica of the model it names, as with the ``"ehbp"`` transport mode: the gateway sees the method, URL and
     headers, and WebSocket upgrades are refused.
 
-    ``model_pins`` pins models to repositories; with ``pinned_models_only``,
-    only pinned models are served, which requires at least one pin.
-    ``verifier`` is the policy for unpinned models; a pin's own verifier
+    ``model_pins`` pins models to repositories. Only pinned models are served,
+    so at least one pin is required.
+    ``verifier`` is the policy for pins that set none; a pin's own verifier
     replaces it for that model. ``verification_check`` is called with each
     replica's verification; a replica it rejects is skipped for the next
     replica of the model. ``user_cache_secret`` empty selects the random
@@ -473,7 +473,6 @@ class GatewayHTTPClient:
         self,
         *,
         model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
@@ -487,7 +486,6 @@ class GatewayHTTPClient:
             relay=relay,
             catalog=catalog,
             model_pins=model_pins,
-            pinned_models_only=pinned_models_only,
             verifier=verifier,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,
@@ -576,7 +574,6 @@ class AsyncGatewayHTTPClient:
         cls,
         *,
         model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
@@ -590,7 +587,6 @@ class AsyncGatewayHTTPClient:
             relay=relay,
             catalog=catalog,
             model_pins=model_pins,
-            pinned_models_only=pinned_models_only,
             verifier=verifier,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,

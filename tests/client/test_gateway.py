@@ -52,6 +52,7 @@ from tinfoil._types import TimeoutTypes
 from tinfoil.verifier import Verification, Verifier
 
 MODEL = "test-model"
+PINS = {MODEL: ModelPin("tinfoilsh/test")}
 INITIAL = "initial.example"
 SPEC_BODY = b'{"model":"test-model","messages":[{"role":"user","content":"hello"}]}'
 SPEC_SALT = "DpKycpNLBpMrAyjpNCVBx66rSpZVwsZJPz5Ty66bBy8"
@@ -105,6 +106,7 @@ def seal_transport(
 
     entries = catalog() if catalog_entries is None else catalog_entries
     return GatewayTransport(
+        model_pins=PINS,
         base_url="https://gateway.example/v1/",
         relay="gateway.example",
         catalog=lambda: entries,
@@ -171,25 +173,29 @@ class TestCatalog:
 class TestPolicy:
     def test_rejects_invalid_options(self) -> None:
         authorizer = Verifier(config_authorizer=lambda _: None)
-        with pytest.raises(ConfigurationError, match="pinned-only"):
-            _Policy({}, True, None)
+        with pytest.raises(ConfigurationError, match="at least one model pin"):
+            _Policy({}, None)
         with pytest.raises(ConfigurationError, match="caller-authorized"):
-            _Policy({}, False, authorizer)
+            _Policy({"m": ModelPin("tinfoilsh/m")}, authorizer)
         with pytest.raises(ConfigurationError, match="caller-authorized"):
-            _Policy({"m": ModelPin("tinfoilsh/m", authorizer)}, False, None)
+            _Policy({"m": ModelPin("tinfoilsh/m", authorizer)}, None)
         with pytest.raises(ConfigurationError, match="must belong to tinfoilsh/"):
-            _Policy({"m": ModelPin("acme/m")}, False, None)
+            _Policy({"m": ModelPin("acme/m")}, None)
         with pytest.raises(ConfigurationError, match="must belong to tinfoilsh/"):
-            _Policy({" ": ModelPin("tinfoilsh/m")}, False, None)
+            _Policy({" ": ModelPin("tinfoilsh/m")}, None)
         with pytest.raises(ConfigurationError, match='model "m"'):
-            _Policy({"m": ModelPin("tinfoilsh/m@")}, False, None)
+            _Policy({"m": ModelPin("tinfoilsh/m@")}, None)
 
     def test_resolve(self) -> None:
         gateway_verifier = Verifier()
         pin_verifier = Verifier()
         policy = _Policy(
-            {"pinned": ModelPin("tinfoilsh/pinned@v1", pin_verifier), "inherits": ModelPin("tinfoilsh/inherits")},
-            False,
+            {
+                "pinned": ModelPin("tinfoilsh/pinned@v1", pin_verifier),
+                "inherits": ModelPin("tinfoilsh/inherits"),
+                "missing": ModelPin("tinfoilsh/missing"),
+                "untrusted": ModelPin("tinfoilsh/untrusted"),
+            },
             gateway_verifier,
         )
         entries: Catalog = {
@@ -205,9 +211,8 @@ class TestPolicy:
         assert policy.verifier_for(replica) is pin_verifier
         _, inherits = policy.resolve("inherits", entries)
         assert policy.verifier_for(inherits) is gateway_verifier
-        _, unpinned = policy.resolve("unpinned", entries)
-        assert unpinned == _Replica("", "tinfoilsh/unpinned", "")
-        assert policy.verifier_for(unpinned) is gateway_verifier
+        with pytest.raises(ConfigurationError, match="is not pinned"):
+            policy.resolve("unpinned", entries)
         with pytest.raises(ConfigurationError, match="no valid bare tinfoilsh/ repository"):
             policy.resolve("missing", entries)
         with pytest.raises(ConfigurationError, match="no valid bare"):
@@ -217,13 +222,10 @@ class TestPolicy:
             AttestationError, match='expected repository "tinfoilsh/pinned", gateway offered "tinfoilsh/other"'
         ):
             policy.resolve("mismatch", entries)
-        pinned_only = _Policy({"pinned": ModelPin("tinfoilsh/pinned")}, True, None)
-        with pytest.raises(ConfigurationError, match="is not pinned"):
-            pinned_only.resolve("unpinned", entries)
 
     def test_pins_are_copied(self) -> None:
         pins = {"m": ModelPin("tinfoilsh/m")}
-        policy = _Policy(pins, False, None)
+        policy = _Policy(pins, None)
         pins["later"] = ModelPin("tinfoilsh/later")
         assert "later" not in policy.pins
 
@@ -475,6 +477,7 @@ class TestMultipart:
     ) -> None:
         monkeypatch.setattr(_gateway, "MAX_MULTIPART_BODY_SIZE", 64)
         seal = AsyncGatewayTransport(
+            model_pins=PINS,
             base_url="https://gateway.example/v1/",
             relay="gateway.example",
             catalog=catalog,
@@ -838,7 +841,11 @@ class TestVerifications:
             return ReplicaTransport(keyed, FakeChain(keyed))
 
         seal = GatewayTransport(
-            base_url="https://gateway.example/v1/", relay="gateway.example", catalog=catalog, _build=build
+            model_pins=PINS,
+            base_url="https://gateway.example/v1/",
+            relay="gateway.example",
+            catalog=catalog,
+            _build=build,
         )
         results: list[ReplicaTransport] = []
 
@@ -1107,7 +1114,7 @@ class TestCatalogCache:
             cache.get(5.0)
         assert fetches == 0
         monkeypatch.setattr(_gateway, "fetch_catalog", lambda *_, **__: pytest.fail("a closed transport fetched"))
-        seal = GatewayTransport(base_url="https://gateway.example/v1/", relay="gateway.example")
+        seal = GatewayTransport(model_pins=PINS, base_url="https://gateway.example/v1/", relay="gateway.example")
         seal.close()
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
             seal.catalog()
@@ -1132,7 +1139,7 @@ class TestCatalogCache:
             pytest.fail("a closed transport fetched")
 
         monkeypatch.setattr(_gateway, "fetch_catalog_async", fetch_catalog_async)
-        seal = AsyncGatewayTransport(base_url="https://gateway.example/v1/", relay="gateway.example")
+        seal = AsyncGatewayTransport(model_pins=PINS, base_url="https://gateway.example/v1/", relay="gateway.example")
         await seal.aclose()
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
             await seal.catalog()
@@ -1148,7 +1155,6 @@ def test_models_and_current_without_network(monkeypatch: pytest.MonkeyPatch) -> 
         relay="gateway.example",
         catalog=lambda: entries,
         model_pins={"pinned": ModelPin("tinfoilsh/pinned@v1")},
-        pinned_models_only=True,
         user_cache_secret="test-secret",
     )
     assert seal.models() == ["pinned"]
@@ -1187,6 +1193,7 @@ async def test_async_gateway_transport() -> None:
         return AsyncReplicaTransport(AsyncFakeKeyed(replica.host), AsyncFakeChain(replica.host))
 
     seal = AsyncGatewayTransport(
+        model_pins=PINS,
         base_url="https://gateway.example/v1/",
         relay="gateway.example",
         catalog=catalog,

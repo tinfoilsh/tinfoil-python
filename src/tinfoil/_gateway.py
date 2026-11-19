@@ -186,7 +186,7 @@ def parse_catalog(body: bytes) -> Catalog:
 @dataclass(frozen=True, slots=True)
 class _Replica:
     """What a verified replica transport is keyed by: the host, the reference it is verified against and the pinned
-    model it serves, empty when unpinned."""
+    model it serves."""
 
     host: str
     ref: str
@@ -194,20 +194,17 @@ class _Replica:
 
 
 class _Policy:
-    """The gateway's verification policy: the pins, whether only pinned models are served, and the verifier for
-    unpinned models."""
+    """The gateway's verification policy: the pins, each with the verifier its replicas are verified under."""
 
-    def __init__(self, model_pins: Mapping[str, ModelPin] | None, pinned_only: bool, verifier: Verifier | None):
-        if pinned_only and not model_pins:
-            raise ConfigurationError("pinned-only mode requires at least one model pin")
+    def __init__(self, model_pins: Mapping[str, ModelPin] | None, verifier: Verifier | None):
+        if not model_pins:
+            raise ConfigurationError("a gateway client requires at least one model pin")
         if verifier is None:
             verifier = Verifier()
         if verifier.caller_authorizes_config:
             raise ConfigurationError(CALLER_AUTHORIZED_CONFIG)
         self.pins: dict[str, ModelPin] = {}
-        self.pinned_only = pinned_only
-        self.verifier = verifier
-        for model, pin in (model_pins or {}).items():
+        for model, pin in model_pins.items():
             if pin.verifier is not None and pin.verifier.caller_authorizes_config:
                 raise ConfigurationError(f'model "{model}": {CALLER_AUTHORIZED_CONFIG}')
             if not model.strip() or not pin.repo.startswith(TRUSTED_REPO_OWNER):
@@ -223,7 +220,7 @@ class _Policy:
     def resolve(self, model: str, catalog: Catalog) -> tuple[tuple[str, ...], _Replica]:
         """The hosts serving ``model`` and the replica key its requests are verified under."""
         pin = self.pins.get(model)
-        if self.pinned_only and pin is None:
+        if pin is None:
             raise ConfigurationError(f'model "{model}" is not pinned')
         entry = catalog.get(model)
         if entry is None or not entry.trusted():
@@ -231,18 +228,15 @@ class _Policy:
                 f'model "{model}" has no valid bare {TRUSTED_REPO_OWNER} repository with replicas '
                 "in the gateway catalog"
             )
-        if pin is not None:
-            repo = pin.repo.split("@", 1)[0]
-            if entry.repo != repo:
-                raise AttestationError(f'model "{model}": expected repository "{repo}", gateway offered "{entry.repo}"')
-            return entry.hosts, _Replica(host="", ref=pin.repo, model=model)
-        return entry.hosts, _Replica(host="", ref=entry.repo)
+        repo = pin.repo.split("@", 1)[0]
+        if entry.repo != repo:
+            raise AttestationError(f'model "{model}": expected repository "{repo}", gateway offered "{entry.repo}"')
+        return entry.hosts, _Replica(host="", ref=pin.repo, model=model)
 
     def verifier_for(self, replica: _Replica) -> Verifier:
-        pin = self.pins.get(replica.model) if replica.model else None
-        if pin is not None and pin.verifier is not None:
-            return pin.verifier
-        return self.verifier
+        verifier = self.pins[replica.model].verifier
+        assert verifier is not None
+        return verifier
 
 
 def rank(hosts: tuple[str, ...] | list[str], prefix: str, first: str) -> list[str]:
@@ -517,13 +511,12 @@ class _Shared(Generic[_T]):
         base_url: str,
         relay: str,
         model_pins: Mapping[str, ModelPin] | None,
-        pinned_models_only: bool,
         verifier: Verifier | None,
         verification_check: VerificationCheck | None,
         user_cache_secret: str | None,
         timeout: TimeoutTypes,
     ) -> None:
-        self.policy = _Policy(model_pins, pinned_models_only, verifier)
+        self.policy = _Policy(model_pins, verifier)
         self.base_url = base_url
         self.relay = relay
         self.check = verification_check
@@ -721,7 +714,6 @@ class GatewayTransport(httpx.BaseTransport):
         relay: str,
         catalog: Callable[[], Catalog] | None = None,
         model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
@@ -733,7 +725,6 @@ class GatewayTransport(httpx.BaseTransport):
             base_url=base_url,
             relay=relay,
             model_pins=model_pins,
-            pinned_models_only=pinned_models_only,
             verifier=verifier,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,
@@ -952,7 +943,6 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         relay: str,
         catalog: Callable[[], Catalog] | None = None,
         model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
@@ -964,7 +954,6 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
             base_url=base_url,
             relay=relay,
             model_pins=model_pins,
-            pinned_models_only=pinned_models_only,
             verifier=verifier,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,

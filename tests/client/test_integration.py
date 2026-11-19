@@ -15,6 +15,7 @@ from tinfoil import (
     AttestationError,
     EnclaveHTTPClient,
     GatewayHTTPClient,
+    ModelPin,
     Pin,
     RouterHTTPClient,
     RouterOpenAIClient,
@@ -136,8 +137,10 @@ def test_router_discovery() -> None:
 
 def test_gateway() -> None:
     host = urlsplit(DEFAULT_GATEWAY_URL).netloc
-    assert fetch_catalog(host), "the gateway publishes a catalog with usable entries"
-    with GatewayHTTPClient(user_cache_secret=CACHE_SECRET) as gateway:
+    published = fetch_catalog(host)
+    assert published, "the gateway publishes a catalog with usable entries"
+    pins = {model: ModelPin(entry.repo) for model, entry in published.items()}
+    with GatewayHTTPClient(model_pins=pins, user_cache_secret=CACHE_SECRET) as gateway:
         models = gateway.models()
         assert models
         # The client's own catalog decides what it serves; a separately fetched snapshot may already differ.
