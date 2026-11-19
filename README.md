@@ -152,7 +152,7 @@ On the OpenAI clients `base_url` is this route option, not the `openai` package'
 
 ## The gateway
 
-Tinfoil's gateway serves many models behind one URL; a gateway client seals each request to a verified replica of the model that the request names. `model_pins` pins a model to the repository that its replicas must run, and `pinned_models_only=True` refuses models that are not pinned. The gateway clients are experimental and may change in a later release.
+Tinfoil's gateway serves many models behind one URL; a gateway client seals each request to a verified replica of the model that the request names. `model_pins` pins a model to the repository that its replicas must run, and models that are not pinned are refused. The gateway clients are experimental and may change in a later release.
 
 ```python
 import os
@@ -161,7 +161,6 @@ from tinfoil import GatewayOpenAIClient, ModelPin
 
 client = GatewayOpenAIClient(
     model_pins={"glm-5-3": ModelPin("tinfoilsh/confidential-glm5-3-nvfp4")},
-    pinned_models_only=True,
     api_key=os.environ["TINFOIL_API_KEY"],
 )
 ```

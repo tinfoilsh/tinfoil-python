@@ -585,7 +585,6 @@ class GatewayOpenAIClient(_AttestedOpenAI):
         self,
         *,
         model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
@@ -600,7 +599,6 @@ class GatewayOpenAIClient(_AttestedOpenAI):
         if _http_client is None:
             _http_client = GatewayHTTPClient(
                 model_pins=model_pins,
-                pinned_models_only=pinned_models_only,
                 verifier=verifier,
                 verification_check=verification_check,
                 user_cache_secret=user_cache_secret,
@@ -641,7 +639,6 @@ class AsyncGatewayOpenAIClient(_AsyncAttestedOpenAI):
         cls,
         *,
         model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
@@ -653,7 +650,6 @@ class AsyncGatewayOpenAIClient(_AsyncAttestedOpenAI):
         _without_transport_options(openai_kwargs)
         http_client = await AsyncGatewayHTTPClient.create(
             model_pins=model_pins,
-            pinned_models_only=pinned_models_only,
             verifier=verifier,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,

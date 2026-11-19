@@ -31,7 +31,7 @@ from tinfoil._clients import (
     RouterHTTPClient,
 )
 from tinfoil._errors import AttestationError, ConfigurationError, TinfoilError, tinfoil_error
-from tinfoil._gateway import CatalogEntry
+from tinfoil._gateway import CatalogEntry, ModelPin
 from tinfoil._openai import (
     _FORBIDDEN_TRANSPORT_OPTIONS,
     BASE_URL_FIXED,
@@ -55,6 +55,7 @@ from tinfoil._types import DEFAULT_HTTP_TIMEOUT
 from tinfoil.verifier import Pin, Verifier
 
 MODELS = b'{"object":"list","data":[]}'
+PINS = {"m": ModelPin("tinfoilsh/m")}
 
 
 def foreign(**options: Any) -> dict[str, Any]:
@@ -182,6 +183,7 @@ class TestConstruction:
         assert [str(r.url) for r in through(router)] == ["https://proxy.example/v1/models"]
         router.close()
         gateway = GatewayOpenAIClient(
+            model_pins=PINS,
             url="https://gateway.example/v1/",
             catalog=lambda: {"m": CatalogEntry("tinfoilsh/m", ("a.example",))},
             api_key="k",
@@ -196,7 +198,7 @@ class TestConstruction:
         with pytest.raises(ConfigurationError):
             RouterOpenAIClient(transport_mode="quic", api_key="k")  # type: ignore[arg-type]
         with pytest.raises(ConfigurationError):
-            GatewayOpenAIClient(url="http://gateway.example/v1/", catalog=dict, api_key="k")
+            GatewayOpenAIClient(model_pins=PINS, url="http://gateway.example/v1/", catalog=dict, api_key="k")
         assert offline.requests == []
 
     def test_callers_http_client_and_base_url_cannot_replace_the_attested_ones(self, offline: Recorder) -> None:
@@ -310,19 +312,27 @@ class TestConstruction:
             assert json.loads(recorder.bodies[0])["user_cache_secret"] == secret, "the body passed the secret layer"
             client.close()
 
+    def test_gateway_client_requires_model_pins(self, offline: Recorder) -> None:
+        with pytest.raises(ConfigurationError, match="at least one model pin"):
+            GatewayOpenAIClient(url="https://gateway.example/v1/", api_key="k")
+        assert offline.requests == [], "a client without pins is refused before the catalog is fetched"
+
     def test_gateway_client_refuses_a_base_url(self, offline: Recorder) -> None:
         """The gateway's base URL is its ``url`` option: a ``base_url`` is refused rather than dropped, from the
         constructor and from copies alike, while a copy passing the gateway's own back is accepted."""
         entries = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
         with pytest.raises(ConfigurationError) as err:
             GatewayOpenAIClient(
+                model_pins=PINS,
                 url="https://gateway.example/v1/",
                 catalog=lambda: entries,
                 api_key="k",
                 **foreign(base_url="https://other.example/v1/"),
             )
         assert str(err.value) == BASE_URL_FIXED
-        gateway = GatewayOpenAIClient(url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k")
+        gateway = GatewayOpenAIClient(
+            model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k"
+        )
         for copy in (gateway.copy, gateway.with_options):
             with pytest.raises(ConfigurationError, match="base_url"):
                 copy(**foreign(base_url="https://other.example/v1/"))
@@ -508,6 +518,7 @@ class TestErrors:
         second = RouterOpenAIClient(api_key="k", max_retries=0)
         pinned = RouterOpenAIClient(user_cache_secret="client-level", api_key="k", max_retries=0)
         gateway = GatewayOpenAIClient(
+            model_pins=PINS,
             url="https://gateway.example/v1/",
             catalog=lambda: {"m": CatalogEntry("tinfoilsh/m", ("a.example",))},
             api_key="k",
@@ -552,10 +563,18 @@ async def test_async_responses_go_through_the_attested_transport(offline: Record
 
 
 @pytest.mark.asyncio
+async def test_async_gateway_client_requires_model_pins(offline: Recorder) -> None:
+    with pytest.raises(ConfigurationError, match="at least one model pin"):
+        await AsyncGatewayOpenAIClient.create(url="https://gateway.example/v1/", api_key="k")
+    assert offline.requests == [], "a client without pins is refused before the catalog is fetched"
+
+
+@pytest.mark.asyncio
 async def test_async_gateway_client_refuses_a_base_url(offline: Recorder) -> None:
     entries = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
     with pytest.raises(ConfigurationError) as err:
         await AsyncGatewayOpenAIClient.create(
+            model_pins=PINS,
             url="https://gateway.example/v1/",
             catalog=lambda: entries,
             api_key="k",
@@ -563,7 +582,7 @@ async def test_async_gateway_client_refuses_a_base_url(offline: Recorder) -> Non
         )
     assert str(err.value) == BASE_URL_FIXED
     gateway = await AsyncGatewayOpenAIClient.create(
-        url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k"
+        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k"
     )
     with pytest.raises(ConfigurationError, match="base_url"):
         gateway.with_options(**foreign(base_url="https://other.example/v1/"))
@@ -656,7 +675,7 @@ SYNC_FACTORIES: dict[str, Callable[..., openai.OpenAI]] = {
     ),
     "RouterOpenAIClient": lambda **kw: RouterOpenAIClient(transport_mode="ehbp", **kw),
     "GatewayOpenAIClient": lambda **kw: GatewayOpenAIClient(
-        url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
+        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
     ),
     "Client": lambda **kw: Client(**kw),
     "create_client": lambda **kw: create_client(**kw),
@@ -667,7 +686,7 @@ ASYNC_FACTORIES: dict[str, Callable[..., Awaitable[openai.AsyncOpenAI]]] = {
     ),
     "AsyncRouterOpenAIClient": lambda **kw: AsyncRouterOpenAIClient.create(transport_mode="ehbp", **kw),
     "AsyncGatewayOpenAIClient": lambda **kw: AsyncGatewayOpenAIClient.create(
-        url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
+        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
     ),
     "AsyncClient": lambda **kw: AsyncClient.create(**kw),
     "create_async_client": lambda **kw: create_async_client(**kw),
