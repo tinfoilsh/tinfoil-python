@@ -38,7 +38,7 @@ MAX_ROUTER_BYTES = 32 << 20
 
 RouterList = Callable[[TimeoutTypes, "float | None"], Sequence[str]]
 """How discovery obtains the candidate list: ``(timeout, deadline)`` to the hosts. Any error counts as an empty
-list."""
+list, except a ``MisusedRouterListFetcher``, which discovery reports."""
 AsyncRouterList = Callable[[TimeoutTypes, "float | None"], Awaitable[Sequence[str]]]
 
 
@@ -120,7 +120,8 @@ def discover(
     """The transport ``new_transport`` makes for the first router from the router list, in random order, that
     verifies under ``verifier`` and passes ``check``, and otherwise for the fallback host, which it leaves to be
     verified on first use. None selects the default policy and accepts every router. ``list_routers`` replaces the
-    fetch of Tinfoil's list, and any error from it counts as an empty list; ``fetch_document`` obtains every
+    fetch of Tinfoil's list, and any error from it counts as an empty list, except a ``MisusedRouterListFetcher``, which
+    is raised; ``fetch_document`` obtains every
     candidate's and the fallback's documents. It stops trying routers after ``DISCOVERY_TIMEOUT`` seconds."""
     fallback = Enclave(
         FALLBACK_HOST, DEFAULT_ROUTER_PIN, verifier=verifier, verification_check=check, fetch_document=fetch_document
