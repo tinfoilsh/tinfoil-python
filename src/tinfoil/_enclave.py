@@ -53,6 +53,11 @@ Fetch = Callable[[], Verification]
 """A test seam: replaces fetching and verifying a document."""
 AsyncFetch = Callable[[], Awaitable[Verification]]
 
+DocumentFetch = Callable[[str, bytes, TimeoutTypes, "float | None"], bytes]
+"""How an enclave obtains its raw attestation document: ``(host, nonce, timeout, deadline)`` to the document, where
+``deadline`` is a ``time.monotonic`` instant or None. Errors are client errors already."""
+AsyncDocumentFetch = Callable[[str, bytes, TimeoutTypes, "float | None"], Awaitable[bytes]]
+
 
 def new_verifier(config: ConfigTrust | None, policy: Policy | None) -> Verifier:
     """The verifier that ``config`` and ``policy`` describe. A verifier UsageError, such as an invalid policy field
@@ -80,12 +85,24 @@ class Enclave:
     is the policy, which several enclaves can share; None selects the defaults.
     ``verification_check``, when set, is called with each verification
     that passes the verifier; raising rejects it without a retry.
+    ``fetch_document`` and ``fetch_document_async``, when set, obtain the
+    raw document in place of a direct fetch from ``host`` or ``relay``.
 
     Construction checks ``pin`` against the verifier's rules and does no
     network I/O.
     """
 
-    __slots__ = ("_check", "_fetch", "_fetch_async", "host", "pin", "relay", "verifier")
+    __slots__ = (
+        "_check",
+        "_fetch",
+        "_fetch_async",
+        "fetch_document",
+        "fetch_document_async",
+        "host",
+        "pin",
+        "relay",
+        "verifier",
+    )
 
     def __init__(
         self,
@@ -95,6 +112,8 @@ class Enclave:
         relay: str = "",
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
+        fetch_document: DocumentFetch | None = None,
+        fetch_document_async: AsyncDocumentFetch | None = None,
         _fetch: Fetch | None = None,
         _fetch_async: AsyncFetch | None = None,
     ) -> None:
@@ -114,6 +133,8 @@ class Enclave:
         self.pin = pin
         self.verifier = verifier
         self._check = verification_check
+        self.fetch_document = fetch_document
+        self.fetch_document_async = fetch_document_async
         self._fetch = _fetch
         self._fetch_async = _fetch_async
 
@@ -197,12 +218,18 @@ class Enclave:
 
     def _fetch_verification(self, timeout: TimeoutTypes, deadline: float | None) -> Verification:
         nonce = random_nonce()
-        doc = fetch_document(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
+        if self.fetch_document is not None:
+            doc = self.fetch_document(self.host, nonce, timeout, deadline)
+        else:
+            doc = fetch_document(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
         return self._verify_document(doc, nonce)
 
     async def _fetch_verification_async(self, timeout: TimeoutTypes, deadline: float | None) -> Verification:
         nonce = random_nonce()
-        doc = await fetch_document_async(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
+        if self.fetch_document_async is not None:
+            doc = await self.fetch_document_async(self.host, nonce, timeout, deadline)
+        else:
+            doc = await fetch_document_async(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
         # Verification is CPU-bound, so it runs off the event loop.
         return await asyncio.to_thread(self._verify_document, doc, nonce)
 
@@ -269,6 +296,8 @@ __all__ = [
     "FRESHNESS_EXPIRED",
     "NO_FRESHNESS_DEADLINE",
     "VERIFICATION_RETRY_DELAY",
+    "AsyncDocumentFetch",
+    "DocumentFetch",
     "Enclave",
     "VerificationRejected",
     "check_deadline",

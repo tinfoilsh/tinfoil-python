@@ -154,6 +154,27 @@ client = OpenAIClient(http_client, api_key=os.environ["TINFOIL_API_KEY"])
 
 The proxy URL is where the proxy is mounted, not the API's base URL: the OpenAI client above sends to `https://proxy.example.com/tinfoil/v1/`, and the HTTP client's `base_url` is `https://proxy.example.com/tinfoil/`. `EnclaveHTTPClient` takes the same `transport`, and refuses a proxy URL on the enclave's own origin; leave the proxy URL unset to connect directly. `transport=TLS()` is the default.
 
+## Reaching only your own origin
+
+An attestation document and the router list are fetched directly by default: from each enclave, and from `https://atc.tinfoil.sh/routers`. A client that may reach only one origin, such as one behind a strict content security policy, or one that should not reveal its IP address to enclaves, fetches them through relays on that origin instead, beside an EHBP proxy for the requests themselves:
+
+```python
+import os
+
+from tinfoil import EHBP, AttestationRelay, OpenAIClient, RouterHTTPClient, RouterListRelay
+
+http_client = RouterHTTPClient(
+    transport=EHBP(proxy_url="https://app.example.com/tinfoil"),
+    fetch_attestation=AttestationRelay("https://app.example.com/attestation"),
+    fetch_router_list=RouterListRelay("https://app.example.com/atc"),
+)
+client = OpenAIClient(http_client, api_key=os.environ["TINFOIL_API_KEY"])
+```
+
+The attestation relay serves `GET {url}/.well-known/tinfoil-attestation?nonce=...&enclave=...` by forwarding it to the enclave that `enclave` names, and the router-list relay serves `GET {url}/routers` by forwarding it to `https://atc.tinfoil.sh/routers`. Relay URLs follow the proxy URL's rules (HTTPS, or HTTP to a loopback address) and are checked when the client is created. `EnclaveHTTPClient` takes `fetch_attestation` too.
+
+`fetch_attestation` and `fetch_router_list` also take your own callables: `fetch_attestation(host, nonce)` returns the raw document, and `fetch_router_list()` the candidate hosts; the asynchronous clients take `async` callables. Neither is trusted. The client verifies every document as it verifies one that it fetched itself, so a fetcher can make verification fail but cannot make an enclave pass; discovery shuffles the list, verifies each router that it tries and falls back to `inference.tinfoil.sh`. An exception from a document fetcher is a `NetworkError`, and one from a router-list fetcher counts as an empty list. Since a document does not name the host that serves it, the list source is trusted not to name a host that would relay another router's attestation: with EHBP, that host would see the request headers, the API key included, although not the sealed bodies.
+
 ## The gateway
 
 Tinfoil's gateway serves many models behind one URL; a gateway client seals each request to a verified replica of the model that the request names. `model_pins` pins a model to the repository that its replicas must run, and `pinned_models_only=True` refuses models that are not pinned. The gateway clients are experimental and may change in a later release.

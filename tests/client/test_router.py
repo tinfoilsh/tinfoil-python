@@ -33,6 +33,9 @@ from .test_transport import AsyncFakeMode, FakeMode
 
 @pytest.fixture
 def atc(monkeypatch: pytest.MonkeyPatch) -> Recorder:
+    """The router list, kept in its order so that a test can name the router that discovery tries first; the
+    shuffle itself is tested on its own."""
+    monkeypatch.setattr(_router, "_shuffle", lambda routers: None)
     recorder = Recorder(lambda _: response(200, b'["router.example"]'))
     monkeypatch.setattr(_fetch, "_TRANSPORT", recorder.transport)
     monkeypatch.setattr(_fetch, "_ASYNC_TRANSPORT", recorder.async_transport)

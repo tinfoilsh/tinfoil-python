@@ -51,6 +51,14 @@ if TYPE_CHECKING:
         RouterHTTPClient,
     )
     from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, TinfoilError, tinfoil_error
+    from tinfoil._fetchers import (
+        AsyncAttestationFetcher,
+        AsyncRouterListFetcher,
+        AttestationFetcher,
+        AttestationRelay,
+        RouterListFetcher,
+        RouterListRelay,
+    )
     from tinfoil._gateway import (
         DEFAULT_GATEWAY_URL,
         Catalog,
@@ -92,6 +100,7 @@ __all__ = [
     "APIResponseValidationError",
     "APIStatusError",
     "APITimeoutError",
+    "AsyncAttestationFetcher",
     "AsyncAttestedHTTPClient",
     "AsyncClient",
     "AsyncEnclaveHTTPClient",
@@ -100,7 +109,10 @@ __all__ = [
     "AsyncOpenAICopyOptions",
     "AsyncOpenAIOptions",
     "AsyncRouterHTTPClient",
+    "AsyncRouterListFetcher",
     "AttestationError",
+    "AttestationFetcher",
+    "AttestationRelay",
     "AttestedHTTPClient",
     "AuthenticationError",
     "AuthorizedBy",
@@ -128,6 +140,8 @@ __all__ = [
     "ReplicaVerification",
     "RepoPin",
     "RouterHTTPClient",
+    "RouterListFetcher",
+    "RouterListRelay",
     "SignedBy",
     "TimeoutTypes",
     "TinfoilError",
@@ -181,6 +195,17 @@ _MODULE_OF: dict[str, str] = {
         (
             "tinfoil._errors",
             ("AttestationError", "ConfigurationError", "NetworkError", "TinfoilError", "tinfoil_error"),
+        ),
+        (
+            "tinfoil._fetchers",
+            (
+                "AsyncAttestationFetcher",
+                "AsyncRouterListFetcher",
+                "AttestationFetcher",
+                "AttestationRelay",
+                "RouterListFetcher",
+                "RouterListRelay",
+            ),
         ),
         (
             "tinfoil._gateway",

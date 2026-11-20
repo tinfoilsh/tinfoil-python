@@ -48,23 +48,25 @@ def request_origin(raw_url: str) -> str:
     return normalized_origin(parts)
 
 
-def validate_proxy_url(proxy_url: str) -> str:
-    """Checks that ``proxy_url`` is an absolute URL that keeps request headers private on the way to the proxy:
-    HTTPS, or HTTP to a loopback host, whose traffic never leaves the machine. A query or a fragment is refused,
-    since request paths join under the URL. Returns the URL with its path ending in a slash. Raises
-    ConfigurationError."""
+def validate_proxy_url(proxy_url: str, name: str = "proxy URL") -> str:
+    """Checks that ``proxy_url``, a route URL that ``name`` describes, such as a proxy or a relay, is an absolute URL
+    that keeps request headers private on the way there: HTTPS, or HTTP to a loopback host, whose traffic never
+    leaves the machine. A query or a fragment is refused, since request paths join under the URL. Returns the URL
+    with its path ending in a slash. Raises ConfigurationError."""
+    if not isinstance(proxy_url, str):
+        raise ConfigurationError(f"invalid {name}: want a string, not {type(proxy_url).__name__}")
     try:
         origin = origin_of(proxy_url)
     except ValueError as err:
-        raise ConfigurationError(f"invalid proxy URL: {err}") from None
+        raise ConfigurationError(f"invalid {name}: {err}") from None
     parts = urlsplit(proxy_url)
     if not origin.startswith("https://") and not is_loopback(parts.hostname or ""):
         raise ConfigurationError(
-            "invalid proxy URL: HTTP is allowed only for localhost or a loopback IP address; "
+            f"invalid {name}: HTTP is allowed only for localhost or a loopback IP address; "
             "use HTTPS to protect request headers"
         )
     if has_query_or_fragment(proxy_url):
-        raise ConfigurationError(QUERY_OR_FRAGMENT_REFUSED)
+        raise ConfigurationError(QUERY_OR_FRAGMENT_REFUSED.replace("proxy URL", name))
     return with_trailing_slash(proxy_url)
 
 

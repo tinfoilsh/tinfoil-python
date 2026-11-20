@@ -86,6 +86,7 @@ ignore = [
 "src/tinfoil/_clients.py" = ["ASYNC109"]
 "src/tinfoil/_enclave.py" = ["ASYNC109"]
 "src/tinfoil/_fetch.py" = ["ASYNC109"]
+"src/tinfoil/_fetchers.py" = ["ASYNC109"]
 "src/tinfoil/_gateway.py" = ["ASYNC109"]
 "src/tinfoil/_router.py" = ["ASYNC109"]
 "src/tinfoil/_tls.py" = ["ASYNC109"]

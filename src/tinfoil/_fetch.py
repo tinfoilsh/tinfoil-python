@@ -40,10 +40,45 @@ def document_url(host: str, relay: str, nonce: bytes) -> str:
     for authority in (host, relay):
         if authority and not is_authority(authority):
             raise ValueError(f"invalid host {authority!r}: want a host with an optional port")
-    query = "nonce=" + nonce.hex()
     if relay:
-        return f"https://{relay}{ATTESTATION_ENDPOINT}?{query}&enclave={quote(host, safe='')}"
-    return f"https://{host}{ATTESTATION_ENDPOINT}?{query}"
+        return relay_document_url(f"https://{relay}", host, nonce)
+    return f"https://{host}{ATTESTATION_ENDPOINT}?nonce={nonce.hex()}"
+
+
+def relay_document_url(relay_url: str, host: str, nonce: bytes) -> str:
+    """Where a relay at ``relay_url``, a checked URL, serves the attestation document of ``host`` for ``nonce``: the
+    attestation path joined under the relay's path, whether or not it ends with a slash, with the nonce in
+    lowercase hex and the host query-escaped."""
+    base = relay_url.removesuffix("/")
+    return f"{base}{ATTESTATION_ENDPOINT}?nonce={nonce.hex()}&enclave={quote(host, safe='')}"
+
+
+def fetch_document_at(
+    url: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
+) -> bytes:
+    """``fetch_document`` for a document URL that is already built, such as a relay's."""
+    return get_bounded(
+        url,
+        timeout=timeout,
+        deadline=deadline,
+        overall=FETCH_TIMEOUT,
+        max_bytes=MAX_DOCUMENT_BYTES,
+        headers=attestation_headers(),
+    )
+
+
+async def fetch_document_at_async(
+    url: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
+) -> bytes:
+    """``fetch_document_at`` on the event loop."""
+    return await get_bounded_async(
+        url,
+        timeout=timeout,
+        deadline=deadline,
+        overall=FETCH_TIMEOUT,
+        max_bytes=MAX_DOCUMENT_BYTES,
+        headers=attestation_headers(),
+    )
 
 
 def is_authority(value: str) -> bool:
@@ -281,7 +316,10 @@ __all__ = [
     "document_url",
     "fetch_document",
     "fetch_document_async",
+    "fetch_document_at",
+    "fetch_document_at_async",
     "get_bounded",
     "get_bounded_async",
     "is_authority",
+    "relay_document_url",
 ]

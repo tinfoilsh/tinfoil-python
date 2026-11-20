@@ -31,6 +31,18 @@ from tinfoil._chain import (
 )
 from tinfoil._enclave import Enclave, new_verifier
 from tinfoil._errors import ConfigurationError
+from tinfoil._fetchers import (
+    AsyncAttestationFetcher,
+    AsyncRouterListFetcher,
+    AttestationFetcher,
+    AttestationRelay,
+    RouterListFetcher,
+    RouterListRelay,
+    async_document_fetch,
+    async_router_list,
+    sync_document_fetch,
+    sync_router_list,
+)
 from tinfoil._gateway import (
     DEFAULT_GATEWAY_URL,
     AsyncGatewayTransport,
@@ -227,17 +239,29 @@ def _enclave_parts(
     transport: Transport | None,
     policy: Policy | None,
     verification_check: VerificationCheck | None,
+    fetch_attestation: object,
+    *,
+    asynchronous: bool,
 ) -> tuple[Enclave, Transport, str, Trust]:
     """The checks an enclave client makes before any network I/O, in order: the host, the trust argument, the
-    transport and its proxy URL, the verifier that the trust and the policy describe, whether the trust can be
-    satisfied at all, and a proxy URL on the enclave's own origin. Returns the enclave, the transport, the proxy
-    URL and a copy of the trust argument."""
+    transport and its proxy URL, the attestation fetcher, the verifier that the trust and the policy describe,
+    whether the trust can be satisfied at all, and a proxy URL on the enclave's own origin. Returns the enclave,
+    the transport, the proxy URL and a copy of the trust argument."""
     if not host:
         raise ConfigurationError("enclave host is required")
     inputs = verifier_inputs(trust)
     resolved, proxy_url = resolve_transport(transport)
+    fetch_document = None if asynchronous else sync_document_fetch(fetch_attestation)
+    fetch_document_async = async_document_fetch(fetch_attestation) if asynchronous else None
     verifier = new_verifier(inputs.config, policy)
-    enclave = Enclave(host, inputs.pin, verifier=verifier, verification_check=verification_check)
+    enclave = Enclave(
+        host,
+        inputs.pin,
+        verifier=verifier,
+        verification_check=verification_check,
+        fetch_document=fetch_document,
+        fetch_document_async=fetch_document_async,
+    )
     refuse_enclave_origin_proxy(proxy_url, host)
     return enclave, resolved, proxy_url, inputs.trust
 
@@ -252,7 +276,9 @@ class EnclaveHTTPClient(_AttestedClient):
     that apply on top of the trust; None keeps every default. ``transport``
     is ``TLS()``, the default, or ``EHBP(proxy_url=...)``; a proxy URL is
     where requests are sent, and they carry ``X-Tinfoil-Enclave-Url`` so
-    that the proxy can forward them.
+    that the proxy can forward them. ``fetch_attestation`` is how the client
+    obtains each attestation document: an ``AttestationFetcher`` callable or
+    an ``AttestationRelay``; None fetches it directly from the enclave.
     ``verification_check``, when set, is called with each verification that
     passes the trust and the policy before the client uses the enclave's keys; raising
     rejects the enclave, and the rejection is not retried. ``timeout`` is
@@ -280,9 +306,12 @@ class EnclaveHTTPClient(_AttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
+        fetch_attestation: AttestationFetcher | AttestationRelay | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
-        enclave, resolved, proxy_url, self._trust = _enclave_parts(host, trust, transport, policy, verification_check)
+        enclave, resolved, proxy_url, self._trust = _enclave_parts(
+            host, trust, transport, policy, verification_check, fetch_attestation, asynchronous=False
+        )
         keyed = AttestedTransport(enclave, mode_for(resolved), timeout=timeout)
         self._attested = _Attested(keyed, proxy_url, "")
         try:
@@ -300,7 +329,7 @@ class EnclaveHTTPClient(_AttestedClient):
 
 class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
     """``EnclaveHTTPClient`` for asyncio, built with ``await AsyncEnclaveHTTPClient.create(...)``, which takes
-    the same arguments."""
+    the same arguments, with an ``AsyncAttestationFetcher`` or an ``AttestationRelay`` for ``fetch_attestation``."""
 
     def __init__(self, *, _attested: _AsyncAttested | None = None, _trust: Trust | None = None) -> None:
         if _attested is None or _trust is None:
@@ -317,9 +346,12 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
+        fetch_attestation: AsyncAttestationFetcher | AttestationRelay | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
-        enclave, resolved, proxy_url, copied = _enclave_parts(host, trust, transport, policy, verification_check)
+        enclave, resolved, proxy_url, copied = _enclave_parts(
+            host, trust, transport, policy, verification_check, fetch_attestation, asynchronous=True
+        )
         keyed = AsyncAttestedTransport(enclave, async_mode_for(resolved), timeout=timeout)
         client = cls(_attested=_AsyncAttested(keyed, proxy_url, ""), _trust=copied)
         try:
@@ -339,9 +371,13 @@ class RouterHTTPClient(_AttestedClient):
     """An ``httpx`` client whose requests reach only the attested router it discovered.
 
     The constructor checks its options before any network I/O, then tries
-    the routers on Tinfoil's router list for at most 30 seconds and keeps the
-    first that verifies, falling back to ``inference.tinfoil.sh``, which it
-    verifies before returning. It discovers again each time it is called.
+    the routers on Tinfoil's router list, in random order, for at most 30
+    seconds and keeps the first that verifies, falling back to
+    ``inference.tinfoil.sh``, which it verifies before returning. It
+    discovers again each time it is called. ``fetch_router_list``, a
+    ``RouterListFetcher`` callable or a ``RouterListRelay``, replaces the
+    fetch of Tinfoil's list; ``fetch_attestation`` obtains the documents of
+    every router that discovery tries and of the fallback.
     An ``EHBP`` proxy URL forwards requests to the router that discovery
     chooses. ``policy`` applies on top of the
     router's fixed trust, its own repository. ``user_cache_secret`` empty selects a random secret that is
@@ -357,9 +393,13 @@ class RouterHTTPClient(_AttestedClient):
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
+        fetch_attestation: AttestationFetcher | AttestationRelay | None = None,
+        fetch_router_list: RouterListFetcher | RouterListRelay | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
         resolved, proxy_url = resolve_transport(transport)
+        fetch_document = sync_document_fetch(fetch_attestation)
+        list_routers = sync_router_list(fetch_router_list)
         verifier = new_verifier(None, policy)
         mode = mode_for(resolved)
         secret = _cachesecret.resolve(user_cache_secret)
@@ -368,6 +408,8 @@ class RouterHTTPClient(_AttestedClient):
             verification_check,
             lambda enclave: AttestedTransport(enclave, mode, timeout=timeout),
             timeout=timeout,
+            list_routers=list_routers,
+            fetch_document=fetch_document,
         )
         self._attested = _Attested(keyed, proxy_url, secret)
         # Discovery leaves its fallback unverified.
@@ -394,9 +436,13 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
+        fetch_attestation: AsyncAttestationFetcher | AttestationRelay | None = None,
+        fetch_router_list: AsyncRouterListFetcher | RouterListRelay | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
         resolved, proxy_url = resolve_transport(transport)
+        fetch_document = async_document_fetch(fetch_attestation)
+        list_routers = async_router_list(fetch_router_list)
         verifier = new_verifier(None, policy)
         mode = async_mode_for(resolved)
         secret = _cachesecret.resolve(user_cache_secret)
@@ -405,6 +451,8 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
             verification_check,
             lambda enclave: AsyncAttestedTransport(enclave, mode, timeout=timeout),
             timeout=timeout,
+            list_routers=list_routers,
+            fetch_document=fetch_document,
         )
         client = cls(_attested=_AsyncAttested(keyed, proxy_url, secret))
         try:

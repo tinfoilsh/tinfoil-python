@@ -90,6 +90,7 @@ class Network:
 
 @pytest.fixture
 def network(monkeypatch: pytest.MonkeyPatch) -> Network:
+    monkeypatch.setattr(_router, "_shuffle", lambda routers: None)  # keep the router list in order
     return Network(monkeypatch)
 
 
