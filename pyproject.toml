@@ -13,7 +13,6 @@ description = "Python client for Tinfoil"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "openai>=3.26.0",
     "httpx>=0.28",
     "tinfoil-ehbp>=0.6.0",
     "cryptography>=42.0.0",
@@ -22,9 +21,15 @@ dependencies = [
     "rfc3161-client>=1.0.7",
 ]
 
+[project.optional-dependencies]
+# The OpenAI clients (OpenAIClient, AsyncOpenAIClient and the drop-in Client); the HTTP clients and the verifier
+# don't need it.
+openai = ["openai>=3.26.0"]
+
 [dependency-groups]
 dev = [
     "mypy>=2.4.1",
+    "openai>=3.26.0",
     "pytest",
     "pytest-asyncio>=0.26.0",
     "ruff>=0.17.4",

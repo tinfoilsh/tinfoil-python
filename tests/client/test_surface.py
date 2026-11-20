@@ -28,16 +28,16 @@ EXPECTED_ALL = (
     "APIResponseValidationError",
     "APIStatusError",
     "APITimeoutError",
+    "AsyncAttestedHTTPClient",
     "AsyncClient",
     "AsyncEnclaveHTTPClient",
-    "AsyncEnclaveOpenAIClient",
     "AsyncGatewayHTTPClient",
-    "AsyncGatewayOpenAIClient",
+    "AsyncOpenAIClient",
     "AsyncOpenAICopyOptions",
     "AsyncOpenAIOptions",
     "AsyncRouterHTTPClient",
-    "AsyncRouterOpenAIClient",
     "AttestationError",
+    "AttestedHTTPClient",
     "AuthenticationError",
     "AuthorizedBy",
     "BadRequestError",
@@ -49,13 +49,12 @@ EXPECTED_ALL = (
     "EitherPin",
     "EmbeddedConfig",
     "EnclaveHTTPClient",
-    "EnclaveOpenAIClient",
     "GatewayHTTPClient",
-    "GatewayOpenAIClient",
     "InternalServerError",
     "ModelPin",
     "NetworkError",
     "NotFoundError",
+    "OpenAIClient",
     "OpenAICopyOptions",
     "OpenAIError",
     "OpenAIOptions",
@@ -65,7 +64,6 @@ EXPECTED_ALL = (
     "ReplicaVerification",
     "RepoPin",
     "RouterHTTPClient",
-    "RouterOpenAIClient",
     "SignedBy",
     "TimeoutTypes",
     "TinfoilError",
@@ -84,11 +82,9 @@ EXPECTED_ALL = (
 EXPERIMENTAL = {
     "DEFAULT_GATEWAY_URL",
     "AsyncGatewayHTTPClient",
-    "AsyncGatewayOpenAIClient",
     "Catalog",
     "CatalogEntry",
     "GatewayHTTPClient",
-    "GatewayOpenAIClient",
     "ModelPin",
     "ReplicaVerification",
     "fetch_catalog",
@@ -158,15 +154,19 @@ import httpx
 from tinfoil import (
     EHBP,
     AsyncClient,
+    AsyncOpenAIClient,
     AsyncOpenAIOptions,
+    AsyncRouterHTTPClient,
+    AttestedHTTPClient,
     Client,
-    EnclaveOpenAIClient,
-    GatewayOpenAIClient,
-    OpenAICopyOptions,
     EitherPin,
+    EnclaveHTTPClient,
+    GatewayHTTPClient,
+    OpenAIClient,
+    OpenAICopyOptions,
     OpenAIOptions,
     RepoPin,
-    RouterOpenAIClient,
+    RouterHTTPClient,
     create_client,
 )
 
@@ -191,36 +191,43 @@ other_options: OpenAIOptions = {{"organization": "o", "default_query": {{"v": 1}
 
 async def consume() -> None:
     trust = EitherPin("org/repo", "org/project")
-    enclave = EnclaveOpenAIClient("enclave.example", trust, transport=EHBP(), http_timeout=5.0, **options)
-    router = RouterOpenAIClient(user_cache_secret="s", api_key="k", organization="o", project="p")
-    gateway = GatewayOpenAIClient(url="https://gateway.example/v1/", api_key="k", max_retries=1)
+    http_client: AttestedHTTPClient = EnclaveHTTPClient("enclave.example", trust, transport=EHBP(), timeout=5.0)
+    enclave = OpenAIClient(http_client, api_path="/openai/v1", **options)
+    router = OpenAIClient(RouterHTTPClient(user_cache_secret="s"), api_key="k", organization="o", project="p")
+    gateway = OpenAIClient(GatewayHTTPClient(url="https://gateway.example/v1/"), api_key="k", max_retries=1)
     drop_in: Client = create_client(**options)
     again: Client = drop_in.with_options(**overrides).copy(max_retries=2, set_default_query={{"v": 1}})
+    async_router = AsyncOpenAIClient(await AsyncRouterHTTPClient.create(), **async_options)
     async_drop_in = await AsyncClient.create(**async_options)
     for client in (enclave, router, gateway, drop_in, again):
         client.close()
+    await async_router.close()
     await async_drop_in.close()
     {mistakes}
 '''
 
 MISTAKES = (
-    'EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), api_key="k", max_retires=0)',
+    'OpenAIClient(RouterHTTPClient(), api_key="k", max_retires=0)',
     'create_client(api_key="k", transport=EHBP())',
-    'RouterOpenAIClient(api_key="k", http_client=httpx.Client())',
-    'EnclaveOpenAIClient("enclave.example", api_key="k")',
-    'EnclaveOpenAIClient("enclave.example", "org/repo", api_key="k")',
+    'OpenAIClient(RouterHTTPClient(), api_key="k", http_client=httpx.Client())',
+    'OpenAIClient(api_key="k")',
+    'OpenAIClient("https://enclave.example/", api_key="k")',
+    'OpenAIClient(AsyncRouterHTTPClient(), api_key="k")',
+    'EnclaveHTTPClient("enclave.example", "org/repo")',
     "RepoPin(repo=1)",
-    'GatewayOpenAIClient(api_key="k").with_options(base_url="https://elsewhere.example/")',
+    'OpenAIClient(GatewayHTTPClient(), api_key="k").with_options(base_url="https://elsewhere.example/")',
+    "OpenAIClient(RouterHTTPClient(), api_path=1)",
     "create_client(api_key=async_key)",
     'create_client(api_key="k", data_residency="us")',
-    "RouterOpenAIClient(provider=None)",
-    'EnclaveOpenAIClient("e.example", RepoPin("o/r"), workload_identity=None).with_options(workload_identity=None)',
+    "OpenAIClient(RouterHTTPClient(), provider=None)",
+    "OpenAIClient(RouterHTTPClient(), workload_identity=None).with_options(workload_identity=None)",
     'create_client(api_key="k", websocket_base_url=None)',
 )
 """Consumer mistakes, one per line of the probe: a misspelled option, a route option on the drop-in client, the
-fixed ``http_client`` and ``base_url``, a missing trust, a bare string for it, a repository
-of another type, an awaitable key on a synchronous client, and the
-transport options that ``OpenAIOptions`` leaves out, even when they are ``None``."""
+fixed ``http_client`` and the overridden ``base_url`` and ``data_residency``, a missing HTTP client, a string or an
+asynchronous client in its place, a bare string for a trust argument, a repository of another type, an API path of
+another type, an awaitable key on a synchronous client, and the transport options that ``OpenAIOptions`` leaves
+out, even when they are ``None``."""
 
 
 def _mypy(probe: Path) -> subprocess.CompletedProcess[str]:

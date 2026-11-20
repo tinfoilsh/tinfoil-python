@@ -219,7 +219,6 @@ class TestEnclaveClient:
             "the verifier receives each pin in its own namespace"
         )
         assert client.base_url == "https://proxy.example/v1/"
-        assert client._attested.openai_url == "https://proxy.example/v1/v1/", "the proxy's path is its mount point"
         client.close()
         network.serve("enclave.example")
         with EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP()) as repository:
@@ -230,7 +229,6 @@ class TestEnclaveClient:
             assert registry.trust == ProjectPin("org/project")
             assert network.pins[-1] == Pin(project="org/project")
             assert registry.base_url == "https://enclave.example/"
-            assert registry._attested.openai_url == "https://enclave.example/v1/"
 
     def test_requests_go_through_every_layer(self, network: Network) -> None:
         network.serve("enclave.example")

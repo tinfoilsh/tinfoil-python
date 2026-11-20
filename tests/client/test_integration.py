@@ -13,13 +13,14 @@ from tinfoil import (
     DEFAULT_GATEWAY_URL,
     EHBP,
     TLS,
-    AsyncRouterOpenAIClient,
+    AsyncOpenAIClient,
+    AsyncRouterHTTPClient,
     AttestationError,
     EnclaveHTTPClient,
     GatewayHTTPClient,
+    OpenAIClient,
     RepoPin,
     RouterHTTPClient,
-    RouterOpenAIClient,
     Transport,
     create_async_client,
     create_client,
@@ -57,8 +58,9 @@ def test_enclave_client(mode: Transport) -> None:
 @needs_api_key
 @pytest.mark.parametrize("mode", [TLS(), EHBP()])
 def test_router_openai_client(mode: Transport) -> None:
-    with RouterOpenAIClient(transport=mode, user_cache_secret=CACHE_SECRET, api_key=API_KEY) as client:
-        attested = client.http_client
+    attested = RouterHTTPClient(transport=mode, user_cache_secret=CACHE_SECRET)
+    with OpenAIClient(attested, api_key=API_KEY) as client:
+        assert client.http_client is attested
         verified = attested.ensure_verified()
         assert attested.current is not None
         assert verified.freshness_expires_at == attested.current.freshness_expires_at, "a valid verification is reused"
@@ -107,7 +109,7 @@ def test_verification_check_rejects_once() -> None:
 @needs_api_key
 @pytest.mark.asyncio
 async def test_async_router_client() -> None:
-    client = await AsyncRouterOpenAIClient.create(transport=EHBP(), api_key=API_KEY)
+    client = AsyncOpenAIClient(await AsyncRouterHTTPClient.create(transport=EHBP()), api_key=API_KEY)
     try:
         stream = await client.chat.completions.create(
             model=MODEL, messages=[{"role": "user", "content": "Hello from the async integration test"}], stream=True

@@ -71,7 +71,9 @@ class _Attested:
     """What the enclave and router clients share: the verified enclave and the chain their requests go through.
     The chain, from the inside out: the proxy header, one replay after a key rejection, the cache secret, and
     origin pinning. The cache secret sits above the attested transport, so the field it adds is sealed with the
-    rest of the body or sent over the pinned connection."""
+    rest of the body or sent over the pinned connection. ``http_client`` is the caller's ``httpx`` client over
+    the chain; ``secure`` is a second one over the same chain that OpenAI clients send through, which changes
+    to the caller's client, such as its headers, authentication or event hooks, cannot reach."""
 
     def __init__(self, keyed: AttestedTransport, proxy_url: str, secret: str) -> None:
         host = keyed.enclave.host
@@ -81,8 +83,12 @@ class _Attested:
         guard = with_origin_restriction(chain, host, proxy_url)
         self.keyed = keyed
         self.http_client = httpx.Client(transport=guard, timeout=keyed.timeout)
+        self.secure = httpx.Client(transport=guard, timeout=keyed.timeout)
         self.base_url = proxy_url or f"https://{host}/"
-        self.openai_url = self.base_url + "v1/"
+
+    def close(self) -> None:
+        self.http_client.close()
+        self.secure.close()
 
 
 class _AsyncAttested:
@@ -94,8 +100,12 @@ class _AsyncAttested:
         guard = with_origin_restriction_async(chain, host, proxy_url)
         self.keyed = keyed
         self.http_client = httpx.AsyncClient(transport=guard, timeout=keyed.timeout)
+        self.secure = httpx.AsyncClient(transport=guard, timeout=keyed.timeout)
         self.base_url = proxy_url or f"https://{host}/"
-        self.openai_url = self.base_url + "v1/"
+
+    async def close(self) -> None:
+        await self.http_client.aclose()
+        await self.secure.aclose()
 
 
 class _AttestedClient:
@@ -152,7 +162,7 @@ class _AttestedClient:
         ``RuntimeError`` that ``httpx`` raises for a closed client. An OpenAI client built over this one closes
         it with itself, and its copies share it, so closing a copy closes the original's too. A client is not
         shared across ``os.fork``: its connections and verification state belong to the process that made it."""
-        self._attested.http_client.close()
+        self._attested.close()
 
     def __enter__(self) -> Self:
         return self
@@ -199,7 +209,7 @@ class _AsyncAttestedClient:
     async def close(self) -> None:
         """Releases the client's connections and stops re-verification; see the synchronous client for what a
         closed client refuses, how OpenAI copies share it, and forking."""
-        await self._attested.http_client.aclose()
+        await self._attested.close()
 
     async def __aenter__(self) -> Self:
         return self
@@ -479,6 +489,8 @@ class GatewayHTTPClient:
         )
         guard = with_origin_restriction(self._transport, "", base_url)
         self._http_client = httpx.Client(transport=guard, timeout=timeout)
+        # What OpenAI clients send through, which changes to the caller's client cannot reach.
+        self._secure = httpx.Client(transport=guard, timeout=timeout)
         self._base_url = base_url
         try:
             self._transport.models()
@@ -529,6 +541,7 @@ class GatewayHTTPClient:
         a copy closes the original's too. A client is not shared across ``os.fork``: its connections and
         verification state belong to the process that made it."""
         self._http_client.close()
+        self._secure.close()
 
     def __enter__(self) -> Self:
         return self
@@ -554,6 +567,7 @@ class AsyncGatewayHTTPClient:
         self._base_url = _base_url
         guard = with_origin_restriction_async(_transport, "", _base_url)
         self._http_client = httpx.AsyncClient(transport=guard, timeout=_transport.timeout)
+        self._secure = httpx.AsyncClient(transport=guard, timeout=_transport.timeout)
 
     @classmethod
     async def create(
@@ -615,6 +629,7 @@ class AsyncGatewayHTTPClient:
         """Releases every replica's connections and stops catalog refreshes; see the synchronous client for what
         a closed client refuses, how OpenAI copies share it, and forking."""
         await self._http_client.aclose()
+        await self._secure.aclose()
 
     async def __aenter__(self) -> Self:
         return self

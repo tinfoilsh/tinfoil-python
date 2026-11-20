@@ -1,5 +1,10 @@
 """Attested HTTP and OpenAI clients for Tinfoil's enclaves.
 
+The HTTP clients are the core of the package. ``OpenAIClient`` and
+``AsyncOpenAIClient`` build ``openai`` clients on top of them, and ``Client``
+is the drop-in one over the router; they and the re-exported ``openai`` errors
+need the optional ``openai`` dependency, ``pip install 'tinfoil[openai]'``.
+
 The enclave and router clients verify before the constructor returns;
 gateway clients verify each model's replica on its first request. The
 asynchronous clients are built with ``await Cls.create(...)``, which is
@@ -54,23 +59,25 @@ if TYPE_CHECKING:
         fetch_catalog_async,
     )
     from tinfoil._openai import (
+        AsyncAttestedHTTPClient,
         AsyncClient,
-        AsyncEnclaveOpenAIClient,
-        AsyncGatewayOpenAIClient,
+        AsyncOpenAIClient,
         AsyncOpenAICopyOptions,
         AsyncOpenAIOptions,
-        AsyncRouterOpenAIClient,
+        AttestedHTTPClient,
         Client,
-        EnclaveOpenAIClient,
-        GatewayOpenAIClient,
+        OpenAIClient,
         OpenAICopyOptions,
         OpenAIOptions,
-        RouterOpenAIClient,
         create_async_client,
         create_client,
     )
     from tinfoil._trust import AuthorizedBy, EitherPin, EmbeddedConfig, ProjectPin, RepoPin, SignedBy, Trust
     from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP, TLS, TimeoutTypes, Transport, VerificationCheck
+
+_OPENAI_EXTRA = "install it with `pip install 'tinfoil[openai]'`"
+"""How to install the optional ``openai`` dependency, which the OpenAI clients and the re-exported ``openai`` errors
+need."""
 
 __version__ = sdk_version()
 """The version of this package, as installed."""
@@ -85,16 +92,16 @@ __all__ = [
     "APIResponseValidationError",
     "APIStatusError",
     "APITimeoutError",
+    "AsyncAttestedHTTPClient",
     "AsyncClient",
     "AsyncEnclaveHTTPClient",
-    "AsyncEnclaveOpenAIClient",
     "AsyncGatewayHTTPClient",
-    "AsyncGatewayOpenAIClient",
+    "AsyncOpenAIClient",
     "AsyncOpenAICopyOptions",
     "AsyncOpenAIOptions",
     "AsyncRouterHTTPClient",
-    "AsyncRouterOpenAIClient",
     "AttestationError",
+    "AttestedHTTPClient",
     "AuthenticationError",
     "AuthorizedBy",
     "BadRequestError",
@@ -106,13 +113,12 @@ __all__ = [
     "EitherPin",
     "EmbeddedConfig",
     "EnclaveHTTPClient",
-    "EnclaveOpenAIClient",
     "GatewayHTTPClient",
-    "GatewayOpenAIClient",
     "InternalServerError",
     "ModelPin",
     "NetworkError",
     "NotFoundError",
+    "OpenAIClient",
     "OpenAICopyOptions",
     "OpenAIError",
     "OpenAIOptions",
@@ -122,7 +128,6 @@ __all__ = [
     "ReplicaVerification",
     "RepoPin",
     "RouterHTTPClient",
-    "RouterOpenAIClient",
     "SignedBy",
     "TimeoutTypes",
     "TinfoilError",
@@ -190,18 +195,16 @@ _MODULE_OF: dict[str, str] = {
         (
             "tinfoil._openai",
             (
+                "AsyncAttestedHTTPClient",
                 "AsyncClient",
-                "AsyncEnclaveOpenAIClient",
-                "AsyncGatewayOpenAIClient",
+                "AsyncOpenAIClient",
                 "AsyncOpenAICopyOptions",
                 "AsyncOpenAIOptions",
-                "AsyncRouterOpenAIClient",
+                "AttestedHTTPClient",
                 "Client",
-                "EnclaveOpenAIClient",
-                "GatewayOpenAIClient",
+                "OpenAIClient",
                 "OpenAICopyOptions",
                 "OpenAIOptions",
-                "RouterOpenAIClient",
                 "create_async_client",
                 "create_client",
             ),
@@ -230,7 +233,15 @@ if not TYPE_CHECKING:
             module = _MODULE_OF[name]
         except KeyError:
             raise AttributeError(f"module 'tinfoil' has no attribute {name!r}") from None
-        value = getattr(importlib.import_module(module), name)
+        try:
+            loaded = importlib.import_module(module)
+        except ModuleNotFoundError as err:
+            if err.name != "openai":
+                raise
+            raise ModuleNotFoundError(
+                f"tinfoil.{name} requires the openai package: {_OPENAI_EXTRA}", name="openai"
+            ) from err
+        value = getattr(loaded, name)
         globals()[name] = value
         return value
 

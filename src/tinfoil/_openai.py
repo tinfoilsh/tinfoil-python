@@ -1,17 +1,18 @@
-"""OpenAI clients over the attested HTTP clients. Each is an ``openai`` client whose requests go through one of
-them, so every HTTP resource of the ``openai`` package works unchanged and no application data is sent before
-the enclave is verified. The exceptions are the websocket entry points: the ``realtime`` resource and the
-``connect`` methods of ``responses``, ``beta.responses``, ``live``, ``live.sideband`` and ``live.forks``. Each
-opens a websocket of its own, which can't use the attested HTTP client, so each is refused with a
-ConfigurationError rather than left to bypass the attested transport, and so is the ``websocket_base_url``
-option that would point them elsewhere."""
+"""OpenAI clients over the attested HTTP clients. ``OpenAIClient`` and ``AsyncOpenAIClient`` are ``openai``
+clients whose requests go through an HTTP client of this package, so every HTTP resource of the ``openai`` package
+works unchanged and no application data is sent before the enclave is verified. The exceptions are the websocket
+entry points: the ``realtime`` resource and the ``connect`` methods of ``responses``, ``beta.responses``,
+``live``, ``live.sideband`` and ``live.forks``. Each opens a websocket of its own, which can't use the attested
+HTTP client, so each is refused with a ConfigurationError rather than left to bypass the attested transport, and
+so is the ``websocket_base_url`` option that would point them elsewhere."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterator, Mapping
-from contextlib import contextmanager
+import re
+from collections.abc import Awaitable, Callable, Mapping
 from functools import cached_property
-from typing import Any, NoReturn, Protocol, Self, TypedDict, TypeVar, Unpack
+from typing import Any, NoReturn, Protocol, Self, TypeAlias, TypedDict, Unpack
+from urllib.parse import unquote
 
 import httpx
 import openai
@@ -31,21 +32,15 @@ from tinfoil._clients import (
     RouterHTTPClient,
 )
 from tinfoil._errors import ConfigurationError
-from tinfoil._gateway import Catalog, ModelPin
-from tinfoil._trust import Trust
-from tinfoil._types import (
-    DEFAULT_HTTP_TIMEOUT,
-    TimeoutTypes,
-    Transport,
-    VerificationCheck,
-)
-from tinfoil.verifier import Policy
-
-_C = TypeVar("_C", bound=openai.AsyncOpenAI)
 
 HTTP_CLIENT_FIXED = "http_client is the attested HTTP client's and cannot be replaced"
-BASE_URL_FIXED = "base_url is the attested HTTP client's and cannot be replaced"
-DROP_IN_OPTIONS = "{name} takes only the openai package's options; {keys} belong to {route}"
+DROP_IN_OPTIONS = "{name} takes only the openai package's options; for {keys}, pass a {route} to {openai}"
+NOT_AN_ATTESTED_CLIENT = "the HTTP client must be {expected} that its constructor returned, not {actual}"
+GATEWAY_API_PATH = (
+    "invalid API path: a gateway client's URL already carries the API path; set the gateway client's url instead"
+)
+DEFAULT_API_PATH = "/v1/"
+"""The API path of an OpenAI client without one."""
 WEBSOCKET_UNAVAILABLE = "{name} is not available over an attested client"
 """The message of the ConfigurationError that a websocket entry point raises, naming it: a websocket can't use
 the attested HTTP client, so it would open outside it, bypassing the origin guard, the TLS pin and EHBP."""
@@ -55,14 +50,20 @@ REALTIME_UNAVAILABLE = WEBSOCKET_UNAVAILABLE.format(name="realtime")
 TRANSPORT_OPTION_UNSUPPORTED = (
     "the {key} option is not supported: the Tinfoil client owns the transport and base URL that requests go to"
 )
-_FORBIDDEN_TRANSPORT_OPTIONS = ("data_residency", "provider", "websocket_base_url", "workload_identity")
-"""The ``openai`` client options that choose another base URL, including the one that websockets would connect
-to, or that send requests, such as a token exchange, through an HTTP client of their own: each is a
-ConfigurationError from every constructor, factory and copy, so that the guarantee that requests go through the
-attested client does not depend on the ``openai`` package's own checks. An option that is ``None`` is unset."""
+_FORBIDDEN_TRANSPORT_OPTIONS = ("provider", "websocket_base_url", "workload_identity")
+"""The ``openai`` client options that choose the base URL that websockets would connect to, or that send requests,
+such as a token exchange, through an HTTP client of their own: each is a ConfigurationError from every
+constructor, factory and copy, so that the guarantee that requests go through the attested client does not depend
+on the ``openai`` package's own checks. An option that is ``None`` is unset."""
 
-ROUTE_OPTIONS = frozenset({"transport", "policy", "verification_check", "user_cache_secret", "http_timeout"})
-"""The options that configure a route, which the drop-in ``Client`` and ``AsyncClient`` refuse."""
+_IGNORED_OPTIONS = ("base_url", "data_residency")
+"""The ``openai`` client options that choose the base URL, which the SDK sets itself after the caller's options,
+so that they have no effect, as the ``OPENAI_BASE_URL`` environment variable has none."""
+
+ROUTE_OPTIONS = frozenset(
+    {"transport", "policy", "verification_check", "user_cache_secret", "http_timeout", "api_path"}
+)
+"""The options that configure a route or an API path, which the drop-in ``Client`` and ``AsyncClient`` refuse."""
 
 
 class _SharedOptions(TypedDict, total=False):
@@ -80,12 +81,12 @@ class _SharedOptions(TypedDict, total=False):
 
 class OpenAIOptions(_SharedOptions, total=False):
     """The ``openai.OpenAI`` constructor options that the synchronous OpenAI clients accept by keyword: every
-    option of the installed ``openai`` package except ``http_client`` and ``base_url``, which the attested
-    client fixes, and ``data_residency``, ``provider``, ``websocket_base_url`` and ``workload_identity``, which
-    would choose another base URL or send a token exchange through an HTTP client other than the attested one,
-    and which are refused.
+    option of the installed ``openai`` package except ``http_client``, which the attested client fixes, the
+    ``base_url`` and ``data_residency`` options, which the SDK overrides, and ``provider``,
+    ``websocket_base_url`` and ``workload_identity``, which would choose another websocket URL or send a token
+    exchange through an HTTP client other than the attested one, and which are refused.
     ``timeout`` and ``max_retries`` are per request, as they are in the package; the attested client's own
-    timeout is the ``http_timeout`` option. ``api_key`` may be a callable that returns the key."""
+    timeout is the HTTP client's ``timeout`` option. ``api_key`` may be a callable that returns the key."""
 
     api_key: str | Callable[[], str] | None
 
@@ -268,15 +269,19 @@ class _AttestedOpenAI(openai.OpenAI):
     def live(self) -> _Live:
         return _Live(self)
 
+    _api_path: str | None
+
     def _shared(self) -> dict[str, object]:
-        """What a copy's constructor receives besides the options: the attested client it shares."""
-        return {"_http_client": self._tinfoil}
+        """What a copy's constructor receives besides the options: the attested client that it shares, and the API
+        path."""
+        return {"client": self._tinfoil, "api_path": self._api_path}
 
     # The method it overrides also takes base_url and http_client, which the attested client fixes, and the
     # transport options, which are refused, so this one accepts fewer options than its supertype's.
     def copy(self, **kwargs: Unpack[OpenAICopyOptions]) -> Self:  # type: ignore[override]
-        """A client with ``kwargs`` applied over this one's options, sharing its attested client."""
-        return super().copy(**_copy_options(_without_transport_options(kwargs), self._shared()))
+        """A client with ``kwargs`` applied over this one's options, sharing its attested client and its API
+        path."""
+        return super().copy(**_copy_options(_caller_options(kwargs), self._shared()))
 
     with_options = copy  # type: ignore[assignment]
 
@@ -308,12 +313,15 @@ class _AsyncAttestedOpenAI(openai.AsyncOpenAI):
     def live(self) -> _AsyncLive:
         return _AsyncLive(self)
 
+    _api_path: str | None
+
     def _shared(self) -> dict[str, object]:
-        return {"_http_client": self._tinfoil}
+        return {"client": self._tinfoil, "api_path": self._api_path}
 
     def copy(self, **kwargs: Unpack[AsyncOpenAICopyOptions]) -> Self:  # type: ignore[override]
-        """A client with ``kwargs`` applied over this one's options, sharing its attested client."""
-        return super().copy(**_copy_options(_without_transport_options(kwargs), self._shared()))
+        """A client with ``kwargs`` applied over this one's options, sharing its attested client and its API
+        path."""
+        return super().copy(**_copy_options(_caller_options(kwargs), self._shared()))
 
     with_options = copy  # type: ignore[assignment]
 
@@ -324,377 +332,154 @@ class _AsyncAttestedOpenAI(openai.AsyncOpenAI):
         await self._tinfoil.close()
 
 
-def _openai_options(
-    kwargs: Mapping[str, object], http_client: httpx.Client | httpx.AsyncClient, base_url: str
-) -> dict[str, Any]:
-    """``kwargs`` with the attested HTTP client and its base URL; an ``http_client`` or ``base_url`` in
-    ``kwargs`` is a ConfigurationError unless it is the attested client's own, which a copy passes back. The
-    per-request ``timeout`` keeps the ``openai`` package's own default unless the caller sets it: the attested
-    client's timeout, which ``http_timeout`` sets, is not adopted in its place. A transport option that is set
-    is a ConfigurationError, as it is from ``_without_transport_options``."""
-    options = _without_transport_options(kwargs)
-    supplied = options.pop("http_client", None)
-    if supplied is not None and supplied is not http_client:
-        raise ConfigurationError(HTTP_CLIENT_FIXED)
-    supplied_url = options.pop("base_url", None)
-    if supplied_url is not None and str(supplied_url) != base_url:
-        raise ConfigurationError(BASE_URL_FIXED)
-    options.setdefault("timeout", openai.DEFAULT_TIMEOUT)
-    return {**options, "http_client": http_client, "base_url": base_url}
+AttestedHTTPClient: TypeAlias = EnclaveHTTPClient | RouterHTTPClient | GatewayHTTPClient
+"""An HTTP client that an ``OpenAIClient`` sends through: one of this package's three, as its constructor or
+``create`` returned it."""
+
+AsyncAttestedHTTPClient: TypeAlias = AsyncEnclaveHTTPClient | AsyncRouterHTTPClient | AsyncGatewayHTTPClient
+"""An HTTP client that an ``AsyncOpenAIClient`` sends through."""
 
 
-def _without_transport_options(kwargs: Mapping[str, object]) -> dict[str, Any]:
-    """``kwargs`` without the unset transport options; one that is set is a ConfigurationError naming it. Each
-    constructor, factory and copy calls this before any network I/O, and ``_openai_options`` calls it again for
-    every ``openai`` client built, so that no path reaches the ``openai`` constructor with one set."""
-    for key in _FORBIDDEN_TRANSPORT_OPTIONS:
-        if kwargs.get(key) is not None:
-            raise ConfigurationError(TRANSPORT_OPTION_UNSUPPORTED.format(key=key))
-    return {key: value for key, value in kwargs.items() if key not in _FORBIDDEN_TRANSPORT_OPTIONS}
+class OpenAIClient(_AttestedOpenAI):
+    """An ``openai.OpenAI`` client whose requests go through ``client``: an ``EnclaveHTTPClient``,
+    ``RouterHTTPClient`` or ``GatewayHTTPClient``. Anything else, an asynchronous client included, is a
+    ConfigurationError. The constructor does no network I/O, since ``client`` was verified when it was created
+    and verifies again by itself.
 
-
-def _copy_options(kwargs: Mapping[str, object], shared: Mapping[str, object]) -> dict[str, Any]:
-    """``kwargs`` for the ``openai`` package's ``copy``, with ``shared`` passed to the copy's constructor."""
-    options: dict[str, Any] = dict(kwargs)
-    options["_extra_kwargs"] = {**options.pop("_extra_kwargs", {}), **shared}
-    return options
-
-
-def _refuse_route_options(name: str, route: str, kwargs: Mapping[str, object]) -> None:
-    """Raises ConfigurationError naming the route options in ``kwargs``, which ``name`` does not take."""
-    refused = sorted(ROUTE_OPTIONS.intersection(kwargs))
-    if refused:
-        raise ConfigurationError(DROP_IN_OPTIONS.format(name=name, keys=", ".join(refused), route=route))
-
-
-class EnclaveOpenAIClient(_AttestedOpenAI):
-    """An ``openai.OpenAI`` client whose requests go through an ``EnclaveHTTPClient``, to ``base_url`` or, when
-    that is unset, the enclave's ``/v1/`` API.
-
-    ``host``, ``trust`` and the keyword options up to ``http_timeout`` are
-    those of ``EnclaveHTTPClient``, which is created first and verifies the
-    enclave; ``http_timeout`` is its ``timeout``. The remaining keyword
-    arguments are ``OpenAIOptions``, the ``openai`` package's, applied after
-    it; ``http_client`` and ``base_url`` are the attested client's and
-    cannot be replaced. ``copy`` and ``with_options`` share the attested
-    client, so closing a copy closes the original's too. The websocket
-    entry points, the ``realtime`` resource and the ``connect`` methods,
-    whose websockets would bypass the attested client, raise a
+    Requests go to ``api_path`` under the client's ``base_url``: under the
+    ``EHBP`` proxy URL when one is set, and under the enclave's own origin
+    otherwise. ``api_path`` defaults to ``/v1/``; it must be an absolute
+    path, without a query, a fragment, an encoded slash, or a ``.`` or
+    ``..`` segment, percent-encoded or not. A gateway client's URL already
+    carries the API path, so an ``api_path`` with a gateway client is a
     ConfigurationError.
+
+    The remaining keyword arguments are ``OpenAIOptions``, the ``openai``
+    package's. The SDK sets ``http_client`` and the base URL itself, after
+    them: a ``base_url`` or ``data_residency`` option, or ``OPENAI_BASE_URL``
+    in the environment, has no effect; set ``api_path`` to change the API
+    path. An ``http_client`` other than the attested one is a
+    ConfigurationError. ``copy`` and ``with_options`` share the attested
+    client and the API path. ``close`` closes the attested client as well,
+    as the ``openai`` package closes an ``http_client`` that it is given, so
+    closing a copy closes the original's too. The websocket entry points,
+    the ``realtime`` resource and the ``connect`` methods, whose websockets
+    would bypass the attested client, raise a ConfigurationError.
     """
 
-    _tinfoil: EnclaveHTTPClient
+    _tinfoil: AttestedHTTPClient
+
+    def __init__(
+        self, client: AttestedHTTPClient, *, api_path: str | None = None, **openai_kwargs: Unpack[OpenAIOptions]
+    ) -> None:
+        options = _caller_options(openai_kwargs)
+        secure, base_url = _sync_attachment(client, api_path)
+        self._tinfoil = client
+        self._api_path = api_path
+        super().__init__(**_openai_options(options, secure, base_url))
+
+    @property
+    def http_client(self) -> AttestedHTTPClient:
+        """The attested HTTP client that the OpenAI client sends through."""
+        return self._tinfoil
+
+
+class AsyncOpenAIClient(_AsyncAttestedOpenAI):
+    """``OpenAIClient`` for asyncio: an ``openai.AsyncOpenAI`` client whose requests go through ``client``, an
+    ``AsyncEnclaveHTTPClient``, ``AsyncRouterHTTPClient`` or ``AsyncGatewayHTTPClient``, with
+    ``AsyncOpenAIOptions``. The constructor does no network I/O, so it is a plain constructor."""
+
+    _tinfoil: AsyncAttestedHTTPClient
 
     def __init__(
         self,
-        host: str,
-        trust: Trust,
+        client: AsyncAttestedHTTPClient,
         *,
-        transport: Transport | None = None,
-        policy: Policy | None = None,
-        verification_check: VerificationCheck | None = None,
-        user_cache_secret: str | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
-        _http_client: EnclaveHTTPClient | None = None,
-        **openai_kwargs: Unpack[OpenAIOptions],
+        api_path: str | None = None,
+        **openai_kwargs: Unpack[AsyncOpenAIOptions],
     ) -> None:
-        _without_transport_options(openai_kwargs)
-        owned = _http_client is None
-        if _http_client is None:
-            _http_client = EnclaveHTTPClient(
-                host,
-                trust,
-                transport=transport,
-                policy=policy,
-                verification_check=verification_check,
-                user_cache_secret=user_cache_secret,
-                timeout=http_timeout,
-            )
-        self._tinfoil = _http_client
-        attested = _http_client._attested
-        with _closing_on_failure(_http_client, owned):
-            super().__init__(**_openai_options(openai_kwargs, attested.http_client, attested.openai_url))
+        options = _caller_options(openai_kwargs)
+        secure, base_url = _async_attachment(client, api_path)
+        self._tinfoil = client
+        self._api_path = api_path
+        super().__init__(**_openai_options(options, secure, base_url))
 
     @property
-    def http_client(self) -> EnclaveHTTPClient:
-        """The enclave client the OpenAI client sends through."""
+    def http_client(self) -> AsyncAttestedHTTPClient:
+        """The attested HTTP client that the OpenAI client sends through."""
         return self._tinfoil
+
+
+class Client(OpenAIClient):
+    """An OpenAI client for Tinfoil's recommended route: an ``OpenAIClient`` over a ``RouterHTTPClient`` that the
+    constructor creates with the default options, verified before it returns. It takes only the ``openai``
+    package's options, ``OpenAIOptions``; a route option or an API path is a ConfigurationError here, from the
+    constructor and from ``copy`` and ``with_options`` alike: create a ``RouterHTTPClient`` with it and pass that
+    to ``OpenAIClient`` instead."""
+
+    def __init__(self, *, _router: RouterHTTPClient | None = None, **openai_kwargs: Unpack[OpenAIOptions]) -> None:
+        owned = _router is None
+        if _router is None:
+            _refuse_route_options("Client", "RouterHTTPClient", "OpenAIClient", openai_kwargs)
+            _caller_options(openai_kwargs)
+            _router = RouterHTTPClient()
+        try:
+            super().__init__(_router, **openai_kwargs)
+        except BaseException:
+            if owned:
+                _router.close()
+            raise
 
     def _shared(self) -> dict[str, object]:
-        return {"host": self._tinfoil.enclave, "trust": self._tinfoil.trust, "_http_client": self._tinfoil}
-
-
-class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
-    """``EnclaveOpenAIClient`` for asyncio, built with ``await AsyncEnclaveOpenAIClient.create(...)``, which
-    takes the same arguments, with ``AsyncOpenAIOptions``. The websocket entry points raise a
-    ConfigurationError."""
-
-    _tinfoil: AsyncEnclaveHTTPClient
-
-    def __init__(
-        self, *, _http_client: AsyncEnclaveHTTPClient | None = None, **openai_kwargs: Unpack[AsyncOpenAIOptions]
-    ) -> None:
-        if _http_client is None:
-            raise ConfigurationError(f"{type(self).__name__} is built with 'await {type(self).__name__}.create(...)'")
-        self._tinfoil = _http_client
-        attested = _http_client._attested
-        super().__init__(**_openai_options(openai_kwargs, attested.http_client, attested.openai_url))
-
-    @classmethod
-    async def create(
-        cls,
-        host: str,
-        trust: Trust,
-        *,
-        transport: Transport | None = None,
-        policy: Policy | None = None,
-        verification_check: VerificationCheck | None = None,
-        user_cache_secret: str | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
-        **openai_kwargs: Unpack[AsyncOpenAIOptions],
-    ) -> Self:
-        _without_transport_options(openai_kwargs)
-        http_client = await AsyncEnclaveHTTPClient.create(
-            host,
-            trust,
-            transport=transport,
-            policy=policy,
-            verification_check=verification_check,
-            user_cache_secret=user_cache_secret,
-            timeout=http_timeout,
-        )
-        return await _built(cls, http_client, openai_kwargs)
-
-    @property
-    def http_client(self) -> AsyncEnclaveHTTPClient:
-        """The enclave client the OpenAI client sends through."""
-        return self._tinfoil
-
-
-class RouterOpenAIClient(_AttestedOpenAI):
-    """An ``openai.OpenAI`` client whose requests go through a ``RouterHTTPClient``, to ``base_url`` or, when
-    that is unset, the router's ``/v1/`` API. The keyword options up to ``http_timeout`` are those of
-    ``RouterHTTPClient``, ``http_timeout`` being its ``timeout``; the remaining keyword arguments are
-    ``OpenAIOptions``, the ``openai`` package's, except ``http_client`` and ``base_url``, which the attested
-    client fixes. ``copy`` and ``with_options`` share the attested client, so closing a copy closes the
-    original's too. The websocket entry points, the ``realtime`` resource and the ``connect`` methods, whose
-    websockets would bypass the attested client, raise a ConfigurationError."""
-
-    _tinfoil: RouterHTTPClient
-
-    def __init__(
-        self,
-        *,
-        transport: Transport | None = None,
-        policy: Policy | None = None,
-        verification_check: VerificationCheck | None = None,
-        user_cache_secret: str | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
-        _http_client: RouterHTTPClient | None = None,
-        **openai_kwargs: Unpack[OpenAIOptions],
-    ) -> None:
-        _without_transport_options(openai_kwargs)
-        owned = _http_client is None
-        if _http_client is None:
-            _http_client = RouterHTTPClient(
-                transport=transport,
-                policy=policy,
-                verification_check=verification_check,
-                user_cache_secret=user_cache_secret,
-                timeout=http_timeout,
-            )
-        self._tinfoil = _http_client
-        attested = _http_client._attested
-        with _closing_on_failure(_http_client, owned):
-            super().__init__(**_openai_options(openai_kwargs, attested.http_client, attested.openai_url))
+        return {"_router": self._tinfoil}
 
     @property
     def http_client(self) -> RouterHTTPClient:
-        """The router client the OpenAI client sends through."""
-        return self._tinfoil
+        """The router client that the OpenAI client sends through."""
+        return self._tinfoil  # type: ignore[return-value]
 
-
-class AsyncRouterOpenAIClient(_AsyncAttestedOpenAI):
-    """``RouterOpenAIClient`` for asyncio, built with ``await AsyncRouterOpenAIClient.create(...)``, with
-    ``AsyncOpenAIOptions``. The websocket entry points raise a ConfigurationError."""
-
-    _tinfoil: AsyncRouterHTTPClient
-
-    def __init__(
-        self, *, _http_client: AsyncRouterHTTPClient | None = None, **openai_kwargs: Unpack[AsyncOpenAIOptions]
-    ) -> None:
-        if _http_client is None:
-            raise ConfigurationError(f"{type(self).__name__} is built with 'await {type(self).__name__}.create(...)'")
-        self._tinfoil = _http_client
-        attested = _http_client._attested
-        super().__init__(**_openai_options(openai_kwargs, attested.http_client, attested.openai_url))
-
-    @classmethod
-    async def create(
-        cls,
-        *,
-        transport: Transport | None = None,
-        policy: Policy | None = None,
-        verification_check: VerificationCheck | None = None,
-        user_cache_secret: str | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
-        **openai_kwargs: Unpack[AsyncOpenAIOptions],
-    ) -> Self:
-        _without_transport_options(openai_kwargs)
-        http_client = await AsyncRouterHTTPClient.create(
-            transport=transport,
-            policy=policy,
-            verification_check=verification_check,
-            user_cache_secret=user_cache_secret,
-            timeout=http_timeout,
-        )
-        return await _built(cls, http_client, openai_kwargs)
-
-    @property
-    def http_client(self) -> AsyncRouterHTTPClient:
-        return self._tinfoil
-
-
-class GatewayOpenAIClient(_AttestedOpenAI):
-    """An ``openai.OpenAI`` client whose requests go through a ``GatewayHTTPClient``, to the gateway's URL. The
-    keyword options up to ``http_timeout`` are those of ``GatewayHTTPClient``, ``http_timeout`` being its
-    ``timeout``; the remaining keyword arguments are ``OpenAIOptions``, the ``openai`` package's, except
-    ``http_client`` and ``base_url``, which the gateway client fixes: a ``base_url`` other than the gateway's
-    is a ConfigurationError, since the gateway's base URL is its ``url`` option. ``copy`` and ``with_options``
-    share the gateway client, so closing a copy closes the original's too. The websocket entry points, the
-    ``realtime`` resource and the ``connect`` methods, whose websockets would bypass the gateway client, raise a
-    ConfigurationError.
-
-    Experimental: the gateway route is new, and this API may change or be
-    removed in a later release.
-    """
-
-    _tinfoil: GatewayHTTPClient
-
-    def __init__(
-        self,
-        *,
-        model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
-        policy: Policy | None = None,
-        verification_check: VerificationCheck | None = None,
-        user_cache_secret: str | None = None,
-        url: str | None = None,
-        catalog: Callable[[], Catalog] | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
-        _http_client: GatewayHTTPClient | None = None,
-        **openai_kwargs: Unpack[OpenAIOptions],
-    ) -> None:
-        _without_transport_options(openai_kwargs)
-        owned = _http_client is None
-        if _http_client is None:
-            _http_client = GatewayHTTPClient(
-                model_pins=model_pins,
-                pinned_models_only=pinned_models_only,
-                policy=policy,
-                verification_check=verification_check,
-                user_cache_secret=user_cache_secret,
-                url=url,
-                catalog=catalog,
-                timeout=http_timeout,
-            )
-        self._tinfoil = _http_client
-        with _closing_on_failure(_http_client, owned):
-            super().__init__(**_openai_options(openai_kwargs, _http_client.http_client, _http_client.base_url))
-
-    @property
-    def http_client(self) -> GatewayHTTPClient:
-        """The gateway client the OpenAI client sends through."""
-        return self._tinfoil
-
-
-class AsyncGatewayOpenAIClient(_AsyncAttestedOpenAI):
-    """``GatewayOpenAIClient`` for asyncio, built with ``await AsyncGatewayOpenAIClient.create(...)``, with
-    ``AsyncOpenAIOptions``. The websocket entry points raise a ConfigurationError.
-
-    Experimental: the gateway route is new, and this API may change or be
-    removed in a later release.
-    """
-
-    _tinfoil: AsyncGatewayHTTPClient
-
-    def __init__(
-        self, *, _http_client: AsyncGatewayHTTPClient | None = None, **openai_kwargs: Unpack[AsyncOpenAIOptions]
-    ) -> None:
-        if _http_client is None:
-            raise ConfigurationError(f"{type(self).__name__} is built with 'await {type(self).__name__}.create(...)'")
-        self._tinfoil = _http_client
-        super().__init__(**_openai_options(openai_kwargs, _http_client.http_client, _http_client.base_url))
-
-    @classmethod
-    async def create(
-        cls,
-        *,
-        model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
-        policy: Policy | None = None,
-        verification_check: VerificationCheck | None = None,
-        user_cache_secret: str | None = None,
-        url: str | None = None,
-        catalog: Callable[[], Catalog] | None = None,
-        http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
-        **openai_kwargs: Unpack[AsyncOpenAIOptions],
-    ) -> Self:
-        _without_transport_options(openai_kwargs)
-        http_client = await AsyncGatewayHTTPClient.create(
-            model_pins=model_pins,
-            pinned_models_only=pinned_models_only,
-            policy=policy,
-            verification_check=verification_check,
-            user_cache_secret=user_cache_secret,
-            url=url,
-            catalog=catalog,
-            timeout=http_timeout,
-        )
-        return await _built(cls, http_client, openai_kwargs)
-
-    @property
-    def http_client(self) -> AsyncGatewayHTTPClient:
-        return self._tinfoil
-
-
-class Client(RouterOpenAIClient):
-    """An OpenAI client for Tinfoil's recommended route: the router, verified before the constructor returns. It
-    takes only the ``openai`` package's options, ``OpenAIOptions``; a route option, such as a proxy
-    ``base_url``, a transport mode, policy, verification check, cache secret or ``http_timeout``, is a
-    ConfigurationError here, from the constructor and from ``copy`` and ``with_options`` alike, and is configured
-    on ``RouterOpenAIClient`` instead."""
-
-    def __init__(self, *, _http_client: RouterHTTPClient | None = None, **openai_kwargs: Unpack[OpenAIOptions]) -> None:
-        if _http_client is None:
-            _refuse_route_options("Client", "RouterOpenAIClient", openai_kwargs)
-        super().__init__(_http_client=_http_client, **openai_kwargs)
-
-    # A copy's constructor receives the attested client's own base URL, so the caller's options are checked here.
+    # A copy's constructor receives the attested client, so the caller's options are checked here.
     def copy(self, **kwargs: Unpack[OpenAICopyOptions]) -> Self:  # type: ignore[override]
-        _refuse_route_options("Client", "RouterOpenAIClient", kwargs)
+        _refuse_route_options("Client", "RouterHTTPClient", "OpenAIClient", kwargs)
         return super().copy(**kwargs)
 
     with_options = copy  # type: ignore[assignment]
 
 
-class AsyncClient(AsyncRouterOpenAIClient):
+class AsyncClient(AsyncOpenAIClient):
     """``Client`` for asyncio, built with ``await AsyncClient.create(...)`` or ``create_async_client``, with
     ``AsyncOpenAIOptions``."""
 
     def __init__(
-        self, *, _http_client: AsyncRouterHTTPClient | None = None, **openai_kwargs: Unpack[AsyncOpenAIOptions]
+        self, *, _router: AsyncRouterHTTPClient | None = None, **openai_kwargs: Unpack[AsyncOpenAIOptions]
     ) -> None:
-        super().__init__(_http_client=_http_client, **openai_kwargs)
+        if _router is None:
+            raise ConfigurationError(f"{type(self).__name__} is built with 'await {type(self).__name__}.create(...)'")
+        super().__init__(_router, **openai_kwargs)
 
-    # Narrower than the route client's create on purpose: the route options are refused here.
     @classmethod
-    async def create(cls, **openai_kwargs: Unpack[AsyncOpenAIOptions]) -> Self:  # type: ignore[override]
-        _refuse_route_options("AsyncClient", "AsyncRouterOpenAIClient", openai_kwargs)
-        return await super().create(**openai_kwargs)
+    async def create(cls, **openai_kwargs: Unpack[AsyncOpenAIOptions]) -> Self:
+        """The client over an ``AsyncRouterHTTPClient`` that it creates with the default options, verified before
+        it returns."""
+        _refuse_route_options("AsyncClient", "AsyncRouterHTTPClient", "AsyncOpenAIClient", openai_kwargs)
+        _caller_options(openai_kwargs)
+        router = await AsyncRouterHTTPClient.create()
+        try:
+            return cls(_router=router, **openai_kwargs)
+        except BaseException:
+            await router.close()
+            raise
+
+    def _shared(self) -> dict[str, object]:
+        return {"_router": self._tinfoil}
+
+    @property
+    def http_client(self) -> AsyncRouterHTTPClient:
+        """The router client that the OpenAI client sends through."""
+        return self._tinfoil  # type: ignore[return-value]
 
     def copy(self, **kwargs: Unpack[AsyncOpenAICopyOptions]) -> Self:  # type: ignore[override]
-        _refuse_route_options("AsyncClient", "AsyncRouterOpenAIClient", kwargs)
+        _refuse_route_options("AsyncClient", "AsyncRouterHTTPClient", "AsyncOpenAIClient", kwargs)
         return super().copy(**kwargs)
 
     with_options = copy  # type: ignore[assignment]
@@ -711,40 +496,136 @@ async def create_async_client(**openai_kwargs: Unpack[AsyncOpenAIOptions]) -> As
     return await AsyncClient.create(**openai_kwargs)
 
 
-@contextmanager
-def _closing_on_failure(http_client: _Closable, owned: bool) -> Iterator[None]:
-    """Closes ``http_client`` when the ``openai`` constructor inside refuses the options, but only when the
-    constructor created it: a copy shares the original's, which stays in use."""
-    try:
-        yield
-    except BaseException:
-        if owned:
-            http_client.close()
-        raise
+def _sync_attachment(client: object, api_path: str | None) -> tuple[httpx.Client, str]:
+    """The protected ``httpx`` client of ``client`` and the base URL of the API under it; anything but one of the
+    synchronous attested clients is a ConfigurationError."""
+    if isinstance(client, EnclaveHTTPClient | RouterHTTPClient):
+        attested = getattr(client, "_attested", None)
+        if attested is not None:
+            return attested.secure, join_api_path(attested.base_url, api_path)
+    elif isinstance(client, GatewayHTTPClient) and getattr(client, "_secure", None) is not None:
+        return client._secure, _gateway_base_url(client.base_url, api_path)
+    raise ConfigurationError(
+        NOT_AN_ATTESTED_CLIENT.format(
+            expected="an EnclaveHTTPClient, RouterHTTPClient or GatewayHTTPClient", actual=type(client).__name__
+        )
+    )
 
 
-async def _built(cls: Callable[..., _C], http_client: _AsyncClosable, openai_kwargs: Mapping[str, object]) -> _C:
-    """``cls`` over ``http_client``, which is closed when the ``openai`` constructor refuses the options."""
-    try:
-        return cls(_http_client=http_client, **openai_kwargs)
-    except BaseException:
-        await http_client.close()
-        raise
+def _async_attachment(client: object, api_path: str | None) -> tuple[httpx.AsyncClient, str]:
+    """``_sync_attachment`` for the asynchronous attested clients."""
+    if isinstance(client, AsyncEnclaveHTTPClient | AsyncRouterHTTPClient):
+        attested = getattr(client, "_attested", None)
+        if attested is not None:
+            return attested.secure, join_api_path(attested.base_url, api_path)
+    elif isinstance(client, AsyncGatewayHTTPClient) and getattr(client, "_secure", None) is not None:
+        return client._secure, _gateway_base_url(client.base_url, api_path)
+    raise ConfigurationError(
+        NOT_AN_ATTESTED_CLIENT.format(
+            expected="an AsyncEnclaveHTTPClient, AsyncRouterHTTPClient or AsyncGatewayHTTPClient",
+            actual=type(client).__name__,
+        )
+    )
+
+
+def _gateway_base_url(base_url: str, api_path: str | None) -> str:
+    """A gateway client's base URL, which already carries the API path, so that an API path is refused."""
+    if api_path is not None and api_path != "":
+        raise ConfigurationError(GATEWAY_API_PATH)
+    return base_url
+
+
+_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def join_api_path(root: str, api_path: str | None) -> str:
+    """``api_path``, or ``DEFAULT_API_PATH`` when it is None or empty, joined under ``root``, a proxy URL or an
+    origin, whether or not ``root`` ends with a slash. The result ends with a slash, so that request paths join
+    under it. An ``api_path`` that is not an absolute path that can only name a path under its root is a
+    ConfigurationError."""
+    if api_path is None or api_path == "":
+        api_path = DEFAULT_API_PATH
+    validate_api_path(api_path)
+    joined = root.removesuffix("/") + api_path
+    return joined if joined.endswith("/") else joined + "/"
+
+
+def validate_api_path(api_path: object) -> None:
+    """Requires an absolute path without a query, a fragment, an encoded slash, or a ``.`` or ``..`` segment,
+    percent-encoded or not, so that it can only name a path under its root. Raises ConfigurationError."""
+    if not isinstance(api_path, str):
+        raise ConfigurationError(f"invalid API path: want a string, not {type(api_path).__name__}")
+    if not api_path.startswith("/") or api_path.startswith("//"):
+        raise ConfigurationError(f"invalid API path {api_path!r}: it must be an absolute path, such as /v1/")
+    if "?" in api_path or "#" in api_path:
+        raise ConfigurationError(f"invalid API path {api_path!r}: it must not carry a query or a fragment")
+    if _PERCENT_ESCAPE.search(api_path) or _CONTROL.search(api_path):
+        raise ConfigurationError(f"invalid API path {api_path!r}: it does not parse")
+    for segment in api_path.split("/"):
+        decoded = unquote(segment)
+        if decoded in (".", "..") or "/" in decoded:
+            raise ConfigurationError(
+                f'invalid API path {api_path!r}: it must not contain a "." or ".." segment or an encoded slash'
+            )
+
+
+def _openai_options(
+    options: Mapping[str, object], http_client: httpx.Client | httpx.AsyncClient, base_url: str
+) -> dict[str, Any]:
+    """``options``, which ``_caller_options`` checked, with the attested HTTP client and its base URL, which are
+    set after them. An ``http_client`` in ``options`` is a ConfigurationError unless it is the attested client's
+    own, which a copy passes back. The per-request ``timeout`` keeps the ``openai`` package's own default unless
+    the caller sets it: the attested client's timeout is not adopted in its place."""
+    options = dict(options)
+    supplied = options.pop("http_client", None)
+    if supplied is not None and supplied is not http_client:
+        raise ConfigurationError(HTTP_CLIENT_FIXED)
+    options.setdefault("timeout", openai.DEFAULT_TIMEOUT)
+    return {**options, "http_client": http_client, "base_url": base_url}
+
+
+def _caller_options(kwargs: Mapping[str, object]) -> dict[str, Any]:
+    """``kwargs`` without the options that the SDK overrides and the unset transport options; a transport option
+    that is set is a ConfigurationError naming it. Each constructor, factory and copy calls this before the
+    ``openai`` constructor runs, so that no path reaches it with one set."""
+    for key in _FORBIDDEN_TRANSPORT_OPTIONS:
+        if kwargs.get(key) is not None:
+            raise ConfigurationError(TRANSPORT_OPTION_UNSUPPORTED.format(key=key))
+    dropped = (*_FORBIDDEN_TRANSPORT_OPTIONS, *_IGNORED_OPTIONS)
+    return {key: value for key, value in kwargs.items() if key not in dropped}
+
+
+def _copy_options(kwargs: Mapping[str, object], shared: Mapping[str, object]) -> dict[str, Any]:
+    """``kwargs`` for the ``openai`` package's ``copy``, with ``shared`` passed to the copy's constructor."""
+    options: dict[str, Any] = dict(kwargs)
+    options["_extra_kwargs"] = {**options.pop("_extra_kwargs", {}), **shared}
+    return options
+
+
+def _refuse_route_options(name: str, route: str, openai_class: str, kwargs: Mapping[str, object]) -> None:
+    """Raises ConfigurationError naming the route options in ``kwargs``, which ``name`` does not take."""
+    refused = sorted(ROUTE_OPTIONS.intersection(kwargs))
+    if refused:
+        raise ConfigurationError(
+            DROP_IN_OPTIONS.format(name=name, keys=", ".join(refused), route=route, openai=openai_class)
+        )
 
 
 __all__ = [
+    "DEFAULT_API_PATH",
+    "AsyncAttestedHTTPClient",
     "AsyncClient",
-    "AsyncEnclaveOpenAIClient",
-    "AsyncGatewayOpenAIClient",
+    "AsyncOpenAIClient",
     "AsyncOpenAICopyOptions",
     "AsyncOpenAIOptions",
-    "AsyncRouterOpenAIClient",
+    "AttestedHTTPClient",
     "Client",
-    "EnclaveOpenAIClient",
-    "GatewayOpenAIClient",
+    "OpenAIClient",
     "OpenAICopyOptions",
     "OpenAIOptions",
-    "RouterOpenAIClient",
     "create_async_client",
     "create_client",
+    "join_api_path",
+    "validate_api_path",
 ]
