@@ -5,13 +5,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from tests import document_builder
 from tests.sigstore_world import World
 from tinfoil.verifier._document import document
 from tinfoil.verifier._document.collateral import entry
-from tinfoil.verifier._embedded import EmbeddedConfig, EmbeddedReferences
+from tinfoil.verifier._options import (
+    ConfigTrust,
+    EmbeddedArtifacts,
+    EmbeddedConfig,
+    Policy,
+)
 from tinfoil.verifier._policy import ARTIFACT_FORMAT_V2
 from tinfoil.verifier._runtime import MEASUREMENT_SIZE
 from tinfoil.verifier._verifier import Overrides, Verifier, _build
@@ -47,10 +53,40 @@ def platform_bytes() -> bytes:
     return json.dumps({"format": ARTIFACT_FORMAT_V2, "measurements": {}, "machines": {}, "policies": {}}).encode()
 
 
-def embedded_inputs() -> EmbeddedReferences:
+@dataclass(frozen=True, kw_only=True)
+class EmbeddedInputs:
+    """Caller-trusted values for a verifier: a config for its config trust, and a runtime manifest and a platform
+    artifact for its ``EmbeddedArtifacts``. A None member is left to its endorsement."""
+
+    config: ConfigTrust | None = None
+    runtime: bytes | None = None
+    platform: bytes | None = None
+
+    def options(self, policy: Policy | None = None) -> tuple[ConfigTrust | None, Policy]:
+        """The config trust and the policy that select these values, with ``policy``'s other fields."""
+        policy = policy or Policy()
+        if self.runtime is not None or self.platform is not None:
+            policy = Policy(
+                pinned_registers=policy.pinned_registers,
+                freshness_max_age=policy.freshness_max_age,
+                artifacts=EmbeddedArtifacts(
+                    runtime=self.runtime,
+                    platform=self.platform,
+                    freshness_keys=getattr(policy.artifacts, "freshness_keys", None),
+                ),
+            )
+        return self.config, policy
+
+
+def embedded_verifier(inputs: EmbeddedInputs, policy: Policy | None = None) -> Verifier:
+    """A verifier that trusts ``inputs``."""
+    return Verifier(*inputs.options(policy))
+
+
+def embedded_inputs() -> EmbeddedInputs:
     """A config, the manifest that it pins and an empty platform artifact."""
     manifest = manifest_bytes()
-    return EmbeddedReferences(
+    return EmbeddedInputs(
         config=EmbeddedConfig(data=config_bytes(manifest), name=EMBEDDED_CONFIG_NAME),
         runtime=manifest,
         platform=platform_bytes(),
@@ -84,6 +120,6 @@ def embedded_document(
     return encoded, nonce, document.parse(encoded, nonce)
 
 
-def world_verifier(world: World, **options: Any) -> Verifier:
+def world_verifier(world: World, config: ConfigTrust | None = None, policy: Policy | None = None) -> Verifier:
     """A verifier whose Sigstore trust is the world's root."""
-    return _build(overrides=Overrides(sigstore_root=world.trusted_root_json()), **options)
+    return _build(config, policy, overrides=Overrides(sigstore_root=world.trusted_root_json()))

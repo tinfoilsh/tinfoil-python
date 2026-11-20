@@ -18,6 +18,7 @@ from tinfoil.verifier._errors import (
     VerificationError,
 )
 from tinfoil.verifier._measurement import SEVSNP, Expected, ExpectedSEVSNP, Measurement
+from tinfoil.verifier._options import Policy
 from tinfoil.verifier._verifier import Overrides, Pin, _build
 
 STAGE = "verify-attestation-v3"
@@ -127,7 +128,7 @@ def test_full_verify_vectors(fixture: dict[str, Any]) -> None:
 def test_hardware_bounds_cached_verification(group: str, name: str, deadline: datetime) -> None:
     data = vector(group, name)["input"]
     verifier = _build(
-        freshness_max_age=timedelta(days=20 * 365),
+        policy=Policy(freshness_max_age=timedelta(days=20 * 365)),
         overrides=Overrides(
             sigstore_root=base64.b64decode(data["sigstore_trusted_root_json_b64"]),
             amd_root_pem=f"{data['ask_pem'].strip()}\n{data['amd_root_ca_pem'].strip()}\n".encode()

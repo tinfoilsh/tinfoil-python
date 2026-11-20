@@ -13,8 +13,8 @@ from tinfoil._url import (
     has_query_or_fragment,
     is_loopback,
     origin_of,
-    validate_base_url,
-    validate_tls_base_url,
+    refuse_enclave_origin_proxy,
+    validate_proxy_url,
     with_trailing_slash,
 )
 
@@ -46,8 +46,8 @@ def test_origin_of_rejects_relative_hostless_and_other_schemes(raw: str) -> None
 def test_hostless_authority_is_a_configuration_error() -> None:
     with pytest.raises(ValueError, match="must name a host"):
         origin_of("https://:443/v1")
-    with pytest.raises(ConfigurationError, match="invalid base URL: URL must name a host"):
-        validate_base_url("https://:443/v1")
+    with pytest.raises(ConfigurationError, match="invalid proxy URL: URL must name a host"):
+        validate_proxy_url("https://:443/v1")
     with pytest.raises(ValueError, match="must name a host"):
         allowed_origins("", "https://:443/v1/")
 
@@ -58,7 +58,7 @@ def test_origin_of_refuses_userinfo_without_echoing_it() -> None:
     assert str(err.value) == USERINFO_REFUSED
     assert "hunter2" not in str(err.value)
     with pytest.raises(ConfigurationError) as refused:
-        validate_base_url("https://user:hunter2@proxy.example/v1/")
+        validate_proxy_url("https://user:hunter2@proxy.example/v1/")
     assert "hunter2" not in str(refused.value)
 
 
@@ -73,8 +73,8 @@ def test_origin_of_refuses_userinfo_without_echoing_it() -> None:
         "http://[::1]:8080/v1/",
     ],
 )
-def test_validate_base_url_accepts(base_url: str) -> None:
-    assert validate_base_url(base_url) == base_url
+def test_validate_proxy_url_accepts(base_url: str) -> None:
+    assert validate_proxy_url(base_url) == base_url
 
 
 @pytest.mark.parametrize(
@@ -97,12 +97,12 @@ def test_validate_base_url_accepts(base_url: str) -> None:
         "https://proxy.example/v1/#",
     ],
 )
-def test_validate_base_url_rejects(base_url: str) -> None:
-    with pytest.raises(ConfigurationError, match="invalid base URL"):
-        validate_base_url(base_url)
+def test_validate_proxy_url_rejects(base_url: str) -> None:
+    with pytest.raises(ConfigurationError, match="invalid proxy URL"):
+        validate_proxy_url(base_url)
 
 
-def test_validate_base_url_names_a_query_or_fragment() -> None:
+def test_validate_proxy_url_names_a_query_or_fragment() -> None:
     """A query or a fragment is refused by name, including a bare delimiter, which parses as no component and
     would otherwise be dropped with the trailing slash."""
     for base_url in (
@@ -114,27 +114,29 @@ def test_validate_base_url_names_a_query_or_fragment() -> None:
     ):
         assert has_query_or_fragment(base_url), base_url
         with pytest.raises(ConfigurationError) as err:
-            validate_base_url(base_url)
+            validate_proxy_url(base_url)
         assert str(err.value) == QUERY_OR_FRAGMENT_REFUSED
     assert not has_query_or_fragment("https://proxy.example/v1/")
 
 
-def test_validate_base_url_normalizes_the_trailing_slash() -> None:
-    assert validate_base_url("https://proxy.example/v1") == "https://proxy.example/v1/"
-    assert validate_base_url("https://proxy.example") == "https://proxy.example/"
+def test_validate_proxy_url_normalizes_the_trailing_slash() -> None:
+    assert validate_proxy_url("https://proxy.example/v1") == "https://proxy.example/v1/"
+    assert validate_proxy_url("https://proxy.example") == "https://proxy.example/"
     assert with_trailing_slash("https://proxy.example/v1?x=1") == "https://proxy.example/v1/?x=1"
 
 
-def test_validate_tls_base_url() -> None:
-    validate_tls_base_url("", "enclave.example.com")
-    validate_tls_base_url("https://enclave.example.com/custom/v1", "enclave.example.com")
-    validate_tls_base_url("https://enclave.example.com:443/custom/v1", "enclave.example.com")
-    with pytest.raises(ConfigurationError) as proxy:
-        validate_tls_base_url("https://proxy.example.com/v1", "enclave.example.com")
-    assert "verified enclave origin" in str(proxy.value)
-    assert '"ehbp"' in str(proxy.value), "the error names the mode a proxy needs"
-    with pytest.raises(ConfigurationError, match="verified enclave origin"):
-        validate_tls_base_url("http://enclave.example.com/v1", "enclave.example.com")
+def test_refuse_enclave_origin_proxy() -> None:
+    refuse_enclave_origin_proxy("", "enclave.example.com")
+    refuse_enclave_origin_proxy("https://proxy.example.com/v1/", "enclave.example.com")
+    refuse_enclave_origin_proxy("http://enclave.example.com/v1/", "enclave.example.com")
+    refuse_enclave_origin_proxy("https://enclave.example.com:8443/", "enclave.example.com")
+    for malformed in ("/relay", "https://u:p@proxy.example/"):
+        with pytest.raises(ConfigurationError, match="invalid proxy URL"):
+            refuse_enclave_origin_proxy(malformed, "enclave.example.com")
+    for proxy_url in ("https://enclave.example.com/relay", "https://ENCLAVE.example.com:443"):
+        with pytest.raises(ConfigurationError, match="leave proxy_url unset to connect directly") as err:
+            refuse_enclave_origin_proxy(proxy_url, "enclave.example.com")
+        assert '"https://enclave.example.com" is the enclave\'s own origin' in str(err.value)
 
 
 @pytest.mark.parametrize(

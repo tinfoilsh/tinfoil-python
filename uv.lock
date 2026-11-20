@@ -996,16 +996,21 @@ source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
-    { name = "openai" },
     { name = "pyyaml" },
     { name = "rfc3161-client" },
     { name = "sigstore-models" },
     { name = "tinfoil-ehbp" },
 ]
 
+[package.optional-dependencies]
+openai = [
+    { name = "openai" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "openai" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -1016,16 +1021,18 @@ dev = [
 requires-dist = [
     { name = "cryptography", specifier = ">=42.0.0" },
     { name = "httpx", specifier = ">=0.28" },
-    { name = "openai", specifier = ">=3.26.0" },
+    { name = "openai", marker = "extra == 'openai'", specifier = ">=3.26.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rfc3161-client", specifier = ">=1.0.7" },
     { name = "sigstore-models", specifier = ">=0.0.6" },
     { name = "tinfoil-ehbp", specifier = ">=0.6.0" },
 ]
+provides-extras = ["openai"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy", specifier = ">=2.4.1" },
+    { name = "openai", specifier = ">=3.26.0" },
     { name = "pytest" },
     { name = "pytest-asyncio", specifier = ">=0.26.0" },
     { name = "ruff", specifier = ">=0.17.4" },

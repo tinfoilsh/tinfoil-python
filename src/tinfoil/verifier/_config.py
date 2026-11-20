@@ -4,10 +4,8 @@ config, the runtime that it pins and the platform endorsements, each endorsed, e
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import TypeAlias
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -18,7 +16,6 @@ from tinfoil.verifier._document.collateral.collateral import (
     FRESHNESS_ID_PLATFORM,
     FRESHNESS_ID_RUNTIME,
 )
-from tinfoil.verifier._document.collateral.config import ConfigEndorsement
 from tinfoil.verifier._document.collateral.runtime import RuntimeReference
 from tinfoil.verifier._document.document import Document
 from tinfoil.verifier._embedded import ResolvedReferences
@@ -40,6 +37,7 @@ from tinfoil.verifier._endorsement.provenance import ProvenanceClient
 from tinfoil.verifier._endorsement.reference import AuthenticatedArtifact, ReleaseReferenceError, parse_reference
 from tinfoil.verifier._errors import LAYER_PROVENANCE, UsageError, VerificationError
 from tinfoil.verifier._measurement import Expected
+from tinfoil.verifier._options import AuthorizeConfig, PublicKey
 from tinfoil.verifier._policy import ARTIFACT_FORMAT_V2, Artifact
 from tinfoil.verifier._policy import parse as parse_policy_artifact
 from tinfoil.verifier._quote import ConfigReferenceValues, QuoteOptions, ReferenceValues
@@ -53,21 +51,11 @@ from tinfoil.verifier._verification import (
 )
 from tinfoil.verifier._x509.certificate import X509Error, load_public_key_der, load_public_key_pem
 
-PublicKey: TypeAlias = ec.EllipticCurvePublicKey
-"""A config or freshness signing key: an ECDSA P-256 public key, the one key type that approvals are signed with.
-``load_public_key`` decodes one from PEM or DER."""
-
-ConfigAuthorizer = Callable[[ConfigEndorsement], None]
-"""Caller policy over detached, untrusted config material; it must raise for config bytes that it does not
-authorize. It may be called concurrently. Runtime, platform and hardware checks still apply; approval does not
-authenticate a registry name or timestamp. The decision is about ``config``; ``bundle`` is there for transparency,
-not for the authorizer to verify."""
-
 _P256 = ec.SECP256R1.name
 
 
 def load_public_key(pem_or_der: bytes | str) -> PublicKey:
-    """Decode a signing key for ``Verifier(config_signing_keys=...)`` or ``freshness_signing_keys``: a PEM
+    """Decode a signing key for ``ConfigSigningKeys`` or for the ``freshness_keys`` of an artifact trust: a PEM
     ``PUBLIC KEY`` block as text or bytes, or a DER SubjectPublicKeyInfo. Anything that is not an ECDSA P-256
     public key, including a PEM with several blocks or DER that does not re-encode to itself, is a UsageError."""
     try:
@@ -100,7 +88,7 @@ class TrustPolicy:
     embedded: ResolvedReferences
     pinned_registers: Expected | None
     freshness_max_age: timedelta
-    config_authorizer: ConfigAuthorizer | None
+    config_authorizer: AuthorizeConfig | None
     endorsements: ProvenanceClient
     """Authenticates reference values against its own copy of the trusted root."""
     config_keys: tuple[PublicKey, ...] | None
@@ -337,7 +325,7 @@ def _authenticate_artifact_freshness(
 
 
 __all__ = [
-    "ConfigAuthorizer",
+    "AuthorizeConfig",
     "EndorsementResult",
     "PublicKey",
     "ReferencesError",

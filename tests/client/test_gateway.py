@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import replace
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -33,6 +34,7 @@ from tinfoil._gateway import (
     ReplicaTransport,
     _AsyncCatalogCache,
     _CatalogCache,
+    _PinnedModel,
     _Policy,
     _Replica,
     bearer_credential,
@@ -49,7 +51,7 @@ from tinfoil._gateway import (
 from tinfoil._keys import PeerLacksKeyError, key_rejection
 from tinfoil._transport import CLIENT_CLOSED
 from tinfoil._types import TimeoutTypes
-from tinfoil.verifier import Verification, Verifier
+from tinfoil.verifier import EndorsedArtifacts, Policy, Verification
 
 MODEL = "test-model"
 INITIAL = "initial.example"
@@ -170,13 +172,17 @@ class TestCatalog:
 
 class TestPolicy:
     def test_rejects_invalid_options(self) -> None:
-        authorizer = Verifier(config_authorizer=lambda _: None)
+        invalid = Policy(artifacts=EndorsedArtifacts(freshness_keys=[]))
         with pytest.raises(ConfigurationError, match="pinned-only"):
             _Policy({}, True, None)
-        with pytest.raises(ConfigurationError, match="caller-authorized"):
-            _Policy({}, False, authorizer)
-        with pytest.raises(ConfigurationError, match="caller-authorized"):
-            _Policy({"m": ModelPin("tinfoilsh/m", authorizer)}, False, None)
+        with pytest.raises(ConfigurationError, match="freshness signing keys must not be empty"):
+            _Policy({}, False, invalid)
+        with pytest.raises(ConfigurationError, match="freshness signing keys must not be empty"):
+            _Policy({"m": ModelPin("tinfoilsh/m", invalid)}, False, None)
+        with pytest.raises(ConfigurationError, match="policy must be a Policy value"):
+            _Policy({"m": ModelPin("tinfoilsh/m", "strict")}, False, None)  # type: ignore[arg-type]
+        with pytest.raises(ConfigurationError, match="must be a ModelPin value"):
+            _Policy({"m": "tinfoilsh/m"}, False, None)  # type: ignore[dict-item]
         with pytest.raises(ConfigurationError, match="must belong to tinfoilsh/"):
             _Policy({"m": ModelPin("acme/m")}, False, None)
         with pytest.raises(ConfigurationError, match="must belong to tinfoilsh/"):
@@ -185,13 +191,15 @@ class TestPolicy:
             _Policy({"m": ModelPin("tinfoilsh/m@")}, False, None)
 
     def test_resolve(self) -> None:
-        gateway_verifier = Verifier()
-        pin_verifier = Verifier()
+        gateway_policy = Policy(freshness_max_age=timedelta(hours=2))
+        pin_policy = Policy(freshness_max_age=timedelta(hours=1))
         policy = _Policy(
-            {"pinned": ModelPin("tinfoilsh/pinned@v1", pin_verifier), "inherits": ModelPin("tinfoilsh/inherits")},
+            {"pinned": ModelPin("tinfoilsh/pinned@v1", pin_policy), "inherits": ModelPin("tinfoilsh/inherits")},
             False,
-            gateway_verifier,
+            gateway_policy,
         )
+        gateway_verifier = policy.verifier
+        assert gateway_verifier.freshness_max_age == timedelta(hours=2)
         entries: Catalog = {
             "pinned": CatalogEntry("tinfoilsh/pinned", ("a.example",)),
             "inherits": CatalogEntry("tinfoilsh/inherits", ("b.example",)),
@@ -202,7 +210,7 @@ class TestPolicy:
         hosts, replica = policy.resolve("pinned", entries)
         assert hosts == ("a.example",)
         assert replica == _Replica("", "tinfoilsh/pinned@v1", "pinned")
-        assert policy.verifier_for(replica) is pin_verifier
+        assert policy.verifier_for(replica).freshness_max_age == timedelta(hours=1), "a pin's policy replaces"
         _, inherits = policy.resolve("inherits", entries)
         assert policy.verifier_for(inherits) is gateway_verifier
         _, unpinned = policy.resolve("unpinned", entries)
@@ -212,7 +220,7 @@ class TestPolicy:
             policy.resolve("missing", entries)
         with pytest.raises(ConfigurationError, match="no valid bare"):
             policy.resolve("untrusted", entries)
-        policy.pins["mismatch"] = ModelPin("tinfoilsh/pinned@v2", gateway_verifier)
+        policy.pins["mismatch"] = _PinnedModel("tinfoilsh/pinned@v2", gateway_verifier)
         with pytest.raises(
             AttestationError, match='expected repository "tinfoilsh/pinned", gateway offered "tinfoilsh/other"'
         ):

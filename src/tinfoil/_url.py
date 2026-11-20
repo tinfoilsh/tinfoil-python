@@ -9,8 +9,8 @@ from tinfoil._errors import ConfigurationError
 
 USERINFO_REFUSED = "URL must not contain user information"
 """The message for a URL with a user name or password. The URL itself is never echoed."""
-QUERY_OR_FRAGMENT_REFUSED = "invalid base URL: a base URL must not carry a query or a fragment"
-"""The message for a base URL with a query or a fragment: request paths join under a base URL, so neither has a
+QUERY_OR_FRAGMENT_REFUSED = "invalid proxy URL: a proxy URL must not carry a query or a fragment"
+"""The message for a proxy URL with a query or a fragment: request paths join under a proxy URL, so neither has a
 place there."""
 
 
@@ -48,40 +48,42 @@ def request_origin(raw_url: str) -> str:
     return normalized_origin(parts)
 
 
-def validate_base_url(base_url: str) -> str:
-    """Checks that ``base_url`` is an absolute URL that keeps request headers private on the way to the enclave or
-    proxy: HTTPS, or HTTP to a loopback host, whose traffic never leaves the machine. A query or a fragment is
-    refused, since request paths join under the URL. Returns the URL with its path ending in a slash. Raises
-    ConfigurationError."""
+def validate_proxy_url(proxy_url: str, name: str = "proxy URL") -> str:
+    """Checks that ``proxy_url``, a route URL that ``name`` describes, such as a proxy or a relay, is an absolute URL
+    that keeps request headers private on the way there: HTTPS, or HTTP to a loopback host, whose traffic never
+    leaves the machine. A query or a fragment is refused, since request paths join under the URL. Returns the URL
+    with its path ending in a slash. Raises ConfigurationError."""
+    if not isinstance(proxy_url, str):
+        raise ConfigurationError(f"invalid {name}: want a string, not {type(proxy_url).__name__}")
     try:
-        origin = origin_of(base_url)
+        origin = origin_of(proxy_url)
     except ValueError as err:
-        raise ConfigurationError(f"invalid base URL: {err}") from None
-    parts = urlsplit(base_url)
+        raise ConfigurationError(f"invalid {name}: {err}") from None
+    parts = urlsplit(proxy_url)
     if not origin.startswith("https://") and not is_loopback(parts.hostname or ""):
         raise ConfigurationError(
-            "invalid base URL: HTTP is allowed only for localhost or a loopback IP address; "
+            f"invalid {name}: HTTP is allowed only for localhost or a loopback IP address; "
             "use HTTPS to protect request headers"
         )
-    if has_query_or_fragment(base_url):
-        raise ConfigurationError(QUERY_OR_FRAGMENT_REFUSED)
-    return with_trailing_slash(base_url)
+    if has_query_or_fragment(proxy_url):
+        raise ConfigurationError(QUERY_OR_FRAGMENT_REFUSED.replace("proxy URL", name))
+    return with_trailing_slash(proxy_url)
 
 
-def validate_tls_base_url(base_url: str, enclave: str) -> None:
-    """Checks that a TLS base URL uses the enclave's own origin, since a pinned connection cannot pass through a
-    proxy. Raises ConfigurationError."""
-    if not base_url:
+def refuse_enclave_origin_proxy(proxy_url: str, enclave: str) -> None:
+    """Refuses a proxy URL on the enclave's own origin, which would send requests directly to the enclave under the
+    name of a proxy. Raises ConfigurationError."""
+    if not proxy_url:
         return
     try:
-        base_origin = origin_of(base_url)
+        proxy_origin = origin_of(proxy_url)
+        enclave_origin = origin_of(f"https://{enclave}")
     except ValueError as err:
-        raise ConfigurationError(f"invalid base URL: {err}") from None
-    enclave_origin = origin_of(f"https://{enclave}")
-    if base_origin != enclave_origin:
+        raise ConfigurationError(f"invalid proxy URL: {err}") from None
+    if proxy_origin == enclave_origin:
         raise ConfigurationError(
-            f'a base URL off the verified enclave origin "{enclave_origin}" is a proxy, '
-            'which requires the "ehbp" transport mode'
+            f'invalid proxy URL: "{enclave_origin}" is the enclave\'s own origin; leave proxy_url unset to connect '
+            "directly"
         )
 
 
@@ -159,8 +161,8 @@ __all__ = [
     "is_loopback",
     "normalized_origin",
     "origin_of",
+    "refuse_enclave_origin_proxy",
     "request_origin",
-    "validate_base_url",
-    "validate_tls_base_url",
+    "validate_proxy_url",
     "with_trailing_slash",
 ]

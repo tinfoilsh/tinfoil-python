@@ -31,7 +31,9 @@ from tinfoil._transport import (
     TLSMode,
     async_mode_for,
     mode_for,
+    resolve_transport,
 )
+from tinfoil._types import EHBP, TLS
 from tinfoil.verifier import Verification
 
 Fetch = Callable[[], Verification]
@@ -415,13 +417,32 @@ def test_modes_require_their_keys() -> None:
         AsyncEHBPMode().new_transport(verification("key", hpke=None))
     with pytest.raises(AttestationError, match='no "tls" key'):
         AsyncTLSMode().new_transport(verification("", tls="", hpke="01" * 32))
-    assert isinstance(mode_for("tls"), TLSMode)
-    assert isinstance(mode_for("ehbp"), EHBPMode)
-    assert isinstance(async_mode_for("ehbp"), AsyncEHBPMode)
-    with pytest.raises(ConfigurationError, match="unknown transport mode"):
-        mode_for("quic")  # type: ignore[arg-type]
-    with pytest.raises(ConfigurationError, match="unknown transport mode"):
-        async_mode_for("quic")  # type: ignore[arg-type]
+    assert isinstance(mode_for(TLS()), TLSMode)
+    assert isinstance(mode_for(EHBP()), EHBPMode)
+    assert isinstance(async_mode_for(TLS()), AsyncTLSMode)
+    assert isinstance(async_mode_for(EHBP("https://proxy.example/")), AsyncEHBPMode)
+    for unchecked in ("ehbp", None):
+        with pytest.raises(ConfigurationError, match="transport must be a TLS or EHBP value"):
+            mode_for(unchecked)  # type: ignore[arg-type]
+        with pytest.raises(ConfigurationError, match="transport must be a TLS or EHBP value"):
+            async_mode_for(unchecked)  # type: ignore[arg-type]
+
+
+def test_resolve_transport() -> None:
+    assert resolve_transport(None) == (TLS(), "")
+    assert resolve_transport(TLS()) == (TLS(), "")
+    assert resolve_transport(EHBP()) == (EHBP(), "")
+    assert resolve_transport(EHBP("")) == (EHBP(""), "")
+    assert resolve_transport(EHBP("https://proxy.example/relay")) == (
+        EHBP("https://proxy.example/relay"),
+        "https://proxy.example/relay/",
+    )
+    assert resolve_transport(EHBP("http://[::1]:8080/relay"))[1] == "http://[::1]:8080/relay/"
+    for not_a_transport in ("tls", "ehbp", TLS, EHBP, {"proxy_url": "https://proxy.example/"}):
+        with pytest.raises(ConfigurationError, match="transport must be a TLS or EHBP value"):
+            resolve_transport(not_a_transport)
+    with pytest.raises(ConfigurationError, match="invalid proxy URL: want a string"):
+        resolve_transport(EHBP(b"https://proxy.example/"))  # type: ignore[arg-type]
 
 
 def test_refresh_rejects_an_expired_verification() -> None:

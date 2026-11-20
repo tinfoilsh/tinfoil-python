@@ -51,7 +51,6 @@ from tinfoil.verifier._document.collateral.config import (
 )
 from tinfoil.verifier._document.collateral.runtime import PLATFORM_ID, RUNTIME_ID, RUNTIME_REPO, RuntimeReference
 from tinfoil.verifier._document.document import NONCE_SIZE
-from tinfoil.verifier._embedded import EmbeddedConfig, EmbeddedConfigReference, EmbeddedReferences
 from tinfoil.verifier._endorsement.approval import (
     CONFIG_FRESHNESS_DOMAIN_V2,
     KIND_RUNTIME,
@@ -73,6 +72,16 @@ from tinfoil.verifier._errors import (
     VerifyError,
 )
 from tinfoil.verifier._measurement import SEVSNP, ExpectedSEVSNP, ExpectedTDX
+from tinfoil.verifier._options import (
+    ConfigAuthorizer,
+    ConfigSigningKeys,
+    EmbeddedArtifacts,
+    EmbeddedConfig,
+    EmbeddedConfigReference,
+    EndorsedArtifacts,
+    Policy,
+    Registries,
+)
 from tinfoil.verifier._quote import ConfigReferenceValues
 from tinfoil.verifier._runtime import decode_manifest, runtime_from_config
 from tinfoil.verifier._sigstore.bundle import endorsement_reference
@@ -116,39 +125,42 @@ def test_new_defaults() -> None:
     v = Verifier()
     assert v.freshness_max_age == DEFAULT_MAX_AGE
     assert v.pinned_registers is None
-    assert v.caller_authorizes_config is False
 
 
 def test_freshness_max_age() -> None:
-    # None keeps the default; every non-negative age is honored, including zero, which accepts only a witness that
-    # is no older than the verification instant.
-    assert Verifier(freshness_max_age=None).freshness_max_age == DEFAULT_MAX_AGE
-    assert Verifier(freshness_max_age=timedelta(0)).freshness_max_age == timedelta(0)
-    assert Verifier(freshness_max_age=timedelta(microseconds=1)).freshness_max_age == timedelta(microseconds=1)
-    assert Verifier(freshness_max_age=timedelta(hours=24)).freshness_max_age == timedelta(hours=24)
+    # None keeps the default and every positive age is honored. Zero is refused rather than read as a bound of zero,
+    # which would reject every witness, and so is an age that rounds to zero microseconds.
+    assert Verifier(policy=Policy(freshness_max_age=None)).freshness_max_age == DEFAULT_MAX_AGE
+    for zero in (timedelta(0), timedelta(seconds=0), timedelta(microseconds=0.4), -timedelta(0)):
+        with pytest.raises(UsageError, match="freshness maximum age must be positive"):
+            Verifier(policy=Policy(freshness_max_age=zero))
+    assert Verifier(policy=Policy(freshness_max_age=timedelta(microseconds=1))).freshness_max_age == timedelta(
+        microseconds=1
+    )
+    assert Verifier(policy=Policy(freshness_max_age=timedelta(hours=24))).freshness_max_age == timedelta(hours=24)
     for max_age in (timedelta(microseconds=-1), timedelta(hours=-1)):
         with pytest.raises(UsageError, match="freshness maximum age must not be negative"):
-            Verifier(freshness_max_age=max_age)
+            Verifier(policy=Policy(freshness_max_age=max_age))
     for bad in (0, 3600, "7d"):
         with pytest.raises(UsageError, match="freshness maximum age must be a timedelta"):
-            Verifier(freshness_max_age=bad)  # type: ignore[arg-type]
+            Verifier(policy=Policy(freshness_max_age=bad))  # type: ignore[arg-type]
     # The longest window spans the representable datetimes; a longer age could not be anchored on any verification
     # instant, and would reject every document as stale rather than fail the caller.
-    assert Verifier(freshness_max_age=MAX_AGE_SPAN).freshness_max_age == MAX_AGE_SPAN
+    assert Verifier(policy=Policy(freshness_max_age=MAX_AGE_SPAN)).freshness_max_age == MAX_AGE_SPAN
     for too_long in (MAX_AGE_SPAN + timedelta(microseconds=1), timedelta.max):
         with pytest.raises(UsageError, match="freshness maximum age is longer than any representable window"):
-            Verifier(freshness_max_age=too_long)
+            Verifier(policy=Policy(freshness_max_age=too_long))
 
 
 def test_pinned_registers_must_be_expected_values() -> None:
     pins = ExpectedTDX(rtmr3=REGISTER)
-    assert Verifier(pinned_registers=pins).pinned_registers == pins
-    assert Verifier(pinned_registers=ExpectedSEVSNP(launch=REGISTER)).pinned_registers == ExpectedSEVSNP(
+    assert Verifier(policy=Policy(pinned_registers=pins)).pinned_registers == pins
+    assert Verifier(policy=Policy(pinned_registers=ExpectedSEVSNP(launch=REGISTER))).pinned_registers == ExpectedSEVSNP(
         launch=REGISTER
     )
     for bad in (SEVSNP(launch=REGISTER), "pins", {"launch": REGISTER}):
         with pytest.raises(UsageError, match="pinned registers must be an ExpectedSEVSNP or ExpectedTDX value"):
-            Verifier(pinned_registers=bad)  # type: ignore[arg-type]
+            Verifier(policy=Policy(pinned_registers=bad))  # type: ignore[arg-type]
 
 
 def test_verify_v3_rejects_bad_repo() -> None:
@@ -195,7 +207,7 @@ def test_verify_rejects_an_unbuilt_verifier() -> None:
 
 
 def test_verify_v3_at_requires_an_aware_instant() -> None:
-    v = Verifier(embedded_references=vf.embedded_inputs())
+    v = vf.embedded_verifier(vf.embedded_inputs())
     raw, nonce, _ = vf.embedded_document(FORMAT_V3)
     with pytest.raises(UsageError, match="verification time must be timezone-aware"):
         v.verify_v3_at(raw, nonce, Pin(), datetime(2026, 1, 1))
@@ -264,7 +276,7 @@ def test_none_means_no_pin() -> None:
             Verifier().check_pin_verifiability(pin)
         with pytest.raises(UsageError, match="pin names nothing"):
             Verifier().verify_v3_at(b"not a document", bytes(NONCE_SIZE), pin, NOW)
-    v = Verifier(config_registry_ids=[PUBLIC_REGISTRY_ID])
+    v = Verifier(Registries([PUBLIC_REGISTRY_ID]))
     v.check_pin_verifiability(Pin())
     v.check_pin_verifiability(Pin(repo="", project=""))
     for part in (None, ""):
@@ -274,7 +286,7 @@ def test_none_means_no_pin() -> None:
         with pytest.raises(VerificationError) as live:
             v.verify_v3(b"not a document", bytes(NONCE_SIZE), Pin(repo=part, project=part))
         rejected_at(live.value, LAYER_ENVELOPE)
-    authorizing = Verifier(config_authorizer=authorize_all)
+    authorizing = Verifier(ConfigAuthorizer(authorize_all))
     authorizing.check_pin_verifiability(Pin())
     with pytest.raises(UsageError, match="cannot authenticate repository"):
         authorizing.check_pin_verifiability(Pin(project="org/project"))
@@ -313,15 +325,10 @@ def test_parse_reference_rejects_with_a_usage_error() -> None:
 
 
 def test_repr_shows_the_policy() -> None:
-    assert repr(Verifier()) == (
-        f"Verifier(pinned_registers=None, freshness_max_age={DEFAULT_MAX_AGE!r}, caller_authorizes_config=False)"
-    )
+    assert repr(Verifier()) == f"Verifier(pinned_registers=None, freshness_max_age={DEFAULT_MAX_AGE!r})"
     pinned = ExpectedSEVSNP(launch=bytes(48))
-    v = Verifier(pinned_registers=pinned, freshness_max_age=timedelta(hours=1), config_authorizer=authorize_all)
-    assert repr(v) == (
-        f"Verifier(pinned_registers={pinned!r}, freshness_max_age={timedelta(hours=1)!r}, "
-        "caller_authorizes_config=True)"
-    )
+    v = Verifier(ConfigAuthorizer(authorize_all), Policy(pinned_registers=pinned, freshness_max_age=timedelta(hours=1)))
+    assert repr(v) == f"Verifier(pinned_registers={pinned!r}, freshness_max_age={timedelta(hours=1)!r})"
 
 
 def test_load_public_key() -> None:
@@ -334,7 +341,10 @@ def test_load_public_key() -> None:
         loaded = load_public_key(encoded)
         assert isinstance(loaded, ec.EllipticCurvePublicKey)
         assert loaded.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo) == want
-    Verifier(config_signing_keys=[load_public_key(pem)], freshness_signing_keys=[load_public_key(want)])
+    Verifier(
+        ConfigSigningKeys([load_public_key(pem)]),
+        Policy(artifacts=EndorsedArtifacts(freshness_keys=[load_public_key(want)])),
+    )
     for other in (pki.p384(), pki.rsa_key(), pki.ed25519_key()):
         with pytest.raises(UsageError, match="ECDSA P-256"):
             load_public_key(pki.public_pem(other))
@@ -369,7 +379,7 @@ def test_verify_appraises_cpu_evidence_at_the_verification_instant() -> None:
     )
     crl_entry = vf.endorsement_entry("crl", AMD_CRL_V1_FORMAT, {"crl_der_base64": b64(crl)})
     raw, nonce, _ = vf.embedded_document(FORMAT_V3, vcek, crl_entry, report=b"unauthenticated quote")
-    v = Verifier(embedded_references=vf.embedded_inputs())
+    v = vf.embedded_verifier(vf.embedded_inputs())
     with pytest.raises(VerificationError, match="outside its validity window") as now_rejected:
         v.verify_v3(raw, nonce, Pin())
     rejected_at(now_rejected.value, LAYER_QUOTE)
@@ -407,7 +417,7 @@ def test_collateral_version_selects_verification() -> None:
 
 
 def test_repository_collateral_under_registry_only_trust_keeps_its_error() -> None:
-    v = Verifier(embedded_references=vf.embedded_inputs())
+    v = vf.embedded_verifier(vf.embedded_inputs())
     raw, nonce, _ = vf.embedded_document(FORMAT_V2)
     for repo, project in ((None, None), (None, "org/project@v1"), ("org/project", "org/project@v1")):
         with pytest.raises(VerificationError, match="configured trust requires") as rejected:
@@ -457,24 +467,28 @@ def test_v3_collateral_requires_config_identity_pins() -> None:
 
 def test_check_pin_verifiability() -> None:
     inputs = vf.embedded_inputs()
-    embedded: dict[str, Any] = {"embedded_references": inputs}
-    authorizer: dict[str, Any] = {"config_authorizer": authorize_all}
+    defaults: dict[str, Any] = {}
+    embedded: dict[str, Any] = dict(zip(("config", "policy"), inputs.options(), strict=True))
+    authorizer: dict[str, Any] = {"config": ConfigAuthorizer(authorize_all)}
     registry_only: list[tuple[str, dict[str, Any]]] = [
         ("embedded config", embedded),
         ("config authorizer", authorizer),
-        ("config signing keys", {"config_signing_keys": public_signing_keys()}),
-        ("freshness signing keys", {"freshness_signing_keys": public_signing_keys()}),
-        ("config registry IDs", {"config_registry_ids": [PUBLIC_REGISTRY_ID]}),
+        ("config signing keys", {"config": ConfigSigningKeys(public_signing_keys())}),
+        (
+            "freshness signing keys",
+            {"policy": Policy(artifacts=EndorsedArtifacts(freshness_keys=public_signing_keys()))},
+        ),
+        ("config registry IDs", {"config": Registries([PUBLIC_REGISTRY_ID])}),
     ]
     cases: list[tuple[str, dict[str, Any], str | None, str | None, bool]] = [
-        ("defaults with a project", {}, None, "org/repo@v1", True),
-        ("defaults with a repository", {}, "Org/My_Repo", None, True),
-        ("defaults with both", {}, "Org/My_Repo", "org/project", True),
-        ("defaults without a pin", {}, None, None, False),
-        ("defaults with empty pins", {}, "", "", False),
-        ("defaults with a malformed project", {}, None, "not a reference", False),
-        ("defaults with a malformed repository", {}, "not a reference", None, False),
-        ("defaults with a malformed repository beside a project", {}, "not a reference", "org/project", False),
+        ("defaults with a project", defaults, None, "org/repo@v1", True),
+        ("defaults with a repository", defaults, "Org/My_Repo", None, True),
+        ("defaults with both", defaults, "Org/My_Repo", "org/project", True),
+        ("defaults without a pin", defaults, None, None, False),
+        ("defaults with empty pins", defaults, "", "", False),
+        ("defaults with a malformed project", defaults, None, "not a reference", False),
+        ("defaults with a malformed repository", defaults, "not a reference", None, False),
+        ("defaults with a malformed repository beside a project", defaults, "not a reference", "org/project", False),
         ("embedded config without a pin", embedded, None, None, True),
         ("embedded config with its own project", embedded, None, "org/project@v1", True),
         ("embedded config with another project", embedded, None, "org/repo", False),
@@ -496,15 +510,6 @@ def test_check_pin_verifiability() -> None:
         Verifier(**embedded).check_pin_verifiability(Pin(repo="org/project"))
 
 
-def test_caller_authorizes_config() -> None:
-    inputs = vf.embedded_inputs()
-    without_config = dataclasses.replace(inputs, config=None)
-    assert Verifier().caller_authorizes_config is False
-    assert Verifier(embedded_references=without_config).caller_authorizes_config is False
-    assert Verifier(embedded_references=inputs).caller_authorizes_config is True
-    assert Verifier(config_authorizer=authorize_all).caller_authorizes_config is True
-
-
 # --- config authorizer ------------------------------------------------------------------------
 
 
@@ -521,7 +526,7 @@ def test_config_authorizer_error_never_chooses_the_type() -> None:
     def refuse(candidate: ConfigEndorsement) -> None:
         raise refused
 
-    v = Verifier(embedded_references=dataclasses.replace(inputs, config=None), config_authorizer=refuse)
+    v = vf.embedded_verifier(dataclasses.replace(inputs, config=ConfigAuthorizer(refuse)))
     with pytest.raises(VerificationError) as rejected:
         v.verify_v3(raw, nonce, Pin())
     rejected_at(rejected.value, LAYER_PROVENANCE)
@@ -536,7 +541,7 @@ def test_config_authorizer_preserves_references_and_hardware_checks() -> None:
     digest = hashlib.sha256(config).digest()
     entry = vf.reference_entry(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": b64(config)})
     raw, nonce, doc = vf.embedded_document(FORMAT_V3, entry)
-    v = Verifier(embedded_references=dataclasses.replace(inputs, config=None))
+    v = vf.embedded_verifier(dataclasses.replace(inputs, config=None))
     with pytest.raises(ReferencesError, match="unsigned config"):
         config_references(trust_of(v), doc, "org/project", NOW)
     rejected = ValueError("config is not authorized")
@@ -579,15 +584,11 @@ def test_config_authorizer_preserves_references_and_hardware_checks() -> None:
     assert legacy.collateral_format() == FORMAT_V2
 
 
-def test_config_authorizer_rejects_conflicting_trust() -> None:
-    inputs = vf.embedded_inputs()
-    keys = public_signing_keys()
-    with pytest.raises(UsageError, match="config authorizer conflicts"):
-        Verifier(config_authorizer=authorize_all, embedded_references=inputs)
-    with pytest.raises(UsageError, match="config authorizer conflicts"):
-        Verifier(config_authorizer=authorize_all, config_signing_keys=keys)
+def test_config_authorizer_must_be_callable() -> None:
     with pytest.raises(UsageError, match="config authorizer must be callable"):
-        Verifier(config_authorizer="authorize")  # type: ignore[arg-type]
+        Verifier(ConfigAuthorizer("authorize"))  # type: ignore[arg-type]
+    with pytest.raises(UsageError, match="config authorizer must be callable"):
+        Verifier(ConfigAuthorizer(None))  # type: ignore[arg-type]
 
 
 def test_config_size_is_bounded_before_the_authorizer_runs() -> None:
@@ -597,7 +598,7 @@ def test_config_size_is_bounded_before_the_authorizer_runs() -> None:
     def record(candidate: ConfigEndorsement) -> None:
         calls.append(candidate.config)
 
-    v = Verifier(embedded_references=dataclasses.replace(inputs, config=None), config_authorizer=record)
+    v = vf.embedded_verifier(dataclasses.replace(inputs, config=ConfigAuthorizer(record)))
     reference = endorsement_reference(b"statement")
     entry = vf.reference_entry(
         CONFIG_ID, CONFIG_ENDORSEMENT_V2_FORMAT, {"endorsement_ref": reference, "sigstore_bundle": {}}
@@ -618,12 +619,12 @@ def test_config_pins_one_runtime_manifest() -> None:
             manifest = vf.manifest_bytes("v0.15.0" + suffix, snp_launch="ef" * 48, mrtd="12" * 48)
         else:
             manifest = vf.manifest_bytes()
-        inputs = EmbeddedReferences(
+        inputs = vf.EmbeddedInputs(
             config=EmbeddedConfig(data=vf.config_bytes(manifest, "0.15.0" + suffix), name=vf.EMBEDDED_CONFIG_NAME),
             runtime=manifest,
             platform=vf.platform_bytes(),
         )
-        v = Verifier(embedded_references=inputs)
+        v = vf.embedded_verifier(inputs)
         refs = config_references(trust_of(v), doc, "", NOW)
         assert isinstance(refs.quote, ConfigReferenceValues)
         assert isinstance(inputs.config, EmbeddedConfig)
@@ -633,7 +634,7 @@ def test_config_pins_one_runtime_manifest() -> None:
         assert refs.artifact.source == SOURCE_EMBEDDED
         if suffix:
             with pytest.raises(UsageError, match="digest pin"):
-                Verifier(embedded_references=dataclasses.replace(inputs, runtime=vf.manifest_bytes()))
+                vf.embedded_verifier(dataclasses.replace(inputs, runtime=vf.manifest_bytes()))
 
 
 def test_embedded_config_reference_without_config_bytes() -> None:
@@ -642,8 +643,7 @@ def test_embedded_config_reference_without_config_bytes() -> None:
     digest = hashlib.sha256(inputs.config.data).hexdigest()
     runtime = runtime_from_config(inputs.config.data)
     reference = EmbeddedConfigReference(name=vf.EMBEDDED_CONFIG_NAME, digest=digest, runtime=runtime)
-    v = Verifier(embedded_references=dataclasses.replace(inputs, config=reference))
-    assert v.caller_authorizes_config is True
+    v = vf.embedded_verifier(dataclasses.replace(inputs, config=reference))
     v.check_pin_verifiability(Pin())
     v.check_pin_verifiability(Pin(project="org/project@v1@sha256:" + digest))
     with pytest.raises(UsageError):
@@ -665,14 +665,14 @@ def test_embedded_config_reference_without_config_bytes() -> None:
         dataclasses.replace(reference, name="/invalid"),
     ):
         with pytest.raises(UsageError):
-            Verifier(embedded_references=dataclasses.replace(inputs, config=bad))
+            vf.embedded_verifier(dataclasses.replace(inputs, config=bad))
 
 
 def test_embedded_references_preserve_bindings() -> None:
     inputs = vf.embedded_inputs()
     assert isinstance(inputs.config, EmbeddedConfig)
     config_hash = hashlib.sha256(inputs.config.data).digest()
-    v = Verifier(embedded_references=inputs)
+    v = vf.embedded_verifier(inputs)
     raw, nonce, doc = vf.embedded_document(FORMAT_V3)
     refs = config_references(trust_of(v), doc, "org/project@v1@sha256:" + config_hash.hex(), NOW)
     assert isinstance(refs.quote, ConfigReferenceValues)
@@ -699,18 +699,18 @@ def test_embedded_references_preserve_bindings() -> None:
 
 def test_embedded_references_cannot_override_pins() -> None:
     inputs = vf.embedded_inputs()
-    v = Verifier(embedded_references=inputs)
+    v = vf.embedded_verifier(inputs)
     raw, nonce, _ = vf.embedded_document(FORMAT_V3)
     for ref in ("other/project", "org/project@v2", "org/project@sha256:" + "00" * 32):
         with pytest.raises(UsageError, match="does not match the caller's pins"):
             v.verify_v3(raw, nonce, Pin(project=ref))
     assert inputs.runtime is not None
     with pytest.raises(UsageError, match="digest pin"):
-        Verifier(embedded_references=dataclasses.replace(inputs, runtime=inputs.runtime + b"\n"))
+        vf.embedded_verifier(dataclasses.replace(inputs, runtime=inputs.runtime + b"\n"))
 
     assert isinstance(inputs.config, EmbeddedConfig)
     unnamed = dataclasses.replace(inputs, config=dataclasses.replace(inputs.config, name=""))
-    v = Verifier(embedded_references=unnamed)
+    v = vf.embedded_verifier(unnamed)
     with pytest.raises(UsageError, match="does not match the caller's pins"):
         v.verify_v3(raw, nonce, Pin(project="org/project"))
     with pytest.raises(VerificationError) as rejected:
@@ -725,7 +725,7 @@ def test_embedded_references_still_require_other_endorsements() -> None:
         (RUNTIME_ID, {"runtime": None}),
         (PLATFORM_ID, {"platform": None}),
     ):
-        v = Verifier(embedded_references=dataclasses.replace(vf.embedded_inputs(), **changes))
+        v = vf.embedded_verifier(dataclasses.replace(vf.embedded_inputs(), **changes))
         with pytest.raises(NotFoundError, match=component):
             config_references(trust_of(v), doc, "org/project", NOW)
 
@@ -733,45 +733,53 @@ def test_embedded_references_still_require_other_endorsements() -> None:
 def test_embedded_trust_rejects_invalid_or_unused_inputs() -> None:
     inputs = vf.embedded_inputs()
     keys = public_signing_keys()
+    with pytest.raises(UsageError, match="embedded artifacts must contain a runtime or a platform"):
+        Verifier(policy=Policy(artifacts=EmbeddedArtifacts()))
     for refs in (
-        EmbeddedReferences(),
-        EmbeddedReferences(config=EmbeddedConfig(data=b"")),
-        EmbeddedReferences(runtime=b""),
-        EmbeddedReferences(runtime=b"{}"),
-        EmbeddedReferences(platform=b""),
-        EmbeddedReferences(platform=b'{"format":"unknown"}'),
-        EmbeddedReferences(platform=b'{"format":"https://tinfoil.sh/predicate/platform-endorsements/v1"}'),
+        vf.EmbeddedInputs(config=EmbeddedConfig(data=b"")),
+        vf.EmbeddedInputs(runtime=b""),
+        vf.EmbeddedInputs(runtime=b"{}"),
+        vf.EmbeddedInputs(platform=b""),
+        vf.EmbeddedInputs(platform=b'{"format":"unknown"}'),
+        vf.EmbeddedInputs(platform=b'{"format":"https://tinfoil.sh/predicate/platform-endorsements/v1"}'),
     ):
         with pytest.raises(UsageError):
-            Verifier(embedded_references=refs)
+            vf.embedded_verifier(refs)
     for version in ("", "0.15.0", "v0.15"):
         with pytest.raises(UsageError):
-            Verifier(embedded_references=EmbeddedReferences(runtime=vf.manifest_bytes(version)))
-    for config in (b"config bytes", "sha256:" + "cd" * 32, {"data": b"config bytes"}):
-        with pytest.raises(UsageError, match="embedded config must be an EmbeddedConfig or EmbeddedConfigReference"):
-            Verifier(embedded_references=EmbeddedReferences(config=config))  # type: ignore[arg-type]
-    with pytest.raises(UsageError, match="conflicting trust sources"):
-        Verifier(embedded_references=inputs, config_signing_keys=keys)
+            vf.embedded_verifier(vf.EmbeddedInputs(runtime=vf.manifest_bytes(version)))
+    for config in (b"config bytes", "sha256:" + "cd" * 32, {"data": b"config bytes"}, PUBLIC_REGISTRY_ID, keys):
+        with pytest.raises(UsageError, match="config trust must be a Registries, ConfigSigningKeys, ConfigAuthorizer"):
+            Verifier(config)  # type: ignore[arg-type]
+    for artifacts in (b"runtime", {"runtime": b"{}"}, inputs, keys):
+        with pytest.raises(UsageError, match="artifact trust must be an EndorsedArtifacts or EmbeddedArtifacts"):
+            Verifier(policy=Policy(artifacts=artifacts))  # type: ignore[arg-type]
+    for not_a_policy in ({"freshness_max_age": timedelta(hours=1)}, EndorsedArtifacts(), "policy"):
+        with pytest.raises(UsageError, match="policy must be a Policy value"):
+            Verifier(policy=not_a_policy)  # type: ignore[arg-type]
+    both = EmbeddedArtifacts(runtime=inputs.runtime, platform=inputs.platform, freshness_keys=keys)
     with pytest.raises(UsageError, match="no endorsed artifact"):
-        Verifier(embedded_references=inputs, freshness_signing_keys=keys)
+        Verifier(policy=Policy(artifacts=both))
     raw, nonce, _ = vf.embedded_document(FORMAT_V2)
-    configured: list[dict[str, Any]] = [
-        {"embedded_references": inputs},
-        {"config_signing_keys": keys},
-        {"freshness_signing_keys": keys},
-        {"config_registry_ids": [PRIVATE_REGISTRY_ID]},
-        {"config_authorizer": authorize_all},
+    configured: list[tuple[Any, Policy | None]] = [
+        inputs.options(),
+        (ConfigSigningKeys(keys), None),
+        (None, Policy(artifacts=EndorsedArtifacts(freshness_keys=keys))),
+        (None, Policy(artifacts=EmbeddedArtifacts(platform=inputs.platform))),
+        (Registries([PRIVATE_REGISTRY_ID]), None),
+        (ConfigAuthorizer(authorize_all), None),
     ]
-    for options in configured:
-        v = Verifier(**options)
+    for config, policy in configured:
+        v = Verifier(config, policy)
         with pytest.raises(VerificationError, match="configured trust requires") as rejected:
             v.verify_v3(raw, nonce, Pin(repo="org/project"))
         rejected_at(rejected.value, LAYER_PROVENANCE)
 
 
-def _refs(**fields: Any) -> EmbeddedReferences:
-    """Embedded references with fields of any type, for the type checks."""
-    return EmbeddedReferences(**fields)
+def _refs(**fields: Any) -> dict[str, Any]:
+    """The verifier arguments that select embedded values with fields of any type, for the type checks."""
+    config, policy = vf.EmbeddedInputs(**fields).options()
+    return {"config": config, "policy": policy}
 
 
 def _config(**fields: Any) -> EmbeddedConfig:
@@ -796,46 +804,45 @@ def test_option_fields_of_the_wrong_type_are_usage_errors() -> None:
     reference = EmbeddedConfigReference(name=vf.EMBEDDED_CONFIG_NAME, digest=digest, runtime=runtime)
     config_text = inputs.config.data.decode()
     cases: list[tuple[dict[str, Any], str]] = [
-        ({"config_registry_ids": [5]}, "config registry IDs must be strings"),
-        ({"config_registry_ids": [PRIVATE_REGISTRY_ID, None]}, "config registry IDs must be strings"),
-        ({"config_registry_ids": 5}, "config registry IDs must be a sequence"),
-        ({"config_signing_keys": 5}, "config signing keys must be a sequence of keys"),
-        ({"freshness_signing_keys": object()}, "freshness signing keys must be a sequence of keys"),
-        ({"embedded_references": {"runtime": b"{}"}}, "embedded references must be an EmbeddedReferences value"),
-        ({"embedded_references": _refs(runtime="{}")}, "embedded runtime manifest must be bytes"),
-        ({"embedded_references": _refs(platform="{}")}, "embedded platform artifact must be bytes"),
-        ({"embedded_references": _refs(config=_config(data=config_text))}, "embedded config data must be bytes"),
-        ({"embedded_references": _refs(config=_config(data=None))}, "embedded config data must be bytes"),
+        ({"config": Registries([5])}, "config registry IDs must be strings"),  # type: ignore[list-item]
+        ({"config": Registries([PRIVATE_REGISTRY_ID, None])}, "config registry IDs must be strings"),  # type: ignore[list-item]
+        ({"config": Registries(5)}, "config registry IDs must be a sequence"),  # type: ignore[arg-type]
+        ({"config": Registries(PRIVATE_REGISTRY_ID)}, "config registry IDs must be a sequence"),
+        ({"config": ConfigSigningKeys(5)}, "config signing keys must be a sequence of keys"),  # type: ignore[arg-type]
         (
-            {"embedded_references": _refs(config=_config(data=inputs.config.data, name=None))},
+            {"policy": Policy(artifacts=EndorsedArtifacts(freshness_keys=object()))},  # type: ignore[arg-type]
+            "freshness signing keys must be a sequence of keys",
+        ),
+        (_refs(runtime="{}"), "embedded runtime manifest must be bytes"),
+        (_refs(platform="{}"), "embedded platform artifact must be bytes"),
+        (_refs(config=_config(data=config_text)), "embedded config data must be bytes"),
+        (_refs(config=_config(data=None)), "embedded config data must be bytes"),
+        (
+            _refs(config=_config(data=inputs.config.data, name=None)),
             "embedded config name must be a string",
         ),
         (
-            {"embedded_references": _refs(config=_reference(reference, digest=None))},
+            _refs(config=_reference(reference, digest=None)),
             "embedded config digest must be a string",
         ),
         (
-            {"embedded_references": _refs(config=_reference(reference, name=None))},
+            _refs(config=_reference(reference, name=None)),
             "embedded config name must be a string",
         ),
         (
-            {
-                "embedded_references": _refs(
-                    config=_reference(reference, runtime=(runtime.repo, runtime.tag, runtime.digest))
-                )
-            },
+            _refs(config=_reference(reference, runtime=(runtime.repo, runtime.tag, runtime.digest))),
             "embedded config runtime must be a RuntimeReference",
         ),
         (
-            {"embedded_references": _refs(config=_reference(reference, runtime=_runtime(runtime, repo=None)))},
+            _refs(config=_reference(reference, runtime=_runtime(runtime, repo=None))),
             "embedded config runtime repo must be a string",
         ),
         (
-            {"embedded_references": _refs(config=_reference(reference, runtime=_runtime(runtime, tag=(0, 15, 0))))},
+            _refs(config=_reference(reference, runtime=_runtime(runtime, tag=(0, 15, 0)))),
             "embedded config runtime tag must be a string",
         ),
         (
-            {"embedded_references": _refs(config=_reference(reference, runtime=_runtime(runtime, digest=b"\x00")))},
+            _refs(config=_reference(reference, runtime=_runtime(runtime, digest=b"\x00"))),
             "embedded config runtime digest must be a string",
         ),
     ]
@@ -848,7 +855,7 @@ def test_option_fields_of_the_wrong_type_are_usage_errors() -> None:
     platform = bytearray(inputs.platform or b"")
     config = bytearray(inputs.config.data)
     v = Verifier(
-        embedded_references=_refs(
+        **_refs(
             config=_config(data=memoryview(config), name=vf.EMBEDDED_CONFIG_NAME),
             runtime=manifest,
             platform=memoryview(platform),
@@ -885,8 +892,8 @@ def test_endorsed_config_with_embedded_artifacts_retains_freshness_and_authority
     bundle = world.keyed_bundle(payload)
     v = vf.world_verifier(
         world,
-        embedded_references=EmbeddedReferences(runtime=inputs.runtime, platform=inputs.platform),
-        config_signing_keys=[world.key.public_key()],
+        ConfigSigningKeys([world.key.public_key()]),
+        Policy(artifacts=EmbeddedArtifacts(runtime=inputs.runtime, platform=inputs.platform)),
     )
     pins = ConfigPolicy(identity="/org/project", now=world.now, max_age=v.freshness_max_age, registry_ids=None)
     approved = trust_of(v).config_verifier.verify(config, as_json(bundle), pins)
@@ -933,10 +940,12 @@ def test_endorsed_config_with_embedded_artifacts_retains_freshness_and_authority
 def test_config_trust_requires_endorsements() -> None:
     keys = [pki.p256().public_key()]
     with pytest.raises(UsageError, match="must not be empty"):
-        Verifier(freshness_signing_keys=[])
+        Verifier(policy=Policy(artifacts=EndorsedArtifacts(freshness_keys=[])))
     with pytest.raises(UsageError, match="must not be empty"):
-        Verifier(config_signing_keys=[])
-    v = Verifier(config_signing_keys=keys, freshness_signing_keys=keys)
+        Verifier(policy=Policy(artifacts=EmbeddedArtifacts(platform=vf.platform_bytes(), freshness_keys=[])))
+    with pytest.raises(UsageError, match="must not be empty"):
+        Verifier(ConfigSigningKeys([]))
+    v = Verifier(ConfigSigningKeys(keys), Policy(artifacts=EndorsedArtifacts(freshness_keys=keys)))
     raw, nonce, _ = vf.embedded_document(FORMAT_V3)
     with pytest.raises(VerificationError, match=CONFIG_ID) as rejected:
         v.verify_v3(raw, nonce, Pin(project="org/project"))
@@ -961,8 +970,8 @@ def test_digest_endorsement_binds_quote_and_runtime_without_config() -> None:
         CONFIG_ENDORSEMENT_V2_FORMAT, endorsement_ref=reference, sigstore_bundle=world.keyed_bundle(payload)
     )
     raw, nonce, doc = vf.embedded_document(FORMAT_V3, entry)
-    artifacts = EmbeddedReferences(runtime=inputs.runtime, platform=inputs.platform)
-    v = vf.world_verifier(world, embedded_references=artifacts, config_signing_keys=[world.key.public_key()])
+    artifacts = EmbeddedArtifacts(runtime=inputs.runtime, platform=inputs.platform)
+    v = vf.world_verifier(world, ConfigSigningKeys([world.key.public_key()]), Policy(artifacts=artifacts))
     refs = config_references(trust_of(v), doc, "org/project@v1", world.now)
     assert isinstance(refs.quote, ConfigReferenceValues)
     assert refs.quote.hash == hashlib.sha256(config).digest()
@@ -996,8 +1005,8 @@ def test_digest_endorsement_binds_quote_and_runtime_without_config() -> None:
     assert inputs.runtime is not None
     v = vf.world_verifier(
         world,
-        embedded_references=dataclasses.replace(artifacts, runtime=inputs.runtime + b"\n"),
-        config_signing_keys=[world.key.public_key()],
+        ConfigSigningKeys([world.key.public_key()]),
+        Policy(artifacts=dataclasses.replace(artifacts, runtime=inputs.runtime + b"\n")),
     )
     with pytest.raises(ValueError, match="digest pin"):
         config_references(trust_of(v), doc, "org/project@v1", world.now)
@@ -1026,15 +1035,15 @@ def test_scoped_config_retains_freshness_after_certificate_expiry() -> None:
         sigstore_bundle=world.certified_bundle(payload, certificate, leaf, world.now),
     )
     _, _, doc = vf.embedded_document(FORMAT_V3, entry)
-    artifacts = EmbeddedReferences(runtime=inputs.runtime, platform=inputs.platform)
+    artifacts = Policy(artifacts=EmbeddedArtifacts(runtime=inputs.runtime, platform=inputs.platform))
     registry = ConfigVerifier(world.trusted_root(), [root_key.public_key()], root_keys=[root_key.public_key()])
-    for name, options, accepted in (
-        ("default", {}, False),
-        ("exclusive", {"config_registry_ids": [PRIVATE_REGISTRY_ID]}, True),
-        ("additive", {"config_registry_ids": [PUBLIC_REGISTRY_ID, PRIVATE_REGISTRY_ID]}, True),
-        ("other registry", {"config_registry_ids": [PUBLIC_REGISTRY_ID]}, False),
+    for name, registries, accepted in (
+        ("default", None, False),
+        ("exclusive", Registries([PRIVATE_REGISTRY_ID]), True),
+        ("additive", Registries([PUBLIC_REGISTRY_ID, PRIVATE_REGISTRY_ID]), True),
+        ("other registry", Registries([PUBLIC_REGISTRY_ID]), False),
     ):
-        v = vf.world_verifier(world, embedded_references=artifacts, **options)
+        v = vf.world_verifier(world, registries, artifacts)
         with_trust(v, config_verifier=registry)
         later = world.now + timedelta(hours=24)
         if not accepted:
@@ -1050,27 +1059,17 @@ def test_scoped_config_retains_freshness_after_certificate_expiry() -> None:
             config_references(trust_of(v), doc, "org/other", world.now)
 
 
-def test_config_registry_id_options_reject_ambiguous_trust() -> None:
-    key = pki.p256().public_key()
-    conflicts: list[tuple[dict[str, Any], str]] = [
-        ({"config_registry_ids": []}, "must not be empty"),
-        ({"config_registry_ids": [""]}, "registry"),
-        ({"config_registry_ids": [PRIVATE_REGISTRY_ID, PRIVATE_REGISTRY_ID]}, "duplicate config registry ID"),
-        (
-            {"config_registry_ids": [PRIVATE_REGISTRY_ID], "config_signing_keys": [key]},
-            "requires Tinfoil registry root",
-        ),
-        (
-            {"config_registry_ids": [PRIVATE_REGISTRY_ID], "embedded_references": vf.embedded_inputs()},
-            "require endorsement verification",
-        ),
-        ({"config_registry_ids": [PRIVATE_REGISTRY_ID], "config_authorizer": authorize_all}, "require endorsement"),
+def test_registries_reject_invalid_ids() -> None:
+    invalid: list[tuple[list[str], str]] = [
+        ([], "must not be empty"),
+        ([""], "registry"),
+        ([PRIVATE_REGISTRY_ID, PRIVATE_REGISTRY_ID], "duplicate config registry ID"),
     ]
-    for options, want in conflicts:
+    for ids, want in invalid:
         with pytest.raises(UsageError, match=want):
-            Verifier(**options)
+            Verifier(Registries(ids))
     registry_ids = [PRIVATE_REGISTRY_ID]
-    v = Verifier(config_registry_ids=registry_ids)
+    v = Verifier(Registries(registry_ids))
     registry_ids[0] = PUBLIC_REGISTRY_ID
     assert reference_pins(trust_of(v), "").registry_ids == (PRIVATE_REGISTRY_ID,)
     raw, nonce, _ = vf.embedded_document(FORMAT_V2)
@@ -1080,7 +1079,7 @@ def test_config_registry_id_options_reject_ambiguous_trust() -> None:
 
 def test_registry_ids_default_to_the_public_registry_only_under_registry_trust() -> None:
     assert reference_pins(trust_of(Verifier()), "").registry_ids == (PUBLIC_REGISTRY_ID,)
-    keyed = Verifier(config_signing_keys=[pki.p256().public_key()])
+    keyed = Verifier(ConfigSigningKeys([pki.p256().public_key()]))
     assert reference_pins(trust_of(keyed), "").registry_ids is None, "caller keys authorize without a registry"
     pins = reference_pins(trust_of(Verifier()), "org/project@v1@sha256:" + "ab" * 32)
     assert (pins.identity, pins.revision, pins.digest) == ("/org/project", "v1", "ab" * 32)
@@ -1107,9 +1106,9 @@ def test_configured_keys_preserve_proof_verification() -> None:
     )
     for expired in (False, True):
         v = _build(
+            ConfigSigningKeys([world.key.public_key()]),
+            Policy(artifacts=EndorsedArtifacts(freshness_keys=[other.key.public_key()])),
             overrides=Overrides(sigstore_root=trusted_root),
-            config_signing_keys=[world.key.public_key()],
-            freshness_signing_keys=[other.key.public_key()],
         )
         now = world.now + (DEFAULT_MAX_AGE + timedelta(seconds=1) if expired else timedelta(0))
         if expired:
@@ -1174,7 +1173,7 @@ def test_document_builder_quote_is_not_authentic() -> None:
     """The dummy report that the embedded documents carry never authenticates, so every test that reaches the
     quote layer is rejected there and not later."""
     raw, nonce, _ = vf.embedded_document(FORMAT_V3)
-    v = Verifier(embedded_references=vf.embedded_inputs())
+    v = vf.embedded_verifier(vf.embedded_inputs())
     with pytest.raises(VerificationError) as rejected:
         v.verify_v3(raw, nonce, Pin())
     rejected_at(rejected.value, LAYER_QUOTE)

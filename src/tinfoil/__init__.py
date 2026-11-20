@@ -1,13 +1,20 @@
 """Attested HTTP and OpenAI clients for Tinfoil's enclaves.
 
+The HTTP clients are the core of the package. ``OpenAIClient`` and
+``AsyncOpenAIClient`` build ``openai`` clients on top of them, and ``Client``
+is the drop-in one over the router; they and the re-exported ``openai`` errors
+need the optional ``openai`` dependency, ``pip install 'tinfoil[openai]'``.
+
 The enclave and router clients verify before the constructor returns;
 gateway clients verify each model's replica on its first request. The
 asynchronous clients are built with ``await Cls.create(...)``, which is
 where they verify, since their constructor raises. Every request is bound
-to the keys of the current verification. The verifier that appraises the
-attestation documents is the ``verifier`` subpackage; of its names only
-``Pin`` is re-exported here. The client modules load on first use, so
-that importing the ``verifier`` subpackage alone stays light.
+to the keys of the current verification. The enclave clients take a trust
+argument, ``Trust``, which names who vouches for the enclave's config. The
+verifier that appraises the attestation documents is the ``verifier``
+subpackage, which defines the ``Policy`` that every client takes. The
+client modules load on first use, so that importing the ``verifier``
+subpackage alone stays light.
 """
 
 import importlib
@@ -34,14 +41,24 @@ if TYPE_CHECKING:
     )
 
     from tinfoil._clients import (
+        AsyncAttestedHTTPClient,
         AsyncEnclaveHTTPClient,
         AsyncGatewayHTTPClient,
         AsyncRouterHTTPClient,
+        AttestedHTTPClient,
         EnclaveHTTPClient,
         GatewayHTTPClient,
         RouterHTTPClient,
     )
     from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, TinfoilError, tinfoil_error
+    from tinfoil._fetchers import (
+        AsyncAttestationFetcher,
+        AsyncRouterListFetcher,
+        AttestationFetcher,
+        AttestationRelay,
+        RouterListFetcher,
+        RouterListRelay,
+    )
     from tinfoil._gateway import (
         DEFAULT_GATEWAY_URL,
         Catalog,
@@ -53,28 +70,22 @@ if TYPE_CHECKING:
     )
     from tinfoil._openai import (
         AsyncClient,
-        AsyncEnclaveOpenAIClient,
-        AsyncGatewayOpenAIClient,
+        AsyncOpenAIClient,
         AsyncOpenAICopyOptions,
         AsyncOpenAIOptions,
-        AsyncRouterOpenAIClient,
         Client,
-        EnclaveOpenAIClient,
-        GatewayOpenAIClient,
+        OpenAIClient,
         OpenAICopyOptions,
         OpenAIOptions,
-        RouterOpenAIClient,
         create_async_client,
         create_client,
     )
-    from tinfoil._types import (
-        DEFAULT_HTTP_TIMEOUT,
-        DEFAULT_TRANSPORT_MODE,
-        TimeoutTypes,
-        TransportMode,
-        VerificationCheck,
-    )
-    from tinfoil.verifier import Pin
+    from tinfoil._trust import AuthorizedBy, EitherPin, EmbeddedConfig, ProjectPin, RepoPin, SignedBy, Trust
+    from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP, TLS, TimeoutTypes, Transport, VerificationCheck
+
+_OPENAI_EXTRA = "install it with `pip install 'tinfoil[openai]'`"
+"""How to install the optional ``openai`` dependency, which the OpenAI clients and the re-exported ``openai`` errors
+need."""
 
 __version__ = sdk_version()
 """The version of this package, as installed."""
@@ -82,49 +93,60 @@ __version__ = sdk_version()
 __all__ = [
     "DEFAULT_GATEWAY_URL",
     "DEFAULT_HTTP_TIMEOUT",
-    "DEFAULT_TRANSPORT_MODE",
+    "EHBP",
+    "TLS",
     "APIConnectionError",
     "APIError",
     "APIResponseValidationError",
     "APIStatusError",
     "APITimeoutError",
+    "AsyncAttestationFetcher",
+    "AsyncAttestedHTTPClient",
     "AsyncClient",
     "AsyncEnclaveHTTPClient",
-    "AsyncEnclaveOpenAIClient",
     "AsyncGatewayHTTPClient",
-    "AsyncGatewayOpenAIClient",
+    "AsyncOpenAIClient",
     "AsyncOpenAICopyOptions",
     "AsyncOpenAIOptions",
     "AsyncRouterHTTPClient",
-    "AsyncRouterOpenAIClient",
+    "AsyncRouterListFetcher",
     "AttestationError",
+    "AttestationFetcher",
+    "AttestationRelay",
+    "AttestedHTTPClient",
     "AuthenticationError",
+    "AuthorizedBy",
     "BadRequestError",
     "Catalog",
     "CatalogEntry",
     "Client",
     "ConfigurationError",
     "ConflictError",
+    "EitherPin",
+    "EmbeddedConfig",
     "EnclaveHTTPClient",
-    "EnclaveOpenAIClient",
     "GatewayHTTPClient",
-    "GatewayOpenAIClient",
     "InternalServerError",
     "ModelPin",
     "NetworkError",
     "NotFoundError",
+    "OpenAIClient",
     "OpenAICopyOptions",
     "OpenAIError",
     "OpenAIOptions",
     "PermissionDeniedError",
-    "Pin",
+    "ProjectPin",
     "RateLimitError",
     "ReplicaVerification",
+    "RepoPin",
     "RouterHTTPClient",
-    "RouterOpenAIClient",
+    "RouterListFetcher",
+    "RouterListRelay",
+    "SignedBy",
     "TimeoutTypes",
     "TinfoilError",
-    "TransportMode",
+    "Transport",
+    "Trust",
     "UnprocessableEntityError",
     "VerificationCheck",
     "__version__",
@@ -160,9 +182,11 @@ _MODULE_OF: dict[str, str] = {
         (
             "tinfoil._clients",
             (
+                "AsyncAttestedHTTPClient",
                 "AsyncEnclaveHTTPClient",
                 "AsyncGatewayHTTPClient",
                 "AsyncRouterHTTPClient",
+                "AttestedHTTPClient",
                 "EnclaveHTTPClient",
                 "GatewayHTTPClient",
                 "RouterHTTPClient",
@@ -171,6 +195,17 @@ _MODULE_OF: dict[str, str] = {
         (
             "tinfoil._errors",
             ("AttestationError", "ConfigurationError", "NetworkError", "TinfoilError", "tinfoil_error"),
+        ),
+        (
+            "tinfoil._fetchers",
+            (
+                "AsyncAttestationFetcher",
+                "AsyncRouterListFetcher",
+                "AttestationFetcher",
+                "AttestationRelay",
+                "RouterListFetcher",
+                "RouterListRelay",
+            ),
         ),
         (
             "tinfoil._gateway",
@@ -188,26 +223,25 @@ _MODULE_OF: dict[str, str] = {
             "tinfoil._openai",
             (
                 "AsyncClient",
-                "AsyncEnclaveOpenAIClient",
-                "AsyncGatewayOpenAIClient",
+                "AsyncOpenAIClient",
                 "AsyncOpenAICopyOptions",
                 "AsyncOpenAIOptions",
-                "AsyncRouterOpenAIClient",
                 "Client",
-                "EnclaveOpenAIClient",
-                "GatewayOpenAIClient",
+                "OpenAIClient",
                 "OpenAICopyOptions",
                 "OpenAIOptions",
-                "RouterOpenAIClient",
                 "create_async_client",
                 "create_client",
             ),
         ),
         (
             "tinfoil._types",
-            ("DEFAULT_HTTP_TIMEOUT", "DEFAULT_TRANSPORT_MODE", "TimeoutTypes", "TransportMode", "VerificationCheck"),
+            ("DEFAULT_HTTP_TIMEOUT", "EHBP", "TLS", "TimeoutTypes", "Transport", "VerificationCheck"),
         ),
-        ("tinfoil.verifier", ("Pin",)),
+        (
+            "tinfoil._trust",
+            ("AuthorizedBy", "EitherPin", "EmbeddedConfig", "ProjectPin", "RepoPin", "SignedBy", "Trust"),
+        ),
     )
     for name in names
 }
@@ -224,7 +258,15 @@ if not TYPE_CHECKING:
             module = _MODULE_OF[name]
         except KeyError:
             raise AttributeError(f"module 'tinfoil' has no attribute {name!r}") from None
-        value = getattr(importlib.import_module(module), name)
+        try:
+            loaded = importlib.import_module(module)
+        except ModuleNotFoundError as err:
+            if err.name != "openai":
+                raise
+            raise ModuleNotFoundError(
+                f"tinfoil.{name} requires the openai package: {_OPENAI_EXTRA}", name="openai"
+            ) from err
+        value = getattr(loaded, name)
         globals()[name] = value
         return value
 

@@ -24,7 +24,8 @@ from tinfoil._enclave import DEADLINE_EXCEEDED, FRESHNESS_EXPIRED, Enclave, is_f
 from tinfoil._errors import AttestationError, ConfigurationError, NetworkError
 from tinfoil._keys import PeerLacksKeyError, key_rejection
 from tinfoil._tls import NO_TLS, AsyncPinnedTransport, PinnedTransport
-from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, TransportMode
+from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP, TLS, TimeoutTypes, Transport
+from tinfoil._url import validate_proxy_url
 from tinfoil.verifier import Verification
 
 CLIENT_CLOSED = "client is closed"
@@ -124,22 +125,42 @@ def _validate_tls(request: httpx.Request) -> None:
         raise ConfigurationError(NO_TLS)
 
 
-def mode_for(transport_mode: TransportMode) -> Mode:
-    """The synchronous mode for ``transport_mode``; an unknown mode is a ConfigurationError."""
-    if transport_mode == "tls":
+def resolve_transport(transport: object) -> tuple[Transport, str]:
+    """``transport``, or ``TLS()`` for None, after checking the values that the variant carries, and the proxy URL
+    that it sends requests through, with a trailing slash, or ``""`` when it connects directly. Anything but a
+    ``TLS`` or ``EHBP`` value is a ConfigurationError."""
+    if transport is None:
+        return TLS(), ""
+    if isinstance(transport, TLS):
+        return transport, ""
+    if isinstance(transport, EHBP):
+        proxy_url = transport.proxy_url
+        if proxy_url is None or proxy_url == "":
+            return transport, ""
+        if not isinstance(proxy_url, str):
+            raise ConfigurationError(f"invalid proxy URL: want a string, not {type(proxy_url).__name__}")
+        return transport, validate_proxy_url(proxy_url)
+    raise ConfigurationError(f"transport must be a TLS or EHBP value, not {type(transport).__name__}")
+
+
+def mode_for(transport: Transport) -> Mode:
+    """The synchronous mode for a ``transport`` that ``resolve_transport`` checked; anything else is a
+    ConfigurationError."""
+    if isinstance(transport, TLS):
         return TLSMode()
-    if transport_mode == "ehbp":
+    if isinstance(transport, EHBP):
         return EHBPMode()
-    raise ConfigurationError(f"unknown transport mode {transport_mode!r}")
+    raise ConfigurationError(f"transport must be a TLS or EHBP value, not {type(transport).__name__}")
 
 
-def async_mode_for(transport_mode: TransportMode) -> AsyncMode:
-    """The asynchronous mode for ``transport_mode``; an unknown mode is a ConfigurationError."""
-    if transport_mode == "tls":
+def async_mode_for(transport: Transport) -> AsyncMode:
+    """The asynchronous mode for a ``transport`` that ``resolve_transport`` checked; anything else is a
+    ConfigurationError."""
+    if isinstance(transport, TLS):
         return AsyncTLSMode()
-    if transport_mode == "ehbp":
+    if isinstance(transport, EHBP):
         return AsyncEHBPMode()
-    raise ConfigurationError(f"unknown transport mode {transport_mode!r}")
+    raise ConfigurationError(f"transport must be a TLS or EHBP value, not {type(transport).__name__}")
 
 
 def _tls_key(verified: Verification) -> str:
@@ -574,4 +595,5 @@ __all__ = [
     "UseClientDefault",
     "async_mode_for",
     "mode_for",
+    "resolve_transport",
 ]

@@ -13,16 +13,14 @@ must not be trusted.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from tinfoil._sdkinfo import SDK_NAME, sdk_version
 from tinfoil.verifier._config import (
-    ConfigAuthorizer,
     EndorsementResult,
-    PublicKey,
     ReferencesError,
     TrustPolicy,
     config_references,
@@ -38,7 +36,7 @@ from tinfoil.verifier._document.collateral.collateral import (
     SIGSTORE_FRESHNESS_V1_FORMAT,
 )
 from tinfoil.verifier._document.document import Document, InvalidInputError, parse
-from tinfoil.verifier._embedded import EmbeddedReferences, ResolvedReferences, resolve_embedded
+from tinfoil.verifier._embedded import ResolvedReferences, resolve_artifacts, resolve_config
 from tinfoil.verifier._endorsement.approval import ApprovalError, ConfigPolicy, public_signing_keys
 from tinfoil.verifier._endorsement.provenance import ProvenanceClient, ProvenanceError
 from tinfoil.verifier._endorsement.reference import AuthenticatedArtifact, Reference, ReleaseReferenceError
@@ -54,6 +52,18 @@ from tinfoil.verifier._errors import (
     VerifyError,
 )
 from tinfoil.verifier._measurement import Expected, ExpectedSEVSNP, ExpectedTDX
+from tinfoil.verifier._options import (
+    ConfigAuthorizer,
+    ConfigSigningKeys,
+    ConfigTrust,
+    EmbeddedArtifacts,
+    EmbeddedConfig,
+    EmbeddedConfigReference,
+    EndorsedArtifacts,
+    Policy,
+    PublicKey,
+    Registries,
+)
 from tinfoil.verifier._policy import ARTIFACT_FORMAT
 from tinfoil.verifier._quote import LegacyReferenceValues, QuoteOptions, TestOnlyRoots, assemble, authenticate
 from tinfoil.verifier._verification import (
@@ -128,80 +138,23 @@ class Verifier:
 
     _trust: TrustPolicy
 
-    def __init__(
-        self,
-        *,
-        pinned_registers: Expected | None = None,
-        freshness_max_age: timedelta | None = None,
-        config_signing_keys: Sequence[PublicKey] | None = None,
-        freshness_signing_keys: Sequence[PublicKey] | None = None,
-        config_registry_ids: Sequence[str] | None = None,
-        config_authorizer: ConfigAuthorizer | None = None,
-        embedded_references: EmbeddedReferences | None = None,
-    ) -> None:
-        """Build a verifier. The defaults use the embedded production trust roots, Tinfoil's public config and
-        artifact signing keys, and a seven-day freshness bound. An invalid option or a conflicting combination is a
-        UsageError.
+    def __init__(self, config: ConfigTrust | None = None, policy: Policy | None = None) -> None:
+        """Build a verifier that trusts configs as ``config`` selects and applies ``policy``.
 
-        ``pinned_registers``: register checks on top of the release's. Each
-        set register must match the enclave: it fills a register that the
-        release leaves open and must equal one that the release fixes. Pins
-        for one platform reject every enclave on the other. None adds no
-        checks.
+        ``config`` is one of ``Registries``, ``ConfigSigningKeys``,
+        ``ConfigAuthorizer``, ``EmbeddedConfig`` or ``EmbeddedConfigReference``;
+        None selects the public registry. ``policy`` is a ``Policy``; None
+        keeps every default: no register pins, the seven-day freshness bound,
+        and runtime and platform artifacts that Tinfoil's public keys approve.
+        The constructor copies what it keeps, so that later changes by the
+        caller have no effect, and raises a UsageError for a value of another
+        type or an invalid field.
 
-        ``freshness_max_age``: how old an authenticated witness or approval
-        may be at the verification instant. None keeps the seven-day
-        default. Any non-negative ``timedelta`` is honored as given: zero
-        accepts only a witness that is no older than the verification
-        instant. A negative age, or one longer than the span between the
-        earliest and the latest representable ``datetime``, so that no
-        verification instant could anchor the window, is a UsageError.
-
-
-        ``config_signing_keys``: ECDSA P-256 keys (``load_public_key``)
-        that replace the public config trust. Configs must be key-signed by
-        one of them; registry ids do not apply and these keys authorize no
-        artifact freshness. An empty sequence is a UsageError.
-
-        ``freshness_signing_keys``: ECDSA P-256 keys that replace the public
-        keys for the platform and runtime freshness approvals. An empty
-        sequence is a UsageError.
-
-        ``config_registry_ids``: the registries whose certified approvals
-        are accepted, in place of the public registry alone. An empty
-        sequence or a malformed id is a UsageError.
-
-        ``config_authorizer``: caller policy that replaces config
-        endorsement verification; it decides on the config bytes and the
-        verifier still authenticates the runtime, the platform and the
-        hardware. ``verify_v3`` then requires an empty ``project`` and
-        refuses a ``repo`` passed alone.
-
-        ``embedded_references``: caller-trusted config, runtime manifest
-        or platform artifact that replace endorsement and renewal checks
-        for the components supplied; the others keep their checks.
-
-        Conflicts, each a UsageError: an embedded config with
-        ``config_signing_keys``; ``config_authorizer`` with an embedded
-        config or ``config_signing_keys``; ``config_registry_ids`` with an
-        embedded config, ``config_authorizer`` or ``config_signing_keys``;
-        ``freshness_signing_keys`` when both the runtime and the platform
-        are embedded, so that no endorsed artifact remains to verify.
-
-        Any explicit key set, registry list, authorizer or embedded
-        reference requires ``attestation-collaterals/v3`` collateral; a v2
+        Any config trust other than None, and any artifact trust other than
+        the default, requires ``attestation-collaterals/v3`` collateral; a v2
         document is then rejected at the provenance layer.
         """
-        self._trust = _trust_policy(
-            overrides=None,
-            pinned_registers=pinned_registers,
-            freshness_max_age=freshness_max_age,
-            config_signing_keys=config_signing_keys,
-            freshness_signing_keys=freshness_signing_keys,
-            config_registry_ids=config_registry_ids,
-            config_authorizer=config_authorizer,
-            embedded_references=embedded_references,
-        )
+        self._trust = _trust_policy(config, policy, overrides=None)
 
     @property
     def freshness_max_age(self) -> timedelta:
@@ -213,17 +166,8 @@ class Verifier:
         """The configured register pins, or None."""
         return self._trust.pinned_registers
 
-    @property
-    def caller_authorizes_config(self) -> bool:
-        """Whether the caller supplies the config, with an embedded config, or authorizes it, with a config
-        authorizer, instead of a pin authenticating it."""
-        return self._trust.embedded.config is not None or self._trust.config_authorizer is not None
-
     def __repr__(self) -> str:
-        return (
-            f"Verifier(pinned_registers={self.pinned_registers!r}, freshness_max_age={self.freshness_max_age!r}, "
-            f"caller_authorizes_config={self.caller_authorizes_config!r})"
-        )
+        return f"Verifier(pinned_registers={self.pinned_registers!r}, freshness_max_age={self.freshness_max_age!r})"
 
     def check_pin_verifiability(self, pin: Pin) -> None:
         """Raise UsageError, without a document or network I/O, for a pin that ``verify_v3`` rejects whatever the
@@ -319,81 +263,54 @@ def _repository_pin(repo: str) -> Reference:
         raise UsageError(str(err)) from err
 
 
-def _key_tuple(what: str, keys: Sequence[PublicKey] | None) -> tuple[PublicKey, ...] | None:
-    """The keys as a tuple, None for None; a value that is not iterable or an empty one is a UsageError."""
-    if keys is None:
-        return None
-    try:
-        out = tuple(keys)
-    except TypeError as err:
-        raise UsageError(f"{what} must be a sequence of keys") from err
+def _key_tuple(what: str, keys: object) -> tuple[PublicKey, ...]:
+    """The keys as a tuple; a value that is not a sequence of keys, or an empty one, is a UsageError."""
+    if isinstance(keys, str | bytes | bytearray | memoryview) or not isinstance(keys, Iterable):
+        raise UsageError(f"{what} must be a sequence of keys")
+    out: tuple[PublicKey, ...] = tuple(keys)
     if len(out) == 0:
         raise UsageError(f"{what} must not be empty")
     return out
 
 
+def _freshness_keys(keys: object) -> tuple[PublicKey, ...] | None:
+    """An explicit freshness key set as a tuple; None selects Tinfoil's public keys and stays None."""
+    if keys is None:
+        return None
+    return _key_tuple("freshness signing keys", keys)
+
+
 def _build(
-    *,
-    overrides: Overrides | None = None,
-    pinned_registers: Expected | None = None,
-    freshness_max_age: timedelta | None = None,
-    config_signing_keys: Sequence[PublicKey] | None = None,
-    freshness_signing_keys: Sequence[PublicKey] | None = None,
-    config_registry_ids: Sequence[str] | None = None,
-    config_authorizer: ConfigAuthorizer | None = None,
-    embedded_references: EmbeddedReferences | None = None,
+    config: ConfigTrust | None = None, policy: Policy | None = None, *, overrides: Overrides | None = None
 ) -> Verifier:
-    """``Verifier(...)`` with replacement trust anchors, for the conformance harness only. A Sigstore root that is
-    not a trusted-root document is a UsageError; the vendor roots are checked when evidence selects them."""
+    """``Verifier(config, policy)`` with replacement trust anchors, for the conformance harness only. A Sigstore
+    root that is not a trusted-root document is a UsageError; the vendor roots are checked when evidence selects
+    them."""
     verifier = object.__new__(Verifier)
-    verifier._trust = _trust_policy(
-        overrides=overrides,
-        pinned_registers=pinned_registers,
-        freshness_max_age=freshness_max_age,
-        config_signing_keys=config_signing_keys,
-        freshness_signing_keys=freshness_signing_keys,
-        config_registry_ids=config_registry_ids,
-        config_authorizer=config_authorizer,
-        embedded_references=embedded_references,
-    )
+    verifier._trust = _trust_policy(config, policy, overrides=overrides)
     return verifier
 
 
-def _trust_policy(
-    *,
-    overrides: Overrides | None,
-    pinned_registers: Expected | None,
-    freshness_max_age: timedelta | None,
-    config_signing_keys: Sequence[PublicKey] | None,
-    freshness_signing_keys: Sequence[PublicKey] | None,
-    config_registry_ids: Sequence[str] | None,
-    config_authorizer: ConfigAuthorizer | None,
-    embedded_references: EmbeddedReferences | None,
-) -> TrustPolicy:
-    """Check each option, then the combinations, then build the endorsement verifiers. Every failure is a
-    UsageError."""
-    if pinned_registers is not None and not isinstance(pinned_registers, ExpectedSEVSNP | ExpectedTDX):
-        raise UsageError(
-            f"pinned registers must be an ExpectedSEVSNP or ExpectedTDX value, not {type(pinned_registers).__name__}"
-        )
-    max_age = DEFAULT_MAX_AGE
-    if freshness_max_age is not None:
-        if not isinstance(freshness_max_age, timedelta):
-            raise UsageError(f"freshness maximum age must be a timedelta, not {type(freshness_max_age).__name__}")
-        if freshness_max_age < timedelta(0):
-            raise UsageError("freshness maximum age must not be negative")
-        if freshness_max_age > MAX_AGE_SPAN:
-            raise UsageError("freshness maximum age is longer than any representable window")
-        max_age = freshness_max_age
-    config_keys = _key_tuple("config signing keys", config_signing_keys)
-    freshness_keys = _key_tuple("freshness signing keys", freshness_signing_keys)
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ConfigChoice:
+    """What a config trust selects, checked and copied."""
 
+    config_keys: tuple[PublicKey, ...] | None = None
     registry_ids: tuple[str, ...] | None = None
-    if config_registry_ids is not None:
-        try:
-            registry_ids = tuple(config_registry_ids)
-        except TypeError as err:
-            raise UsageError("config registry IDs must be a sequence of strings") from err
+    authorizer: Callable[..., None] | None = None
+    embedded: EmbeddedConfigReference | None = None
+
+
+def _config_choice(config: object, runtime: bytes | None) -> _ConfigChoice:
+    """Check ``config`` and copy what it selects. It runs after the artifact trust, so that an embedded config can
+    check an embedded runtime."""
+    if config is None:
+        return _ConfigChoice()
+    if isinstance(config, Registries):
+        ids = config.ids
+        if isinstance(ids, str) or not isinstance(ids, Sequence):
+            raise UsageError("config registry IDs must be a sequence of strings")
+        registry_ids = tuple(ids)
         if len(registry_ids) == 0:
             raise UsageError("config registry IDs must not be empty")
         if not all(isinstance(registry_id, str) for registry_id in registry_ids):
@@ -402,20 +319,66 @@ def _trust_policy(
             ConfigPolicy(registry_ids=registry_ids).validate_pins()
         except ApprovalError as err:
             raise UsageError(str(err)) from err
-    if config_authorizer is not None and not callable(config_authorizer):
-        raise UsageError("config authorizer must be callable")
-    embedded = ResolvedReferences() if embedded_references is None else resolve_embedded(embedded_references)
+        return _ConfigChoice(registry_ids=registry_ids)
+    if isinstance(config, ConfigSigningKeys):
+        return _ConfigChoice(config_keys=_key_tuple("config signing keys", config.keys))
+    if isinstance(config, ConfigAuthorizer):
+        if not callable(config.authorize):
+            raise UsageError("config authorizer must be callable")
+        return _ConfigChoice(authorizer=config.authorize)
+    if isinstance(config, EmbeddedConfig | EmbeddedConfigReference):
+        return _ConfigChoice(embedded=resolve_config(config, runtime))
+    raise UsageError(
+        "config trust must be a Registries, ConfigSigningKeys, ConfigAuthorizer, EmbeddedConfig or "
+        f"EmbeddedConfigReference value, not {type(config).__name__}"
+    )
 
-    if embedded.config is not None and config_keys is not None:
-        raise UsageError("embedded config and config signing keys select conflicting trust sources")
-    if config_authorizer is not None and (embedded.config is not None or config_keys is not None):
-        raise UsageError("config authorizer conflicts with embedded config or config signing keys")
-    if registry_ids is not None and (embedded.config is not None or config_authorizer is not None):
-        raise UsageError("config authority pins require endorsement verification")
-    if registry_ids is not None and config_keys is not None:
-        raise UsageError("config registry ID policy requires Tinfoil registry root verification")
-    if embedded.runtime is not None and embedded.platform is not None and freshness_keys is not None:
-        raise UsageError("freshness signing keys have no endorsed artifact to verify")
+
+def _artifact_choice(artifacts: object) -> tuple[ResolvedReferences, tuple[PublicKey, ...] | None]:
+    """Check ``artifacts`` and copy the embedded artifacts and the freshness keys that it selects."""
+    if artifacts is None:
+        return ResolvedReferences(), None
+    if isinstance(artifacts, EndorsedArtifacts):
+        return ResolvedReferences(), _freshness_keys(artifacts.freshness_keys)
+    if isinstance(artifacts, EmbeddedArtifacts):
+        if artifacts.runtime is not None and artifacts.platform is not None and artifacts.freshness_keys is not None:
+            raise UsageError("freshness signing keys have no endorsed artifact to verify")
+        keys = _freshness_keys(artifacts.freshness_keys)
+        return resolve_artifacts(artifacts), keys
+    raise UsageError(
+        f"artifact trust must be an EndorsedArtifacts or EmbeddedArtifacts value, not {type(artifacts).__name__}"
+    )
+
+
+def _trust_policy(config: object, policy: object, *, overrides: Overrides | None) -> TrustPolicy:
+    """Check the policy, then the config trust, then build the endorsement verifiers. Every failure is a
+    UsageError."""
+    if policy is None:
+        policy = Policy()
+    if not isinstance(policy, Policy):
+        raise UsageError(f"policy must be a Policy value, not {type(policy).__name__}")
+    pinned_registers = policy.pinned_registers
+    if pinned_registers is not None and not isinstance(pinned_registers, ExpectedSEVSNP | ExpectedTDX):
+        raise UsageError(
+            f"pinned registers must be an ExpectedSEVSNP or ExpectedTDX value, not {type(pinned_registers).__name__}"
+        )
+    max_age = DEFAULT_MAX_AGE
+    freshness_max_age = policy.freshness_max_age
+    if freshness_max_age is not None:
+        if not isinstance(freshness_max_age, timedelta):
+            raise UsageError(f"freshness maximum age must be a timedelta, not {type(freshness_max_age).__name__}")
+        if freshness_max_age < timedelta(0):
+            raise UsageError("freshness maximum age must not be negative")
+        if freshness_max_age == timedelta(0):
+            raise UsageError(
+                "freshness maximum age must be positive: zero would reject every witness; leave it None for the default"
+            )
+        if freshness_max_age > MAX_AGE_SPAN:
+            raise UsageError("freshness maximum age is longer than any representable window")
+        max_age = freshness_max_age
+    artifacts, freshness_keys = _artifact_choice(policy.artifacts)
+    choice = _config_choice(config, artifacts.runtime)
+    embedded = ResolvedReferences(config=choice.embedded, runtime=artifacts.runtime, platform=artifacts.platform)
 
     try:
         if overrides is None or overrides.sigstore_root is None:
@@ -423,10 +386,10 @@ def _trust_policy(
         else:
             endorsements = ProvenanceClient.from_json(overrides.sigstore_root)
         public_keys = public_signing_keys()
-        if config_keys is None:
+        if choice.config_keys is None:
             config_verifier = endorsements.registry_verifier(public_keys)
         else:
-            config_verifier = endorsements.config_verifier(config_keys)
+            config_verifier = endorsements.config_verifier(choice.config_keys)
         freshness_verifier = endorsements.freshness_verifier(freshness_keys or public_keys)
     except (ProvenanceError, ApprovalError, X509Error) as err:
         raise UsageError(str(err)) from err
@@ -440,11 +403,11 @@ def _trust_policy(
         embedded=embedded,
         pinned_registers=pinned_registers,
         freshness_max_age=max_age,
-        config_authorizer=config_authorizer,
+        config_authorizer=choice.authorizer,
         endorsements=endorsements,
-        config_keys=config_keys,
+        config_keys=choice.config_keys,
         config_verifier=config_verifier,
-        config_registry_ids=registry_ids,
+        config_registry_ids=choice.registry_ids,
         freshness_keys=freshness_keys,
         freshness_verifier=freshness_verifier,
         quote_options=quote_options,

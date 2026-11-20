@@ -22,9 +22,9 @@ from tinfoil._keys import PeerLacksKeyError
 
 EHBP_TUNNEL = (
     "EHBP seals only request and response bodies, so it can't protect a protocol upgrade, such as a WebSocket, "
-    "or a CONNECT tunnel; use the TLS transport mode on a direct connection"
+    "or a CONNECT tunnel; use the TLS transport on a direct connection"
 )
-NO_HPKE_KEY = "document endorses no HPKE key; cannot use the EHBP transport mode (use the TLS transport mode)"
+NO_HPKE_KEY = "document endorses no HPKE key; cannot use the EHBP transport (use the TLS transport)"
 
 # The transports sealed requests go out over when set; tests point them at a mock. None selects httpx's own.
 _INNER_TRANSPORT: httpx.BaseTransport | None = None

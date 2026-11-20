@@ -1,9 +1,10 @@
-"""The OpenAI wrappers: every request goes through the attested HTTP client to the route's URL, the caller's
-``http_client`` and ``base_url`` cannot replace it, the websocket entry points are refused, copies keep the attested
-client, a failed constructor closes the one it created, API errors pass through unchanged, and a client error
-raised in the transport reaches the caller unwrapped and unretried, since the library wraps and retries only
-the errors of its own HTTP stack. The options that would choose another base URL or an HTTP client of their own
-are refused from every constructor, factory and copy, before any network I/O."""
+"""The OpenAI layer: ``OpenAIClient`` and ``AsyncOpenAIClient`` take one of the SDK's attested HTTP clients and
+nothing else, do no network I/O, send every request through the attested client's protected transport to the API
+path under its route, and set the base URL themselves, so that a caller's ``base_url``, ``data_residency`` or
+``OPENAI_BASE_URL`` has no effect. The caller's ``http_client`` cannot replace the attested one, the websocket entry
+points are refused, copies keep the attested client and the API path, API errors pass through unchanged, and a
+client error raised in the transport reaches the caller unwrapped and unretried. The options that would choose
+another websocket URL or an HTTP client of their own are refused from every constructor, factory and copy."""
 
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from tinfoil import _cachesecret, _fetch
 from tinfoil._clients import (
     AsyncEnclaveHTTPClient,
     AsyncGatewayHTTPClient,
+    AsyncRouterHTTPClient,
     EnclaveHTTPClient,
     GatewayHTTPClient,
     RouterHTTPClient,
@@ -34,27 +36,26 @@ from tinfoil._errors import AttestationError, ConfigurationError, TinfoilError, 
 from tinfoil._gateway import CatalogEntry
 from tinfoil._openai import (
     _FORBIDDEN_TRANSPORT_OPTIONS,
-    BASE_URL_FIXED,
     DROP_IN_OPTIONS,
+    GATEWAY_API_PATH,
     REALTIME_UNAVAILABLE,
     ROUTE_OPTIONS,
     TRANSPORT_OPTION_UNSUPPORTED,
     WEBSOCKET_UNAVAILABLE,
     AsyncClient,
-    AsyncEnclaveOpenAIClient,
-    AsyncGatewayOpenAIClient,
-    AsyncRouterOpenAIClient,
+    AsyncOpenAIClient,
     Client,
-    EnclaveOpenAIClient,
-    GatewayOpenAIClient,
-    RouterOpenAIClient,
+    OpenAIClient,
     create_async_client,
     create_client,
+    join_api_path,
 )
-from tinfoil._types import DEFAULT_HTTP_TIMEOUT
-from tinfoil.verifier import Pin, Verifier
+from tinfoil._trust import EitherPin, RepoPin
+from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP
+from tinfoil.verifier import Policy, Verifier
 
 MODELS = b'{"object":"list","data":[]}'
+ENTRIES = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
 
 
 def foreign(**options: Any) -> dict[str, Any]:
@@ -64,13 +65,24 @@ def foreign(**options: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def offline(monkeypatch: pytest.MonkeyPatch) -> Recorder:
-    """A network that answers every attestation fetch with a document the patched verifier accepts, and every
-    application request with an empty model list."""
-    recorder = Recorder(lambda _: response(200, b"doc"))
+    """A network that answers every attestation fetch with a document the patched verifier accepts, every router
+    list with an empty one, and every application request with an empty model list."""
+    recorder = Recorder(
+        lambda request: response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
+    )
     monkeypatch.setattr(_fetch, "_TRANSPORT", recorder.transport)
     monkeypatch.setattr(_fetch, "_ASYNC_TRANSPORT", recorder.async_transport)
     monkeypatch.setattr(Verifier, "verify_v3", lambda self, doc, nonce, pin: verification("ab" * 32))
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     return recorder
+
+
+def enclave(**options: Any) -> EnclaveHTTPClient:
+    return EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), **options)
+
+
+def gateway() -> GatewayHTTPClient:
+    return GatewayHTTPClient(url="https://gateway.example/v1/", catalog=lambda: ENTRIES)
 
 
 def models_response(_: httpx.Request) -> httpx.Response:
@@ -120,133 +132,192 @@ def realtime_of(holder: object) -> object:
 
 def by_path(request: httpx.Request) -> httpx.Response:
     bodies = {
-        "/v1/chat/completions": CHAT,
-        "/v1/embeddings": EMBEDDINGS,
-        "/v1/audio/transcriptions": b'{"text":"hi"}',
-        "/v1/responses": RESPONSE,
-        "/v1/live/sessions": LIVE_SESSION,
+        "/chat/completions": CHAT,
+        "/embeddings": EMBEDDINGS,
+        "/audio/transcriptions": b'{"text":"hi"}',
+        "/responses": RESPONSE,
+        "/live/sessions": LIVE_SESSION,
     }
-    return response(200, bodies[request.url.path], {"Content-Type": "application/json"})
+    path = request.url.path
+    return response(200, bodies[path[path.index("/", 1) :]], {"Content-Type": "application/json"})
 
 
 class TestConstruction:
-    def test_enclave_client_sends_through_its_http_client(self, offline: Recorder) -> None:
-        client = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
-        )
-        assert isinstance(client.http_client, EnclaveHTTPClient)
+    def test_enclave_client_sends_through_its_protected_transport(self, offline: Recorder) -> None:
+        http_client = enclave()
+        fetched = len(offline.requests)
+        client = OpenAIClient(http_client, api_key="k", max_retries=0)
+        assert len(offline.requests) == fetched, "the constructor does no network I/O"
+        assert client.http_client is http_client
         assert client.base_url == "https://enclave.example/v1/"
         inner: object = client._client
-        assert inner is client.http_client.http_client
+        assert inner is http_client._attested.secure, "the protected client, not the caller's"
+        assert inner is not http_client.http_client
         requests = through(client)
         assert [str(r.url) for r in requests] == ["https://enclave.example/v1/models"]
         assert requests[0].headers["Authorization"] == "Bearer k"
         client.close()
         with pytest.raises(ConfigurationError, match="closed"):
-            client.http_client.ensure_verified()
+            http_client.ensure_verified()
 
-    def test_pin_project_is_separate_from_the_openai_project(self, offline: Recorder) -> None:
-        client = EnclaveOpenAIClient(
-            "enclave.example",
-            Pin(repo="org/repo", project="org/project"),
-            transport_mode="ehbp",
-            api_key="k",
-            project="proj_123",
-        )
-        assert client.http_client.pin == Pin(repo="org/repo", project="org/project")
+    def test_changes_to_the_callers_client_do_not_reach_openai_requests(self, offline: Recorder) -> None:
+        http_client = enclave()
+        http_client.http_client.headers["X-Leak"] = "1"
+        http_client.http_client.auth = ("user", "password")
+        client = OpenAIClient(http_client, api_key="k", max_retries=0)
+        [request] = through(client)
+        assert "X-Leak" not in request.headers
+        assert request.headers["Authorization"] == "Bearer k"
+        client.close()
+
+    def test_takes_only_the_sdks_http_clients(self, offline: Recorder) -> None:
+        async_like: Any = object.__new__(AsyncEnclaveHTTPClient)
+        unbuilt: Any = object.__new__(EnclaveHTTPClient)
+        for not_a_client in (None, "https://enclave.example/", httpx.Client(), enclave().http_client, unbuilt):
+            with pytest.raises(ConfigurationError, match="must be an EnclaveHTTPClient, RouterHTTPClient or"):
+                OpenAIClient(not_a_client, api_key="k")  # type: ignore[arg-type]
+        with pytest.raises(ConfigurationError, match="not AsyncEnclaveHTTPClient"):
+            OpenAIClient(async_like, api_key="k")
+        for not_an_async_client in (None, enclave(), httpx.AsyncClient()):
+            with pytest.raises(ConfigurationError, match="must be an AsyncEnclaveHTTPClient, AsyncRouterHTTPClient"):
+                AsyncOpenAIClient(not_an_async_client, api_key="k")  # type: ignore[arg-type]
+
+    def test_trust_project_is_separate_from_the_openai_project(self, offline: Recorder) -> None:
+        http_client = EnclaveHTTPClient("enclave.example", EitherPin("org/repo", "org/project"), transport=EHBP())
+        client = OpenAIClient(http_client, api_key="k", project="proj_123")
+        assert http_client.trust == EitherPin("org/repo", "org/project")
         assert client.project == "proj_123"
         copy = client.with_options(max_retries=0)
         assert copy.http_client is client.http_client
         assert copy.project == "proj_123"
         assert through(copy)[0].headers["OpenAI-Project"] == "proj_123"
         client.close()
-        with pytest.raises(ConfigurationError):
-            EnclaveOpenAIClient("enclave.example", Pin(project="not a reference"), api_key="k")
-        for not_a_pin in ("org/repo", None):
-            with pytest.raises(ConfigurationError, match="pin must be a Pin"):
-                EnclaveOpenAIClient("enclave.example", not_a_pin, api_key="k", project="proj_123")  # type: ignore[arg-type]
-        with pytest.raises(TypeError, match="registry_project"):
-            EnclaveOpenAIClient(
-                "enclave.example", Pin(repo="o/r"), api_key="k", **foreign(registry_project="org/project")
-            )
 
     def test_router_and_gateway_clients(self, offline: Recorder) -> None:
         offline.handler = lambda request: (
             response(200, b'["router.example"]') if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
         )
-        router = RouterOpenAIClient(
-            transport_mode="ehbp", base_url="https://proxy.example/v1/", user_cache_secret="s", api_key="k"
-        )
+        router = OpenAIClient(RouterHTTPClient(transport=EHBP("https://proxy.example/relay")), api_key="k")
         assert isinstance(router.http_client, RouterHTTPClient)
-        assert router.base_url == "https://proxy.example/v1/"
-        assert [str(r.url) for r in through(router)] == ["https://proxy.example/v1/models"]
+        assert router.base_url == "https://proxy.example/relay/v1/"
+        assert [str(r.url) for r in through(router)] == ["https://proxy.example/relay/v1/models"]
         router.close()
-        gateway = GatewayOpenAIClient(
-            url="https://gateway.example/v1/",
-            catalog=lambda: {"m": CatalogEntry("tinfoilsh/m", ("a.example",))},
-            api_key="k",
-        )
-        assert isinstance(gateway.http_client, GatewayHTTPClient)
-        assert gateway.base_url == "https://gateway.example/v1/"
-        gateway.close()
+        gateway_client = OpenAIClient(gateway(), api_key="k")
+        assert isinstance(gateway_client.http_client, GatewayHTTPClient)
+        assert gateway_client.base_url == "https://gateway.example/v1/"
+        gateway_client.close()
 
-    def test_rejects_invalid_options(self, offline: Recorder) -> None:
-        with pytest.raises(ConfigurationError):
-            EnclaveOpenAIClient("", Pin(repo="org/repo"), api_key="k")
-        with pytest.raises(ConfigurationError):
-            RouterOpenAIClient(transport_mode="quic", api_key="k")  # type: ignore[arg-type]
-        with pytest.raises(ConfigurationError):
-            GatewayOpenAIClient(url="http://gateway.example/v1/", catalog=dict, api_key="k")
-        assert offline.requests == []
-
-    def test_callers_http_client_and_base_url_cannot_replace_the_attested_ones(self, offline: Recorder) -> None:
-        with pytest.raises(ConfigurationError, match="http_client"):
-            EnclaveOpenAIClient(
-                "enclave.example",
-                Pin(repo="org/repo"),
-                transport_mode="ehbp",
-                api_key="k",
-                **foreign(http_client=httpx.Client()),
-            )
-        client = EnclaveOpenAIClient(
-            "enclave.example",
-            Pin(repo="org/repo"),
-            transport_mode="ehbp",
-            api_key="k",
-            base_url="https://enclave.example/custom/v1/",
-        )
-        assert client.base_url == "https://enclave.example/custom/v1/", (
-            "base_url is the route option, applied to the attested client"
-        )
+    @pytest.mark.parametrize(
+        ("proxy_url", "api_path", "want"),
+        [
+            (None, None, "https://enclave.example/v1/"),
+            (None, "", "https://enclave.example/v1/"),
+            (None, "/openai/v1", "https://enclave.example/openai/v1/"),
+            (None, "/openai/v1/", "https://enclave.example/openai/v1/"),
+            ("https://proxy.example/relay", None, "https://proxy.example/relay/v1/"),
+            ("https://proxy.example/relay/", None, "https://proxy.example/relay/v1/"),
+            ("https://proxy.example/relay", "/openai/v1", "https://proxy.example/relay/openai/v1/"),
+            ("https://proxy.example", None, "https://proxy.example/v1/"),
+            ("http://localhost:8080/", "/", "http://localhost:8080/"),
+        ],
+    )
+    def test_api_path_joins_under_the_route(
+        self, offline: Recorder, proxy_url: str | None, api_path: str | None, want: str
+    ) -> None:
+        http_client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(proxy_url))
+        client = OpenAIClient(http_client, api_path=api_path, api_key="k")
+        assert client.base_url == want
+        assert [str(r.url) for r in through(client)] == [want + "models"]
+        copied = client.with_options(max_retries=0)
+        assert copied.base_url == want, "a copy keeps the API path"
         client.close()
 
-    def test_http_timeout_leaves_the_per_request_default_alone(self, offline: Recorder) -> None:
-        """``http_timeout`` is the attested client's timeout; the library's own per-request default stays unless
-        the caller sets ``timeout``, so a short attestation timeout does not cut a streamed completion short."""
-        client = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", http_timeout=10.0
-        )
+    @pytest.mark.parametrize(
+        "api_path",
+        [
+            "v1/",
+            "//v1/",
+            "https://other.example/v1/",
+            "/v1/?x=1",
+            "/v1/?",
+            "/v1/#f",
+            "/v1/../admin/",
+            "/v1/./",
+            "/..",
+            "/v1/%2e%2e/admin/",
+            "/v1/%2E/",
+            "/v1%2fadmin/",
+            "/v1/%zz/",
+            "/v1/\x00/",
+            "/v1/\n/",
+        ],
+    )
+    def test_rejects_an_api_path_that_could_leave_its_root(self, offline: Recorder, api_path: str) -> None:
+        http_client = enclave()
+        with pytest.raises(ConfigurationError, match="invalid API path"):
+            OpenAIClient(http_client, api_path=api_path, api_key="k")
+        with pytest.raises(ConfigurationError, match="invalid API path"):
+            join_api_path("https://enclave.example/", api_path)
+        with pytest.raises(ConfigurationError, match="invalid API path: want a string"):
+            OpenAIClient(http_client, api_path=b"/v1/", api_key="k")  # type: ignore[arg-type]
+        http_client.close()
+
+    def test_gateway_client_refuses_an_api_path(self, offline: Recorder) -> None:
+        http_client = gateway()
+        with pytest.raises(ConfigurationError) as err:
+            OpenAIClient(http_client, api_path="/v1/", api_key="k")
+        assert str(err.value) == GATEWAY_API_PATH
+        assert OpenAIClient(http_client, api_path="", api_key="k").base_url == "https://gateway.example/v1/"
+        http_client.close()
+
+    def test_the_sdk_sets_the_base_url_after_the_callers_options(
+        self, offline: Recorder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A base URL from the caller, from ``OPENAI_BASE_URL`` or from a data residency option has no effect:
+        requests go to the base URL that the SDK builds, from the constructor and from copies alike."""
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://from-env.example/v1/")
+        cases: list[tuple[EnclaveHTTPClient | GatewayHTTPClient, str]] = [
+            (enclave(), "https://enclave.example/v1/"),
+            (gateway(), "https://gateway.example/v1/"),
+        ]
+        for http_client, want in cases:
+            client = OpenAIClient(
+                http_client,
+                api_key="k",
+                **foreign(base_url="https://other.example/v1/", data_residency="eu"),
+            )
+            assert client.base_url == want
+            for copy in (client.copy, client.with_options):
+                copied = copy(**foreign(base_url="https://other.example/v1/", data_residency="us"))
+                assert copied.base_url == want
+            assert str(through(client)[0].url) == want + "models"
+            client.close()
+        drop_in = create_client(api_key="k", **foreign(base_url="https://other.example/v1/"))
+        assert drop_in.base_url == "https://inference.tinfoil.sh/v1/"
+        drop_in.close()
+
+    def test_http_client_timeout_leaves_the_per_request_default_alone(self, offline: Recorder) -> None:
+        """The HTTP client's ``timeout`` is the attested client's; the library's own per-request default stays
+        unless the caller sets ``timeout``, so a short attestation timeout does not cut a streamed completion
+        short."""
+        client = OpenAIClient(enclave(timeout=10.0), api_key="k")
         assert client.timeout == openai.DEFAULT_TIMEOUT
         assert client.http_client.http_client.timeout == httpx.Timeout(10.0)
         client.close()
-        explicit = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", http_timeout=10.0, timeout=2.0
-        )
+        explicit = OpenAIClient(enclave(timeout=10.0), api_key="k", timeout=2.0)
         assert explicit.timeout == 2.0
         assert explicit.with_options(max_retries=0).timeout == 2.0, "a copy keeps the caller's timeout"
         explicit.close()
-        default = EnclaveOpenAIClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k")
+        default = OpenAIClient(enclave(), api_key="k")
         assert default.http_client.http_client.timeout == DEFAULT_HTTP_TIMEOUT
         assert default.timeout == openai.DEFAULT_TIMEOUT
         default.close()
 
     def test_copies_keep_the_attested_client(self, offline: Recorder) -> None:
-        client = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
-        )
+        client = OpenAIClient(enclave(), api_key="k", max_retries=0)
         attestations = len(offline.requests)
         copied = client.with_options(timeout=1.0, max_retries=2)
-        assert isinstance(copied, EnclaveOpenAIClient)
+        assert isinstance(copied, OpenAIClient)
         assert copied.http_client is client.http_client
         assert copied.base_url == client.base_url
         assert copied.max_retries == 2
@@ -256,17 +327,17 @@ class TestConstruction:
         assert [str(r.url) for r in through(copied)] == ["https://enclave.example/v1/models"]
         client.close()
 
+    def test_a_callers_http_client_is_refused_and_the_attested_client_stays_open(self, offline: Recorder) -> None:
+        http_client = enclave()
+        with pytest.raises(ConfigurationError, match="http_client"):
+            OpenAIClient(http_client, api_key="k", **foreign(http_client=httpx.Client()))
+        http_client.ensure_verified()
+        http_client.close()
+
     def test_realtime_is_refused_while_http_resources_go_through_the_attested_transport(
         self, offline: Recorder
     ) -> None:
-        client = EnclaveOpenAIClient(
-            "enclave.example",
-            Pin(repo="org/repo"),
-            transport_mode="ehbp",
-            user_cache_secret="s",
-            api_key="k",
-            max_retries=0,
-        )
+        client = OpenAIClient(RouterHTTPClient(transport=EHBP(), user_cache_secret="s"), api_key="k", max_retries=0)
         for holder in (client, client.beta, client.with_options(), client.with_raw_response):
             with pytest.raises(ConfigurationError, match=REALTIME_UNAVAILABLE):
                 realtime_of(holder)
@@ -281,151 +352,92 @@ class TestConstruction:
             "/v1/embeddings",
             "/v1/audio/transcriptions",
         ]
-        assert all(r.url.host == "enclave.example" for r in recorder.requests)
+        assert all(r.url.host == "inference.tinfoil.sh" for r in recorder.requests)
         assert json.loads(recorder.bodies[0])["user_cache_secret"] == "s", "the chat body passed the secret layer"
         client.close()
 
     def test_responses_go_through_the_attested_transport(self, offline: Recorder) -> None:
-        """The Responses API is reachable on each wrapper and takes the path chat does: the attested origin,
-        with the client-level cache secret in the body."""
-        offline.handler = lambda request: (
-            response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
-        )
-        enclave = EnclaveOpenAIClient(
-            "enclave.example",
-            Pin(repo="org/repo"),
-            transport_mode="ehbp",
-            user_cache_secret="s",
-            api_key="k",
-            max_retries=0,
-        )
+        """The Responses API takes the path chat does: the attested origin, with the router client's cache secret
+        in the body."""
+        router = OpenAIClient(RouterHTTPClient(transport=EHBP(), user_cache_secret="s"), api_key="k", max_retries=0)
         drop_in = create_client(api_key="k", max_retries=0)
-        for client, host, secret in (
-            (enclave, "enclave.example", "s"),
-            (drop_in, "inference.tinfoil.sh", "test-secret"),
-        ):
+        for client, secret in ((router, "s"), (drop_in, "test-secret")):
             recorder = below_the_attested_transport(client, by_path)
             assert client.responses.create(model="m", input="hi").output_text == "ok"
-            assert [(r.url.host, r.url.path) for r in recorder.requests] == [(host, "/v1/responses")]
+            assert [(r.url.host, r.url.path) for r in recorder.requests] == [("inference.tinfoil.sh", "/v1/responses")]
             assert json.loads(recorder.bodies[0])["user_cache_secret"] == secret, "the body passed the secret layer"
             client.close()
 
-    def test_gateway_client_refuses_a_base_url(self, offline: Recorder) -> None:
-        """The gateway's base URL is its ``url`` option: a ``base_url`` is refused rather than dropped, from the
-        constructor and from copies alike, while a copy passing the gateway's own back is accepted."""
-        entries = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
-        with pytest.raises(ConfigurationError) as err:
-            GatewayOpenAIClient(
-                url="https://gateway.example/v1/",
-                catalog=lambda: entries,
-                api_key="k",
-                **foreign(base_url="https://other.example/v1/"),
-            )
-        assert str(err.value) == BASE_URL_FIXED
-        gateway = GatewayOpenAIClient(url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k")
-        for copy in (gateway.copy, gateway.with_options):
-            with pytest.raises(ConfigurationError, match="base_url"):
-                copy(**foreign(base_url="https://other.example/v1/"))
-        copied = gateway.with_options(timeout=1.0)
-        assert copied.base_url == gateway.base_url == "https://gateway.example/v1/"
-        assert copied.http_client is gateway.http_client
-        gateway.close()
-
-    def test_constructor_failure_closes_the_attested_client_it_created(
+    def test_drop_in_constructor_failure_closes_the_router_client_it_created(
         self, offline: Recorder, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        closes: list[EnclaveHTTPClient] = []
-        original = EnclaveHTTPClient.close
+        closes: list[RouterHTTPClient] = []
+        original = RouterHTTPClient.close
 
-        def close(self: EnclaveHTTPClient) -> None:
+        def close(self: RouterHTTPClient) -> None:
             closes.append(self)
             original(self)
 
-        monkeypatch.setattr(EnclaveHTTPClient, "close", close)
+        monkeypatch.setattr(RouterHTTPClient, "close", close)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        with pytest.raises(ConfigurationError, match="http_client"):
-            EnclaveOpenAIClient(
-                "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", **foreign(http_client=httpx.Client())
-            )
-        assert len(closes) == 1, "the attested client created for the refused options is closed"
         with pytest.raises(openai.OpenAIError):
-            EnclaveOpenAIClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp")  # no api_key anywhere
-        assert len(closes) == 2, "so is one the openai constructor refuses"
-        for closed in closes:
-            with pytest.raises(ConfigurationError, match="closed"):
-                closed.ensure_verified()
-        client = EnclaveOpenAIClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k")
+            Client()  # no api_key anywhere
+        assert len(closes) == 1, "the router client created for the refused options is closed"
+        with pytest.raises(ConfigurationError, match="closed"):
+            closes[0].ensure_verified()
+        client = Client(api_key="k")
         with pytest.raises(ConfigurationError, match="http_client"):
             client.with_options(**foreign(http_client=httpx.Client()))
-        assert len(closes) == 2, "a copy's failure leaves the original's attested client open"
+        assert len(closes) == 1, "a copy's failure leaves the original's router client open"
         client.http_client.ensure_verified()
         client.close()
-        assert len(closes) == 3
-
-    def test_host_and_pin_are_required(self, offline: Recorder) -> None:
-        """Both are positional and have no defaults, so leaving one out fails at the call, before any I/O."""
-        host_only: list[Any] = ["enclave.example"]
-        with pytest.raises(TypeError, match="pin"):
-            EnclaveOpenAIClient(*host_only, api_key="k")
-        with pytest.raises(TypeError, match="pin"):
-            EnclaveHTTPClient(*host_only)
-        with pytest.raises(TypeError, match="host"):
-            EnclaveOpenAIClient(api_key="k")  # type: ignore[call-arg]
-        assert offline.requests == []
-        client = EnclaveOpenAIClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k")
-        copied = client.with_options(max_retries=0)
-        assert copied.http_client is client.http_client
-        assert (copied.http_client.enclave, copied.http_client.pin) == ("enclave.example", Pin(repo="org/repo"))
-        client.close()
+        assert len(closes) == 2
 
     @pytest.mark.parametrize("option", sorted(ROUTE_OPTIONS))
     def test_drop_in_client_refuses_each_route_option(self, offline: Recorder, option: str) -> None:
         with pytest.raises(ConfigurationError) as err:
             Client(api_key="k", **foreign(**{option: "x"}))
-        assert option in str(err.value)
-        assert "RouterOpenAIClient" in str(err.value)
+        assert str(err.value) == DROP_IN_OPTIONS.format(
+            name="Client", keys=option, route="RouterHTTPClient", openai="OpenAIClient"
+        )
         assert offline.requests == [], "the options are refused before discovery"
 
     @pytest.mark.parametrize("option", sorted(ROUTE_OPTIONS))
     def test_drop_in_copies_refuse_each_route_option(self, offline: Recorder, option: str) -> None:
         """A route option is refused on ``copy`` and ``with_options`` as on the constructor, rather than dropped
         in favor of the attested client's own."""
-        offline.handler = lambda request: (
-            response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
-        )
         client = create_client(api_key="k")
         for copy in (client.with_options, client.copy):
             with pytest.raises(ConfigurationError) as err:
                 copy(**foreign(**{option: "x"}))
-            assert str(err.value) == DROP_IN_OPTIONS.format(name="Client", keys=option, route="RouterOpenAIClient")
+            assert str(err.value) == DROP_IN_OPTIONS.format(
+                name="Client", keys=option, route="RouterHTTPClient", openai="OpenAIClient"
+            )
         assert isinstance(client.with_options(max_retries=0), Client)
         client.close()
 
-    def test_drop_in_client_takes_only_openai_options(self, offline: Recorder) -> None:
-        offline.handler = lambda request: (
-            response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
-        )
-        with pytest.raises(ConfigurationError, match="RouterOpenAIClient"):
-            create_client(api_key="k", **foreign(base_url="https://proxy.example/v1/"))
+    def test_drop_in_client_is_an_openai_client_over_a_router(self, offline: Recorder) -> None:
         with pytest.raises(ConfigurationError) as err:
-            create_client(api_key="k", **foreign(transport_mode="ehbp", http_timeout=1.0, verifier=Verifier()))
+            create_client(api_key="k", **foreign(transport=EHBP(), http_timeout=1.0, policy=Policy()))
         assert str(err.value) == DROP_IN_OPTIONS.format(
-            name="Client", keys="http_timeout, transport_mode, verifier", route="RouterOpenAIClient"
+            name="Client", keys="http_timeout, policy, transport", route="RouterHTTPClient", openai="OpenAIClient"
         ), "every refused option is named"
         assert offline.requests == []
         client = create_client(api_key="k")
         assert isinstance(client, Client)
+        assert isinstance(client, OpenAIClient)
+        assert isinstance(client.http_client, RouterHTTPClient)
         assert client.http_client.enclave == "inference.tinfoil.sh"
         assert client.base_url == "https://inference.tinfoil.sh/v1/"
-        assert isinstance(client.with_options(timeout=2.0), Client)
+        copied = client.with_options(timeout=2.0)
+        assert isinstance(copied, Client)
+        assert copied.http_client is client.http_client
         client.close()
 
 
 class TestErrors:
     def test_api_errors_pass_through(self, offline: Recorder) -> None:
-        client = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
-        )
+        client = OpenAIClient(enclave(), api_key="k", max_retries=0)
         with pytest.raises(openai.RateLimitError) as err:
             through(
                 client,
@@ -438,9 +450,7 @@ class TestErrors:
     def test_client_errors_reach_the_caller(self, offline: Recorder) -> None:
         """The library reports only its HTTP stack's errors as connection errors, so a client error raised from
         the transport reaches the caller as itself, with or without the library's retries."""
-        client = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", max_retries=2
-        )
+        client = OpenAIClient(enclave(), api_key="k", max_retries=2)
         failure = AttestationError("channel binding failed")
         attempts = 0
 
@@ -461,27 +471,18 @@ class TestErrors:
 
         def chat(request: httpx.Request) -> httpx.Response:
             received.append(json.loads(request.read()))
-            return response(
-                200,
-                b'{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}',
-                {"Content-Type": "application/json"},
-            )
+            return response(200, CHAT, {"Content-Type": "application/json"})
 
-        enclave = EnclaveOpenAIClient(
-            "enclave.example",
-            Pin(repo="org/repo"),
-            transport_mode="ehbp",
-            user_cache_secret="client-level",
-            api_key="k",
-            max_retries=0,
+        router = OpenAIClient(
+            RouterHTTPClient(transport=EHBP(), user_cache_secret="client-level"), api_key="k", max_retries=0
         )
-        below_the_attested_transport(enclave, chat)  # below the cache-secret layer, so it sees the injected body
+        below_the_attested_transport(router, chat)  # below the cache-secret layer, so it sees the injected body
         params: dict[str, Any] = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-        enclave.chat.completions.create(**params)
-        enclave.chat.completions.create(**params, extra_body={"user_cache_secret": "end-user-7"})
-        enclave.chat.completions.create(**params, extra_body={"user_cache_secret": ""})
+        router.chat.completions.create(**params)
+        router.chat.completions.create(**params, extra_body={"user_cache_secret": "end-user-7"})
+        router.chat.completions.create(**params, extra_body={"user_cache_secret": ""})
         assert [body["user_cache_secret"] for body in received] == ["client-level", "end-user-7", "client-level"]
-        enclave.close()
+        router.close()
 
     def test_clients_without_the_option_share_one_generated_secret(
         self, offline: Recorder, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -497,7 +498,6 @@ class TestErrors:
         secret_file.parent.mkdir()
         secret_file.write_text("from-file")
         secret_file.chmod(0o600)
-        answering_discovery(offline)
         received: list[dict[str, Any]] = []
 
         def chat(request: httpx.Request) -> httpx.Response:
@@ -505,13 +505,9 @@ class TestErrors:
             return response(200, CHAT, {"Content-Type": "application/json"})
 
         first = create_client(api_key="k", max_retries=0)
-        second = RouterOpenAIClient(api_key="k", max_retries=0)
-        pinned = RouterOpenAIClient(user_cache_secret="client-level", api_key="k", max_retries=0)
-        gateway = GatewayOpenAIClient(
-            url="https://gateway.example/v1/",
-            catalog=lambda: {"m": CatalogEntry("tinfoilsh/m", ("a.example",))},
-            api_key="k",
-        )
+        second = OpenAIClient(RouterHTTPClient(), api_key="k", max_retries=0)
+        pinned = OpenAIClient(RouterHTTPClient(user_cache_secret="client-level"), api_key="k", max_retries=0)
+        gateway_client = gateway()
         params: dict[str, Any] = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
         for client in (first, second, pinned):
             below_the_attested_transport(client, chat)
@@ -521,75 +517,24 @@ class TestErrors:
         assert len(generated) == 64
         assert generated not in ("from-env", "from-file")
         assert [body["user_cache_secret"] for body in received] == [generated, generated, "client-level", "end-user-7"]
-        gateway_transport: Any = gateway.http_client._transport
+        gateway_transport: Any = gateway_client._transport
         assert gateway_transport.secret == generated, "the gateway client shares the process secret"
         assert secret_file.read_text() == "from-file"
         for client in (first, second, pinned):
             client.close()
-        gateway.close()
+        gateway_client.close()
 
 
 @pytest.mark.asyncio
-async def test_async_responses_go_through_the_attested_transport(offline: Recorder) -> None:
-    offline.handler = lambda request: (
-        response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
-    )
-    enclave = await AsyncEnclaveOpenAIClient.create(
-        "enclave.example",
-        Pin(repo="org/repo"),
-        transport_mode="ehbp",
-        user_cache_secret="s",
-        api_key="k",
-        max_retries=0,
-    )
-    drop_in = await create_async_client(api_key="k", max_retries=0)
-    for client, host, secret in ((enclave, "enclave.example", "s"), (drop_in, "inference.tinfoil.sh", "test-secret")):
-        recorder = below_the_attested_transport(client, by_path)
-        assert (await client.responses.create(model="m", input="hi")).output_text == "ok"
-        assert [(r.url.host, r.url.path) for r in recorder.requests] == [(host, "/v1/responses")]
-        assert json.loads(recorder.bodies[0])["user_cache_secret"] == secret
-        await client.close()
-
-
-@pytest.mark.asyncio
-async def test_async_gateway_client_refuses_a_base_url(offline: Recorder) -> None:
-    entries = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
-    with pytest.raises(ConfigurationError) as err:
-        await AsyncGatewayOpenAIClient.create(
-            url="https://gateway.example/v1/",
-            catalog=lambda: entries,
-            api_key="k",
-            **foreign(base_url="https://other.example/v1/"),
-        )
-    assert str(err.value) == BASE_URL_FIXED
-    gateway = await AsyncGatewayOpenAIClient.create(
-        url="https://gateway.example/v1/", catalog=lambda: entries, api_key="k"
-    )
-    with pytest.raises(ConfigurationError, match="base_url"):
-        gateway.with_options(**foreign(base_url="https://other.example/v1/"))
-    assert gateway.with_options(timeout=1.0).base_url == "https://gateway.example/v1/"
-    await gateway.close()
-
-
-@pytest.mark.asyncio
-async def test_async_wrappers(offline: Recorder) -> None:
-    with pytest.raises(ConfigurationError, match="create"):
-        AsyncEnclaveOpenAIClient(api_key="k")
-    host_only: list[Any] = ["enclave.example"]
-    with pytest.raises(TypeError, match="pin"):
-        await AsyncEnclaveOpenAIClient.create(*host_only, api_key="k")
-    with pytest.raises(TypeError, match="pin"):
-        await AsyncEnclaveHTTPClient.create(*host_only)
-    for not_a_pin in ("org/repo", None):
-        with pytest.raises(ConfigurationError, match="pin must be a Pin"):
-            await AsyncEnclaveOpenAIClient.create("enclave.example", not_a_pin, api_key="k")  # type: ignore[arg-type]
-    assert offline.requests == []
-    client = await AsyncEnclaveOpenAIClient.create(
-        "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
-    )
+async def test_async_client(offline: Recorder) -> None:
+    http_client = await AsyncEnclaveHTTPClient.create("enclave.example", RepoPin("org/repo"), transport=EHBP())
+    fetched = len(offline.requests)
+    client = AsyncOpenAIClient(http_client, api_key="k", max_retries=0)
+    assert len(offline.requests) == fetched, "the constructor does no network I/O"
+    assert client.http_client is http_client
     assert client.base_url == "https://enclave.example/v1/"
     inner: object = client._client
-    assert inner is client.http_client.http_client
+    assert inner is http_client._attested.secure
     copied = client.with_options(timeout=1.0)
     assert copied.http_client is client.http_client
     for holder in (client, client.beta, copied):
@@ -601,29 +546,59 @@ async def test_async_wrappers(offline: Recorder) -> None:
     await client.models.list()
     assert [str(r.url) for r in recorder.requests] == ["https://enclave.example/v1/models"]
     await client.close()
-    offline.handler = lambda request: (
-        response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
+    gateway_client = await AsyncGatewayHTTPClient.create(url="https://gateway.example/v1/", catalog=lambda: ENTRIES)
+    with pytest.raises(ConfigurationError, match="gateway client's URL already carries the API path"):
+        AsyncOpenAIClient(gateway_client, api_path="/v1/", api_key="k")
+    async_gateway = AsyncOpenAIClient(gateway_client, api_key="k", **foreign(base_url="https://other.example/v1/"))
+    assert async_gateway.base_url == "https://gateway.example/v1/"
+    assert async_gateway.with_options(**foreign(base_url="https://other.example/")).base_url == async_gateway.base_url
+    await async_gateway.close()
+    router = await AsyncRouterHTTPClient.create(transport=EHBP("https://proxy.example/relay/"))
+    assert AsyncOpenAIClient(router, api_path="/openai/v1", api_key="k").base_url == (
+        "https://proxy.example/relay/openai/v1/"
     )
-    with pytest.raises(ConfigurationError, match="AsyncRouterOpenAIClient"):
-        await create_async_client(api_key="k", **foreign(base_url="https://proxy.example/v1/"))
+    await router.close()
+
+
+@pytest.mark.asyncio
+async def test_async_drop_in_client(offline: Recorder) -> None:
+    with pytest.raises(ConfigurationError, match="create"):
+        AsyncClient(api_key="k")
     for option in sorted(ROUTE_OPTIONS):
         with pytest.raises(ConfigurationError, match=option):
             await AsyncClient.create(api_key="k", **foreign(**{option: "x"}))
-    drop_in = await create_async_client(api_key="k")
+    assert offline.requests == []
+    drop_in = await create_async_client(api_key="k", **foreign(base_url="https://other.example/v1/"))
     assert isinstance(drop_in, AsyncClient)
-    assert isinstance(drop_in, AsyncRouterOpenAIClient)
+    assert isinstance(drop_in, AsyncOpenAIClient)
+    assert isinstance(drop_in.http_client, AsyncRouterHTTPClient)
     assert drop_in.http_client.enclave == "inference.tinfoil.sh"
+    assert drop_in.base_url == "https://inference.tinfoil.sh/v1/"
     for option in sorted(ROUTE_OPTIONS):
         for copy in (drop_in.with_options, drop_in.copy):
             with pytest.raises(ConfigurationError) as err:
                 copy(**foreign(**{option: "x"}))
             assert str(err.value) == DROP_IN_OPTIONS.format(
-                name="AsyncClient", keys=option, route="AsyncRouterOpenAIClient"
+                name="AsyncClient", keys=option, route="AsyncRouterHTTPClient", openai="AsyncOpenAIClient"
             )
     assert isinstance(drop_in.with_options(max_retries=0), AsyncClient)
     with pytest.raises(ConfigurationError, match=REALTIME_UNAVAILABLE):
         realtime_of(drop_in)
     await drop_in.close()
+
+
+@pytest.mark.asyncio
+async def test_async_responses_go_through_the_attested_transport(offline: Recorder) -> None:
+    router = AsyncOpenAIClient(
+        await AsyncRouterHTTPClient.create(transport=EHBP(), user_cache_secret="s"), api_key="k", max_retries=0
+    )
+    drop_in = await create_async_client(api_key="k", max_retries=0)
+    for client, secret in ((router, "s"), (drop_in, "test-secret")):
+        recorder = below_the_attested_transport(client, by_path)
+        assert (await client.responses.create(model="m", input="hi")).output_text == "ok"
+        assert [(r.url.host, r.url.path) for r in recorder.requests] == [("inference.tinfoil.sh", "/v1/responses")]
+        assert json.loads(recorder.bodies[0])["user_cache_secret"] == secret
+        await client.close()
 
 
 SUBJECT_TOKEN_IDENTITY = {
@@ -632,7 +607,6 @@ SUBJECT_TOKEN_IDENTITY = {
     "provider": {"token_type": "jwt", "get_token": lambda: "subject-token"},
 }
 TRANSPORT_OPTIONS: list[tuple[str, object]] = [
-    ("data_residency", "us"),
     ("provider", bedrock(region="us-east-1", api_key="b")),
     ("websocket_base_url", "wss://elsewhere.example/v1/"),
     ("workload_identity", SUBJECT_TOKEN_IDENTITY),
@@ -641,34 +615,59 @@ TRANSPORT_OPTIONS: list[tuple[str, object]] = [
 """A value for each refused option: the subject-token identity is the one that the ``openai`` package itself
 accepts next to the attested base URL, exchanging the token through an HTTP client of its own."""
 TRANSPORT_OPTION_IDS = [
-    "data_residency",
     "provider",
     "websocket_base_url",
     "subject-token workload_identity",
     "x509 workload_identity",
 ]
 UNSET_TRANSPORT_OPTIONS = dict.fromkeys(_FORBIDDEN_TRANSPORT_OPTIONS)
-ENTRIES = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
 
+HTTP_CLIENTS: dict[str, Callable[[], object]] = {
+    "enclave": enclave,
+    "router": lambda: RouterHTTPClient(transport=EHBP()),
+    "gateway": gateway,
+}
 SYNC_FACTORIES: dict[str, Callable[..., openai.OpenAI]] = {
-    "EnclaveOpenAIClient": lambda **kw: EnclaveOpenAIClient(
-        "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", **kw
-    ),
-    "RouterOpenAIClient": lambda **kw: RouterOpenAIClient(transport_mode="ehbp", **kw),
-    "GatewayOpenAIClient": lambda **kw: GatewayOpenAIClient(
-        url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
-    ),
+    **{
+        f"OpenAIClient over {name}": functools.partial(
+            lambda make, **kw: OpenAIClient(make(), **kw),
+            make,
+        )
+        for name, make in HTTP_CLIENTS.items()
+    },
     "Client": lambda **kw: Client(**kw),
     "create_client": lambda **kw: create_client(**kw),
 }
+
+
+async def _async_enclave() -> AsyncEnclaveHTTPClient:
+    return await AsyncEnclaveHTTPClient.create("enclave.example", RepoPin("org/repo"), transport=EHBP())
+
+
+async def _async_router() -> AsyncRouterHTTPClient:
+    return await AsyncRouterHTTPClient.create(transport=EHBP())
+
+
+async def _async_gateway() -> AsyncGatewayHTTPClient:
+    return await AsyncGatewayHTTPClient.create(url="https://gateway.example/v1/", catalog=lambda: ENTRIES)
+
+
+ASYNC_HTTP_CLIENTS: dict[str, Callable[[], Awaitable[Any]]] = {
+    "enclave": _async_enclave,
+    "router": _async_router,
+    "gateway": _async_gateway,
+}
+
+
+async def _async_openai(make: Callable[[], Awaitable[Any]], **kw: Any) -> openai.AsyncOpenAI:
+    return AsyncOpenAIClient(await make(), **kw)
+
+
 ASYNC_FACTORIES: dict[str, Callable[..., Awaitable[openai.AsyncOpenAI]]] = {
-    "AsyncEnclaveOpenAIClient": lambda **kw: AsyncEnclaveOpenAIClient.create(
-        "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", **kw
-    ),
-    "AsyncRouterOpenAIClient": lambda **kw: AsyncRouterOpenAIClient.create(transport_mode="ehbp", **kw),
-    "AsyncGatewayOpenAIClient": lambda **kw: AsyncGatewayOpenAIClient.create(
-        url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
-    ),
+    **{
+        f"AsyncOpenAIClient over {name}": functools.partial(_async_openai, make)
+        for name, make in ASYNC_HTTP_CLIENTS.items()
+    },
     "AsyncClient": lambda **kw: AsyncClient.create(**kw),
     "create_async_client": lambda **kw: create_async_client(**kw),
 }
@@ -681,12 +680,14 @@ def answering_discovery(offline: Recorder) -> None:
 
 
 def recording(client: openai.OpenAI | openai.AsyncOpenAI) -> Recorder:
-    """A recorder under the attested transport, or, for a gateway client, in place of the gateway client's own
+    """A recorder under the attested transport, or, for a gateway client, in place of the protected client's own
     transport, which the ``openai`` client must send through."""
     holder: Any = client
-    assert client._client is holder.http_client.http_client, "the openai client sends through the attested one"
+    inner_client: object = client._client
     if not isinstance(holder.http_client, (GatewayHTTPClient, AsyncGatewayHTTPClient)):
+        assert inner_client is holder.http_client._attested.secure, "the openai client sends through the attested one"
         return below_the_attested_transport(client, by_path)
+    assert inner_client is holder.http_client._secure
     recorder = Recorder(by_path)
     inner: Any = client._client
     inner._transport = recorder.async_transport if isinstance(client, openai.AsyncOpenAI) else recorder.transport
@@ -698,12 +699,12 @@ def refused(option: str) -> str:
 
 
 class TestTransportOptions:
-    """``data_residency``, ``provider``, ``websocket_base_url`` and ``workload_identity`` would choose another
-    base URL or send a token exchange through an HTTP client of their own, so each is refused by name, before any
-    network I/O, rather than left to the ``openai`` package's own checks; ``None`` is unset."""
+    """``provider``, ``websocket_base_url`` and ``workload_identity`` would choose another websocket URL or send a
+    token exchange through an HTTP client of their own, so each is refused by name, before the ``openai``
+    constructor runs, rather than left to the ``openai`` package's own checks; ``None`` is unset."""
 
     def test_message_names_the_option(self) -> None:
-        assert _FORBIDDEN_TRANSPORT_OPTIONS == ("data_residency", "provider", "websocket_base_url", "workload_identity")
+        assert _FORBIDDEN_TRANSPORT_OPTIONS == ("provider", "websocket_base_url", "workload_identity")
         assert refused("provider") == (
             "the provider option is not supported: the Tinfoil client owns the transport and base URL that "
             "requests go to"
@@ -711,26 +712,27 @@ class TestTransportOptions:
 
     @pytest.mark.parametrize("factory", sorted(SYNC_FACTORIES))
     @pytest.mark.parametrize(("option", "value"), TRANSPORT_OPTIONS, ids=TRANSPORT_OPTION_IDS)
-    def test_constructors_refuse_each_option_before_any_io(
-        self, offline: Recorder, factory: str, option: str, value: object
-    ) -> None:
+    def test_constructors_refuse_each_option(self, offline: Recorder, factory: str, option: str, value: object) -> None:
         with pytest.raises(ConfigurationError) as err:
             SYNC_FACTORIES[factory](api_key="k", **foreign(**{option: value}))
         assert str(err.value) == refused(option)
         with pytest.raises(ConfigurationError, match=f"the {option} option"):
             SYNC_FACTORIES[factory](**foreign(**{option: value}))  # without an api_key too
-        assert offline.requests == [], "nothing is fetched, verified or exchanged"
+        if factory in ("Client", "create_client"):
+            assert offline.requests == [], "the drop-in client refuses them before discovery"
+        assert not any(r.url.host == "a.example" for r in offline.requests), "no token is exchanged"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("factory", sorted(ASYNC_FACTORIES))
     @pytest.mark.parametrize(("option", "value"), TRANSPORT_OPTIONS, ids=TRANSPORT_OPTION_IDS)
-    async def test_async_factories_refuse_each_option_before_any_io(
+    async def test_async_factories_refuse_each_option(
         self, offline: Recorder, factory: str, option: str, value: object
     ) -> None:
         with pytest.raises(ConfigurationError) as err:
             await ASYNC_FACTORIES[factory](api_key="k", **foreign(**{option: value}))
         assert str(err.value) == refused(option)
-        assert offline.requests == []
+        if factory in ("AsyncClient", "create_async_client"):
+            assert offline.requests == []
 
     @pytest.mark.parametrize("factory", sorted(SYNC_FACTORIES))
     def test_copies_refuse_each_option(self, offline: Recorder, factory: str) -> None:
@@ -927,11 +929,11 @@ class TestWebsockets:
         assert client.responses.create(model="m", input="hi").output_text == "ok"
         assert client.beta.responses.create(model="m", input="hi").id == "r1"
         assert client.live.create(session=session, transport={"type": "webrtc", "sdp": "v=0"}).session.id == "s1"
-        host = httpx.URL(str(client.base_url)).host
+        base = httpx.URL(str(client.base_url))
         assert [(r.url.host, r.url.path) for r in recorder.requests] == [
-            (host, "/v1/responses"),
-            (host, "/v1/responses"),
-            (host, "/v1/live/sessions"),
+            (base.host, base.path + "responses"),
+            (base.host, base.path + "responses"),
+            (base.host, base.path + "live/sessions"),
         ]
         client.close()
 
@@ -948,10 +950,10 @@ class TestWebsockets:
         assert (await client.beta.responses.create(model="m", input="hi")).id == "r1"
         created = await client.live.create(session=session, transport={"type": "webrtc", "sdp": "v=0"})
         assert created.session.id == "s1"
-        host = httpx.URL(str(client.base_url)).host
+        base = httpx.URL(str(client.base_url))
         assert [(r.url.host, r.url.path) for r in recorder.requests] == [
-            (host, "/v1/responses"),
-            (host, "/v1/responses"),
-            (host, "/v1/live/sessions"),
+            (base.host, base.path + "responses"),
+            (base.host, base.path + "responses"),
+            (base.host, base.path + "live/sessions"),
         ]
         await client.close()

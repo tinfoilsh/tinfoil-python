@@ -50,7 +50,7 @@ layer. Anything but a `Pin`, such as a bare string, is a `UsageError`.
 
 `Pin()` accepts any config that the verifier's trust authorizes. Under default
 config trust it is a `UsageError`; it needs an embedded config, a config
-authorizer, config signing keys or `config_registry_ids`.
+authorizer, config signing keys or `Registries`.
 
 `check_pin_verifiability(pin)` raises the `UsageError` that `verify_v3` would
 raise for that pin whatever the document, so that a caller can refuse a pin
@@ -99,21 +99,33 @@ made as of `verification_time`, so a time that an attacker can choose
 accepts collateral that has since expired or been revoked. A naive datetime
 is a `UsageError`.
 
-## Options
+## Config trust and policy
 
 `Verifier()` with no arguments uses the embedded production trust roots,
 Tinfoil's public config and artifact signing keys, and a seven-day
-freshness bound. Every option is keyword-only:
+freshness bound. `Verifier(config, policy)` takes two optional values, both
+plain frozen dataclasses:
 
-| Option | Effect |
-| --- | --- |
-| `pinned_registers` | Registers that the enclave must have measured, on top of what the release fixes. |
-| `freshness_max_age` | How old a witness or approval may be. `None` keeps seven days; `timedelta(0)` accepts only a witness that is no older than the verification instant. |
-| `config_signing_keys` | ECDSA P-256 keys that replace the public config trust. |
-| `freshness_signing_keys` | ECDSA P-256 keys that replace the public keys for runtime and platform freshness approvals. |
-| `config_registry_ids` | The registries whose certified approvals are accepted, in place of the public registry alone. |
-| `config_authorizer` | Caller policy that replaces config endorsement verification. |
-| `embedded_references` | Caller-trusted config, runtime manifest or platform artifact that replace endorsement checks for those components. |
+- `config`, the config trust, names who vouches for the config that the
+  enclave runs. None selects Tinfoil's public registry. The other choices
+  are one value each:
+
+  | Config trust | Effect |
+  | --- | --- |
+  | `Registries(ids)` | Configs that exactly these registries endorse, in place of the public registry alone. List `PUBLIC_REGISTRY_ID` to keep the public registry. |
+  | `ConfigSigningKeys(keys)` | Configs whose endorsements these ECDSA P-256 keys sign, in place of Tinfoil's registry root. |
+  | `ConfigAuthorizer(authorize)` | Caller policy that replaces config endorsement verification. |
+  | `EmbeddedConfig(data, name)` | Exact config bytes that the caller trusts outright. |
+  | `EmbeddedConfigReference(digest, runtime, name)` | An exact config, by digest, and the runtime that it pins. |
+
+- `policy`, a `Policy`, holds the checks that apply on top of the config
+  trust:
+
+  | Field | Effect |
+  | --- | --- |
+  | `pinned_registers` | Registers that the enclave must have measured, on top of what the release fixes. |
+  | `freshness_max_age` | How old a witness or approval may be. `None` keeps seven days; a positive `timedelta` sets the bound, and zero or a negative age is a `UsageError`. |
+  | `artifacts` | `EndorsedArtifacts(freshness_keys=...)`, the default, trusts the runtime and platform that the document's endorsements authenticate, with freshness approvals that Tinfoil's public keys or the given keys sign. `EmbeddedArtifacts(runtime=..., platform=...)` trusts the caller's own runtime manifest or platform artifact in place of its endorsement. |
 
 Keys come from `load_public_key`, which accepts a PEM `PUBLIC KEY` block as
 text or bytes, or SPKI DER, and rejects anything that is not an ECDSA P-256
@@ -122,49 +134,43 @@ key:
 ```python
 from datetime import timedelta
 
-from tinfoil.verifier import Verifier, load_public_key
+from tinfoil.verifier import ConfigSigningKeys, Policy, Verifier, load_public_key
 
 verifier = Verifier(
-    config_signing_keys=[load_public_key(signing_key_pem)],
-    freshness_max_age=timedelta(days=1),
+    ConfigSigningKeys([load_public_key(signing_key_pem)]),
+    Policy(freshness_max_age=timedelta(days=1)),
 )
 ```
 
-Some options exclude each other; each conflict is a `UsageError` from the
-constructor:
-
-| | embedded config | `config_signing_keys` | `config_authorizer` | `config_registry_ids` |
-| --- | --- | --- | --- | --- |
-| embedded config | | conflict | conflict | conflict |
-| `config_signing_keys` | conflict | | conflict | conflict |
-| `config_authorizer` | conflict | conflict | | conflict |
-| `config_registry_ids` | conflict | conflict | conflict | |
-
-`freshness_signing_keys` conflicts with embedding both the runtime and the
-platform, since no endorsed artifact remains for the keys to verify. Any
-explicit key set, registry list, authorizer or embedded reference requires
-`attestation-collaterals/v3` collateral; a document that carries v2
+Since each trust choice is one value, two choices that exclude each other
+cannot be written together. The constructor checks each value and copies
+what it keeps; a value of another type, an empty key or registry list, or a
+malformed field is a `UsageError`. `EmbeddedArtifacts` needs a runtime or a
+platform, and refuses `freshness_keys` when it embeds both, since no endorsed
+artifact remains for the keys to verify. Any config trust other than None,
+`EmbeddedArtifacts`, and `EndorsedArtifacts` with its own `freshness_keys`
+require `attestation-collaterals/v3` collateral; a document that carries v2
 collateral is then rejected at the provenance layer.
 
 ### Pinning registers
 
-`pinned_registers` takes an `ExpectedSEVSNP` or an `ExpectedTDX`. Each set
+`Policy.pinned_registers` takes an `ExpectedSEVSNP` or an `ExpectedTDX`. Each set
 register must match the enclave; an unset one (`None`, or `""` to the
 parsers) is left to the release. A pin for one platform rejects every
 enclave on the other.
 
 ```python
-from tinfoil.verifier import Verifier, parse_expected_tdx
+from tinfoil.verifier import Policy, Verifier, parse_expected_tdx
 
 rtmr3 = "ab" * 48
-pinned = Verifier(pinned_registers=parse_expected_tdx("", "", "", "", rtmr3))
+pinned = Verifier(policy=Policy(pinned_registers=parse_expected_tdx("", "", "", "", rtmr3)))
 ```
 
 To pin an enclave to exactly what it measured today, take the expectations
 from a verified record:
 
 ```python
-locked = Verifier(pinned_registers=verified.enclave_measurement.expected())
+locked = Verifier(policy=Policy(pinned_registers=verified.enclave_measurement.expected()))
 ```
 
 ## Reading the record
@@ -281,14 +287,14 @@ shows how.
 
 The package verifies; it does not fetch documents, cache verifications,
 renew them before `freshness_expires_at`, or speak HTTP. Those live in the
-`tinfoil` package's clients: `create_client` and `RouterOpenAIClient` for
-Tinfoil's router, `EnclaveHTTPClient` and `EnclaveOpenAIClient` for one
-enclave, and `GatewayHTTPClient` for the gateway. The enclave clients
+`tinfoil` package's clients: `RouterHTTPClient` for Tinfoil's router,
+`EnclaveHTTPClient` for one enclave and `GatewayHTTPClient` for the gateway,
+with `OpenAIClient` over any of them and `create_client` for the router. The enclave clients
 verify a document before they return; the router client verifies the
 router it discovers, or its fallback host on first use; the gateway client
 verifies each model's replica on that model's first request. Every one
 pins its transport to `tls_public_key_fp` or encrypts to `hpke_public_key`
-as its transport mode calls for, and verifies again before the deadline. Use the verifier directly when you bring your own
+as its transport calls for, and verifies again before the deadline. Use the verifier directly when you bring your own
 transport.
 
 ## Auditing the code

@@ -39,13 +39,19 @@ the transport's job: compare ``cert_pubkey_fp`` of the peer certificate with
 ``Verification.tls_public_key_fp`` after the handshake and before the first
 byte is written.
 
-The option types of the ``Verifier`` constructor are exported with it:
-``PublicKey`` is the ECDSA P-256 key type that it accepts for config and
-freshness signing keys, ``load_public_key`` decodes one from PEM or DER, and
-``ConfigAuthorizer`` is the signature of a caller's config policy.
+A ``Verifier`` is built from a config trust and a ``Policy``, which are plain
+data. The config trust, ``ConfigTrust``, is one of ``Registries``,
+``ConfigSigningKeys``, ``ConfigAuthorizer``, ``EmbeddedConfig`` or
+``EmbeddedConfigReference``, or None for the public registry. The policy holds
+the register pins, the freshness bound and the artifact trust,
+``ArtifactTrust``: ``EndorsedArtifacts`` or ``EmbeddedArtifacts``. Each trust
+choice is one value, so that choices that exclude each other cannot be
+combined. ``PublicKey`` is the ECDSA P-256 key type that the config and
+freshness signing keys take, and ``load_public_key`` decodes one from PEM or
+DER.
 """
 
-from tinfoil.verifier._config import ConfigAuthorizer, PublicKey, load_public_key
+from tinfoil.verifier._config import load_public_key
 from tinfoil.verifier._document.collateral.config import ConfigEndorsement
 from tinfoil.verifier._document.collateral.runtime import RuntimeReference
 from tinfoil.verifier._document.document import (
@@ -58,7 +64,6 @@ from tinfoil.verifier._document.document import (
     CryptoMaterialItem,
     random_nonce,
 )
-from tinfoil.verifier._embedded import EmbeddedConfig, EmbeddedConfigReference, EmbeddedReferences
 from tinfoil.verifier._endorsement.approval import PUBLIC_REGISTRY_ID
 from tinfoil.verifier._endorsement.reference import Reference
 from tinfoil.verifier._errors import (
@@ -84,6 +89,19 @@ from tinfoil.verifier._measurement import (
     parse_expected_sevsnp,
     parse_expected_tdx,
     parse_register,
+)
+from tinfoil.verifier._options import (
+    ArtifactTrust,
+    ConfigAuthorizer,
+    ConfigSigningKeys,
+    ConfigTrust,
+    EmbeddedArtifacts,
+    EmbeddedConfig,
+    EmbeddedConfigReference,
+    EndorsedArtifacts,
+    Policy,
+    PublicKey,
+    Registries,
 )
 from tinfoil.verifier._verification import (
     SOURCE_EMBEDDED,
@@ -117,24 +135,30 @@ __all__ = [
     "SOURCE_ENDORSEMENT",
     "SOURCE_POLICY",
     "TDX",
+    "ArtifactTrust",
     "ArtifactVerification",
     "ConfigAuthorizer",
     "ConfigEndorsement",
+    "ConfigSigningKeys",
+    "ConfigTrust",
     "ConfigVerification",
     "CryptoMaterialItem",
+    "EmbeddedArtifacts",
     "EmbeddedConfig",
     "EmbeddedConfigReference",
-    "EmbeddedReferences",
+    "EndorsedArtifacts",
     "Expected",
     "ExpectedSEVSNP",
     "ExpectedTDX",
     "Layer",
     "Measurement",
     "Pin",
+    "Policy",
     "PublicKey",
     "Reference",
     "ReferenceSource",
     "Register",
+    "Registries",
     "RuntimeReference",
     "SoftwareIdentity",
     "UsageError",

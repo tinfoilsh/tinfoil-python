@@ -39,7 +39,7 @@ from tinfoil._chain import (
     with_enclave_url_async,
 )
 from tinfoil._ehbp import check_ehbp
-from tinfoil._enclave import Enclave
+from tinfoil._enclave import Enclave, new_verifier
 from tinfoil._errors import (
     AttestationError,
     ConfigurationError,
@@ -61,7 +61,7 @@ from tinfoil._transport import (
     _cancelling,
 )
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
-from tinfoil.verifier import Pin, Verification, Verifier, parse_reference
+from tinfoil.verifier import Pin, Policy, Verification, Verifier, parse_reference
 
 DEFAULT_GATEWAY_URL = "https://inference-gateway.tinfoil.sh/v1/"
 """Tinfoil's gateway, the base URL a gateway client uses when none is given."""
@@ -83,8 +83,6 @@ MAX_MULTIPART_BODY_SIZE = 64 << 20
 # The engine's cache salt is derived here: no router sits between a gateway client and the engine.
 CACHE_SALT_DOMAIN_TAG = b"tinfoil/client-cache-salt/v2"
 CACHE_ROUTE_DOMAIN_TAG = b"tinfoil/client-cache-route/v2"
-
-CALLER_AUTHORIZED_CONFIG = "caller-authorized config requires a direct enclave client"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,11 +108,12 @@ Catalog = Mapping[str, CatalogEntry]
 
 @dataclass(frozen=True, slots=True)
 class ModelPin:
-    """Pins a model to ``tinfoilsh/name[@tag][@sha256:digest]``. A None ``verifier`` inherits the gateway's; one
-    that is set replaces it."""
+    """Pins a model to ``tinfoilsh/name[@tag][@sha256:digest]``. ``policy`` is the pin's verification policy, a
+    ``tinfoil.verifier.Policy``: None inherits the gateway's, and one that is set replaces it entirely, so a field
+    that it leaves unset takes the default rather than the gateway's value."""
 
     repo: str
-    verifier: Verifier | None = None
+    policy: Policy | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,23 +192,28 @@ class _Replica:
     model: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class _PinnedModel:
+    """A model pin with the verifier that its policy selects."""
+
+    repo: str
+    verifier: Verifier
+
+
 class _Policy:
     """The gateway's verification policy: the pins, whether only pinned models are served, and the verifier for
-    unpinned models."""
+    unpinned models. It builds a verifier from the gateway's policy and from each pin's, which copies them."""
 
-    def __init__(self, model_pins: Mapping[str, ModelPin] | None, pinned_only: bool, verifier: Verifier | None):
+    def __init__(self, model_pins: Mapping[str, ModelPin] | None, pinned_only: bool, policy: Policy | None):
         if pinned_only and not model_pins:
             raise ConfigurationError("pinned-only mode requires at least one model pin")
-        if verifier is None:
-            verifier = Verifier()
-        if verifier.caller_authorizes_config:
-            raise ConfigurationError(CALLER_AUTHORIZED_CONFIG)
-        self.pins: dict[str, ModelPin] = {}
+        verifier = new_verifier(None, policy)
+        self.pins: dict[str, _PinnedModel] = {}
         self.pinned_only = pinned_only
         self.verifier = verifier
         for model, pin in (model_pins or {}).items():
-            if pin.verifier is not None and pin.verifier.caller_authorizes_config:
-                raise ConfigurationError(f'model "{model}": {CALLER_AUTHORIZED_CONFIG}')
+            if not isinstance(pin, ModelPin):
+                raise ConfigurationError(f'model pin "{model}" must be a ModelPin value, not {type(pin).__name__}')
             if not model.strip() or not pin.repo.startswith(TRUSTED_REPO_OWNER):
                 raise ConfigurationError(
                     f'model pin "{model}" repository "{pin.repo}" must belong to {TRUSTED_REPO_OWNER}'
@@ -218,7 +222,8 @@ class _Policy:
                 parse_reference(pin.repo)
             except ValueError as err:
                 raise ConfigurationError(f'model "{model}": {err}') from err
-            self.pins[model] = ModelPin(repo=pin.repo, verifier=pin.verifier or verifier)
+            pinned = verifier if pin.policy is None else new_verifier(None, pin.policy)
+            self.pins[model] = _PinnedModel(repo=pin.repo, verifier=pinned)
 
     def resolve(self, model: str, catalog: Catalog) -> tuple[tuple[str, ...], _Replica]:
         """The hosts serving ``model`` and the replica key its requests are verified under."""
@@ -240,7 +245,7 @@ class _Policy:
 
     def verifier_for(self, replica: _Replica) -> Verifier:
         pin = self.pins.get(replica.model) if replica.model else None
-        if pin is not None and pin.verifier is not None:
+        if pin is not None:
             return pin.verifier
         return self.verifier
 
@@ -518,12 +523,12 @@ class _Shared(Generic[_T]):
         relay: str,
         model_pins: Mapping[str, ModelPin] | None,
         pinned_models_only: bool,
-        verifier: Verifier | None,
+        policy: Policy | None,
         verification_check: VerificationCheck | None,
         user_cache_secret: str | None,
         timeout: TimeoutTypes,
     ) -> None:
-        self.policy = _Policy(model_pins, pinned_models_only, verifier)
+        self.policy = _Policy(model_pins, pinned_models_only, policy)
         self.base_url = base_url
         self.relay = relay
         self.check = verification_check
@@ -722,7 +727,7 @@ class GatewayTransport(httpx.BaseTransport):
         catalog: Callable[[], Catalog] | None = None,
         model_pins: Mapping[str, ModelPin] | None = None,
         pinned_models_only: bool = False,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
@@ -734,7 +739,7 @@ class GatewayTransport(httpx.BaseTransport):
             relay=relay,
             model_pins=model_pins,
             pinned_models_only=pinned_models_only,
-            verifier=verifier,
+            policy=policy,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,
             timeout=timeout,
@@ -953,7 +958,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         catalog: Callable[[], Catalog] | None = None,
         model_pins: Mapping[str, ModelPin] | None = None,
         pinned_models_only: bool = False,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
@@ -965,7 +970,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
             relay=relay,
             model_pins=model_pins,
             pinned_models_only=pinned_models_only,
-            verifier=verifier,
+            policy=policy,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,
             timeout=timeout,

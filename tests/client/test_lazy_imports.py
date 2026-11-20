@@ -179,3 +179,41 @@ def test_the_type_checker_sees_the_same_names_from_the_same_modules() -> None:
             assert alias.name not in typed, alias.name
             typed[alias.name] = statement.module
     assert typed == tinfoil._MODULE_OF
+
+
+def test_without_the_openai_extra_the_http_clients_work_and_the_openai_names_say_what_to_install() -> None:
+    """``openai`` is the optional ``tinfoil[openai]`` dependency: with it missing, the verifier, the trust and
+    transport values and the HTTP client modules import and build without network I/O, and an OpenAI name is a
+    ModuleNotFoundError that names the extra."""
+    result = _run(
+        """
+        import json, sys
+        sys.modules["openai"] = None  # as if it were not installed
+        import tinfoil
+        from tinfoil import EHBP, EnclaveHTTPClient, GatewayHTTPClient, RepoPin, RouterHTTPClient, Trust
+        from tinfoil.verifier import Policy, Verifier
+        from tinfoil._transport import mode_for, resolve_transport
+        from tinfoil._trust import verifier_inputs
+        Verifier(None, Policy())
+        verifier_inputs(RepoPin("org/repo"))
+        mode_for(resolve_transport(EHBP("https://proxy.example/"))[0])
+        missing = {}
+        for name in ("OpenAIClient", "AsyncOpenAIClient", "Client", "create_client", "APIConnectionError"):
+            try:
+                getattr(tinfoil, name)
+            except ModuleNotFoundError as err:
+                missing[name] = [str(err), err.name]
+        print(json.dumps({"missing": missing, "loaded": "tinfoil._clients" in sys.modules}))
+        """
+    )
+    assert result["loaded"] is True
+    assert set(result["missing"]) == {
+        "OpenAIClient",
+        "AsyncOpenAIClient",
+        "Client",
+        "create_client",
+        "APIConnectionError",
+    }
+    for name, (message, module) in result["missing"].items():
+        assert message == f"tinfoil.{name} requires the openai package: install it with `pip install 'tinfoil[openai]'`"
+        assert module == "openai"
