@@ -35,9 +35,8 @@ from tinfoil._gateway import Catalog, ModelPin
 from tinfoil._trust import Trust
 from tinfoil._types import (
     DEFAULT_HTTP_TIMEOUT,
-    DEFAULT_TRANSPORT_MODE,
     TimeoutTypes,
-    TransportMode,
+    Transport,
     VerificationCheck,
 )
 from tinfoil.verifier import Policy
@@ -62,9 +61,7 @@ to, or that send requests, such as a token exchange, through an HTTP client of t
 ConfigurationError from every constructor, factory and copy, so that the guarantee that requests go through the
 attested client does not depend on the ``openai`` package's own checks. An option that is ``None`` is unset."""
 
-ROUTE_OPTIONS = frozenset(
-    {"transport_mode", "base_url", "policy", "verification_check", "user_cache_secret", "http_timeout"}
-)
+ROUTE_OPTIONS = frozenset({"transport", "policy", "verification_check", "user_cache_secret", "http_timeout"})
 """The options that configure a route, which the drop-in ``Client`` and ``AsyncClient`` refuse."""
 
 
@@ -393,8 +390,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
         host: str,
         trust: Trust,
         *,
-        transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: str | None = None,
+        transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
@@ -408,8 +404,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
             _http_client = EnclaveHTTPClient(
                 host,
                 trust,
-                transport_mode=transport_mode,
-                base_url=base_url,
+                transport=transport,
                 policy=policy,
                 verification_check=verification_check,
                 user_cache_secret=user_cache_secret,
@@ -451,8 +446,7 @@ class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
         host: str,
         trust: Trust,
         *,
-        transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: str | None = None,
+        transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
@@ -463,8 +457,7 @@ class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
         http_client = await AsyncEnclaveHTTPClient.create(
             host,
             trust,
-            transport_mode=transport_mode,
-            base_url=base_url,
+            transport=transport,
             policy=policy,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,
@@ -492,8 +485,7 @@ class RouterOpenAIClient(_AttestedOpenAI):
     def __init__(
         self,
         *,
-        transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: str | None = None,
+        transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
@@ -505,8 +497,7 @@ class RouterOpenAIClient(_AttestedOpenAI):
         owned = _http_client is None
         if _http_client is None:
             _http_client = RouterHTTPClient(
-                transport_mode=transport_mode,
-                base_url=base_url,
+                transport=transport,
                 policy=policy,
                 verification_check=verification_check,
                 user_cache_secret=user_cache_secret,
@@ -542,8 +533,7 @@ class AsyncRouterOpenAIClient(_AsyncAttestedOpenAI):
     async def create(
         cls,
         *,
-        transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: str | None = None,
+        transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
@@ -552,8 +542,7 @@ class AsyncRouterOpenAIClient(_AsyncAttestedOpenAI):
     ) -> Self:
         _without_transport_options(openai_kwargs)
         http_client = await AsyncRouterHTTPClient.create(
-            transport_mode=transport_mode,
-            base_url=base_url,
+            transport=transport,
             policy=policy,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,

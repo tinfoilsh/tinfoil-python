@@ -47,25 +47,23 @@ from tinfoil._transport import (
     UseClientDefault,
     async_mode_for,
     mode_for,
+    resolve_transport,
 )
 from tinfoil._trust import Trust, verifier_inputs
 from tinfoil._types import (
     DEFAULT_HTTP_TIMEOUT,
-    DEFAULT_TRANSPORT_MODE,
     TimeoutTypes,
-    TransportMode,
+    Transport,
     VerificationCheck,
 )
 from tinfoil._url import (
     has_query_or_fragment,
     origin_of,
-    validate_base_url,
-    validate_tls_base_url,
+    refuse_enclave_origin_proxy,
     with_trailing_slash,
 )
 from tinfoil.verifier import Policy, Verification
 
-ROUTER_PROXY_NEEDS_EHBP = 'a base URL is a proxy when discovering the router, which requires the "ehbp" transport mode'
 ASYNC_CONSTRUCTOR = "{name} is built with 'await {name}.create(...)'"
 
 
@@ -75,35 +73,29 @@ class _Attested:
     origin pinning. The cache secret sits above the attested transport, so the field it adds is sealed with the
     rest of the body or sent over the pinned connection."""
 
-    def __init__(self, keyed: AttestedTransport, transport_mode: TransportMode, base_url: str, secret: str) -> None:
+    def __init__(self, keyed: AttestedTransport, proxy_url: str, secret: str) -> None:
         host = keyed.enclave.host
-        if transport_mode == "tls":
-            validate_tls_base_url(base_url, host)
-        chain = with_enclave_url(keyed, host, base_url)
+        chain = with_enclave_url(keyed, host, proxy_url)
         chain = Replay(chain, buffer_bodies=keyed.mode.buffers_request_bodies)
         chain = with_cache_secret(chain, secret)
-        guard = with_origin_restriction(chain, host, base_url)
+        guard = with_origin_restriction(chain, host, proxy_url)
         self.keyed = keyed
         self.http_client = httpx.Client(transport=guard, timeout=keyed.timeout)
-        self.base_url = base_url or f"https://{host}/"
-        self.openai_url = base_url or f"https://{host}/v1/"
+        self.base_url = proxy_url or f"https://{host}/"
+        self.openai_url = self.base_url + "v1/"
 
 
 class _AsyncAttested:
-    def __init__(
-        self, keyed: AsyncAttestedTransport, transport_mode: TransportMode, base_url: str, secret: str
-    ) -> None:
+    def __init__(self, keyed: AsyncAttestedTransport, proxy_url: str, secret: str) -> None:
         host = keyed.enclave.host
-        if transport_mode == "tls":
-            validate_tls_base_url(base_url, host)
-        chain = with_enclave_url_async(keyed, host, base_url)
+        chain = with_enclave_url_async(keyed, host, proxy_url)
         chain = AsyncReplay(chain, buffer_bodies=keyed.mode.buffers_request_bodies)
         chain = with_cache_secret_async(chain, secret)
-        guard = with_origin_restriction_async(chain, host, base_url)
+        guard = with_origin_restriction_async(chain, host, proxy_url)
         self.keyed = keyed
         self.http_client = httpx.AsyncClient(transport=guard, timeout=keyed.timeout)
-        self.base_url = base_url or f"https://{host}/"
-        self.openai_url = base_url or f"https://{host}/v1/"
+        self.base_url = proxy_url or f"https://{host}/"
+        self.openai_url = self.base_url + "v1/"
 
 
 class _AttestedClient:
@@ -118,20 +110,21 @@ class _AttestedClient:
         so sensitive headers cannot be disclosed elsewhere. A request's body and the response to it are protected
         end to end; headers, and a request without a body, are not private on the EHBP transport. Attested
         requests never follow redirects: a 3xx response is returned to the caller. A streaming request body,
-        such as an iterator, is sent only on the ``"tls"`` transport; the EHBP transport reads bodies into
+        such as an iterator, is sent only on the ``TLS`` transport; the EHBP transport reads bodies into
         memory, since a sealed body may be sent again after a key rotation."""
         return self._attested.http_client
 
     @property
     def base_url(self) -> str:
-        """The URL requests are sent to: the ``base_url`` option, or the enclave's own origin. Build request URLs
-        for ``http_client`` from it so they follow the route."""
+        """The URL that requests are sent to: the ``EHBP`` proxy URL, with a trailing slash, or the enclave's own
+        origin when the client connects directly. Build request URLs for ``http_client`` from it so that they
+        follow the route."""
         return self._attested.base_url
 
     @property
     def enclave(self) -> str:
-        """The host of the enclave the client verifies. It stays the enclave's host when ``base_url`` is a
-        proxy."""
+        """The host of the enclave that the client verifies. It stays the enclave's host when requests go through
+        an ``EHBP`` proxy URL."""
         return self._attested.keyed.enclave.host
 
     @property
@@ -181,7 +174,7 @@ class _AsyncAttestedClient:
 
     @property
     def base_url(self) -> str:
-        """The URL requests are sent to: the ``base_url`` option, or the enclave's own origin."""
+        """The URL that requests are sent to: the ``EHBP`` proxy URL, or the enclave's own origin."""
         return self._attested.base_url
 
     @property
@@ -220,22 +213,22 @@ class _AsyncAttestedClient:
 def _enclave_parts(
     host: str,
     trust: Trust,
-    transport_mode: TransportMode,
-    base_url: str | None,
+    transport: Transport | None,
     policy: Policy | None,
     verification_check: VerificationCheck | None,
-) -> tuple[Enclave, str, Trust]:
+) -> tuple[Enclave, Transport, str, Trust]:
     """The checks an enclave client makes before any network I/O, in order: the host, the trust argument, the
-    transport mode, the base URL, the verifier that the trust and the policy describe, and whether the trust can
-    be satisfied at all. Returns the enclave, the base URL and a copy of the trust argument."""
+    transport and its proxy URL, the verifier that the trust and the policy describe, whether the trust can be
+    satisfied at all, and a proxy URL on the enclave's own origin. Returns the enclave, the transport, the proxy
+    URL and a copy of the trust argument."""
     if not host:
         raise ConfigurationError("enclave host is required")
     inputs = verifier_inputs(trust)
-    mode_for(transport_mode)
-    checked = validate_base_url(base_url) if base_url else ""
+    resolved, proxy_url = resolve_transport(transport)
     verifier = new_verifier(inputs.config, policy)
     enclave = Enclave(host, inputs.pin, verifier=verifier, verification_check=verification_check)
-    return enclave, checked, inputs.trust
+    refuse_enclave_origin_proxy(proxy_url, host)
+    return enclave, resolved, proxy_url, inputs.trust
 
 
 class EnclaveHTTPClient(_AttestedClient):
@@ -245,12 +238,10 @@ class EnclaveHTTPClient(_AttestedClient):
     vouches for the config that it runs: a ``RepoPin``, ``ProjectPin``,
     ``SignedBy``, ``AuthorizedBy``, ``EmbeddedConfig`` or ``EitherPin``. Both
     are required. ``policy``, a ``tinfoil.verifier.Policy``, holds the checks
-    that apply on top of the trust; None keeps every default. ``transport_mode`` defaults to
-    ``"tls"``. ``base_url`` is a path on the enclave's own HTTPS origin, or
-    a proxy on another origin, which requires ``"ehbp"``; requests to a
-    proxy carry ``X-Tinfoil-Enclave-Url`` so it can forward them. A proxy
-    must use HTTPS, since EHBP does not seal headers such as the API key;
-    ``http://`` is accepted only for localhost or a loopback IP address.
+    that apply on top of the trust; None keeps every default. ``transport``
+    is ``TLS()``, the default, or ``EHBP(proxy_url=...)``; a proxy URL is
+    where requests are sent, and they carry ``X-Tinfoil-Enclave-Url`` so
+    that the proxy can forward them.
     ``verification_check``, when set, is called with each verification that
     passes the trust and the policy before the client uses the enclave's keys; raising
     rejects the enclave, and the rejection is not retried.
@@ -272,18 +263,15 @@ class EnclaveHTTPClient(_AttestedClient):
         host: str,
         trust: Trust,
         *,
-        transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: str | None = None,
+        transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
-        enclave, checked, self._trust = _enclave_parts(
-            host, trust, transport_mode, base_url, policy, verification_check
-        )
-        keyed = AttestedTransport(enclave, mode_for(transport_mode), timeout=timeout)
-        self._attested = _Attested(keyed, transport_mode, checked, user_cache_secret or "")
+        enclave, resolved, proxy_url, self._trust = _enclave_parts(host, trust, transport, policy, verification_check)
+        keyed = AttestedTransport(enclave, mode_for(resolved), timeout=timeout)
+        self._attested = _Attested(keyed, proxy_url, user_cache_secret or "")
         try:
             keyed.ensure_verified()
         except BaseException:
@@ -313,16 +301,15 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
         host: str,
         trust: Trust,
         *,
-        transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: str | None = None,
+        transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
-        enclave, checked, copied = _enclave_parts(host, trust, transport_mode, base_url, policy, verification_check)
-        keyed = AsyncAttestedTransport(enclave, async_mode_for(transport_mode), timeout=timeout)
-        client = cls(_attested=_AsyncAttested(keyed, transport_mode, checked, user_cache_secret or ""), _trust=copied)
+        enclave, resolved, proxy_url, copied = _enclave_parts(host, trust, transport, policy, verification_check)
+        keyed = AsyncAttestedTransport(enclave, async_mode_for(resolved), timeout=timeout)
+        client = cls(_attested=_AsyncAttested(keyed, proxy_url, user_cache_secret or ""), _trust=copied)
         try:
             await keyed.ensure_verified()
         except BaseException:
@@ -336,18 +323,6 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
         return self._trust
 
 
-def _router_checks(transport_mode: TransportMode, base_url: str | None) -> str:
-    """The checks a router client makes before discovery, in order: the transport mode, and the base URL, which is
-    a proxy and so requires EHBP."""
-    mode_for(transport_mode)
-    checked = ""
-    if base_url:
-        checked = validate_base_url(base_url)
-        if transport_mode == "tls":
-            raise ConfigurationError(ROUTER_PROXY_NEEDS_EHBP)
-    return checked
-
-
 class RouterHTTPClient(_AttestedClient):
     """An ``httpx`` client whose requests reach only the attested router it discovered.
 
@@ -355,8 +330,8 @@ class RouterHTTPClient(_AttestedClient):
     the routers on Tinfoil's router list for at most 30 seconds and keeps the
     first that verifies, falling back to ``inference.tinfoil.sh``, which it
     verifies before returning. It discovers again each time it is called.
-    ``base_url`` is a proxy that forwards requests to the router discovery
-    chooses, and requires ``"ehbp"``. ``policy`` applies on top of the
+    An ``EHBP`` proxy URL forwards requests to the router that discovery
+    chooses. ``policy`` applies on top of the
     router's fixed trust, its own repository. ``user_cache_secret`` empty selects a random secret that is
     generated once per process and shared by every client in it; pass a
     value for a secret that is stable across processes. The other options
@@ -366,16 +341,15 @@ class RouterHTTPClient(_AttestedClient):
     def __init__(
         self,
         *,
-        transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: str | None = None,
+        transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
-        checked = _router_checks(transport_mode, base_url)
+        resolved, proxy_url = resolve_transport(transport)
         verifier = new_verifier(None, policy)
-        mode = mode_for(transport_mode)
+        mode = mode_for(resolved)
         secret = _cachesecret.resolve(user_cache_secret)
         keyed = discover(
             verifier,
@@ -383,7 +357,7 @@ class RouterHTTPClient(_AttestedClient):
             lambda enclave: AttestedTransport(enclave, mode, timeout=timeout),
             timeout=timeout,
         )
-        self._attested = _Attested(keyed, transport_mode, checked, secret)
+        self._attested = _Attested(keyed, proxy_url, secret)
         # Discovery leaves its fallback unverified.
         try:
             keyed.ensure_verified()
@@ -404,16 +378,15 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
     async def create(
         cls,
         *,
-        transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
-        base_url: str | None = None,
+        transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
-        checked = _router_checks(transport_mode, base_url)
+        resolved, proxy_url = resolve_transport(transport)
         verifier = new_verifier(None, policy)
-        mode = async_mode_for(transport_mode)
+        mode = async_mode_for(resolved)
         secret = _cachesecret.resolve(user_cache_secret)
         keyed = await discover_async(
             verifier,
@@ -421,7 +394,7 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
             lambda enclave: AsyncAttestedTransport(enclave, mode, timeout=timeout),
             timeout=timeout,
         )
-        client = cls(_attested=_AsyncAttested(keyed, transport_mode, checked, secret))
+        client = cls(_attested=_AsyncAttested(keyed, proxy_url, secret))
         try:
             await keyed.ensure_verified()
         except BaseException:
@@ -451,7 +424,7 @@ def _gateway_url(url: str | None) -> tuple[str, str]:
 
 class GatewayHTTPClient:
     """An ``httpx`` client for Tinfoil inference through the gateway. Each request is sealed to a verified
-    replica of the model it names, as with the ``"ehbp"`` transport mode: the gateway sees the method, URL and
+    replica of the model it names, as with the ``EHBP`` transport: the gateway sees the method, URL and
     headers, and WebSocket upgrades are refused.
 
     ``model_pins`` pins models to repositories; with ``pinned_models_only``,

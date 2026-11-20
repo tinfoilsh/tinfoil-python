@@ -52,7 +52,7 @@ from tinfoil._openai import (
     create_client,
 )
 from tinfoil._trust import EitherPin, ProjectPin, RepoPin
-from tinfoil._types import DEFAULT_HTTP_TIMEOUT
+from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP
 from tinfoil.verifier import Policy, Verifier
 
 MODELS = b'{"object":"list","data":[]}'
@@ -133,7 +133,7 @@ def by_path(request: httpx.Request) -> httpx.Response:
 class TestConstruction:
     def test_enclave_client_sends_through_its_http_client(self, offline: Recorder) -> None:
         client = EnclaveOpenAIClient(
-            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), api_key="k", max_retries=0
         )
         assert isinstance(client.http_client, EnclaveHTTPClient)
         assert client.base_url == "https://enclave.example/v1/"
@@ -150,7 +150,7 @@ class TestConstruction:
         client = EnclaveOpenAIClient(
             "enclave.example",
             EitherPin("org/repo", "org/project"),
-            transport_mode="ehbp",
+            transport=EHBP(),
             api_key="k",
             project="proj_123",
         )
@@ -175,9 +175,7 @@ class TestConstruction:
         offline.handler = lambda request: (
             response(200, b'["router.example"]') if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
         )
-        router = RouterOpenAIClient(
-            transport_mode="ehbp", base_url="https://proxy.example/v1/", user_cache_secret="s", api_key="k"
-        )
+        router = RouterOpenAIClient(transport=EHBP("https://proxy.example/"), user_cache_secret="s", api_key="k")
         assert isinstance(router.http_client, RouterHTTPClient)
         assert router.base_url == "https://proxy.example/v1/"
         assert [str(r.url) for r in through(router)] == ["https://proxy.example/v1/models"]
@@ -195,7 +193,7 @@ class TestConstruction:
         with pytest.raises(ConfigurationError):
             EnclaveOpenAIClient("", RepoPin("org/repo"), api_key="k")
         with pytest.raises(ConfigurationError):
-            RouterOpenAIClient(transport_mode="quic", api_key="k")  # type: ignore[arg-type]
+            RouterOpenAIClient(transport="quic", api_key="k")  # type: ignore[arg-type]
         with pytest.raises(ConfigurationError):
             GatewayOpenAIClient(url="http://gateway.example/v1/", catalog=dict, api_key="k")
         assert offline.requests == []
@@ -205,45 +203,39 @@ class TestConstruction:
             EnclaveOpenAIClient(
                 "enclave.example",
                 RepoPin("org/repo"),
-                transport_mode="ehbp",
+                transport=EHBP(),
                 api_key="k",
                 **foreign(http_client=httpx.Client()),
             )
         client = EnclaveOpenAIClient(
-            "enclave.example",
-            RepoPin("org/repo"),
-            transport_mode="ehbp",
-            api_key="k",
-            base_url="https://enclave.example/custom/v1/",
+            "enclave.example", RepoPin("org/repo"), transport=EHBP("https://proxy.example/relay"), api_key="k"
         )
-        assert client.base_url == "https://enclave.example/custom/v1/", (
-            "base_url is the route option, applied to the attested client"
-        )
+        assert client.base_url == "https://proxy.example/relay/v1/", "the proxy URL is where the proxy is mounted"
         client.close()
 
     def test_http_timeout_leaves_the_per_request_default_alone(self, offline: Recorder) -> None:
         """``http_timeout`` is the attested client's timeout; the library's own per-request default stays unless
         the caller sets ``timeout``, so a short attestation timeout does not cut a streamed completion short."""
         client = EnclaveOpenAIClient(
-            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", http_timeout=10.0
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), api_key="k", http_timeout=10.0
         )
         assert client.timeout == openai.DEFAULT_TIMEOUT
         assert client.http_client.http_client.timeout == httpx.Timeout(10.0)
         client.close()
         explicit = EnclaveOpenAIClient(
-            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", http_timeout=10.0, timeout=2.0
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), api_key="k", http_timeout=10.0, timeout=2.0
         )
         assert explicit.timeout == 2.0
         assert explicit.with_options(max_retries=0).timeout == 2.0, "a copy keeps the caller's timeout"
         explicit.close()
-        default = EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k")
+        default = EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), api_key="k")
         assert default.http_client.http_client.timeout == DEFAULT_HTTP_TIMEOUT
         assert default.timeout == openai.DEFAULT_TIMEOUT
         default.close()
 
     def test_copies_keep_the_attested_client(self, offline: Recorder) -> None:
         client = EnclaveOpenAIClient(
-            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), api_key="k", max_retries=0
         )
         attestations = len(offline.requests)
         copied = client.with_options(timeout=1.0, max_retries=2)
@@ -263,7 +255,7 @@ class TestConstruction:
         client = EnclaveOpenAIClient(
             "enclave.example",
             RepoPin("org/repo"),
-            transport_mode="ehbp",
+            transport=EHBP(),
             user_cache_secret="s",
             api_key="k",
             max_retries=0,
@@ -295,7 +287,7 @@ class TestConstruction:
         enclave = EnclaveOpenAIClient(
             "enclave.example",
             RepoPin("org/repo"),
-            transport_mode="ehbp",
+            transport=EHBP(),
             user_cache_secret="s",
             api_key="k",
             max_retries=0,
@@ -346,16 +338,16 @@ class TestConstruction:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         with pytest.raises(ConfigurationError, match="http_client"):
             EnclaveOpenAIClient(
-                "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", **foreign(http_client=httpx.Client())
+                "enclave.example", RepoPin("org/repo"), transport=EHBP(), **foreign(http_client=httpx.Client())
             )
         assert len(closes) == 1, "the attested client created for the refused options is closed"
         with pytest.raises(openai.OpenAIError):
-            EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")  # no api_key anywhere
+            EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport=EHBP())  # no api_key anywhere
         assert len(closes) == 2, "so is one the openai constructor refuses"
         for closed in closes:
             with pytest.raises(ConfigurationError, match="closed"):
                 closed.ensure_verified()
-        client = EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k")
+        client = EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), api_key="k")
         with pytest.raises(ConfigurationError, match="http_client"):
             client.with_options(**foreign(http_client=httpx.Client()))
         assert len(closes) == 2, "a copy's failure leaves the original's attested client open"
@@ -373,7 +365,7 @@ class TestConstruction:
         with pytest.raises(TypeError, match="host"):
             EnclaveOpenAIClient(api_key="k")  # type: ignore[call-arg]
         assert offline.requests == []
-        client = EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k")
+        client = EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), api_key="k")
         copied = client.with_options(max_retries=0)
         assert copied.http_client is client.http_client
         assert (copied.http_client.enclave, copied.http_client.trust) == ("enclave.example", RepoPin("org/repo"))
@@ -406,14 +398,14 @@ class TestConstruction:
         offline.handler = lambda request: (
             response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
         )
-        with pytest.raises(ConfigurationError, match="RouterOpenAIClient"):
-            create_client(api_key="k", **foreign(base_url="https://proxy.example/v1/"))
         with pytest.raises(ConfigurationError) as err:
-            create_client(api_key="k", **foreign(transport_mode="ehbp", http_timeout=1.0, policy=Policy()))
+            create_client(api_key="k", **foreign(transport=EHBP(), http_timeout=1.0, policy=Policy()))
         assert str(err.value) == DROP_IN_OPTIONS.format(
-            name="Client", keys="http_timeout, policy, transport_mode", route="RouterOpenAIClient"
+            name="Client", keys="http_timeout, policy, transport", route="RouterOpenAIClient"
         ), "every refused option is named"
         assert offline.requests == []
+        with pytest.raises(ConfigurationError, match="base_url"):
+            create_client(api_key="k", **foreign(base_url="https://proxy.example/v1/"))
         client = create_client(api_key="k")
         assert isinstance(client, Client)
         assert client.http_client.enclave == "inference.tinfoil.sh"
@@ -425,7 +417,7 @@ class TestConstruction:
 class TestErrors:
     def test_api_errors_pass_through(self, offline: Recorder) -> None:
         client = EnclaveOpenAIClient(
-            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), api_key="k", max_retries=0
         )
         with pytest.raises(openai.RateLimitError) as err:
             through(
@@ -440,7 +432,7 @@ class TestErrors:
         """The library reports only its HTTP stack's errors as connection errors, so a client error raised from
         the transport reaches the caller as itself, with or without the library's retries."""
         client = EnclaveOpenAIClient(
-            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", max_retries=2
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), api_key="k", max_retries=2
         )
         failure = AttestationError("channel binding failed")
         attempts = 0
@@ -471,7 +463,7 @@ class TestErrors:
         enclave = EnclaveOpenAIClient(
             "enclave.example",
             RepoPin("org/repo"),
-            transport_mode="ehbp",
+            transport=EHBP(),
             user_cache_secret="client-level",
             api_key="k",
             max_retries=0,
@@ -538,7 +530,7 @@ async def test_async_responses_go_through_the_attested_transport(offline: Record
     enclave = await AsyncEnclaveOpenAIClient.create(
         "enclave.example",
         RepoPin("org/repo"),
-        transport_mode="ehbp",
+        transport=EHBP(),
         user_cache_secret="s",
         api_key="k",
         max_retries=0,
@@ -586,7 +578,7 @@ async def test_async_wrappers(offline: Recorder) -> None:
             await AsyncEnclaveOpenAIClient.create("enclave.example", not_a_trust, api_key="k")  # type: ignore[arg-type]
     assert offline.requests == []
     client = await AsyncEnclaveOpenAIClient.create(
-        "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
+        "enclave.example", RepoPin("org/repo"), transport=EHBP(), api_key="k", max_retries=0
     )
     assert client.base_url == "https://enclave.example/v1/"
     inner: object = client._client
@@ -605,7 +597,7 @@ async def test_async_wrappers(offline: Recorder) -> None:
     offline.handler = lambda request: (
         response(200, b"[]") if request.url.host == "atc.tinfoil.sh" else response(200, b"doc")
     )
-    with pytest.raises(ConfigurationError, match="AsyncRouterOpenAIClient"):
+    with pytest.raises(ConfigurationError, match="base_url"):
         await create_async_client(api_key="k", **foreign(base_url="https://proxy.example/v1/"))
     for option in sorted(ROUTE_OPTIONS):
         with pytest.raises(ConfigurationError, match=option):
@@ -653,9 +645,9 @@ ENTRIES = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
 
 SYNC_FACTORIES: dict[str, Callable[..., openai.OpenAI]] = {
     "EnclaveOpenAIClient": lambda **kw: EnclaveOpenAIClient(
-        "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", **kw
+        "enclave.example", RepoPin("org/repo"), transport=EHBP(), **kw
     ),
-    "RouterOpenAIClient": lambda **kw: RouterOpenAIClient(transport_mode="ehbp", **kw),
+    "RouterOpenAIClient": lambda **kw: RouterOpenAIClient(transport=EHBP(), **kw),
     "GatewayOpenAIClient": lambda **kw: GatewayOpenAIClient(
         url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
     ),
@@ -664,9 +656,9 @@ SYNC_FACTORIES: dict[str, Callable[..., openai.OpenAI]] = {
 }
 ASYNC_FACTORIES: dict[str, Callable[..., Awaitable[openai.AsyncOpenAI]]] = {
     "AsyncEnclaveOpenAIClient": lambda **kw: AsyncEnclaveOpenAIClient.create(
-        "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", **kw
+        "enclave.example", RepoPin("org/repo"), transport=EHBP(), **kw
     ),
-    "AsyncRouterOpenAIClient": lambda **kw: AsyncRouterOpenAIClient.create(transport_mode="ehbp", **kw),
+    "AsyncRouterOpenAIClient": lambda **kw: AsyncRouterOpenAIClient.create(transport=EHBP(), **kw),
     "AsyncGatewayOpenAIClient": lambda **kw: AsyncGatewayOpenAIClient.create(
         url="https://gateway.example/v1/", catalog=lambda: ENTRIES, **kw
     ),

@@ -70,13 +70,7 @@ if TYPE_CHECKING:
         create_client,
     )
     from tinfoil._trust import AuthorizedBy, EitherPin, EmbeddedConfig, ProjectPin, RepoPin, SignedBy, Trust
-    from tinfoil._types import (
-        DEFAULT_HTTP_TIMEOUT,
-        DEFAULT_TRANSPORT_MODE,
-        TimeoutTypes,
-        TransportMode,
-        VerificationCheck,
-    )
+    from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP, TLS, TimeoutTypes, Transport, VerificationCheck
 
 __version__ = sdk_version()
 """The version of this package, as installed."""
@@ -84,7 +78,8 @@ __version__ = sdk_version()
 __all__ = [
     "DEFAULT_GATEWAY_URL",
     "DEFAULT_HTTP_TIMEOUT",
-    "DEFAULT_TRANSPORT_MODE",
+    "EHBP",
+    "TLS",
     "APIConnectionError",
     "APIError",
     "APIResponseValidationError",
@@ -131,7 +126,7 @@ __all__ = [
     "SignedBy",
     "TimeoutTypes",
     "TinfoilError",
-    "TransportMode",
+    "Transport",
     "Trust",
     "UnprocessableEntityError",
     "VerificationCheck",
@@ -213,7 +208,7 @@ _MODULE_OF: dict[str, str] = {
         ),
         (
             "tinfoil._types",
-            ("DEFAULT_HTTP_TIMEOUT", "DEFAULT_TRANSPORT_MODE", "TimeoutTypes", "TransportMode", "VerificationCheck"),
+            ("DEFAULT_HTTP_TIMEOUT", "EHBP", "TLS", "TimeoutTypes", "Transport", "VerificationCheck"),
         ),
         (
             "tinfoil._trust",

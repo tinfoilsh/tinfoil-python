@@ -11,6 +11,8 @@ import pytest
 
 from tinfoil import (
     DEFAULT_GATEWAY_URL,
+    EHBP,
+    TLS,
     AsyncRouterOpenAIClient,
     AttestationError,
     EnclaveHTTPClient,
@@ -18,7 +20,7 @@ from tinfoil import (
     RepoPin,
     RouterHTTPClient,
     RouterOpenAIClient,
-    TransportMode,
+    Transport,
     create_async_client,
     create_client,
     fetch_catalog,
@@ -37,9 +39,9 @@ AUDIO = Path(__file__).parents[1] / "jackhammer.wav"
 needs_api_key = pytest.mark.skipif(not API_KEY, reason="TINFOIL_API_KEY is not set")
 
 
-@pytest.mark.parametrize("mode", ["tls", "ehbp"])
-def test_enclave_client(mode: TransportMode) -> None:
-    with EnclaveHTTPClient(ENCLAVE, RepoPin(REPO), transport_mode=mode, user_cache_secret=CACHE_SECRET) as client:
+@pytest.mark.parametrize("mode", [TLS(), EHBP()])
+def test_enclave_client(mode: Transport) -> None:
+    with EnclaveHTTPClient(ENCLAVE, RepoPin(REPO), transport=mode, user_cache_secret=CACHE_SECRET) as client:
         assert client.current is not None, "the client is verified when it's returned"
         before = client.ensure_verified()
         assert before.metadata.verified_at == client.current.metadata.verified_at, (
@@ -53,9 +55,9 @@ def test_enclave_client(mode: TransportMode) -> None:
 
 
 @needs_api_key
-@pytest.mark.parametrize("mode", ["tls", "ehbp"])
-def test_router_openai_client(mode: TransportMode) -> None:
-    with RouterOpenAIClient(transport_mode=mode, user_cache_secret=CACHE_SECRET, api_key=API_KEY) as client:
+@pytest.mark.parametrize("mode", [TLS(), EHBP()])
+def test_router_openai_client(mode: Transport) -> None:
+    with RouterOpenAIClient(transport=mode, user_cache_secret=CACHE_SECRET, api_key=API_KEY) as client:
         attested = client.http_client
         verified = attested.ensure_verified()
         assert attested.current is not None
@@ -105,7 +107,7 @@ def test_verification_check_rejects_once() -> None:
 @needs_api_key
 @pytest.mark.asyncio
 async def test_async_router_client() -> None:
-    client = await AsyncRouterOpenAIClient.create(transport_mode="ehbp", api_key=API_KEY)
+    client = await AsyncRouterOpenAIClient.create(transport=EHBP(), api_key=API_KEY)
     try:
         stream = await client.chat.completions.create(
             model=MODEL, messages=[{"role": "user", "content": "Hello from the async integration test"}], stream=True
@@ -125,7 +127,7 @@ async def test_async_router_client() -> None:
 
 
 def test_router_discovery() -> None:
-    with RouterHTTPClient(transport_mode="ehbp") as client:
+    with RouterHTTPClient(transport=EHBP()) as client:
         assert client.current is not None
         assert client.base_url == f"https://{client.enclave}/"
         assert client.ensure_verified().freshness_expires_at == client.current.freshness_expires_at

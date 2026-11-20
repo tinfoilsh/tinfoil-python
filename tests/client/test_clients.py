@@ -27,6 +27,7 @@ from tinfoil._errors import AttestationError, ConfigurationError, NetworkError
 from tinfoil._gateway import Catalog, CatalogEntry, ModelPin
 from tinfoil._transport import CLIENT_CLOSED
 from tinfoil._trust import AuthorizedBy, EitherPin, EmbeddedConfig, ProjectPin, RepoPin, SignedBy, Trust
+from tinfoil._types import EHBP
 from tinfoil.verifier import EndorsedArtifacts, Pin, Policy, Verification, Verifier
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -102,23 +103,30 @@ class TestEnclaveClient:
         ("name", "args"),
         [
             ("no host", ("", RepoPin("org/repo"), {})),
-            ("unknown transport mode", ("enclave.example", RepoPin("org/repo"), {"transport_mode": "quic"})),
+            ("transport of another type", ("enclave.example", RepoPin("org/repo"), {"transport": "ehbp"})),
+            ("transport class, not a value", ("enclave.example", RepoPin("org/repo"), {"transport": EHBP})),
+            ("proxy URL of another type", ("enclave.example", RepoPin("org/repo"), {"transport": EHBP(b"x")})),  # type: ignore[arg-type]
             (
                 "plaintext remote proxy",
                 (
                     "enclave.example",
                     RepoPin("org/repo"),
-                    {"transport_mode": "ehbp", "base_url": "http://proxy.example/v1/"},
+                    {"transport": EHBP("http://proxy.example/v1/")},
                 ),
             ),
+            ("relative proxy URL", ("enclave.example", RepoPin("org/repo"), {"transport": EHBP("/v1/")})),
+            ("ftp proxy URL", ("enclave.example", RepoPin("org/repo"), {"transport": EHBP("ftp://proxy.example")})),
             (
-                "TLS through a loopback proxy",
-                ("enclave.example", RepoPin("org/repo"), {"base_url": "http://localhost:8080/v1/"}),
+                "unspecified address as a proxy",
+                ("enclave.example", RepoPin("org/repo"), {"transport": EHBP("http://0.0.0.0:8080/relay")}),
             ),
-            ("relative base URL", ("enclave.example", RepoPin("org/repo"), {"base_url": "/v1/"})),
             (
-                "TLS through a proxy",
-                ("enclave.example", RepoPin("org/repo"), {"base_url": "https://proxy.example/v1/"}),
+                "proxy on the enclave's own origin",
+                ("enclave.example", RepoPin("org/repo"), {"transport": EHBP("https://enclave.example/relay")}),
+            ),
+            (
+                "proxy on the enclave's own origin with the default port",
+                ("enclave.example", RepoPin("org/repo"), {"transport": EHBP("https://enclave.example:443")}),
             ),
             ("invalid repository", ("enclave.example", RepoPin("not a reference"), {})),
             ("empty repository", ("enclave.example", RepoPin(""), {})),
@@ -135,24 +143,28 @@ class TestEnclaveClient:
             ("policy of another type", ("enclave.example", RepoPin("org/repo"), {"policy": "strict"})),
             ("invalid project", ("enclave.example", EitherPin("org/repo", "not a reference"), {})),
             (
-                "userinfo in the base URL",
+                "userinfo in the proxy URL",
                 (
                     "enclave.example",
                     RepoPin("org/repo"),
-                    {"transport_mode": "ehbp", "base_url": "https://u:p@proxy.example/v1/"},
+                    {"transport": EHBP("https://u:p@proxy.example/v1/")},
                 ),
             ),
             (
-                "query in the base URL",
+                "query in the proxy URL",
                 (
                     "enclave.example",
                     RepoPin("org/repo"),
-                    {"transport_mode": "ehbp", "base_url": "https://proxy.example/v1/?x=1"},
+                    {"transport": EHBP("https://proxy.example/v1/?x=1")},
                 ),
             ),
             (
-                "fragment in the base URL",
-                ("enclave.example", RepoPin("org/repo"), {"base_url": "https://enclave.example/v1/#f"}),
+                "fragment in the proxy URL",
+                ("enclave.example", RepoPin("org/repo"), {"transport": EHBP("https://proxy.example/v1/#f")}),
+            ),
+            (
+                "empty query in the proxy URL",
+                ("enclave.example", RepoPin("org/repo"), {"transport": EHBP("https://proxy.example/v1?")}),
             ),
         ],
     )
@@ -170,7 +182,7 @@ class TestEnclaveClient:
         """A bare reference string or a verifier pin is refused rather than read as an empty trust."""
         network.serve("enclave.example")
         with pytest.raises(ConfigurationError, match="trust must be a RepoPin, ProjectPin, SignedBy, AuthorizedBy"):
-            EnclaveHTTPClient("enclave.example", not_a_trust, transport_mode="ehbp")  # type: ignore[arg-type]
+            EnclaveHTTPClient("enclave.example", not_a_trust, transport=EHBP())  # type: ignore[arg-type]
         assert network.requests == []
         assert network.pins == []
 
@@ -179,7 +191,7 @@ class TestEnclaveClient:
         network.serve("enclave.example")
         for trust in (RepoPin(not_a_reference), ProjectPin(not_a_reference)):  # type: ignore[arg-type]
             with pytest.raises(ConfigurationError, match="must be a string or None"):
-                EnclaveHTTPClient("enclave.example", trust, transport_mode="ehbp")
+                EnclaveHTTPClient("enclave.example", trust, transport=EHBP())
         assert network.requests == []
 
     def test_verifies_before_returning(self, network: Network) -> None:
@@ -189,7 +201,7 @@ class TestEnclaveClient:
             "the enclave is verified before the client is returned, once more after a failure"
         )
         document = network.serve("enclave.example")
-        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")
+        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP())
         assert client.current is document
         assert client.ensure_verified() is document
         assert network.hosts() == ["enclave.example"]
@@ -200,23 +212,21 @@ class TestEnclaveClient:
     def test_reports_its_enclave_trust_and_base_url(self, network: Network) -> None:
         trust = EitherPin("org/repo@v1@sha256:" + "a" * 64, "org/project@v2")
         network.serve("enclave.example:8443")
-        client = EnclaveHTTPClient(
-            "enclave.example:8443", trust, transport_mode="ehbp", base_url="https://proxy.example/v1"
-        )
+        client = EnclaveHTTPClient("enclave.example:8443", trust, transport=EHBP("https://proxy.example/v1"))
         assert client.enclave == "enclave.example:8443", "the enclave, not the proxy"
         assert client.trust == trust
         assert network.pins == [Pin(repo=trust.repo, project=trust.project)], (
             "the verifier receives each pin in its own namespace"
         )
         assert client.base_url == "https://proxy.example/v1/"
-        assert client._attested.openai_url == "https://proxy.example/v1/"
+        assert client._attested.openai_url == "https://proxy.example/v1/v1/", "the proxy's path is its mount point"
         client.close()
         network.serve("enclave.example")
-        with EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp") as repository:
+        with EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP()) as repository:
             assert repository.trust == RepoPin("org/repo")
             assert network.pins[-1] == Pin(repo="org/repo"), "a repository pin never doubles as a project pin"
         network.serve("enclave.example")
-        with EnclaveHTTPClient("enclave.example", ProjectPin("org/project"), transport_mode="ehbp") as registry:
+        with EnclaveHTTPClient("enclave.example", ProjectPin("org/project"), transport=EHBP()) as registry:
             assert registry.trust == ProjectPin("org/project")
             assert network.pins[-1] == Pin(project="org/project")
             assert registry.base_url == "https://enclave.example/"
@@ -238,8 +248,7 @@ class TestEnclaveClient:
         client = EnclaveHTTPClient(
             "enclave.example",
             RepoPin("org/repo"),
-            transport_mode="ehbp",
-            base_url="https://proxy.example/v1/",
+            transport=EHBP("https://proxy.example/v1/"),
             user_cache_secret="explicit",
         )
         reply = client.http_client.post("https://proxy.example/v1/chat/completions", json={"model": "m"}).json()
@@ -259,7 +268,7 @@ class TestEnclaveClient:
     def test_key_rotation_is_recovered_once(self, network: Network) -> None:
         first = network.serve("enclave.example", tag="first")
         network.handler = network.ehbp.handle
-        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")
+        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP())
         assert client.current is first
         assert client.http_client.post("https://enclave.example/v1/x", content=b"hello").content == b"echo:hello"
         network.ehbp.rotated = True
@@ -284,7 +293,7 @@ class TestEnclaveClient:
 
     def test_tls_mode_refuses_plaintext_and_ehbp_refuses_upgrades_before_verifying(self, network: Network) -> None:
         network.serve("enclave.example")
-        sealed = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")
+        sealed = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP())
         network.requests = []
         with pytest.raises(ConfigurationError, match="EHBP seals only"):
             sealed.http_client.get("https://enclave.example/v1/realtime", headers={"Upgrade": "websocket"})
@@ -301,11 +310,11 @@ class TestEnclaveClient:
 
         monkeypatch.setattr(_cachesecret, "resolve", resolve)
         network.serve("enclave.example")
-        EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp").close()
+        EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP()).close()
 
     def test_closed_client_refuses(self, network: Network) -> None:
         network.serve("enclave.example")
-        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")
+        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP())
         client.close()
         assert client.current is None
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
@@ -316,7 +325,7 @@ class TestEnclaveClient:
     def test_expired_document_is_rejected(self, network: Network) -> None:
         network.serve("enclave.example", deadline=datetime.now(UTC) - timedelta(seconds=1))
         with pytest.raises(AttestationError, match="expired"):
-            EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")
+            EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP())
 
     def test_verification_check_rejection(self, network: Network) -> None:
         network.serve("enclave.example")
@@ -327,7 +336,7 @@ class TestEnclaveClient:
             raise RuntimeError("rejected by the test")
 
         with pytest.raises(AttestationError, match="rejected by the test"):
-            EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp", verification_check=check)
+            EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), verification_check=check)
         assert seen == ["enclave.example"], "a rejection isn't retried"
 
 
@@ -335,11 +344,10 @@ class TestRouterClient:
     @pytest.mark.parametrize(
         "options",
         [
-            {"transport_mode": "quic"},
-            {"transport_mode": "ehbp", "base_url": "http://proxy.example/v1/"},
-            {"base_url": "https://proxy.example/v1/"},
-            {"transport_mode": "tls", "base_url": "https://proxy.example/v1/"},
-            {"transport_mode": "ehbp", "base_url": "https://proxy.example/v1/?x=1"},
+            {"transport": "quic"},
+            {"transport": EHBP("http://proxy.example/v1/")},
+            {"transport": EHBP("https://u:p@proxy.example/v1/")},
+            {"transport": EHBP("https://proxy.example/v1/?x=1")},
             {"policy": bad_policy()},
         ],
     )
@@ -348,14 +356,14 @@ class TestRouterClient:
             RouterHTTPClient(**options)  # type: ignore[arg-type]
         assert network.requests == []
 
-    def test_proxy_names_the_mode_it_needs(self, network: Network) -> None:
-        with pytest.raises(ConfigurationError, match='requires the "ehbp"'):
-            RouterHTTPClient(base_url="https://proxy.example/v1/")
+    def test_names_the_transport_it_takes(self, network: Network) -> None:
+        with pytest.raises(ConfigurationError, match="transport must be a TLS or EHBP value, not str"):
+            RouterHTTPClient(transport="ehbp")  # type: ignore[arg-type]
 
     def test_discovers_and_verifies_the_fallback(self, network: Network) -> None:
         network.handler = lambda _: response(200, b"[]")
         with pytest.raises(NetworkError):
-            RouterHTTPClient(transport_mode="ehbp")
+            RouterHTTPClient(transport=EHBP())
         assert network.hosts() == ["atc.tinfoil.sh", _router.FALLBACK_HOST, _router.FALLBACK_HOST], (
             "the fallback's verification has one retry"
         )
@@ -363,7 +371,7 @@ class TestRouterClient:
     def test_keeps_the_first_router_that_verifies(self, network: Network) -> None:
         network.handler = lambda _: response(200, b'["a.example", "b.example"]')
         chosen = network.serve("b.example")
-        client = RouterHTTPClient(transport_mode="ehbp", base_url="http://localhost:8080/v1/", user_cache_secret="s")
+        client = RouterHTTPClient(transport=EHBP("http://localhost:8080/v1/"), user_cache_secret="s")
         assert client.enclave == "b.example"
         assert not hasattr(client, "trust"), "a router's trust is fixed, not the caller's"
         assert not hasattr(client, "pin")
@@ -484,9 +492,7 @@ async def test_async_clients(network: Network) -> None:
     assert network.requests == []
     network.serve("enclave.example")
     network.handler = network.ehbp.handle
-    async with await AsyncEnclaveHTTPClient.create(
-        "enclave.example", RepoPin("org/repo"), transport_mode="ehbp"
-    ) as client:
+    async with await AsyncEnclaveHTTPClient.create("enclave.example", RepoPin("org/repo"), transport=EHBP()) as client:
         assert client.enclave == "enclave.example"
         assert client.trust == RepoPin("org/repo")
         assert client.current is not None
@@ -499,7 +505,7 @@ async def test_async_clients(network: Network) -> None:
 
     network.handler = lambda _: response(200, b'["router.example"]')
     network.serve("router.example")
-    router = await AsyncRouterHTTPClient.create(transport_mode="ehbp", user_cache_secret="s")
+    router = await AsyncRouterHTTPClient.create(transport=EHBP(), user_cache_secret="s")
     assert router.enclave == "router.example"
     await router.close()
 

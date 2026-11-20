@@ -1,9 +1,10 @@
-"""Type aliases shared by the client modules."""
+"""The types shared by the client modules: timeouts, the verification check and the ``Transport`` option."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Literal, TypeAlias
+from dataclasses import dataclass
+from typing import TypeAlias, final
 
 import httpx
 
@@ -24,25 +25,50 @@ VerificationCheck: TypeAlias = Callable[[Verification], None]
 """A caller's check of a verification that passed the verifier, called before the client uses the enclave's keys.
 Raising rejects the enclave; the exception becomes the cause of an AttestationError and is not retried."""
 
-TransportMode: TypeAlias = Literal["tls", "ehbp"]
-"""How a client protects its traffic to an enclave.
 
-``"tls"`` pins each connection to the attested TLS key. It protects the
-whole request and response, and needs a direct connection. ``"ehbp"``
-seals request and response bodies to the attested HPKE key, so they stay
-private through a proxy. The method, URL and headers are not sealed, and
-neither is a request without a body or its response. It refuses protocol
-upgrades, such as WebSockets, and CONNECT tunnels, because nothing after
-the handshake would be sealed.
-"""
+@final
+@dataclass(frozen=True, slots=True)
+class TLS:
+    """Pins each connection to the attested TLS key. It protects the whole request and response, and needs a direct
+    connection to the enclave, so it takes no URL: requests go to the enclave's own HTTPS origin. It is the default
+    transport."""
 
-DEFAULT_TRANSPORT_MODE: TransportMode = "tls"
-"""The transport mode a client uses when none is given: the stronger one. A proxy base URL requires ``"ehbp"``."""
+
+@final
+@dataclass(frozen=True, slots=True)
+class EHBP:
+    """Seals request and response bodies to the attested HPKE key, so that they stay private through a proxy. The
+    method, URL and headers are not sealed, and neither is a request without a body or its response. It refuses
+    protocol upgrades, such as WebSockets, and CONNECT tunnels, because nothing after the handshake would be
+    sealed.
+
+    ``proxy_url``, when set, is a proxy that forwards requests to the
+    enclave, and requests are sent to it; None or ``""`` sends them directly
+    to the enclave. Its path, if any, is where the proxy is mounted, not the
+    API path: an ``OpenAIClient`` joins its ``api_path``, ``/v1/`` by
+    default, under it. Requests to the proxy carry
+    ``X-Tinfoil-Enclave-Url`` so that it can forward them. The proxy must
+    use HTTPS, since EHBP does not seal headers such as the API key;
+    ``http://`` is accepted only when its host is localhost or a loopback IP
+    address, for a local development proxy or a sidecar. Request paths join
+    under it, so a ``proxy_url`` with user information, a query or a
+    fragment, even an empty one, is a ConfigurationError. An enclave client
+    also refuses a ``proxy_url`` on the enclave's own origin, which is no
+    proxy; leave it unset to connect directly.
+    """
+
+    proxy_url: str | None = None
+
+
+Transport: TypeAlias = TLS | EHBP
+"""How a client protects its traffic to an enclave: ``TLS()`` or ``EHBP(proxy_url=...)``. None, where a
+``Transport`` is optional, selects ``TLS()``, the stronger transport."""
 
 __all__ = [
     "DEFAULT_HTTP_TIMEOUT",
-    "DEFAULT_TRANSPORT_MODE",
+    "EHBP",
+    "TLS",
     "TimeoutTypes",
-    "TransportMode",
+    "Transport",
     "VerificationCheck",
 ]

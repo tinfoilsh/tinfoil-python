@@ -21,7 +21,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_ALL = (
     "DEFAULT_GATEWAY_URL",
     "DEFAULT_HTTP_TIMEOUT",
-    "DEFAULT_TRANSPORT_MODE",
+    "EHBP",
+    "TLS",
     "APIConnectionError",
     "APIError",
     "APIResponseValidationError",
@@ -68,7 +69,7 @@ EXPECTED_ALL = (
     "SignedBy",
     "TimeoutTypes",
     "TinfoilError",
-    "TransportMode",
+    "Transport",
     "Trust",
     "UnprocessableEntityError",
     "VerificationCheck",
@@ -155,6 +156,7 @@ PROBE = '''
 import httpx
 
 from tinfoil import (
+    EHBP,
     AsyncClient,
     AsyncOpenAIOptions,
     Client,
@@ -189,7 +191,7 @@ other_options: OpenAIOptions = {{"organization": "o", "default_query": {{"v": 1}
 
 async def consume() -> None:
     trust = EitherPin("org/repo", "org/project")
-    enclave = EnclaveOpenAIClient("enclave.example", trust, transport_mode="ehbp", http_timeout=5.0, **options)
+    enclave = EnclaveOpenAIClient("enclave.example", trust, transport=EHBP(), http_timeout=5.0, **options)
     router = RouterOpenAIClient(user_cache_secret="s", api_key="k", organization="o", project="p")
     gateway = GatewayOpenAIClient(url="https://gateway.example/v1/", api_key="k", max_retries=1)
     drop_in: Client = create_client(**options)
@@ -203,7 +205,7 @@ async def consume() -> None:
 
 MISTAKES = (
     'EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), api_key="k", max_retires=0)',
-    'create_client(api_key="k", transport_mode="ehbp")',
+    'create_client(api_key="k", transport=EHBP())',
     'RouterOpenAIClient(api_key="k", http_client=httpx.Client())',
     'EnclaveOpenAIClient("enclave.example", api_key="k")',
     'EnclaveOpenAIClient("enclave.example", "org/repo", api_key="k")',
