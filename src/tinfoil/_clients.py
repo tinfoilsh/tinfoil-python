@@ -436,7 +436,7 @@ def _gateway_url(url: str | None) -> tuple[str, str]:
 
 class GatewayHTTPClient:
     """An ``httpx`` client for Tinfoil inference through the gateway. Each request is sealed to a verified
-    replica of the model it names, as with the ``EHBP`` transport: the gateway sees the method, URL and
+    replica of the model that it names, as with the ``EHBP`` transport: the gateway sees the method, URL and
     headers, and WebSocket upgrades are refused.
 
     ``model_pins`` pins models to repositories; with ``pinned_models_only``,
