@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import secrets
 import sys
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
@@ -523,6 +524,32 @@ class TestErrors:
         for client in (first, second, pinned):
             client.close()
         gateway_client.close()
+
+    def test_clients_fail_with_the_random_sources_exception(
+        self, offline: Recorder, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without ``user_cache_secret``, a router or gateway client whose secret can't be generated raises the
+        random source's exception unchanged, before any network I/O; a later client generates the secret."""
+        monkeypatch.setattr(_cachesecret, "_process_secret", None)
+        failure = OSError("no secure randomness")
+        real = secrets.token_hex
+
+        def fail(nbytes: int) -> str:
+            raise failure
+
+        monkeypatch.setattr(secrets, "token_hex", fail)
+        with pytest.raises(OSError, match="no secure randomness") as raised:
+            RouterHTTPClient()
+        assert raised.value is failure
+        with pytest.raises(OSError, match="no secure randomness") as raised:
+            gateway()
+        assert raised.value is failure
+        assert offline.requests == []
+        monkeypatch.setattr(secrets, "token_hex", real)
+        router = RouterHTTPClient()
+        assert _cachesecret._process_secret is not None
+        assert len(_cachesecret._process_secret) == 64
+        router.close()
 
 
 @pytest.mark.asyncio

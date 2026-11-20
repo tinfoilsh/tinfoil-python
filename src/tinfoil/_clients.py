@@ -382,8 +382,11 @@ class RouterHTTPClient(_AttestedClient):
     chooses. ``policy`` applies on top of the
     router's fixed trust, its own repository. ``user_cache_secret`` empty selects a random secret that is
     generated once per process and shared by every client in it; pass a
-    value for a secret that is stable across processes. The other options
-    are those of ``EnclaveHTTPClient``.
+    value for a secret that is stable across processes. When that secret
+    can't be generated because the operating system's random source fails,
+    the constructor raises the exception that ``secrets`` raised, unchanged,
+    before any network I/O. The other options are those of
+    ``EnclaveHTTPClient``.
     """
 
     def __init__(
@@ -494,7 +497,8 @@ class GatewayHTTPClient:
     policy replaces it entirely for that model. ``verification_check`` is called with each
     replica's verification; a replica it rejects is skipped for the next
     replica of the model. ``user_cache_secret`` empty selects the random
-    secret that is generated once per process, as on ``RouterHTTPClient``;
+    secret that is generated once per process, as on ``RouterHTTPClient``,
+    whose constructor fails the same way when that secret can't be generated;
     the gateway sees a cache prefix keyed on it, never the secret. ``url``
     is the gateway's base URL, exposed as ``base_url`` with a trailing
     slash; None selects Tinfoil's gateway. ``catalog`` is read on every request and

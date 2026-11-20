@@ -28,14 +28,11 @@ enclave.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 import secrets
 import threading
 from dataclasses import dataclass
-
-logger = logging.getLogger("tinfoil")
 
 FIELD = "user_cache_secret"
 """The router-only request-body field. A non-empty string scopes the prompt cache to that secret."""
@@ -246,21 +243,17 @@ def _skip(text: str, index: int) -> int:
 
 def resolve(explicit: str | None) -> str:
     """The client-level secret: a non-empty ``explicit`` value wins, otherwise the secret that this process
-    generated, which is the same for every client in the process."""
+    generated, which is the same for every client in the process. When the secret has to be generated and the
+    operating system's random source fails, the exception that ``secrets`` raises propagates unchanged."""
     if explicit:
         return explicit
     return _process_secret_value()
 
 
 def _new_secret() -> str:
-    """A fresh 256-bit random secret, hex-encoded; empty when secure random generation fails."""
-    try:
-        return secrets.token_hex(32)
-    except Exception as err:  # pragma: no cover - the OS random source failing
-        logger.warning(
-            "tinfoil: could not generate a user cache secret; automatic prompt-cache scoping is unavailable: %s", err
-        )
-        return ""
+    """A fresh 256-bit random secret, hex-encoded. A failure of the random source raises rather than return a
+    predictable value."""
+    return secrets.token_hex(32)
 
 
 _process_lock = threading.Lock()
@@ -280,7 +273,8 @@ if hasattr(os, "register_at_fork"):
 
 def _process_secret_value() -> str:
     """The secret that this process generates on first use and keeps for its lifetime. It isolates the
-    process's cache namespace; prompt-cache continuity resets when the process exits."""
+    process's cache namespace; prompt-cache continuity resets when the process exits. A generation that raises
+    records nothing, so that the next call tries again."""
     global _process_secret
     with _process_lock:
         if _process_secret is None:
