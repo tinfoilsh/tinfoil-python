@@ -15,6 +15,12 @@ from tinfoil._transport import AsyncAttestedTransport, AttestedTransport
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
 from tinfoil.verifier import Pin, Verifier
 
+
+class MisusedRouterListFetcher(ConfigurationError):
+    """A router-list fetcher of the wrong kind for its client, such as a synchronous callable on an asynchronous
+    client. Unlike the fetcher's own failures, which count as an empty list, discovery reports it."""
+
+
 # Tinfoil owns the router's name in both namespaces.
 DEFAULT_ROUTER_NAME = "tinfoilsh/confidential-model-router"
 DEFAULT_ROUTER_PIN = Pin(repo=DEFAULT_ROUTER_NAME, project=DEFAULT_ROUTER_NAME)
@@ -125,6 +131,8 @@ def discover(
             listed: object = fetch_routers(timeout=timeout, deadline=deadline)
         else:
             listed = list_routers(timeout, deadline)
+    except MisusedRouterListFetcher:
+        raise
     except Exception:
         # The list only proposes candidates; whatever fails, discovery falls back.
         listed = []
@@ -175,6 +183,8 @@ async def discover_async(
             listed: object = await fetch_routers_async(timeout=timeout, deadline=deadline)
         else:
             listed = await list_routers(timeout, deadline)
+    except MisusedRouterListFetcher:
+        raise
     except Exception:
         listed = []
     routers = shuffled(listed)
@@ -220,6 +230,7 @@ __all__ = [
     "DISCOVERY_TIMEOUT",
     "FALLBACK_HOST",
     "AsyncRouterList",
+    "MisusedRouterListFetcher",
     "RouterList",
     "discover",
     "discover_async",

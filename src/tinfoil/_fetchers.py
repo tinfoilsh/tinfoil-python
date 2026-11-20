@@ -18,7 +18,14 @@ from typing import TypeAlias, final
 from tinfoil._enclave import AsyncDocumentFetch, DocumentFetch
 from tinfoil._errors import ConfigurationError, NetworkError, TinfoilError, network_error
 from tinfoil._fetch import FETCH_TIMEOUT, fetch_document_at, fetch_document_at_async, relay_document_url
-from tinfoil._router import AsyncRouterList, RouterList, fetch_routers, fetch_routers_async, relay_list_url
+from tinfoil._router import (
+    AsyncRouterList,
+    MisusedRouterListFetcher,
+    RouterList,
+    fetch_routers,
+    fetch_routers_async,
+    relay_list_url,
+)
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes
 from tinfoil._url import validate_proxy_url
 
@@ -42,7 +49,8 @@ RouterListFetcher: TypeAlias = Callable[[], Sequence[str]]
 """A synchronous router client's ``fetch_router_list``: returns the candidate router hosts in place of the list at
 ``https://atc.tinfoil.sh/routers``. The list is not trusted: discovery shuffles it, verifies each host before it
 uses it, tries them for at most 30 seconds in all, and falls back to ``inference.tinfoil.sh`` when none passes. An
-exception, or a value that is not a sequence of strings, counts as an empty list.
+exception, or a value that is not a sequence of strings, counts as an empty list. It should bound its own wait, since
+the client cannot interrupt it; discovery tries no router after its 30 seconds have passed, and falls back.
 
 An attestation document does not name the host that serves it, so the list source is trusted not to name a host
 that would relay another router's attestation: with EHBP, such a host would receive the request headers, including
@@ -240,10 +248,17 @@ def sync_router_list(option: object) -> RouterList | None:
 
         return relayed
     _require_callable(option, "fetch_router_list", asynchronous=False)
-    fetcher: Callable[[], Sequence[str]] = option  # type: ignore[assignment]
+    fetcher: Callable[[], object] = option  # type: ignore[assignment]
 
     def listed(timeout: TimeoutTypes, deadline: float | None) -> Sequence[str]:
-        return fetcher()
+        value = fetcher()
+        if inspect.isawaitable(value):
+            if inspect.iscoroutine(value):
+                value.close()
+            raise MisusedRouterListFetcher(
+                "fetch_router_list returned an awaitable; pass it to the asynchronous client's create"
+            )
+        return value  # type: ignore[return-value]  # discovery checks the list
 
     return listed
 
@@ -264,8 +279,11 @@ def async_router_list(option: object) -> AsyncRouterList | None:
     fetcher: Callable[[], Awaitable[Sequence[str]]] = option  # type: ignore[assignment]
 
     async def listed(timeout: TimeoutTypes, deadline: float | None) -> Sequence[str]:
+        pending = fetcher()
+        if not inspect.isawaitable(pending):
+            raise MisusedRouterListFetcher("fetch_router_list must return an awaitable on an asynchronous client")
         async with asyncio.timeout(_remaining(deadline)):
-            return await fetcher()
+            return await pending
 
     return listed
 

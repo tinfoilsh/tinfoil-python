@@ -119,6 +119,8 @@ class Enclave:
     ) -> None:
         if not host:
             raise ConfigurationError("enclave host is required")
+        if relay and (fetch_document is not None or fetch_document_async is not None):
+            raise ConfigurationError("an enclave fetches through a relay host or a document fetcher, not both")
         for authority in (host, relay):
             if authority and not is_authority(authority):
                 raise ConfigurationError(f"invalid host {authority!r}: want a host with an optional port")
@@ -220,6 +222,8 @@ class Enclave:
         nonce = random_nonce()
         if self.fetch_document is not None:
             doc = self.fetch_document(self.host, nonce, timeout, deadline)
+        elif self.fetch_document_async is not None:
+            raise ConfigurationError("the enclave's document fetcher is asynchronous; verify it on the event loop")
         else:
             doc = fetch_document(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
         return self._verify_document(doc, nonce)
@@ -228,6 +232,8 @@ class Enclave:
         nonce = random_nonce()
         if self.fetch_document_async is not None:
             doc = await self.fetch_document_async(self.host, nonce, timeout, deadline)
+        elif self.fetch_document is not None:
+            raise ConfigurationError("the enclave's document fetcher is synchronous; verify it with verify")
         else:
             doc = await fetch_document_async(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
         # Verification is CPU-bound, so it runs off the event loop.

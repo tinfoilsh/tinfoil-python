@@ -275,6 +275,39 @@ class TestAsync:
         await relayed.close()
 
     @pytest.mark.asyncio
+    async def test_a_synchronous_list_fetcher_is_refused_on_an_async_client(self, direct: Recorder) -> None:
+        with pytest.raises(ConfigurationError, match="must return an awaitable"):
+            await AsyncRouterHTTPClient.create(fetch_router_list=lambda: ["a.example"])  # type: ignore[arg-type,return-value]
+        assert direct.requests == [], "discovery stops rather than falling back"
+
+    def test_an_async_list_fetcher_is_refused_on_a_sync_client(self, direct: Recorder) -> None:
+        async def routers() -> list[str]:
+            return ["a.example"]
+
+        with pytest.raises(ConfigurationError, match="asynchronous"):
+            RouterHTTPClient(fetch_router_list=routers)  # type: ignore[arg-type]
+        with pytest.raises(ConfigurationError, match="returned an awaitable"):
+            RouterHTTPClient(fetch_router_list=lambda: routers())  # type: ignore[arg-type,return-value]
+        assert direct.requests == []
+
+    def test_an_enclave_refuses_a_fetcher_of_the_other_kind_rather_than_fetching_directly(
+        self, direct: Recorder
+    ) -> None:
+        async def fetch_async(host: str, nonce: bytes, limit: object, deadline: object) -> bytes:
+            return b"doc"
+
+        def fetch(host: str, nonce: bytes, limit: object, deadline: object) -> bytes:
+            return b"doc"
+
+        with pytest.raises(ConfigurationError, match="asynchronous"):
+            _enclave.Enclave("enclave.example", Pin(repo="o/r"), fetch_document_async=fetch_async).verify()
+        with pytest.raises(ConfigurationError, match="synchronous"):
+            asyncio.run(_enclave.Enclave("enclave.example", Pin(repo="o/r"), fetch_document=fetch).verify_async())
+        with pytest.raises(ConfigurationError, match="not both"):
+            _enclave.Enclave("enclave.example", Pin(repo="o/r"), relay="relay.example", fetch_document=fetch)
+        assert direct.requests == []
+
+    @pytest.mark.asyncio
     async def test_a_synchronous_fetcher_is_refused_on_an_async_client(self, direct: Recorder) -> None:
         with pytest.raises(ConfigurationError, match="must return an awaitable"):
             await AsyncEnclaveHTTPClient.create("enclave.example", RepoPin("o/r"), fetch_attestation=Calls().fetch)  # type: ignore[arg-type]
