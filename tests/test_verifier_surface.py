@@ -38,24 +38,30 @@ EXPECTED_ALL = (
     "SOURCE_ENDORSEMENT",
     "SOURCE_POLICY",
     "TDX",
+    "ArtifactTrust",
     "ArtifactVerification",
     "ConfigAuthorizer",
     "ConfigEndorsement",
+    "ConfigSigningKeys",
+    "ConfigTrust",
     "ConfigVerification",
     "CryptoMaterialItem",
+    "EmbeddedArtifacts",
     "EmbeddedConfig",
     "EmbeddedConfigReference",
-    "EmbeddedReferences",
+    "EndorsedArtifacts",
     "Expected",
     "ExpectedSEVSNP",
     "ExpectedTDX",
     "Layer",
     "Measurement",
     "Pin",
+    "Policy",
     "PublicKey",
     "Reference",
     "ReferenceSource",
     "Register",
+    "Registries",
     "RuntimeReference",
     "SoftwareIdentity",
     "UsageError",
@@ -105,7 +111,7 @@ FUNCTIONS = (
 )
 
 # Names that exist for the conformance harness or inside the package and must never be reachable from it.
-PRIVATE_NAMES = ("Overrides", "_build", "ResolvedReferences", "resolve_embedded", "TrustPolicy")
+PRIVATE_NAMES = ("Overrides", "_build", "ResolvedReferences", "resolve_artifacts", "resolve_config", "TrustPolicy")
 
 # The TLS connection checks, which are private to the client package (``tinfoil._pin``): the verifier takes no
 # socket or connection objects, and the client package does not export them either.
@@ -114,8 +120,8 @@ CONNECTION_CHECKS = ("connection_cert_fp", "pin_tls_key")
 # Exported aliases of builtin types, which carry no module of their own.
 BUILTIN_ALIASES = ("Layer", "Register")
 
-# Exported type aliases that are neither classes nor functions: a callable signature, a Literal and two unions.
-TYPE_ALIASES = ("ConfigAuthorizer", "Expected", "Measurement", "ReferenceSource")
+# Exported type aliases that are neither classes nor functions: a Literal and four unions.
+TYPE_ALIASES = ("ArtifactTrust", "ConfigTrust", "Expected", "Measurement", "ReferenceSource")
 
 # The exported key type is a class of the cryptography library, not of this package.
 FOREIGN_CLASSES = ("PublicKey",)
@@ -227,21 +233,27 @@ from {module} import (
     PUBLIC_REGISTRY_ID,
     REGISTER_SIZE,
     SOURCE_EMBEDDED,
+    ArtifactTrust,
     ConfigAuthorizer,
     ConfigEndorsement,
+    ConfigSigningKeys,
+    ConfigTrust,
+    EmbeddedArtifacts,
     EmbeddedConfig,
     EmbeddedConfigReference,
-    EmbeddedReferences,
+    EndorsedArtifacts,
     Expected,
     ExpectedSEVSNP,
     ExpectedTDX,
     Layer,
     Measurement,
     Pin,
+    Policy,
     PublicKey,
     Reference,
     ReferenceSource,
     Register,
+    Registries,
     RuntimeReference,
     SEVSNP,
     TDX,
@@ -318,36 +330,35 @@ def main() -> None:
     assert PUBLIC_REGISTRY_ID
     nonce: bytes = random_nonce()
     assert len(nonce) == NONCE_SIZE
-    verifier = Verifier(pinned_registers=expected, freshness_max_age=timedelta(days=1))
+    verifier = Verifier(policy=Policy(pinned_registers=expected, freshness_max_age=timedelta(days=1)))
     assert verifier.pinned_registers == expected
     assert verifier.freshness_max_age == timedelta(days=1)
-    assert not verifier.caller_authorizes_config
     verifier.check_pin_verifiability(Pin(repo="org/repo"))
     verifier.check_pin_verifiability(Pin(project="org/project@v1"))
-    embedded = EmbeddedReferences(
-        config=EmbeddedConfigReference(
-            digest="00" * 32, runtime=RuntimeReference(repo="tinfoilsh/cvmimage", tag="v1.0.0", digest="00" * 32)
-        )
+    config_ref = EmbeddedConfigReference(
+        digest="00" * 32, runtime=RuntimeReference(repo="tinfoilsh/cvmimage", tag="v1.0.0", digest="00" * 32)
     )
-    assert embedded.config is not None
-    assert EmbeddedConfig(data=b"x", name="/org/project/v1").name
-    authorizer: ConfigAuthorizer = authorize
-    try:
-        Verifier(config_authorizer=authorizer, config_registry_ids=[PUBLIC_REGISTRY_ID])
-    except UsageError as err:
-        assert err.message
-    else:
-        fail("an authorizer and registry ids built a verifier")
+    configs: list[ConfigTrust] = [
+        config_ref,
+        EmbeddedConfig(data=b"x", name="/org/project/v1"),
+        ConfigAuthorizer(authorize),
+        Registries([PUBLIC_REGISTRY_ID]),
+    ]
+    assert len(configs) == 4
+    artifacts: ArtifactTrust = EmbeddedArtifacts(runtime=b"x")
+    assert isinstance(artifacts, EmbeddedArtifacts)
     keys: list[PublicKey] = []
     try:
-        Verifier(config_signing_keys=keys)
+        Verifier(ConfigSigningKeys(keys))
     except UsageError as err:
         assert err.message
         assert isinstance(err, ValueError)
     else:
         fail("an empty key list built a verifier")
     key: PublicKey = load_public_key(PEM)
-    keyed = Verifier(config_signing_keys=[load_public_key(PEM)], freshness_signing_keys=[key])
+    keyed = Verifier(
+        ConfigSigningKeys([load_public_key(PEM)]), Policy(artifacts=EndorsedArtifacts(freshness_keys=[key]))
+    )
     assert repr(keyed).startswith("Verifier(")
     keyed.check_pin_verifiability(Pin())
     try:

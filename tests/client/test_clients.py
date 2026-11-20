@@ -26,7 +26,7 @@ from tinfoil._clients import (
 from tinfoil._errors import AttestationError, ConfigurationError, NetworkError
 from tinfoil._gateway import Catalog, CatalogEntry, ModelPin
 from tinfoil._transport import CLIENT_CLOSED
-from tinfoil.verifier import Pin, Verification, Verifier
+from tinfoil.verifier import ConfigAuthorizer, Pin, Verification, Verifier
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -92,7 +92,7 @@ def network(monkeypatch: pytest.MonkeyPatch) -> Network:
 
 
 def authorizer() -> Verifier:
-    return Verifier(config_authorizer=lambda _: None)
+    return Verifier(ConfigAuthorizer(lambda _: None))
 
 
 class TestEnclaveClient:

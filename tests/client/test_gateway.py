@@ -49,7 +49,7 @@ from tinfoil._gateway import (
 from tinfoil._keys import PeerLacksKeyError, key_rejection
 from tinfoil._transport import CLIENT_CLOSED
 from tinfoil._types import TimeoutTypes
-from tinfoil.verifier import Verification, Verifier
+from tinfoil.verifier import ConfigAuthorizer, Verification, Verifier
 
 MODEL = "test-model"
 INITIAL = "initial.example"
@@ -170,7 +170,7 @@ class TestCatalog:
 
 class TestPolicy:
     def test_rejects_invalid_options(self) -> None:
-        authorizer = Verifier(config_authorizer=lambda _: None)
+        authorizer = Verifier(ConfigAuthorizer(lambda _: None))
         with pytest.raises(ConfigurationError, match="pinned-only"):
             _Policy({}, True, None)
         with pytest.raises(ConfigurationError, match="caller-authorized"):

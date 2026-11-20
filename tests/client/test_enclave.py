@@ -31,8 +31,10 @@ from tinfoil._errors import (
 from tinfoil.verifier import (
     KEY_SPKI_FP_SHA256_V1_FORMAT,
     KEY_X25519_HPKE_V1_FORMAT,
+    ConfigAuthorizer,
     CryptoMaterialItem,
     Pin,
+    Policy,
     Verification,
     VerificationError,
     Verifier,
@@ -40,7 +42,7 @@ from tinfoil.verifier import (
 
 
 def authorizer() -> Verifier:
-    return Verifier(config_authorizer=lambda _: None)
+    return Verifier(ConfigAuthorizer(lambda _: None))
 
 
 def test_construction_checks_config() -> None:
@@ -67,7 +69,7 @@ def test_construction_checks_config() -> None:
         Enclave("https://enclave.example", Pin(repo="org/repo"))
     with pytest.raises(ConfigurationError, match="invalid host"):
         Enclave("enclave.example", Pin(repo="org/repo"), relay="relay.example/path")
-    shared = Verifier(freshness_max_age=timedelta(hours=1))
+    shared = Verifier(policy=Policy(freshness_max_age=timedelta(hours=1)))
     enclave = Enclave("enclave.example", Pin(repo="org/repo"), relay="relay.example", verifier=shared)
     assert enclave.verifier is shared, "enclaves share the caller's verifier"
     assert enclave.relay == "relay.example"
