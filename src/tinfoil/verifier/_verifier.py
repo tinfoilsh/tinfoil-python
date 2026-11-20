@@ -369,6 +369,10 @@ def _trust_policy(config: object, policy: object, *, overrides: Overrides | None
             raise UsageError(f"freshness maximum age must be a timedelta, not {type(freshness_max_age).__name__}")
         if freshness_max_age < timedelta(0):
             raise UsageError("freshness maximum age must not be negative")
+        if freshness_max_age == timedelta(0):
+            raise UsageError(
+                "freshness maximum age must be positive: zero would reject every witness; leave it None for the default"
+            )
         if freshness_max_age > MAX_AGE_SPAN:
             raise UsageError("freshness maximum age is longer than any representable window")
         max_age = freshness_max_age

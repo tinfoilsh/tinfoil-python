@@ -128,10 +128,12 @@ def test_new_defaults() -> None:
 
 
 def test_freshness_max_age() -> None:
-    # None keeps the default; every non-negative age is honored, including zero, which accepts only a witness that
-    # is no older than the verification instant.
+    # None keeps the default and every positive age is honored. Zero is refused rather than read as a bound of zero,
+    # which would reject every witness, and so is an age that rounds to zero microseconds.
     assert Verifier(policy=Policy(freshness_max_age=None)).freshness_max_age == DEFAULT_MAX_AGE
-    assert Verifier(policy=Policy(freshness_max_age=timedelta(0))).freshness_max_age == timedelta(0)
+    for zero in (timedelta(0), timedelta(seconds=0), timedelta(microseconds=0.4), -timedelta(0)):
+        with pytest.raises(UsageError, match="freshness maximum age must be positive"):
+            Verifier(policy=Policy(freshness_max_age=zero))
     assert Verifier(policy=Policy(freshness_max_age=timedelta(microseconds=1))).freshness_max_age == timedelta(
         microseconds=1
     )

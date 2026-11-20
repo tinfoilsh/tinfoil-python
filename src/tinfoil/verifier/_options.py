@@ -143,9 +143,9 @@ class Policy:
 
     freshness_max_age: timedelta | None = None
     """How old an authenticated witness or approval may be at the verification instant. None keeps the seven-day
-    default. Any non-negative ``timedelta`` is honored as given: zero accepts only a witness that is no older than
-    the verification instant. A negative age, or one longer than the span between the earliest and the latest
-    representable ``datetime``, is a UsageError."""
+    default; a positive ``timedelta`` is honored as given. Zero, including a ``timedelta`` that rounds to zero
+    microseconds, is a UsageError rather than a bound that would reject every witness, and so is a negative age or
+    one longer than the span between the earliest and the latest representable ``datetime``."""
 
     artifacts: ArtifactTrust | None = None
     """How the runtime and platform artifacts are trusted; None selects ``EndorsedArtifacts()``."""

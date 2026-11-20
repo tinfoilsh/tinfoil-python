@@ -35,6 +35,7 @@ The pre-releases configured clients with options that were checked against each 
 | `Verifier(embedded_references=EmbeddedReferences(config=c, runtime=r, platform=p))` | `Verifier(c, Policy(artifacts=EmbeddedArtifacts(runtime=r, platform=p)))`, with `c` an `EmbeddedConfig` or `EmbeddedConfigReference` |
 | `Verifier(freshness_signing_keys=keys)` | `Verifier(policy=Policy(artifacts=EndorsedArtifacts(freshness_keys=keys)))`, or `freshness_keys` on `EmbeddedArtifacts` |
 | `Verifier(pinned_registers=e, freshness_max_age=a)` | `Verifier(policy=Policy(pinned_registers=e, freshness_max_age=a))` |
+| `freshness_max_age=timedelta(0)`, a bound of zero | A `UsageError` (a `ConfigurationError` from a client), since it would reject every witness; `None` still selects the seven-day default |
 | `Verifier.caller_authorizes_config` | Removed |
 
 The checks that rejected conflicting options are gone with them, since those combinations can no longer be written. The one check that spans two fields that remains is `EmbeddedArtifacts` with both artifacts embedded and `freshness_keys` set, since nothing would be left for the keys to verify.

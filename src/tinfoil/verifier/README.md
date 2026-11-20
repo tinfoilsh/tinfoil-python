@@ -124,7 +124,7 @@ plain frozen dataclasses:
   | Field | Effect |
   | --- | --- |
   | `pinned_registers` | Registers that the enclave must have measured, on top of what the release fixes. |
-  | `freshness_max_age` | How old a witness or approval may be. `None` keeps seven days; `timedelta(0)` accepts only a witness that is no older than the verification instant. |
+  | `freshness_max_age` | How old a witness or approval may be. `None` keeps seven days; a positive `timedelta` sets the bound, and zero or a negative age is a `UsageError`. |
   | `artifacts` | `EndorsedArtifacts(freshness_keys=...)`, the default, trusts the runtime and platform that the document's endorsements authenticate, with freshness approvals that Tinfoil's public keys or the given keys sign. `EmbeddedArtifacts(runtime=..., platform=...)` trusts the caller's own runtime manifest or platform artifact in place of its endorsement. |
 
 Keys come from `load_public_key`, which accepts a PEM `PUBLIC KEY` block as
