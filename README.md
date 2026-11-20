@@ -4,17 +4,19 @@
 [![SDK Test](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/test.yml/badge.svg)](https://github.com/tinfoilsh/tinfoil-python/actions/workflows/test.yml)
 [![Documentation](https://img.shields.io/badge/docs-tinfoil.sh-blue)](https://docs.tinfoil.sh/sdk/python-sdk)
 
-A Python client for verifiably private AI inference with Tinfoil. It wraps the [OpenAI Python client](https://github.com/openai/openai-python) with the same API, and before sending any request it verifies the enclave's attestation. The enclave and router clients then pin the TLS connection to the attested key, so only the verified enclave can read the request, headers included. To send their requests through your own proxy, set `transport_mode="ehbp"`, which encrypts request and response bodies to the attested key using [EHBP](https://docs.tinfoil.sh/resources/ehbp) but leaves the method, URL and headers visible to the proxy. The gateway clients always use EHBP, so Tinfoil's gateway sees the method, URL and headers of their requests.
+A Python client for verifiably private AI inference with Tinfoil. Its HTTP clients verify the enclave's attestation before sending any request, and an OpenAI client built on top of them gives you the [OpenAI Python client](https://github.com/openai/openai-python)'s API. The enclave and router clients pin the TLS connection to the attested key by default, so only the verified enclave can read the request, headers included. To send their requests through your own proxy, use `transport=EHBP(proxy_url=...)`, which encrypts request and response bodies to the attested key using [EHBP](https://docs.tinfoil.sh/resources/ehbp) but leaves the method, URL and headers visible to the proxy. The gateway clients always use EHBP, so Tinfoil's gateway sees the method, URL and headers of their requests.
 
-Coming from 0.15? The client API and the verifier are new; [MIGRATION.md](MIGRATION.md) maps every old name to its replacement.
+Coming from 0.15 or an earlier 0.16 pre-release? [MIGRATION.md](MIGRATION.md) maps every old name to its replacement.
 
 ## Installation
 
 Requires Python 3.11 or later.
 
 ```bash
-pip install tinfoil
+pip install 'tinfoil[openai]'
 ```
+
+The `openai` extra installs the [OpenAI Python client](https://github.com/openai/openai-python), which the OpenAI clients need. `pip install tinfoil` alone installs the verifier and the HTTP clients; importing an OpenAI name from it then raises a `ModuleNotFoundError` that names the extra.
 
 ## Quick Start
 
@@ -33,7 +35,7 @@ chat_completion = client.chat.completions.create(
 print(chat_completion.choices[0].message.content)
 ```
 
-`create_client` discovers Tinfoil's router, verifies it and returns an `openai.OpenAI` subclass that sends every request over the attested connection. It takes the `openai` package's options (`api_key`, `timeout`, `max_retries`, `default_headers` and so on) and nothing else; the route options below belong to `RouterOpenAIClient`, which it is built on. The `openai` options that would choose another base URL or exchange a token outside the attested connection, `data_residency`, `provider`, `websocket_base_url` and `workload_identity`, raise `ConfigurationError` on every OpenAI client and copy when they are set; a value of `None` counts as unset and is ignored. Every method and type of the OpenAI client is unchanged, except the websocket entry points: the `realtime` resource, its `beta.realtime` alias, and the `connect` methods of `responses`, `beta.responses`, `live`, `live.sideband` and `live.forks` raise `ConfigurationError`, because a websocket can't use the attested HTTP client and would bypass the attested connection. The HTTP methods of those resources, such as `responses.create`, work as before.
+`create_client` discovers Tinfoil's router, verifies it and returns an `OpenAIClient`, an `openai.OpenAI` subclass that sends every request over the attested connection. It takes the `openai` package's options (`api_key`, `timeout`, `max_retries`, `default_headers` and so on) and nothing else; for the route options below, create a `RouterHTTPClient` and pass it to `OpenAIClient`. The SDK sets the base URL of every OpenAI client itself, so a `base_url` or `data_residency` option, or `OPENAI_BASE_URL` in the environment, has no effect. The `openai` options that would choose a websocket URL or exchange a token outside the attested connection, `provider`, `websocket_base_url` and `workload_identity`, raise `ConfigurationError` on every OpenAI client and copy when they are set; a value of `None` counts as unset and is ignored. Every method and type of the OpenAI client is unchanged, except the websocket entry points: the `realtime` resource, its `beta.realtime` alias, and the `connect` methods of `responses`, `beta.responses`, `live`, `live.sideband` and `live.forks` raise `ConfigurationError`, because a websocket can't use the attested HTTP client and would bypass the attested connection. The HTTP methods of those resources, such as `responses.create`, work as before.
 
 ### Async
 
@@ -96,59 +98,61 @@ with open("audio.mp3", "rb") as audio_file:
 print(transcription.text)
 ```
 
+## The HTTP clients and the OpenAI client
+
+The SDK is layered. An HTTP client carries a route, its verification and its transport: `EnclaveHTTPClient` for one enclave, `RouterHTTPClient` for the router that discovery chooses, and `GatewayHTTPClient` for the gateway. Each exposes an `httpx.Client` as `http_client`, whose requests reach only the verified route; a request to any other origin is refused. `OpenAIClient(http_client)` builds an `openai.OpenAI` client on top of any of them, without network I/O, and `AsyncOpenAIClient` does the same for the asynchronous HTTP clients. An OpenAI client takes only these HTTP clients; anything else is a `ConfigurationError`.
+
 ## Talking to one enclave
 
-`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and what it must be running; the client verifies the enclave against that pin before it returns. The second argument is a `Pin`: `Pin(repo=...)` for a GitHub repository, `Pin(project=...)` for a config registry project, or both to accept either; neither is satisfied by the other's collateral. A bare string is a `ConfigurationError`.
+`create_client` sends to the router that discovery chooses. To talk to one enclave instead, name its host and what it must be running; the client verifies the enclave before it returns. The second argument, the trust, names who vouches for the enclave's config:
+
+| Trust | Accepts |
+| --- | --- |
+| `RepoPin(repo)` | v2 collateral for a GitHub repository, `owner/name[@tag][@sha256:digest]` |
+| `ProjectPin(project, registry_ids=None)` | v3 collateral for a config registry project, `org/project[@revision][@sha256:digest]`, that Tinfoil's public registry endorses, or one of `registry_ids`. An empty list is a `ConfigurationError`; list `tinfoil.verifier.PUBLIC_REGISTRY_ID` to keep the public registry beside your own |
+| `SignedBy(keys, project=None)` | v3 configs that your own ECDSA P-256 keys signed, optionally restricted to `project` |
+| `AuthorizedBy(authorize)` | v3 configs that your callback accepts |
+| `EmbeddedConfig(data, name="")` | v3 collateral for exactly the config bytes that you supply |
+| `EitherPin(repo, project)` | v2 collateral for `repo` or v3 collateral for `project`, for the migration from v2 to v3 |
+
+Each is a frozen dataclass, and a value of any other type, such as a bare string, is a `ConfigurationError`.
 
 ```python
 import os
 
-from tinfoil import EnclaveOpenAIClient, Pin
+from tinfoil import EitherPin, EnclaveHTTPClient, OpenAIClient
 
-client = EnclaveOpenAIClient(
+http_client = EnclaveHTTPClient(
     "inference.tinfoil.sh",
-    Pin(repo="tinfoilsh/confidential-model-router", project="tinfoilsh/confidential-model-router"),
-    api_key=os.environ["TINFOIL_API_KEY"],
+    EitherPin("tinfoilsh/confidential-model-router", "tinfoilsh/confidential-model-router"),
 )
+client = OpenAIClient(http_client, api_key=os.environ["TINFOIL_API_KEY"])
 chat_completion = client.chat.completions.create(
     model="llama3-3-70b",
     messages=[{"role": "user", "content": "Hi"}],
 )
-```
 
-For requests outside the OpenAI API, `EnclaveHTTPClient` verifies the same enclave and exposes an `httpx.Client` whose requests reach only it; a request to any other origin is refused. Build URLs from `base_url`, which ends in a slash:
-
-```python
-from tinfoil import EnclaveHTTPClient, Pin
-
-client = EnclaveHTTPClient(
-    "inference.tinfoil.sh",
-    Pin(repo="tinfoilsh/confidential-model-router", project="tinfoilsh/confidential-model-router"),
-)
-
-response = client.http_client.get(client.base_url + "v1/models", timeout=30)
+# Requests outside the OpenAI API go through the HTTP client; build URLs from base_url, which ends in a slash.
+response = http_client.http_client.get(http_client.base_url + "v1/models", timeout=30)
 print(response.status_code, response.text)
 ```
 
-`RouterHTTPClient()` is the same client for the router that discovery chooses. Each OpenAI client exposes the attested client that it sends through as `client.http_client`, so the facts below are read the same way from either.
+The OpenAI client sends to `/v1/` under the enclave's origin; pass `api_path="/openai/v1"` to `OpenAIClient` for an API mounted elsewhere. It must be an absolute path without a query, a fragment, an encoded slash or a `.` or `..` segment. `client.http_client` is the HTTP client that an OpenAI client sends through, and `http_client.trust` is the trust that the enclave is verified under. `RouterHTTPClient()` takes no trust: the router is always verified against its own repository.
 
 ## Sending through a proxy
 
-A pinned TLS connection cannot pass through a proxy, so a proxy needs the `"ehbp"` transport mode, which seals request and response bodies to the attested key instead. The proxy forwards the bodies without being able to read them, but the method, URL and headers, the API key included, stay visible to it, so it must be one that you trust with them and must use HTTPS (plain HTTP is accepted only for a loopback address). Requests carry an `X-Tinfoil-Enclave-Url` header that names the enclave to forward to.
+A pinned TLS connection cannot pass through a proxy, so a proxy needs the EHBP transport, which seals request and response bodies to the attested key instead. The proxy forwards the bodies without being able to read them, but the method, URL and headers, the API key included, stay visible to it, so it must be one that you trust with them and must use HTTPS (plain HTTP is accepted only for a loopback address). Requests carry an `X-Tinfoil-Enclave-Url` header that names the enclave to forward to.
 
 ```python
 import os
 
-from tinfoil import RouterOpenAIClient
+from tinfoil import EHBP, OpenAIClient, RouterHTTPClient
 
-client = RouterOpenAIClient(
-    transport_mode="ehbp",
-    base_url="https://proxy.example.com/v1/",
-    api_key=os.environ["TINFOIL_API_KEY"],
-)
+http_client = RouterHTTPClient(transport=EHBP(proxy_url="https://proxy.example.com/tinfoil"))
+client = OpenAIClient(http_client, api_key=os.environ["TINFOIL_API_KEY"])
 ```
 
-On the OpenAI clients `base_url` is this route option, not the `openai` package's: it is the URL that requests are sent to, verbatim, so it carries the API prefix that the proxy expects. On the HTTP clients it becomes `base_url` as well. `EnclaveOpenAIClient` and `EnclaveHTTPClient` take the same two options.
+The proxy URL is where the proxy is mounted, not the API's base URL: the OpenAI client above sends to `https://proxy.example.com/tinfoil/v1/`, and the HTTP client's `base_url` is `https://proxy.example.com/tinfoil/`. `EnclaveHTTPClient` takes the same `transport`, and refuses a proxy URL on the enclave's own origin; leave the proxy URL unset to connect directly. `transport=TLS()` is the default.
 
 ## The gateway
 
@@ -157,16 +161,16 @@ Tinfoil's gateway serves many models behind one URL; a gateway client seals each
 ```python
 import os
 
-from tinfoil import GatewayOpenAIClient, ModelPin
+from tinfoil import GatewayHTTPClient, ModelPin, OpenAIClient
 
-client = GatewayOpenAIClient(
+http_client = GatewayHTTPClient(
     model_pins={"glm-5-3": ModelPin("tinfoilsh/confidential-glm5-3-nvfp4")},
     pinned_models_only=True,
-    api_key=os.environ["TINFOIL_API_KEY"],
 )
+client = OpenAIClient(http_client, api_key=os.environ["TINFOIL_API_KEY"])
 ```
 
-`GatewayHTTPClient` is the `httpx` form, with `models()` for the catalog's model names and `ensure_verified(model)` for a model's verification.
+The gateway's `url` already carries the API path, so `OpenAIClient` takes no `api_path` with a gateway client. `GatewayHTTPClient` also has `models()` for the catalog's model names and `ensure_verified(model)` for a model's verification.
 
 ## Reading the verification
 
@@ -190,7 +194,18 @@ if current is not None:
 
 A gateway client verifies one replica per model, so its accessors differ: `ensure_verified(model)` returns a valid verification of a replica serving `model`, and `current` is a list of `ReplicaVerification` records, one per replica used so far and retained by the client (a replica reached by redirect may not be in the catalog), each with the replica's `host`, the `models` requested through it, the `reference` it was verified against and its `verification`.
 
-To reject a verified enclave by its facts, pass `verification_check=` to a route client. To change what the verifier itself requires, pass `verifier=` a `tinfoil.verifier.Verifier`: `Verifier(pinned_registers=...)` pins registers that the enclave must have measured, `freshness_max_age` bounds how old a witness or approval may be, and the trust options supply your own roots.
+To reject a verified enclave by its facts, pass `verification_check=` to an HTTP client. To change what the verifier itself requires, pass `policy=` a `tinfoil.verifier.Policy`: `pinned_registers` pins registers that the enclave must have measured, `freshness_max_age` bounds how old a witness or approval may be, and `artifacts` supplies your own runtime and platform artifacts or freshness keys. Every HTTP client takes `policy`, and a gateway `ModelPin` takes one that replaces the gateway's for that model. The client builds its verifier from the trust and the policy, so an invalid policy is a `ConfigurationError` before any network I/O.
+
+```python
+from tinfoil import EnclaveHTTPClient, RepoPin
+from tinfoil.verifier import Policy, parse_expected_sevsnp
+
+http_client = EnclaveHTTPClient(
+    "enclave.example.com",
+    RepoPin("acme/inference"),
+    policy=Policy(pinned_registers=parse_expected_sevsnp("ab" * 48)),
+)
+```
 
 ## Errors
 
@@ -221,18 +236,18 @@ except APIStatusError as err:
 
 ## Prompt cache scoping
 
-The router partitions prompt caches by API identity and a `user_cache_secret` that the client adds to eligible requests. The router and gateway clients, `create_client` included, take the secret from the `user_cache_secret` option and otherwise use a random secret that is generated in memory once per process and shared by every client in it. The SDK reads no environment variable or file for the secret, so prompt-cache hits are not shared across processes unless the application passes a stable `user_cache_secret` itself. The exception is a process created with `os.fork` after its parent has generated the secret, for example by creating a client: it keeps the parent's secret, so prefork workers of one application share a cache namespace. Multi-user services should scope each request to its end user, with a per-request value or a client-level one on `RouterOpenAIClient`:
+The router partitions prompt caches by API identity and a `user_cache_secret` that the client adds to eligible requests. The router and gateway clients, `create_client` included, take the secret from their `user_cache_secret` option and otherwise use a random secret that is generated in memory once per process and shared by every client in it. The SDK reads no environment variable or file for the secret, so prompt-cache hits are not shared across processes unless the application passes a stable `user_cache_secret` itself. The exception is a process created with `os.fork` after its parent has generated the secret, for example by creating a client: it keeps the parent's secret, so prefork workers of one application share a cache namespace. Multi-user services should scope each request to its end user, with a per-request value or a client-level one on `RouterHTTPClient`:
 
 ```python
 import os
 
-from tinfoil import RouterOpenAIClient
+from tinfoil import OpenAIClient, RouterHTTPClient
 
 secret = os.environ["MY_CACHE_SECRET"]
 per_user_secret = os.environ["MY_USER_CACHE_SECRET"]
 
 # A stable, opaque secret for this client.
-client = RouterOpenAIClient(user_cache_secret=secret, api_key=os.environ["TINFOIL_API_KEY"])
+client = OpenAIClient(RouterHTTPClient(user_cache_secret=secret), api_key=os.environ["TINFOIL_API_KEY"])
 
 # A per-request value wins over the client-level secret.
 chat_completion = client.chat.completions.create(
@@ -242,21 +257,21 @@ chat_completion = client.chat.completions.create(
 )
 ```
 
-An enclave client uses only the value that it is given, since other enclaves do not read the field. See [Prompt caching](https://docs.tinfoil.sh/sdk/prompt-caching) for the resolution order and guidance on choosing a scope.
+An enclave client has no cache-secret option and sends request bodies as they are, since other enclaves do not read the field; to scope the prompt cache through an enclave client that points at a router, set `user_cache_secret` in each request body, as with `extra_body` above. See [Prompt caching](https://docs.tinfoil.sh/sdk/prompt-caching) for the resolution order and guidance on choosing a scope.
 
 ## Timeouts
 
-`timeout=` on any OpenAI client is the `openai` package's per-request timeout, as it is on `openai.OpenAI`. `http_timeout=` on `EnclaveOpenAIClient`, `RouterOpenAIClient` and `GatewayOpenAIClient` is the `httpx` timeout of the attested client: the attestation fetches, which are bounded as a whole at 30 seconds besides, and the requests sent through `client.http_client` directly. The HTTP clients call the same option `timeout=`. Both default to `DEFAULT_HTTP_TIMEOUT`, five seconds to connect and ten minutes for each read.
+`timeout=` on an OpenAI client is the `openai` package's per-request timeout, as it is on `openai.OpenAI`. `timeout=` on an HTTP client is the `httpx` timeout of the attested client: the attestation fetches, which are bounded as a whole at 30 seconds besides, and the requests sent through its `http_client` directly. It defaults to `DEFAULT_HTTP_TIMEOUT`, five seconds to connect and ten minutes for each read.
 
 ```python
 import os
 
 import httpx
 
-from tinfoil import RouterOpenAIClient
+from tinfoil import OpenAIClient, RouterHTTPClient
 
-client = RouterOpenAIClient(
-    http_timeout=httpx.Timeout(60.0, connect=5.0),  # the attested client's
+client = OpenAIClient(
+    RouterHTTPClient(timeout=httpx.Timeout(60.0, connect=5.0)),  # the attested client's
     timeout=120.0,  # the openai package's, per request
     api_key=os.environ["TINFOIL_API_KEY"],
 )
@@ -264,7 +279,7 @@ client = RouterOpenAIClient(
 
 ## Closing
 
-Every client is a context manager and has `close()`. Closing releases the connections and stops re-verification; afterward, verification and catalog methods raise `ConfigurationError`, while requests through the closed `http_client` (including OpenAI requests) raise `RuntimeError`. Copies made with `with_options` share the attested client, so closing a copy closes the original's too.
+Every client is a context manager and has `close()`. Closing releases the connections and stops re-verification; afterward, verification and catalog methods raise `ConfigurationError`, while requests through the closed `http_client` (including OpenAI requests) raise `RuntimeError`. Closing an OpenAI client closes the HTTP client that it sends through, as the `openai` package closes an `http_client` that it is given, and copies made with `with_options` share it, so closing a copy closes the original's too.
 
 ```python
 import os
