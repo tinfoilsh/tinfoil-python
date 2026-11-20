@@ -1,6 +1,6 @@
 # Migrating to the v3 client
 
-The client verifies enclaves with version 3 of Tinfoil's attestation format, through a verifier that is its own package, `tinfoil.verifier`. The low-level clients are `httpx` clients for one route each, and `OpenAIClient` is an `openai` client subclass built on top of one of them, so every resource of the `openai` package is available and the OpenAI client is the client itself. The OpenAI clients need the optional `openai` extra: install `tinfoil[openai]`.
+The client verifies enclaves with version 3 of Tinfoil's attestation format, through a verifier that is its own package, `tinfoil.verifier`. The low-level clients are `httpx` clients for one route each, and `OpenAIClient` is an `openai` client subclass built on top of one of them, so every HTTP resource of the `openai` package is available and the OpenAI client is the client itself; the websocket entry points are refused, as the table below says. The OpenAI clients need the optional `openai` extra: install `tinfoil[openai]`.
 
 ## From 0.16.0rc3 and earlier pre-releases
 

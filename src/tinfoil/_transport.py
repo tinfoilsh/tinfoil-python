@@ -144,13 +144,23 @@ def resolve_transport(transport: object) -> tuple[Transport, str]:
 
 
 def mode_for(transport: Transport) -> Mode:
-    """The synchronous mode for a ``transport`` that ``resolve_transport`` checked."""
-    return EHBPMode() if isinstance(transport, EHBP) else TLSMode()
+    """The synchronous mode for a ``transport`` that ``resolve_transport`` checked; anything else is a
+    ConfigurationError."""
+    if isinstance(transport, TLS):
+        return TLSMode()
+    if isinstance(transport, EHBP):
+        return EHBPMode()
+    raise ConfigurationError(f"transport must be a TLS or EHBP value, not {type(transport).__name__}")
 
 
 def async_mode_for(transport: Transport) -> AsyncMode:
-    """The asynchronous mode for a ``transport`` that ``resolve_transport`` checked."""
-    return AsyncEHBPMode() if isinstance(transport, EHBP) else AsyncTLSMode()
+    """The asynchronous mode for a ``transport`` that ``resolve_transport`` checked; anything else is a
+    ConfigurationError."""
+    if isinstance(transport, TLS):
+        return AsyncTLSMode()
+    if isinstance(transport, EHBP):
+        return AsyncEHBPMode()
+    raise ConfigurationError(f"transport must be a TLS or EHBP value, not {type(transport).__name__}")
 
 
 def _tls_key(verified: Verification) -> str:

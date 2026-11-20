@@ -69,7 +69,11 @@ class EmbeddedInputs:
             policy = Policy(
                 pinned_registers=policy.pinned_registers,
                 freshness_max_age=policy.freshness_max_age,
-                artifacts=EmbeddedArtifacts(runtime=self.runtime, platform=self.platform),
+                artifacts=EmbeddedArtifacts(
+                    runtime=self.runtime,
+                    platform=self.platform,
+                    freshness_keys=getattr(policy.artifacts, "freshness_keys", None),
+                ),
             )
         return self.config, policy
 

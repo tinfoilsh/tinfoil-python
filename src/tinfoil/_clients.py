@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from types import TracebackType
-from typing import Self
+from typing import Self, TypeAlias
 from urllib.parse import urlsplit
 
 import httpx
@@ -642,10 +642,19 @@ class AsyncGatewayHTTPClient:
         await self.close()
 
 
+AttestedHTTPClient: TypeAlias = EnclaveHTTPClient | RouterHTTPClient | GatewayHTTPClient
+"""An HTTP client that an ``OpenAIClient`` sends through: one of this package's three, as its constructor
+returned it."""
+
+AsyncAttestedHTTPClient: TypeAlias = AsyncEnclaveHTTPClient | AsyncRouterHTTPClient | AsyncGatewayHTTPClient
+"""An HTTP client that an ``AsyncOpenAIClient`` sends through, as its ``create`` returned it."""
+
 __all__ = [
+    "AsyncAttestedHTTPClient",
     "AsyncEnclaveHTTPClient",
     "AsyncGatewayHTTPClient",
     "AsyncRouterHTTPClient",
+    "AttestedHTTPClient",
     "EnclaveHTTPClient",
     "GatewayHTTPClient",
     "RouterHTTPClient",

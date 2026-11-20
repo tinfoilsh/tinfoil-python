@@ -4,7 +4,6 @@ config, the runtime that it pins and the platform endorsements, each endorsed, e
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
@@ -17,7 +16,6 @@ from tinfoil.verifier._document.collateral.collateral import (
     FRESHNESS_ID_PLATFORM,
     FRESHNESS_ID_RUNTIME,
 )
-from tinfoil.verifier._document.collateral.config import ConfigEndorsement
 from tinfoil.verifier._document.collateral.runtime import RuntimeReference
 from tinfoil.verifier._document.document import Document
 from tinfoil.verifier._embedded import ResolvedReferences
@@ -39,7 +37,7 @@ from tinfoil.verifier._endorsement.provenance import ProvenanceClient
 from tinfoil.verifier._endorsement.reference import AuthenticatedArtifact, ReleaseReferenceError, parse_reference
 from tinfoil.verifier._errors import LAYER_PROVENANCE, UsageError, VerificationError
 from tinfoil.verifier._measurement import Expected
-from tinfoil.verifier._options import PublicKey
+from tinfoil.verifier._options import AuthorizeConfig, PublicKey
 from tinfoil.verifier._policy import ARTIFACT_FORMAT_V2, Artifact
 from tinfoil.verifier._policy import parse as parse_policy_artifact
 from tinfoil.verifier._quote import ConfigReferenceValues, QuoteOptions, ReferenceValues
@@ -52,9 +50,6 @@ from tinfoil.verifier._verification import (
     ConfigVerification,
 )
 from tinfoil.verifier._x509.certificate import X509Error, load_public_key_der, load_public_key_pem
-
-AuthorizeConfig = Callable[[ConfigEndorsement], None]
-"""The ``authorize`` callable of a ``ConfigAuthorizer``."""
 
 _P256 = ec.SECP256R1.name
 

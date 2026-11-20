@@ -64,6 +64,8 @@ def test_each_variant_converts_to_a_config_trust_and_a_pin() -> None:
         (ProjectPin("org/project", ()), "registry_ids must not be empty; leave it None"),
         (ProjectPin("org/project", "acme"), "registry_ids must be a sequence of registry IDs"),
         (EitherPin("org/repo", ""), "EitherPin requires both repo and project"),
+        (SignedBy(iter(())), "SignedBy keys must be a sequence of public keys"),  # type: ignore[arg-type]
+        (SignedBy(set()), "SignedBy keys must be a sequence of public keys"),  # type: ignore[arg-type]
         (EitherPin("", "org/project"), "EitherPin requires both repo and project"),
         (None, "trust must be a RepoPin, ProjectPin, SignedBy, AuthorizedBy, EmbeddedConfig or EitherPin value"),
         (Pin(repo="org/repo"), "not Pin"),

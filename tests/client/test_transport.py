@@ -421,6 +421,11 @@ def test_modes_require_their_keys() -> None:
     assert isinstance(mode_for(EHBP()), EHBPMode)
     assert isinstance(async_mode_for(TLS()), AsyncTLSMode)
     assert isinstance(async_mode_for(EHBP("https://proxy.example/")), AsyncEHBPMode)
+    for unchecked in ("ehbp", None):
+        with pytest.raises(ConfigurationError, match="transport must be a TLS or EHBP value"):
+            mode_for(unchecked)  # type: ignore[arg-type]
+        with pytest.raises(ConfigurationError, match="transport must be a TLS or EHBP value"):
+            async_mode_for(unchecked)  # type: ignore[arg-type]
 
 
 def test_resolve_transport() -> None:

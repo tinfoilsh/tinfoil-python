@@ -130,6 +130,9 @@ def test_refuse_enclave_origin_proxy() -> None:
     refuse_enclave_origin_proxy("https://proxy.example.com/v1/", "enclave.example.com")
     refuse_enclave_origin_proxy("http://enclave.example.com/v1/", "enclave.example.com")
     refuse_enclave_origin_proxy("https://enclave.example.com:8443/", "enclave.example.com")
+    for malformed in ("/relay", "https://u:p@proxy.example/"):
+        with pytest.raises(ConfigurationError, match="invalid proxy URL"):
+            refuse_enclave_origin_proxy(malformed, "enclave.example.com")
     for proxy_url in ("https://enclave.example.com/relay", "https://ENCLAVE.example.com:443"):
         with pytest.raises(ConfigurationError, match="leave proxy_url unset to connect directly") as err:
             refuse_enclave_origin_proxy(proxy_url, "enclave.example.com")

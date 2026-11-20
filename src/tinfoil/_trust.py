@@ -141,7 +141,9 @@ def verifier_inputs(trust: object) -> VerifierInputs:
             )
         return VerifierInputs(Registries(ids), pin, dataclasses.replace(trust, registry_ids=ids))
     if isinstance(trust, SignedBy):
-        signed = dataclasses.replace(trust, keys=_frozen(trust.keys))
+        if isinstance(trust.keys, str | bytes | bytearray | memoryview) or not isinstance(trust.keys, Sequence):
+            raise ConfigurationError("SignedBy keys must be a sequence of public keys")
+        signed = dataclasses.replace(trust, keys=tuple(trust.keys))
         return VerifierInputs(ConfigSigningKeys(signed.keys), Pin(project=trust.project), signed)
     if isinstance(trust, AuthorizedBy):
         return VerifierInputs(ConfigAuthorizer(trust.authorize), Pin(), trust)
@@ -159,10 +161,8 @@ def verifier_inputs(trust: object) -> VerifierInputs:
 
 
 def _frozen(value: Any) -> Any:
-    """``value`` as an immutable copy when it is a list or a mutable buffer, so that a client's copy of the trust
-    argument shares nothing that the caller can change; any other value is returned for the verifier to check."""
-    if isinstance(value, list):
-        return tuple(value)
+    """``value`` as an immutable copy when it is a mutable buffer, so that a client's copy of the trust argument
+    shares nothing that the caller can change; any other value is returned for the verifier to check."""
     if isinstance(value, bytearray | memoryview):
         return bytes(value)
     return value

@@ -41,9 +41,11 @@ if TYPE_CHECKING:
     )
 
     from tinfoil._clients import (
+        AsyncAttestedHTTPClient,
         AsyncEnclaveHTTPClient,
         AsyncGatewayHTTPClient,
         AsyncRouterHTTPClient,
+        AttestedHTTPClient,
         EnclaveHTTPClient,
         GatewayHTTPClient,
         RouterHTTPClient,
@@ -59,12 +61,10 @@ if TYPE_CHECKING:
         fetch_catalog_async,
     )
     from tinfoil._openai import (
-        AsyncAttestedHTTPClient,
         AsyncClient,
         AsyncOpenAIClient,
         AsyncOpenAICopyOptions,
         AsyncOpenAIOptions,
-        AttestedHTTPClient,
         Client,
         OpenAIClient,
         OpenAICopyOptions,
@@ -168,9 +168,11 @@ _MODULE_OF: dict[str, str] = {
         (
             "tinfoil._clients",
             (
+                "AsyncAttestedHTTPClient",
                 "AsyncEnclaveHTTPClient",
                 "AsyncGatewayHTTPClient",
                 "AsyncRouterHTTPClient",
+                "AttestedHTTPClient",
                 "EnclaveHTTPClient",
                 "GatewayHTTPClient",
                 "RouterHTTPClient",
@@ -195,12 +197,10 @@ _MODULE_OF: dict[str, str] = {
         (
             "tinfoil._openai",
             (
-                "AsyncAttestedHTTPClient",
                 "AsyncClient",
                 "AsyncOpenAIClient",
                 "AsyncOpenAICopyOptions",
                 "AsyncOpenAIOptions",
-                "AttestedHTTPClient",
                 "Client",
                 "OpenAIClient",
                 "OpenAICopyOptions",

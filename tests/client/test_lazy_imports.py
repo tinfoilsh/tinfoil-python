@@ -182,15 +182,21 @@ def test_the_type_checker_sees_the_same_names_from_the_same_modules() -> None:
 
 
 def test_without_the_openai_extra_the_http_clients_work_and_the_openai_names_say_what_to_install() -> None:
-    """``openai`` is the optional ``tinfoil[openai]`` dependency: with it missing, the verifier and the HTTP clients
-    import and build as before, and an OpenAI name is a ModuleNotFoundError that names the extra."""
+    """``openai`` is the optional ``tinfoil[openai]`` dependency: with it missing, the verifier, the trust and
+    transport values and the HTTP client modules import and build without network I/O, and an OpenAI name is a
+    ModuleNotFoundError that names the extra."""
     result = _run(
         """
         import json, sys
         sys.modules["openai"] = None  # as if it were not installed
         import tinfoil
         from tinfoil import EHBP, EnclaveHTTPClient, GatewayHTTPClient, RepoPin, RouterHTTPClient, Trust
-        from tinfoil.verifier import Policy
+        from tinfoil.verifier import Policy, Verifier
+        from tinfoil._transport import mode_for, resolve_transport
+        from tinfoil._trust import verifier_inputs
+        Verifier(None, Policy())
+        verifier_inputs(RepoPin("org/repo"))
+        mode_for(resolve_transport(EHBP("https://proxy.example/"))[0])
         missing = {}
         for name in ("OpenAIClient", "AsyncOpenAIClient", "Client", "create_client", "APIConnectionError"):
             try:

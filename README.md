@@ -137,7 +137,7 @@ response = http_client.http_client.get(http_client.base_url + "v1/models", timeo
 print(response.status_code, response.text)
 ```
 
-The OpenAI client sends to `/v1/` under the enclave's origin; pass `api_path="/openai/v1"` to `OpenAIClient` for an API mounted elsewhere. It must be an absolute path without a query, a fragment, an encoded slash or a `.` or `..` segment. `client.http_client` is the HTTP client that an OpenAI client sends through, and `http_client.trust` is the trust that the enclave is verified under. `RouterHTTPClient()` takes no trust: the router is always verified against its own repository.
+The OpenAI client sends to `/v1/` under the HTTP client's `base_url`: the enclave's origin on a direct connection, or the proxy URL with EHBP (see below). Pass `api_path="/openai/v1"` to `OpenAIClient` for an API mounted elsewhere. It must be an absolute path without a query, a fragment, an encoded slash or a `.` or `..` segment. `client.http_client` is the HTTP client that an OpenAI client sends through, and `http_client.trust` is the trust that the enclave is verified under. `RouterHTTPClient()` takes no trust: the router is always verified against its own repository.
 
 ## Sending through a proxy
 

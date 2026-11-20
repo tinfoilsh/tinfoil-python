@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from functools import cached_property
-from typing import Any, NoReturn, Protocol, Self, TypeAlias, TypedDict, Unpack
+from typing import Any, NoReturn, Protocol, Self, TypedDict, Unpack
 from urllib.parse import unquote
 
 import httpx
@@ -24,9 +24,11 @@ from openai.resources.live import AsyncForks, AsyncLive, AsyncSideband, Forks, L
 from openai.resources.responses import AsyncResponses, Responses
 
 from tinfoil._clients import (
+    AsyncAttestedHTTPClient,
     AsyncEnclaveHTTPClient,
     AsyncGatewayHTTPClient,
     AsyncRouterHTTPClient,
+    AttestedHTTPClient,
     EnclaveHTTPClient,
     GatewayHTTPClient,
     RouterHTTPClient,
@@ -332,14 +334,6 @@ class _AsyncAttestedOpenAI(openai.AsyncOpenAI):
         await self._tinfoil.close()
 
 
-AttestedHTTPClient: TypeAlias = EnclaveHTTPClient | RouterHTTPClient | GatewayHTTPClient
-"""An HTTP client that an ``OpenAIClient`` sends through: one of this package's three, as its constructor or
-``create`` returned it."""
-
-AsyncAttestedHTTPClient: TypeAlias = AsyncEnclaveHTTPClient | AsyncRouterHTTPClient | AsyncGatewayHTTPClient
-"""An HTTP client that an ``AsyncOpenAIClient`` sends through."""
-
-
 class OpenAIClient(_AttestedOpenAI):
     """An ``openai.OpenAI`` client whose requests go through ``client``: an ``EnclaveHTTPClient``,
     ``RouterHTTPClient`` or ``GatewayHTTPClient``. Anything else, an asynchronous client included, is a
@@ -614,12 +608,10 @@ def _refuse_route_options(name: str, route: str, openai_class: str, kwargs: Mapp
 
 __all__ = [
     "DEFAULT_API_PATH",
-    "AsyncAttestedHTTPClient",
     "AsyncClient",
     "AsyncOpenAIClient",
     "AsyncOpenAICopyOptions",
     "AsyncOpenAIOptions",
-    "AttestedHTTPClient",
     "Client",
     "OpenAIClient",
     "OpenAICopyOptions",

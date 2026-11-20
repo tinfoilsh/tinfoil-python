@@ -73,8 +73,12 @@ def refuse_enclave_origin_proxy(proxy_url: str, enclave: str) -> None:
     name of a proxy. Raises ConfigurationError."""
     if not proxy_url:
         return
-    enclave_origin = origin_of(f"https://{enclave}")
-    if origin_of(proxy_url) == enclave_origin:
+    try:
+        proxy_origin = origin_of(proxy_url)
+        enclave_origin = origin_of(f"https://{enclave}")
+    except ValueError as err:
+        raise ConfigurationError(f"invalid proxy URL: {err}") from None
+    if proxy_origin == enclave_origin:
         raise ConfigurationError(
             f'invalid proxy URL: "{enclave_origin}" is the enclave\'s own origin; leave proxy_url unset to connect '
             "directly"

@@ -19,6 +19,9 @@ from tinfoil.verifier._document.collateral.config import ConfigEndorsement
 from tinfoil.verifier._document.collateral.runtime import RuntimeReference
 from tinfoil.verifier._measurement import Expected
 
+AuthorizeConfig: TypeAlias = Callable[[ConfigEndorsement], None]
+"""The ``authorize`` callable of a ``ConfigAuthorizer``."""
+
 PublicKey: TypeAlias = ec.EllipticCurvePublicKey
 """A config or freshness signing key: an ECDSA P-256 public key, the one key type that approvals are signed with.
 ``load_public_key`` decodes one from PEM or DER."""
@@ -53,7 +56,7 @@ class ConfigAuthorizer:
     ``project`` pin is a UsageError. The decision is about ``config``; ``bundle`` is there for transparency, not for
     the authorizer to verify. An ``authorize`` that is not callable is a UsageError."""
 
-    authorize: Callable[[ConfigEndorsement], None]
+    authorize: AuthorizeConfig
 
 
 @final
@@ -91,9 +94,10 @@ class EndorsedArtifacts:
     """Trusts runtime and platform artifacts that the document's endorsements authenticate and whose freshness
     approvals ``freshness_keys`` sign.
 
-    None selects Tinfoil's public keys. These keys approve platform and runtime
-    artifacts only; they authorize no config for any org. An explicit key set
-    requires ``attestation-collaterals/v3``, and an empty one is a UsageError.
+    None selects Tinfoil's public keys. Keys set here approve platform and
+    runtime freshness only; they authorize no config, which the config trust
+    decides. An explicit key set requires ``attestation-collaterals/v3``, and
+    an empty one is a UsageError.
     """
 
     freshness_keys: Sequence[PublicKey] | None = None
@@ -149,6 +153,7 @@ class Policy:
 
 __all__ = [
     "ArtifactTrust",
+    "AuthorizeConfig",
     "ConfigAuthorizer",
     "ConfigSigningKeys",
     "ConfigTrust",

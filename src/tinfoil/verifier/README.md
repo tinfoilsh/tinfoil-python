@@ -148,8 +148,8 @@ what it keeps; a value of another type, an empty key or registry list, or a
 malformed field is a `UsageError`. `EmbeddedArtifacts` needs a runtime or a
 platform, and refuses `freshness_keys` when it embeds both, since no endorsed
 artifact remains for the keys to verify. Any config trust other than None,
-and any artifact trust other than the default, requires
-`attestation-collaterals/v3` collateral; a document that carries v2
+`EmbeddedArtifacts`, and `EndorsedArtifacts` with its own `freshness_keys`
+require `attestation-collaterals/v3` collateral; a document that carries v2
 collateral is then rejected at the provenance layer.
 
 ### Pinning registers
