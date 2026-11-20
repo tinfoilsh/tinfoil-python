@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -67,6 +68,23 @@ class TestResolution:
         monkeypatch.setenv("USERPROFILE", str(tmp_path))
         assert is_generated(resolve(None))
         assert list(tmp_path.iterdir()) == []
+
+    def test_a_failing_random_source_raises_unchanged_and_is_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        failure = OSError("no secure randomness")
+        real = secrets.token_hex
+
+        def fail_once(nbytes: int) -> str:
+            monkeypatch.setattr(secrets, "token_hex", real)
+            raise failure
+
+        monkeypatch.setattr(secrets, "token_hex", fail_once)
+        with pytest.raises(OSError, match="no secure randomness") as raised:
+            resolve(None)
+        assert raised.value is failure, "the random source's exception, not a wrapper"
+        assert resolve("explicit") == "explicit", "an explicit value needs no generation"
+        generated = resolve(None)
+        assert is_generated(generated), "the failure was not recorded as the process secret"
+        assert resolve(None) == generated
 
     def test_concurrent_first_use_agrees(self) -> None:
         barrier = threading.Barrier(8)
