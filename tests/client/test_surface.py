@@ -38,12 +38,15 @@ EXPECTED_ALL = (
     "AsyncRouterOpenAIClient",
     "AttestationError",
     "AuthenticationError",
+    "AuthorizedBy",
     "BadRequestError",
     "Catalog",
     "CatalogEntry",
     "Client",
     "ConfigurationError",
     "ConflictError",
+    "EitherPin",
+    "EmbeddedConfig",
     "EnclaveHTTPClient",
     "EnclaveOpenAIClient",
     "GatewayHTTPClient",
@@ -56,14 +59,17 @@ EXPECTED_ALL = (
     "OpenAIError",
     "OpenAIOptions",
     "PermissionDeniedError",
-    "Pin",
+    "ProjectPin",
     "RateLimitError",
     "ReplicaVerification",
+    "RepoPin",
     "RouterHTTPClient",
     "RouterOpenAIClient",
+    "SignedBy",
     "TimeoutTypes",
     "TinfoilError",
     "TransportMode",
+    "Trust",
     "UnprocessableEntityError",
     "VerificationCheck",
     "__version__",
@@ -155,8 +161,9 @@ from tinfoil import (
     EnclaveOpenAIClient,
     GatewayOpenAIClient,
     OpenAICopyOptions,
+    EitherPin,
     OpenAIOptions,
-    Pin,
+    RepoPin,
     RouterOpenAIClient,
     create_client,
 )
@@ -181,8 +188,8 @@ other_options: OpenAIOptions = {{"organization": "o", "default_query": {{"v": 1}
 
 
 async def consume() -> None:
-    pin = Pin(repo="org/repo", project="org/project")
-    enclave = EnclaveOpenAIClient("enclave.example", pin, transport_mode="ehbp", http_timeout=5.0, **options)
+    trust = EitherPin("org/repo", "org/project")
+    enclave = EnclaveOpenAIClient("enclave.example", trust, transport_mode="ehbp", http_timeout=5.0, **options)
     router = RouterOpenAIClient(user_cache_secret="s", api_key="k", organization="o", project="p")
     gateway = GatewayOpenAIClient(url="https://gateway.example/v1/", api_key="k", max_retries=1)
     drop_in: Client = create_client(**options)
@@ -195,22 +202,22 @@ async def consume() -> None:
 '''
 
 MISTAKES = (
-    'EnclaveOpenAIClient("enclave.example", Pin(repo="org/repo"), api_key="k", max_retires=0)',
+    'EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), api_key="k", max_retires=0)',
     'create_client(api_key="k", transport_mode="ehbp")',
     'RouterOpenAIClient(api_key="k", http_client=httpx.Client())',
     'EnclaveOpenAIClient("enclave.example", api_key="k")',
     'EnclaveOpenAIClient("enclave.example", "org/repo", api_key="k")',
-    'Pin("org/repo")',
+    "RepoPin(repo=1)",
     'GatewayOpenAIClient(api_key="k").with_options(base_url="https://elsewhere.example/")',
     "create_client(api_key=async_key)",
     'create_client(api_key="k", data_residency="us")',
     "RouterOpenAIClient(provider=None)",
-    'EnclaveOpenAIClient("enclave.example", Pin(), workload_identity=None).with_options(workload_identity=None)',
+    'EnclaveOpenAIClient("e.example", RepoPin("o/r"), workload_identity=None).with_options(workload_identity=None)',
     'create_client(api_key="k", websocket_base_url=None)',
 )
 """Consumer mistakes, one per line of the probe: a misspelled option, a route option on the drop-in client, the
-fixed ``http_client`` and ``base_url``, a missing pin, a bare string for it, a positional
-pin part, an awaitable key on a synchronous client, and the
+fixed ``http_client`` and ``base_url``, a missing trust, a bare string for it, a repository
+of another type, an awaitable key on a synchronous client, and the
 transport options that ``OpenAIOptions`` leaves out, even when they are ``None``."""
 
 

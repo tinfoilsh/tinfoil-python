@@ -166,12 +166,6 @@ class Verifier:
         """The configured register pins, or None."""
         return self._trust.pinned_registers
 
-    @property
-    def caller_authorizes_config(self) -> bool:
-        """Whether the caller supplies the config, with an embedded config, or authorizes it, with a config
-        authorizer, instead of a pin authenticating it."""
-        return self._trust.embedded.config is not None or self._trust.config_authorizer is not None
-
     def __repr__(self) -> str:
         return f"Verifier(pinned_registers={self.pinned_registers!r}, freshness_max_age={self.freshness_max_age!r})"
 

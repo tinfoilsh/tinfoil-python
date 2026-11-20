@@ -24,7 +24,9 @@ from tinfoil.verifier import (
     CRYPTO_MATERIAL_ID_TLS,
     KEY_SPKI_FP_SHA256_V1_FORMAT,
     KEY_X25519_HPKE_V1_FORMAT,
+    ConfigTrust,
     Pin,
+    Policy,
     Verification,
     Verifier,
     VerifyError,
@@ -50,6 +52,15 @@ VERIFICATION_RETRY_DELAY = 1.0
 Fetch = Callable[[], Verification]
 """A test seam: replaces fetching and verifying a document."""
 AsyncFetch = Callable[[], Awaitable[Verification]]
+
+
+def new_verifier(config: ConfigTrust | None, policy: Policy | None) -> Verifier:
+    """The verifier that ``config`` and ``policy`` describe. A verifier UsageError, such as an invalid policy field
+    or a value of another type, is a ConfigurationError with the UsageError as its cause."""
+    try:
+        return Verifier(config, policy)
+    except VerifyError as err:
+        raise from_verify(err) from err
 
 
 class VerificationRejected(Exception):
@@ -263,6 +274,7 @@ __all__ = [
     "check_deadline",
     "check_freshness",
     "is_fresh",
+    "new_verifier",
     "retryable",
     "validate_transport_keys",
 ]

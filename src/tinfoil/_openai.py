@@ -32,6 +32,7 @@ from tinfoil._clients import (
 )
 from tinfoil._errors import ConfigurationError
 from tinfoil._gateway import Catalog, ModelPin
+from tinfoil._trust import Trust
 from tinfoil._types import (
     DEFAULT_HTTP_TIMEOUT,
     DEFAULT_TRANSPORT_MODE,
@@ -39,7 +40,7 @@ from tinfoil._types import (
     TransportMode,
     VerificationCheck,
 )
-from tinfoil.verifier import Pin, Verifier
+from tinfoil.verifier import Policy
 
 _C = TypeVar("_C", bound=openai.AsyncOpenAI)
 
@@ -62,7 +63,7 @@ ConfigurationError from every constructor, factory and copy, so that the guarant
 attested client does not depend on the ``openai`` package's own checks. An option that is ``None`` is unset."""
 
 ROUTE_OPTIONS = frozenset(
-    {"transport_mode", "base_url", "verifier", "verification_check", "user_cache_secret", "http_timeout"}
+    {"transport_mode", "base_url", "policy", "verification_check", "user_cache_secret", "http_timeout"}
 )
 """The options that configure a route, which the drop-in ``Client`` and ``AsyncClient`` refuse."""
 
@@ -373,7 +374,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
     """An ``openai.OpenAI`` client whose requests go through an ``EnclaveHTTPClient``, to ``base_url`` or, when
     that is unset, the enclave's ``/v1/`` API.
 
-    ``host``, ``pin`` and the keyword options up to ``http_timeout`` are
+    ``host``, ``trust`` and the keyword options up to ``http_timeout`` are
     those of ``EnclaveHTTPClient``, which is created first and verifies the
     enclave; ``http_timeout`` is its ``timeout``. The remaining keyword
     arguments are ``OpenAIOptions``, the ``openai`` package's, applied after
@@ -390,11 +391,11 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
     def __init__(
         self,
         host: str,
-        pin: Pin,
+        trust: Trust,
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
@@ -406,10 +407,10 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
         if _http_client is None:
             _http_client = EnclaveHTTPClient(
                 host,
-                pin,
+                trust,
                 transport_mode=transport_mode,
                 base_url=base_url,
-                verifier=verifier,
+                policy=policy,
                 verification_check=verification_check,
                 user_cache_secret=user_cache_secret,
                 timeout=http_timeout,
@@ -425,7 +426,7 @@ class EnclaveOpenAIClient(_AttestedOpenAI):
         return self._tinfoil
 
     def _shared(self) -> dict[str, object]:
-        return {"host": self._tinfoil.enclave, "pin": self._tinfoil.pin, "_http_client": self._tinfoil}
+        return {"host": self._tinfoil.enclave, "trust": self._tinfoil.trust, "_http_client": self._tinfoil}
 
 
 class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
@@ -448,11 +449,11 @@ class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
     async def create(
         cls,
         host: str,
-        pin: Pin,
+        trust: Trust,
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
@@ -461,10 +462,10 @@ class AsyncEnclaveOpenAIClient(_AsyncAttestedOpenAI):
         _without_transport_options(openai_kwargs)
         http_client = await AsyncEnclaveHTTPClient.create(
             host,
-            pin,
+            trust,
             transport_mode=transport_mode,
             base_url=base_url,
-            verifier=verifier,
+            policy=policy,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,
             timeout=http_timeout,
@@ -493,7 +494,7 @@ class RouterOpenAIClient(_AttestedOpenAI):
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
@@ -506,7 +507,7 @@ class RouterOpenAIClient(_AttestedOpenAI):
             _http_client = RouterHTTPClient(
                 transport_mode=transport_mode,
                 base_url=base_url,
-                verifier=verifier,
+                policy=policy,
                 verification_check=verification_check,
                 user_cache_secret=user_cache_secret,
                 timeout=http_timeout,
@@ -543,7 +544,7 @@ class AsyncRouterOpenAIClient(_AsyncAttestedOpenAI):
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         http_timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
@@ -553,7 +554,7 @@ class AsyncRouterOpenAIClient(_AsyncAttestedOpenAI):
         http_client = await AsyncRouterHTTPClient.create(
             transport_mode=transport_mode,
             base_url=base_url,
-            verifier=verifier,
+            policy=policy,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,
             timeout=http_timeout,
@@ -586,7 +587,7 @@ class GatewayOpenAIClient(_AttestedOpenAI):
         *,
         model_pins: Mapping[str, ModelPin] | None = None,
         pinned_models_only: bool = False,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         url: str | None = None,
@@ -601,7 +602,7 @@ class GatewayOpenAIClient(_AttestedOpenAI):
             _http_client = GatewayHTTPClient(
                 model_pins=model_pins,
                 pinned_models_only=pinned_models_only,
-                verifier=verifier,
+                policy=policy,
                 verification_check=verification_check,
                 user_cache_secret=user_cache_secret,
                 url=url,
@@ -642,7 +643,7 @@ class AsyncGatewayOpenAIClient(_AsyncAttestedOpenAI):
         *,
         model_pins: Mapping[str, ModelPin] | None = None,
         pinned_models_only: bool = False,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         url: str | None = None,
@@ -654,7 +655,7 @@ class AsyncGatewayOpenAIClient(_AsyncAttestedOpenAI):
         http_client = await AsyncGatewayHTTPClient.create(
             model_pins=model_pins,
             pinned_models_only=pinned_models_only,
-            verifier=verifier,
+            policy=policy,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,
             url=url,
@@ -671,7 +672,7 @@ class AsyncGatewayOpenAIClient(_AsyncAttestedOpenAI):
 class Client(RouterOpenAIClient):
     """An OpenAI client for Tinfoil's recommended route: the router, verified before the constructor returns. It
     takes only the ``openai`` package's options, ``OpenAIOptions``; a route option, such as a proxy
-    ``base_url``, a transport mode, verifier, verification check, cache secret or ``http_timeout``, is a
+    ``base_url``, a transport mode, policy, verification check, cache secret or ``http_timeout``, is a
     ConfigurationError here, from the constructor and from ``copy`` and ``with_options`` alike, and is configured
     on ``RouterOpenAIClient`` instead."""
 

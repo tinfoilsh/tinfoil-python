@@ -15,7 +15,7 @@ from tinfoil import (
     AttestationError,
     EnclaveHTTPClient,
     GatewayHTTPClient,
-    Pin,
+    RepoPin,
     RouterHTTPClient,
     RouterOpenAIClient,
     TransportMode,
@@ -30,7 +30,6 @@ pytestmark = pytest.mark.integration
 API_KEY = os.environ.get("TINFOIL_API_KEY", "")
 ENCLAVE = "inference.tinfoil.sh"
 REPO = "tinfoilsh/confidential-model-router"
-ROUTER_PIN = Pin(repo=REPO, project=REPO)
 MODEL = "llama3-3-70b"
 CACHE_SECRET = "python-live-integration-cache-secret"
 AUDIO = Path(__file__).parents[1] / "jackhammer.wav"
@@ -40,7 +39,7 @@ needs_api_key = pytest.mark.skipif(not API_KEY, reason="TINFOIL_API_KEY is not s
 
 @pytest.mark.parametrize("mode", ["tls", "ehbp"])
 def test_enclave_client(mode: TransportMode) -> None:
-    with EnclaveHTTPClient(ENCLAVE, Pin(repo=REPO), transport_mode=mode, user_cache_secret=CACHE_SECRET) as client:
+    with EnclaveHTTPClient(ENCLAVE, RepoPin(REPO), transport_mode=mode, user_cache_secret=CACHE_SECRET) as client:
         assert client.current is not None, "the client is verified when it's returned"
         before = client.ensure_verified()
         assert before.metadata.verified_at == client.current.metadata.verified_at, (
@@ -62,7 +61,6 @@ def test_router_openai_client(mode: TransportMode) -> None:
         assert attested.current is not None
         assert verified.freshness_expires_at == attested.current.freshness_expires_at, "a valid verification is reused"
         assert attested.base_url == f"https://{attested.enclave}/", "the enclave is the router discovery chose"
-        assert attested.pin == ROUTER_PIN
         completion = client.chat.completions.create(
             model=MODEL, messages=[{"role": "user", "content": "Is this a test?"}]
         )
@@ -100,7 +98,7 @@ def test_verification_check_rejects_once() -> None:
         raise RuntimeError("rejected by the test")
 
     with pytest.raises(AttestationError, match="rejected by the test"):
-        EnclaveHTTPClient(ENCLAVE, Pin(repo=REPO), verification_check=check)
+        EnclaveHTTPClient(ENCLAVE, RepoPin(REPO), verification_check=check)
     assert len(seen) == 1, "a rejection isn't retried"
 
 
@@ -128,7 +126,6 @@ async def test_async_router_client() -> None:
 
 def test_router_discovery() -> None:
     with RouterHTTPClient(transport_mode="ehbp") as client:
-        assert client.pin == ROUTER_PIN
         assert client.current is not None
         assert client.base_url == f"https://{client.enclave}/"
         assert client.ensure_verified().freshness_expires_at == client.current.freshness_expires_at

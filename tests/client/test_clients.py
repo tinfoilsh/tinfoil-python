@@ -26,7 +26,8 @@ from tinfoil._clients import (
 from tinfoil._errors import AttestationError, ConfigurationError, NetworkError
 from tinfoil._gateway import Catalog, CatalogEntry, ModelPin
 from tinfoil._transport import CLIENT_CLOSED
-from tinfoil.verifier import ConfigAuthorizer, Pin, Verification, Verifier
+from tinfoil._trust import AuthorizedBy, EitherPin, EmbeddedConfig, ProjectPin, RepoPin, SignedBy, Trust
+from tinfoil.verifier import EndorsedArtifacts, Pin, Policy, Verification, Verifier
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -91,48 +92,53 @@ def network(monkeypatch: pytest.MonkeyPatch) -> Network:
     return Network(monkeypatch)
 
 
-def authorizer() -> Verifier:
-    return Verifier(ConfigAuthorizer(lambda _: None))
+def bad_policy() -> Policy:
+    """A policy that the verifier refuses: an explicit freshness key set that is empty."""
+    return Policy(artifacts=EndorsedArtifacts(freshness_keys=[]))
 
 
 class TestEnclaveClient:
     @pytest.mark.parametrize(
         ("name", "args"),
         [
-            ("no host", ("", Pin(repo="org/repo"), {})),
-            ("unknown transport mode", ("enclave.example", Pin(repo="org/repo"), {"transport_mode": "quic"})),
+            ("no host", ("", RepoPin("org/repo"), {})),
+            ("unknown transport mode", ("enclave.example", RepoPin("org/repo"), {"transport_mode": "quic"})),
             (
                 "plaintext remote proxy",
                 (
                     "enclave.example",
-                    Pin(repo="org/repo"),
+                    RepoPin("org/repo"),
                     {"transport_mode": "ehbp", "base_url": "http://proxy.example/v1/"},
                 ),
             ),
             (
                 "TLS through a loopback proxy",
-                ("enclave.example", Pin(repo="org/repo"), {"base_url": "http://localhost:8080/v1/"}),
+                ("enclave.example", RepoPin("org/repo"), {"base_url": "http://localhost:8080/v1/"}),
             ),
-            ("relative base URL", ("enclave.example", Pin(repo="org/repo"), {"base_url": "/v1/"})),
+            ("relative base URL", ("enclave.example", RepoPin("org/repo"), {"base_url": "/v1/"})),
             (
                 "TLS through a proxy",
-                ("enclave.example", Pin(repo="org/repo"), {"base_url": "https://proxy.example/v1/"}),
+                ("enclave.example", RepoPin("org/repo"), {"base_url": "https://proxy.example/v1/"}),
             ),
-            ("invalid repository", ("enclave.example", Pin(repo="not a reference"), {})),
-            (
-                "config authorizer with a repository pin",
-                ("enclave.example", Pin(repo="org/repo"), {"verifier": authorizer()}),
-            ),
-            (
-                "config authorizer with a project pin",
-                ("enclave.example", Pin(project="org/project"), {"verifier": authorizer()}),
-            ),
-            ("invalid project", ("enclave.example", Pin(repo="org/repo", project="not a reference"), {})),
+            ("invalid repository", ("enclave.example", RepoPin("not a reference"), {})),
+            ("empty repository", ("enclave.example", RepoPin(""), {})),
+            ("empty project", ("enclave.example", ProjectPin(""), {})),
+            ("empty registry IDs", ("enclave.example", ProjectPin("org/project", registry_ids=[]), {})),
+            ("a string of registry IDs", ("enclave.example", ProjectPin("org/project", registry_ids="r"), {})),
+            ("malformed registry ID", ("enclave.example", ProjectPin("org/project", registry_ids=[""]), {})),
+            ("EitherPin without a project", ("enclave.example", EitherPin("org/repo", ""), {})),
+            ("EitherPin without a repository", ("enclave.example", EitherPin("", "org/project"), {})),
+            ("SignedBy without keys", ("enclave.example", SignedBy([]), {})),
+            ("AuthorizedBy that is not callable", ("enclave.example", AuthorizedBy("allow"), {})),  # type: ignore[arg-type]
+            ("EmbeddedConfig without bytes", ("enclave.example", EmbeddedConfig(b""), {})),
+            ("invalid policy", ("enclave.example", RepoPin("org/repo"), {"policy": bad_policy()})),
+            ("policy of another type", ("enclave.example", RepoPin("org/repo"), {"policy": "strict"})),
+            ("invalid project", ("enclave.example", EitherPin("org/repo", "not a reference"), {})),
             (
                 "userinfo in the base URL",
                 (
                     "enclave.example",
-                    Pin(repo="org/repo"),
+                    RepoPin("org/repo"),
                     {"transport_mode": "ehbp", "base_url": "https://u:p@proxy.example/v1/"},
                 ),
             ),
@@ -140,42 +146,50 @@ class TestEnclaveClient:
                 "query in the base URL",
                 (
                     "enclave.example",
-                    Pin(repo="org/repo"),
+                    RepoPin("org/repo"),
                     {"transport_mode": "ehbp", "base_url": "https://proxy.example/v1/?x=1"},
                 ),
             ),
             (
                 "fragment in the base URL",
-                ("enclave.example", Pin(repo="org/repo"), {"base_url": "https://enclave.example/v1/#f"}),
+                ("enclave.example", RepoPin("org/repo"), {"base_url": "https://enclave.example/v1/#f"}),
             ),
         ],
     )
     def test_rejects_invalid_options_before_any_io(
-        self, network: Network, name: str, args: tuple[str, Pin, dict[str, object]]
+        self, network: Network, name: str, args: tuple[str, Trust, dict[str, object]]
     ) -> None:
-        host, pin, options = args
+        host, trust, options = args
         with pytest.raises(ConfigurationError) as err:
-            EnclaveHTTPClient(host, pin, **options)  # type: ignore[arg-type]
+            EnclaveHTTPClient(host, trust, **options)  # type: ignore[arg-type]
         assert network.requests == [], name
         assert ":p@" not in str(err.value)
 
-    @pytest.mark.parametrize("not_a_pin", ["org/repo", "", None, Pin(repo=123), Pin(project=b"org/project")])  # type: ignore[arg-type]
-    def test_rejects_anything_but_a_pin_before_any_io(self, network: Network, not_a_pin: object) -> None:
-        """A bare reference string is refused rather than read as an empty pin, which would verify unpinned."""
+    @pytest.mark.parametrize("not_a_trust", ["org/repo", "", None, Pin(repo="org/repo"), RepoPin, {"repo": "org/repo"}])
+    def test_rejects_anything_but_a_trust_before_any_io(self, network: Network, not_a_trust: object) -> None:
+        """A bare reference string or a verifier pin is refused rather than read as an empty trust."""
         network.serve("enclave.example")
-        with pytest.raises(ConfigurationError, match=r"pass Pin\(repo=...\) .*or Pin\(project=...\)"):
-            EnclaveHTTPClient("enclave.example", not_a_pin, transport_mode="ehbp")  # type: ignore[arg-type]
+        with pytest.raises(ConfigurationError, match="trust must be a RepoPin, ProjectPin, SignedBy, AuthorizedBy"):
+            EnclaveHTTPClient("enclave.example", not_a_trust, transport_mode="ehbp")  # type: ignore[arg-type]
         assert network.requests == []
         assert network.pins == []
 
+    @pytest.mark.parametrize("not_a_reference", [123, b"org/repo"])
+    def test_rejects_a_reference_of_another_type_before_any_io(self, network: Network, not_a_reference: object) -> None:
+        network.serve("enclave.example")
+        for trust in (RepoPin(not_a_reference), ProjectPin(not_a_reference)):  # type: ignore[arg-type]
+            with pytest.raises(ConfigurationError, match="must be a string or None"):
+                EnclaveHTTPClient("enclave.example", trust, transport_mode="ehbp")
+        assert network.requests == []
+
     def test_verifies_before_returning(self, network: Network) -> None:
         with pytest.raises(NetworkError, match="no network"):
-            EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"))
+            EnclaveHTTPClient("enclave.example", RepoPin("org/repo"))
         assert network.hosts() == ["enclave.example", "enclave.example"], (
             "the enclave is verified before the client is returned, once more after a failure"
         )
         document = network.serve("enclave.example")
-        client = EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp")
+        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")
         assert client.current is document
         assert client.ensure_verified() is document
         assert network.hosts() == ["enclave.example"]
@@ -183,27 +197,27 @@ class TestEnclaveClient:
         assert network.hosts() == ["enclave.example"]
         client.close()
 
-    def test_reports_its_enclave_pin_and_base_url(self, network: Network) -> None:
-        pin = Pin(repo="org/repo@v1@sha256:" + "a" * 64, project="org/project@v2")
+    def test_reports_its_enclave_trust_and_base_url(self, network: Network) -> None:
+        trust = EitherPin("org/repo@v1@sha256:" + "a" * 64, "org/project@v2")
         network.serve("enclave.example:8443")
         client = EnclaveHTTPClient(
-            "enclave.example:8443", pin, transport_mode="ehbp", base_url="https://proxy.example/v1"
+            "enclave.example:8443", trust, transport_mode="ehbp", base_url="https://proxy.example/v1"
         )
         assert client.enclave == "enclave.example:8443", "the enclave, not the proxy"
-        assert client.pin == pin
-        assert network.pins == [pin], "the verifier receives each pin in its own namespace"
+        assert client.trust == trust
+        assert network.pins == [Pin(repo=trust.repo, project=trust.project)], (
+            "the verifier receives each pin in its own namespace"
+        )
         assert client.base_url == "https://proxy.example/v1/"
         assert client._attested.openai_url == "https://proxy.example/v1/"
         client.close()
-        with pytest.raises(ConfigurationError, match="pin names nothing"):
-            EnclaveHTTPClient("enclave.example", Pin(), transport_mode="ehbp")
         network.serve("enclave.example")
-        with EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp") as repository:
-            assert repository.pin == Pin(repo="org/repo")
+        with EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp") as repository:
+            assert repository.trust == RepoPin("org/repo")
             assert network.pins[-1] == Pin(repo="org/repo"), "a repository pin never doubles as a project pin"
         network.serve("enclave.example")
-        with EnclaveHTTPClient("enclave.example", Pin(project="org/project"), transport_mode="ehbp") as registry:
-            assert registry.pin == Pin(project="org/project")
+        with EnclaveHTTPClient("enclave.example", ProjectPin("org/project"), transport_mode="ehbp") as registry:
+            assert registry.trust == ProjectPin("org/project")
             assert network.pins[-1] == Pin(project="org/project")
             assert registry.base_url == "https://enclave.example/"
             assert registry._attested.openai_url == "https://enclave.example/v1/"
@@ -223,7 +237,7 @@ class TestEnclaveClient:
         network.handler = network.ehbp.handle
         client = EnclaveHTTPClient(
             "enclave.example",
-            Pin(repo="org/repo"),
+            RepoPin("org/repo"),
             transport_mode="ehbp",
             base_url="https://proxy.example/v1/",
             user_cache_secret="explicit",
@@ -245,7 +259,7 @@ class TestEnclaveClient:
     def test_key_rotation_is_recovered_once(self, network: Network) -> None:
         first = network.serve("enclave.example", tag="first")
         network.handler = network.ehbp.handle
-        client = EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp")
+        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")
         assert client.current is first
         assert client.http_client.post("https://enclave.example/v1/x", content=b"hello").content == b"echo:hello"
         network.ehbp.rotated = True
@@ -270,13 +284,13 @@ class TestEnclaveClient:
 
     def test_tls_mode_refuses_plaintext_and_ehbp_refuses_upgrades_before_verifying(self, network: Network) -> None:
         network.serve("enclave.example")
-        sealed = EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp")
+        sealed = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")
         network.requests = []
         with pytest.raises(ConfigurationError, match="EHBP seals only"):
             sealed.http_client.get("https://enclave.example/v1/realtime", headers={"Upgrade": "websocket"})
         assert network.requests == [], "EHBP refuses an upgrade before verifying"
         sealed.close()
-        pinned = EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"))
+        pinned = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"))
         with pytest.raises(ConfigurationError, match="refusing to send request"):
             pinned.http_client.get("http://enclave.example/v1/models")
         pinned.close()
@@ -287,11 +301,11 @@ class TestEnclaveClient:
 
         monkeypatch.setattr(_cachesecret, "resolve", resolve)
         network.serve("enclave.example")
-        EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp").close()
+        EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp").close()
 
     def test_closed_client_refuses(self, network: Network) -> None:
         network.serve("enclave.example")
-        client = EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp")
+        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")
         client.close()
         assert client.current is None
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
@@ -302,7 +316,7 @@ class TestEnclaveClient:
     def test_expired_document_is_rejected(self, network: Network) -> None:
         network.serve("enclave.example", deadline=datetime.now(UTC) - timedelta(seconds=1))
         with pytest.raises(AttestationError, match="expired"):
-            EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp")
+            EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")
 
     def test_verification_check_rejection(self, network: Network) -> None:
         network.serve("enclave.example")
@@ -313,7 +327,7 @@ class TestEnclaveClient:
             raise RuntimeError("rejected by the test")
 
         with pytest.raises(AttestationError, match="rejected by the test"):
-            EnclaveHTTPClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", verification_check=check)
+            EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp", verification_check=check)
         assert seen == ["enclave.example"], "a rejection isn't retried"
 
 
@@ -326,7 +340,7 @@ class TestRouterClient:
             {"base_url": "https://proxy.example/v1/"},
             {"transport_mode": "tls", "base_url": "https://proxy.example/v1/"},
             {"transport_mode": "ehbp", "base_url": "https://proxy.example/v1/?x=1"},
-            {"verifier": authorizer()},
+            {"policy": bad_policy()},
         ],
     )
     def test_rejects_invalid_options_before_discovery(self, network: Network, options: dict[str, object]) -> None:
@@ -351,8 +365,9 @@ class TestRouterClient:
         chosen = network.serve("b.example")
         client = RouterHTTPClient(transport_mode="ehbp", base_url="http://localhost:8080/v1/", user_cache_secret="s")
         assert client.enclave == "b.example"
-        assert client.pin == Pin(repo=_router.DEFAULT_ROUTER_NAME, project=_router.DEFAULT_ROUTER_NAME)
-        assert set(network.pins) == {client.pin}, (
+        assert not hasattr(client, "trust"), "a router's trust is fixed, not the caller's"
+        assert not hasattr(client, "pin")
+        assert set(network.pins) == {Pin(repo=_router.DEFAULT_ROUTER_NAME, project=_router.DEFAULT_ROUTER_NAME)}, (
             "every candidate is verified against the router's name in both namespaces"
         )
         assert client.current is chosen
@@ -384,8 +399,10 @@ class TestGatewayClient:
             {"pinned_models_only": True},
             {"model_pins": {"m": ModelPin("acme/m")}},
             {"model_pins": {"m": ModelPin("tinfoilsh/m@")}},
-            {"verifier": authorizer()},
-            {"model_pins": {"m": ModelPin("tinfoilsh/m", authorizer())}},
+            {"policy": bad_policy()},
+            {"policy": "strict"},
+            {"model_pins": {"m": ModelPin("tinfoilsh/m", bad_policy())}},
+            {"model_pins": {"m": "tinfoilsh/m"}},
         ],
     )
     def test_rejects_invalid_options(self, network: Network, options: dict[str, object]) -> None:
@@ -460,17 +477,18 @@ async def test_async_clients(network: Network) -> None:
         with pytest.raises(ConfigurationError, match="create"):
             cls()
     with pytest.raises(ConfigurationError):
-        await AsyncEnclaveHTTPClient.create("", Pin(repo="org/repo"))
-    for not_a_pin in ("org/repo", None):
-        with pytest.raises(ConfigurationError, match="pin must be a Pin"):
-            await AsyncEnclaveHTTPClient.create("enclave.example", not_a_pin)  # type: ignore[arg-type]
+        await AsyncEnclaveHTTPClient.create("", RepoPin("org/repo"))
+    for not_a_trust in ("org/repo", None):
+        with pytest.raises(ConfigurationError, match="trust must be a RepoPin"):
+            await AsyncEnclaveHTTPClient.create("enclave.example", not_a_trust)  # type: ignore[arg-type]
     assert network.requests == []
     network.serve("enclave.example")
     network.handler = network.ehbp.handle
     async with await AsyncEnclaveHTTPClient.create(
-        "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp"
+        "enclave.example", RepoPin("org/repo"), transport_mode="ehbp"
     ) as client:
         assert client.enclave == "enclave.example"
+        assert client.trust == RepoPin("org/repo")
         assert client.current is not None
         assert (await client.ensure_verified()) is client.current
         assert (await client.http_client.post("https://enclave.example/v1/x", content=b"hi")).content == b"echo:hi"

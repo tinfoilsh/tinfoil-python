@@ -51,8 +51,9 @@ from tinfoil._openai import (
     create_async_client,
     create_client,
 )
+from tinfoil._trust import EitherPin, ProjectPin, RepoPin
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT
-from tinfoil.verifier import Pin, Verifier
+from tinfoil.verifier import Policy, Verifier
 
 MODELS = b'{"object":"list","data":[]}'
 
@@ -132,7 +133,7 @@ def by_path(request: httpx.Request) -> httpx.Response:
 class TestConstruction:
     def test_enclave_client_sends_through_its_http_client(self, offline: Recorder) -> None:
         client = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
+            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
         )
         assert isinstance(client.http_client, EnclaveHTTPClient)
         assert client.base_url == "https://enclave.example/v1/"
@@ -148,12 +149,12 @@ class TestConstruction:
     def test_pin_project_is_separate_from_the_openai_project(self, offline: Recorder) -> None:
         client = EnclaveOpenAIClient(
             "enclave.example",
-            Pin(repo="org/repo", project="org/project"),
+            EitherPin("org/repo", "org/project"),
             transport_mode="ehbp",
             api_key="k",
             project="proj_123",
         )
-        assert client.http_client.pin == Pin(repo="org/repo", project="org/project")
+        assert client.http_client.trust == EitherPin("org/repo", "org/project")
         assert client.project == "proj_123"
         copy = client.with_options(max_retries=0)
         assert copy.http_client is client.http_client
@@ -161,13 +162,13 @@ class TestConstruction:
         assert through(copy)[0].headers["OpenAI-Project"] == "proj_123"
         client.close()
         with pytest.raises(ConfigurationError):
-            EnclaveOpenAIClient("enclave.example", Pin(project="not a reference"), api_key="k")
-        for not_a_pin in ("org/repo", None):
-            with pytest.raises(ConfigurationError, match="pin must be a Pin"):
-                EnclaveOpenAIClient("enclave.example", not_a_pin, api_key="k", project="proj_123")  # type: ignore[arg-type]
+            EnclaveOpenAIClient("enclave.example", ProjectPin("not a reference"), api_key="k")
+        for not_a_trust in ("org/repo", None):
+            with pytest.raises(ConfigurationError, match="trust must be a RepoPin"):
+                EnclaveOpenAIClient("enclave.example", not_a_trust, api_key="k", project="proj_123")  # type: ignore[arg-type]
         with pytest.raises(TypeError, match="registry_project"):
             EnclaveOpenAIClient(
-                "enclave.example", Pin(repo="o/r"), api_key="k", **foreign(registry_project="org/project")
+                "enclave.example", RepoPin("o/r"), api_key="k", **foreign(registry_project="org/project")
             )
 
     def test_router_and_gateway_clients(self, offline: Recorder) -> None:
@@ -192,7 +193,7 @@ class TestConstruction:
 
     def test_rejects_invalid_options(self, offline: Recorder) -> None:
         with pytest.raises(ConfigurationError):
-            EnclaveOpenAIClient("", Pin(repo="org/repo"), api_key="k")
+            EnclaveOpenAIClient("", RepoPin("org/repo"), api_key="k")
         with pytest.raises(ConfigurationError):
             RouterOpenAIClient(transport_mode="quic", api_key="k")  # type: ignore[arg-type]
         with pytest.raises(ConfigurationError):
@@ -203,14 +204,14 @@ class TestConstruction:
         with pytest.raises(ConfigurationError, match="http_client"):
             EnclaveOpenAIClient(
                 "enclave.example",
-                Pin(repo="org/repo"),
+                RepoPin("org/repo"),
                 transport_mode="ehbp",
                 api_key="k",
                 **foreign(http_client=httpx.Client()),
             )
         client = EnclaveOpenAIClient(
             "enclave.example",
-            Pin(repo="org/repo"),
+            RepoPin("org/repo"),
             transport_mode="ehbp",
             api_key="k",
             base_url="https://enclave.example/custom/v1/",
@@ -224,25 +225,25 @@ class TestConstruction:
         """``http_timeout`` is the attested client's timeout; the library's own per-request default stays unless
         the caller sets ``timeout``, so a short attestation timeout does not cut a streamed completion short."""
         client = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", http_timeout=10.0
+            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", http_timeout=10.0
         )
         assert client.timeout == openai.DEFAULT_TIMEOUT
         assert client.http_client.http_client.timeout == httpx.Timeout(10.0)
         client.close()
         explicit = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", http_timeout=10.0, timeout=2.0
+            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", http_timeout=10.0, timeout=2.0
         )
         assert explicit.timeout == 2.0
         assert explicit.with_options(max_retries=0).timeout == 2.0, "a copy keeps the caller's timeout"
         explicit.close()
-        default = EnclaveOpenAIClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k")
+        default = EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k")
         assert default.http_client.http_client.timeout == DEFAULT_HTTP_TIMEOUT
         assert default.timeout == openai.DEFAULT_TIMEOUT
         default.close()
 
     def test_copies_keep_the_attested_client(self, offline: Recorder) -> None:
         client = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
+            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
         )
         attestations = len(offline.requests)
         copied = client.with_options(timeout=1.0, max_retries=2)
@@ -261,7 +262,7 @@ class TestConstruction:
     ) -> None:
         client = EnclaveOpenAIClient(
             "enclave.example",
-            Pin(repo="org/repo"),
+            RepoPin("org/repo"),
             transport_mode="ehbp",
             user_cache_secret="s",
             api_key="k",
@@ -293,7 +294,7 @@ class TestConstruction:
         )
         enclave = EnclaveOpenAIClient(
             "enclave.example",
-            Pin(repo="org/repo"),
+            RepoPin("org/repo"),
             transport_mode="ehbp",
             user_cache_secret="s",
             api_key="k",
@@ -345,16 +346,16 @@ class TestConstruction:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         with pytest.raises(ConfigurationError, match="http_client"):
             EnclaveOpenAIClient(
-                "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", **foreign(http_client=httpx.Client())
+                "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", **foreign(http_client=httpx.Client())
             )
         assert len(closes) == 1, "the attested client created for the refused options is closed"
         with pytest.raises(openai.OpenAIError):
-            EnclaveOpenAIClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp")  # no api_key anywhere
+            EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp")  # no api_key anywhere
         assert len(closes) == 2, "so is one the openai constructor refuses"
         for closed in closes:
             with pytest.raises(ConfigurationError, match="closed"):
                 closed.ensure_verified()
-        client = EnclaveOpenAIClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k")
+        client = EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k")
         with pytest.raises(ConfigurationError, match="http_client"):
             client.with_options(**foreign(http_client=httpx.Client()))
         assert len(closes) == 2, "a copy's failure leaves the original's attested client open"
@@ -362,20 +363,20 @@ class TestConstruction:
         client.close()
         assert len(closes) == 3
 
-    def test_host_and_pin_are_required(self, offline: Recorder) -> None:
+    def test_host_and_trust_are_required(self, offline: Recorder) -> None:
         """Both are positional and have no defaults, so leaving one out fails at the call, before any I/O."""
         host_only: list[Any] = ["enclave.example"]
-        with pytest.raises(TypeError, match="pin"):
+        with pytest.raises(TypeError, match="trust"):
             EnclaveOpenAIClient(*host_only, api_key="k")
-        with pytest.raises(TypeError, match="pin"):
+        with pytest.raises(TypeError, match="trust"):
             EnclaveHTTPClient(*host_only)
         with pytest.raises(TypeError, match="host"):
             EnclaveOpenAIClient(api_key="k")  # type: ignore[call-arg]
         assert offline.requests == []
-        client = EnclaveOpenAIClient("enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k")
+        client = EnclaveOpenAIClient("enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k")
         copied = client.with_options(max_retries=0)
         assert copied.http_client is client.http_client
-        assert (copied.http_client.enclave, copied.http_client.pin) == ("enclave.example", Pin(repo="org/repo"))
+        assert (copied.http_client.enclave, copied.http_client.trust) == ("enclave.example", RepoPin("org/repo"))
         client.close()
 
     @pytest.mark.parametrize("option", sorted(ROUTE_OPTIONS))
@@ -408,9 +409,9 @@ class TestConstruction:
         with pytest.raises(ConfigurationError, match="RouterOpenAIClient"):
             create_client(api_key="k", **foreign(base_url="https://proxy.example/v1/"))
         with pytest.raises(ConfigurationError) as err:
-            create_client(api_key="k", **foreign(transport_mode="ehbp", http_timeout=1.0, verifier=Verifier()))
+            create_client(api_key="k", **foreign(transport_mode="ehbp", http_timeout=1.0, policy=Policy()))
         assert str(err.value) == DROP_IN_OPTIONS.format(
-            name="Client", keys="http_timeout, transport_mode, verifier", route="RouterOpenAIClient"
+            name="Client", keys="http_timeout, policy, transport_mode", route="RouterOpenAIClient"
         ), "every refused option is named"
         assert offline.requests == []
         client = create_client(api_key="k")
@@ -424,7 +425,7 @@ class TestConstruction:
 class TestErrors:
     def test_api_errors_pass_through(self, offline: Recorder) -> None:
         client = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
+            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
         )
         with pytest.raises(openai.RateLimitError) as err:
             through(
@@ -439,7 +440,7 @@ class TestErrors:
         """The library reports only its HTTP stack's errors as connection errors, so a client error raised from
         the transport reaches the caller as itself, with or without the library's retries."""
         client = EnclaveOpenAIClient(
-            "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", max_retries=2
+            "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", max_retries=2
         )
         failure = AttestationError("channel binding failed")
         attempts = 0
@@ -469,7 +470,7 @@ class TestErrors:
 
         enclave = EnclaveOpenAIClient(
             "enclave.example",
-            Pin(repo="org/repo"),
+            RepoPin("org/repo"),
             transport_mode="ehbp",
             user_cache_secret="client-level",
             api_key="k",
@@ -536,7 +537,7 @@ async def test_async_responses_go_through_the_attested_transport(offline: Record
     )
     enclave = await AsyncEnclaveOpenAIClient.create(
         "enclave.example",
-        Pin(repo="org/repo"),
+        RepoPin("org/repo"),
         transport_mode="ehbp",
         user_cache_secret="s",
         api_key="k",
@@ -576,16 +577,16 @@ async def test_async_wrappers(offline: Recorder) -> None:
     with pytest.raises(ConfigurationError, match="create"):
         AsyncEnclaveOpenAIClient(api_key="k")
     host_only: list[Any] = ["enclave.example"]
-    with pytest.raises(TypeError, match="pin"):
+    with pytest.raises(TypeError, match="trust"):
         await AsyncEnclaveOpenAIClient.create(*host_only, api_key="k")
-    with pytest.raises(TypeError, match="pin"):
+    with pytest.raises(TypeError, match="trust"):
         await AsyncEnclaveHTTPClient.create(*host_only)
-    for not_a_pin in ("org/repo", None):
-        with pytest.raises(ConfigurationError, match="pin must be a Pin"):
-            await AsyncEnclaveOpenAIClient.create("enclave.example", not_a_pin, api_key="k")  # type: ignore[arg-type]
+    for not_a_trust in ("org/repo", None):
+        with pytest.raises(ConfigurationError, match="trust must be a RepoPin"):
+            await AsyncEnclaveOpenAIClient.create("enclave.example", not_a_trust, api_key="k")  # type: ignore[arg-type]
     assert offline.requests == []
     client = await AsyncEnclaveOpenAIClient.create(
-        "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
+        "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", api_key="k", max_retries=0
     )
     assert client.base_url == "https://enclave.example/v1/"
     inner: object = client._client
@@ -652,7 +653,7 @@ ENTRIES = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
 
 SYNC_FACTORIES: dict[str, Callable[..., openai.OpenAI]] = {
     "EnclaveOpenAIClient": lambda **kw: EnclaveOpenAIClient(
-        "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", **kw
+        "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", **kw
     ),
     "RouterOpenAIClient": lambda **kw: RouterOpenAIClient(transport_mode="ehbp", **kw),
     "GatewayOpenAIClient": lambda **kw: GatewayOpenAIClient(
@@ -663,7 +664,7 @@ SYNC_FACTORIES: dict[str, Callable[..., openai.OpenAI]] = {
 }
 ASYNC_FACTORIES: dict[str, Callable[..., Awaitable[openai.AsyncOpenAI]]] = {
     "AsyncEnclaveOpenAIClient": lambda **kw: AsyncEnclaveOpenAIClient.create(
-        "enclave.example", Pin(repo="org/repo"), transport_mode="ehbp", **kw
+        "enclave.example", RepoPin("org/repo"), transport_mode="ehbp", **kw
     ),
     "AsyncRouterOpenAIClient": lambda **kw: AsyncRouterOpenAIClient.create(transport_mode="ehbp", **kw),
     "AsyncGatewayOpenAIClient": lambda **kw: AsyncGatewayOpenAIClient.create(

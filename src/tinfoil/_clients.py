@@ -29,7 +29,7 @@ from tinfoil._chain import (
     with_origin_restriction,
     with_origin_restriction_async,
 )
-from tinfoil._enclave import Enclave
+from tinfoil._enclave import Enclave, new_verifier
 from tinfoil._errors import ConfigurationError
 from tinfoil._gateway import (
     DEFAULT_GATEWAY_URL,
@@ -48,6 +48,7 @@ from tinfoil._transport import (
     async_mode_for,
     mode_for,
 )
+from tinfoil._trust import Trust, verifier_inputs
 from tinfoil._types import (
     DEFAULT_HTTP_TIMEOUT,
     DEFAULT_TRANSPORT_MODE,
@@ -62,10 +63,9 @@ from tinfoil._url import (
     validate_tls_base_url,
     with_trailing_slash,
 )
-from tinfoil.verifier import Pin, Verification, Verifier
+from tinfoil.verifier import Policy, Verification
 
 ROUTER_PROXY_NEEDS_EHBP = 'a base URL is a proxy when discovering the router, which requires the "ehbp" transport mode'
-ROUTER_NEEDS_REPO = "caller-authorized config requires an explicit enclave"
 ASYNC_CONSTRUCTOR = "{name} is built with 'await {name}.create(...)'"
 
 
@@ -135,11 +135,6 @@ class _AttestedClient:
         return self._attested.keyed.enclave.host
 
     @property
-    def pin(self) -> Pin:
-        """The pin the enclave is verified against."""
-        return self._attested.keyed.enclave.pin
-
-    @property
     def current(self) -> Verification | None:
         """The last successful verification without checking it, or None. It may have expired or been rejected;
         ``ensure_verified`` returns one that is valid."""
@@ -195,11 +190,6 @@ class _AsyncAttestedClient:
         return self._attested.keyed.enclave.host
 
     @property
-    def pin(self) -> Pin:
-        """The pin the enclave is verified against."""
-        return self._attested.keyed.enclave.pin
-
-    @property
     def current(self) -> Verification | None:
         """The last successful verification without checking it, or None."""
         return self._attested.keyed.current
@@ -229,35 +219,40 @@ class _AsyncAttestedClient:
 
 def _enclave_parts(
     host: str,
-    pin: Pin,
+    trust: Trust,
     transport_mode: TransportMode,
     base_url: str | None,
-    verifier: Verifier | None,
+    policy: Policy | None,
     verification_check: VerificationCheck | None,
-) -> tuple[Enclave, str]:
-    """The checks an enclave client makes before any network I/O, in order: the host, the transport mode, the
-    base URL and the pin."""
+) -> tuple[Enclave, str, Trust]:
+    """The checks an enclave client makes before any network I/O, in order: the host, the trust argument, the
+    transport mode, the base URL, the verifier that the trust and the policy describe, and whether the trust can
+    be satisfied at all. Returns the enclave, the base URL and a copy of the trust argument."""
     if not host:
         raise ConfigurationError("enclave host is required")
+    inputs = verifier_inputs(trust)
     mode_for(transport_mode)
     checked = validate_base_url(base_url) if base_url else ""
-    enclave = Enclave(host, pin, verifier=verifier, verification_check=verification_check)
-    return enclave, checked
+    verifier = new_verifier(inputs.config, policy)
+    enclave = Enclave(host, inputs.pin, verifier=verifier, verification_check=verification_check)
+    return enclave, checked, inputs.trust
 
 
 class EnclaveHTTPClient(_AttestedClient):
     """An ``httpx`` client whose requests reach only one attested enclave.
 
-    ``host`` is the enclave, with an optional port, and ``pin`` the ``Pin`` it
-    is verified against; both are required. ``Pin()`` is a
-    ``ConfigurationError`` unless ``verifier`` configures its own config trust. ``transport_mode`` defaults to
+    ``host`` is the enclave, with an optional port, and ``trust`` names who
+    vouches for the config that it runs: a ``RepoPin``, ``ProjectPin``,
+    ``SignedBy``, ``AuthorizedBy``, ``EmbeddedConfig`` or ``EitherPin``. Both
+    are required. ``policy``, a ``tinfoil.verifier.Policy``, holds the checks
+    that apply on top of the trust; None keeps every default. ``transport_mode`` defaults to
     ``"tls"``. ``base_url`` is a path on the enclave's own HTTPS origin, or
     a proxy on another origin, which requires ``"ehbp"``; requests to a
     proxy carry ``X-Tinfoil-Enclave-Url`` so it can forward them. A proxy
     must use HTTPS, since EHBP does not seal headers such as the API key;
     ``http://`` is accepted only for localhost or a loopback IP address.
     ``verification_check``, when set, is called with each verification that
-    passes ``verifier`` before the client uses the enclave's keys; raising
+    passes the trust and the policy before the client uses the enclave's keys; raising
     rejects the enclave, and the rejection is not retried.
     ``user_cache_secret``, when set, is the default prompt-cache scope for
     the client's requests; only Tinfoil's router reads it. ``timeout`` is
@@ -265,24 +260,28 @@ class EnclaveHTTPClient(_AttestedClient):
     attestation fetches, which are bounded as a whole besides, at 30
     seconds each; it defaults to ``DEFAULT_HTTP_TIMEOUT``.
 
-    The options are checked before any network I/O; the enclave is then
-    verified before the constructor returns. The client verifies again by
-    itself when the verification expires or is rejected.
+    The trust argument and the options are checked before any network I/O,
+    including that the trust can be satisfied at all; a value of another
+    type is a ConfigurationError. The enclave is then verified before the
+    constructor returns. The client verifies again by itself when the
+    verification expires or is rejected.
     """
 
     def __init__(
         self,
         host: str,
-        pin: Pin,
+        trust: Trust,
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
-        enclave, checked = _enclave_parts(host, pin, transport_mode, base_url, verifier, verification_check)
+        enclave, checked, self._trust = _enclave_parts(
+            host, trust, transport_mode, base_url, policy, verification_check
+        )
         keyed = AttestedTransport(enclave, mode_for(transport_mode), timeout=timeout)
         self._attested = _Attested(keyed, transport_mode, checked, user_cache_secret or "")
         try:
@@ -291,32 +290,39 @@ class EnclaveHTTPClient(_AttestedClient):
             self.close()
             raise
 
+    @property
+    def trust(self) -> Trust:
+        """The trust argument that the enclave is verified under. It is a copy that shares no mutable value with
+        the caller's, so later changes by the caller have no effect on the client."""
+        return self._trust
+
 
 class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
     """``EnclaveHTTPClient`` for asyncio, built with ``await AsyncEnclaveHTTPClient.create(...)``, which takes
     the same arguments."""
 
-    def __init__(self, *, _attested: _AsyncAttested | None = None) -> None:
-        if _attested is None:
+    def __init__(self, *, _attested: _AsyncAttested | None = None, _trust: Trust | None = None) -> None:
+        if _attested is None or _trust is None:
             raise ConfigurationError(ASYNC_CONSTRUCTOR.format(name=type(self).__name__))
         self._attested = _attested
+        self._trust = _trust
 
     @classmethod
     async def create(
         cls,
         host: str,
-        pin: Pin,
+        trust: Trust,
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
-        enclave, checked = _enclave_parts(host, pin, transport_mode, base_url, verifier, verification_check)
+        enclave, checked, copied = _enclave_parts(host, trust, transport_mode, base_url, policy, verification_check)
         keyed = AsyncAttestedTransport(enclave, async_mode_for(transport_mode), timeout=timeout)
-        client = cls(_attested=_AsyncAttested(keyed, transport_mode, checked, user_cache_secret or ""))
+        client = cls(_attested=_AsyncAttested(keyed, transport_mode, checked, user_cache_secret or ""), _trust=copied)
         try:
             await keyed.ensure_verified()
         except BaseException:
@@ -324,18 +330,21 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
             raise
         return client
 
+    @property
+    def trust(self) -> Trust:
+        """The trust argument that the enclave is verified under, as on ``EnclaveHTTPClient``."""
+        return self._trust
 
-def _router_checks(transport_mode: TransportMode, base_url: str | None, verifier: Verifier | None) -> str:
-    """The checks a router client makes before discovery, in order: the transport mode, the base URL, which is a
-    proxy and so requires EHBP, and the verifier, which must verify against the router's pin."""
+
+def _router_checks(transport_mode: TransportMode, base_url: str | None) -> str:
+    """The checks a router client makes before discovery, in order: the transport mode, and the base URL, which is
+    a proxy and so requires EHBP."""
     mode_for(transport_mode)
     checked = ""
     if base_url:
         checked = validate_base_url(base_url)
         if transport_mode == "tls":
             raise ConfigurationError(ROUTER_PROXY_NEEDS_EHBP)
-    if verifier is not None and verifier.caller_authorizes_config:
-        raise ConfigurationError(ROUTER_NEEDS_REPO)
     return checked
 
 
@@ -347,9 +356,8 @@ class RouterHTTPClient(_AttestedClient):
     first that verifies, falling back to ``inference.tinfoil.sh``, which it
     verifies before returning. It discovers again each time it is called.
     ``base_url`` is a proxy that forwards requests to the router discovery
-    chooses, and requires ``"ehbp"``. A ``verifier`` that authorizes the
-    config itself is refused, since the router is verified against its own
-    repository. ``user_cache_secret`` empty selects a random secret that is
+    chooses, and requires ``"ehbp"``. ``policy`` applies on top of the
+    router's fixed trust, its own repository. ``user_cache_secret`` empty selects a random secret that is
     generated once per process and shared by every client in it; pass a
     value for a secret that is stable across processes. The other options
     are those of ``EnclaveHTTPClient``.
@@ -360,12 +368,13 @@ class RouterHTTPClient(_AttestedClient):
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
-        checked = _router_checks(transport_mode, base_url, verifier)
+        checked = _router_checks(transport_mode, base_url)
+        verifier = new_verifier(None, policy)
         mode = mode_for(transport_mode)
         secret = _cachesecret.resolve(user_cache_secret)
         keyed = discover(
@@ -397,12 +406,13 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
         *,
         transport_mode: TransportMode = DEFAULT_TRANSPORT_MODE,
         base_url: str | None = None,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
-        checked = _router_checks(transport_mode, base_url, verifier)
+        checked = _router_checks(transport_mode, base_url)
+        verifier = new_verifier(None, policy)
         mode = async_mode_for(transport_mode)
         secret = _cachesecret.resolve(user_cache_secret)
         keyed = await discover_async(
@@ -446,8 +456,9 @@ class GatewayHTTPClient:
 
     ``model_pins`` pins models to repositories; with ``pinned_models_only``,
     only pinned models are served, which requires at least one pin.
-    ``verifier`` is the policy for unpinned models; a pin's own verifier
-    replaces it for that model. ``verification_check`` is called with each
+    ``policy``, a ``tinfoil.verifier.Policy``, is the verification policy for
+    unpinned models, and for pinned models whose pin sets none; a pin's own
+    policy replaces it entirely for that model. ``verification_check`` is called with each
     replica's verification; a replica it rejects is skipped for the next
     replica of the model. ``user_cache_secret`` empty selects the random
     secret that is generated once per process, as on ``RouterHTTPClient``;
@@ -474,7 +485,7 @@ class GatewayHTTPClient:
         *,
         model_pins: Mapping[str, ModelPin] | None = None,
         pinned_models_only: bool = False,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         url: str | None = None,
@@ -488,7 +499,7 @@ class GatewayHTTPClient:
             catalog=catalog,
             model_pins=model_pins,
             pinned_models_only=pinned_models_only,
-            verifier=verifier,
+            policy=policy,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,
             timeout=timeout,
@@ -577,7 +588,7 @@ class AsyncGatewayHTTPClient:
         *,
         model_pins: Mapping[str, ModelPin] | None = None,
         pinned_models_only: bool = False,
-        verifier: Verifier | None = None,
+        policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         user_cache_secret: str | None = None,
         url: str | None = None,
@@ -591,7 +602,7 @@ class AsyncGatewayHTTPClient:
             catalog=catalog,
             model_pins=model_pins,
             pinned_models_only=pinned_models_only,
-            verifier=verifier,
+            policy=policy,
             verification_check=verification_check,
             user_cache_secret=user_cache_secret,
             timeout=timeout,
