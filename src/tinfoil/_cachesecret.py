@@ -4,9 +4,9 @@ and its injection into a request body.
 The router derives the request's prefix-cache namespace from the field:
 requests carrying the same secret under the same API identity share cached
 prompt prefixes, and requests carrying different secrets cannot observe
-each other's cache timing. Clients for Tinfoil's inference routes resolve
-it in this order; a client for an explicit enclave uses only the first two,
-since other enclaves do not read the field:
+each other's cache timing. The router and gateway clients resolve it in this
+order; a client for an explicit enclave has no cache-secret option and sends
+request bodies as they are, since other enclaves do not read the field:
 
 1. a non-empty per-request ``user_cache_secret`` field in the body,
 2. the client's ``user_cache_secret`` option,

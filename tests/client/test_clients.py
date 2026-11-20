@@ -171,6 +171,7 @@ class TestEnclaveClient:
     def test_rejects_invalid_options_before_any_io(
         self, network: Network, name: str, args: tuple[str, Trust, dict[str, object]]
     ) -> None:
+        """Every option is checked before the enclave is contacted."""
         host, trust, options = args
         with pytest.raises(ConfigurationError) as err:
             EnclaveHTTPClient(host, trust, **options)  # type: ignore[arg-type]
@@ -247,11 +248,14 @@ class TestEnclaveClient:
             "enclave.example",
             RepoPin("org/repo"),
             transport=EHBP("https://proxy.example/v1/"),
-            user_cache_secret="explicit",
         )
         reply = client.http_client.post("https://proxy.example/v1/chat/completions", json={"model": "m"}).json()
         assert reply["path"] == "/v1/chat/completions"
-        assert json.loads(reply["body"]) == {"model": "m", "user_cache_secret": "explicit"}
+        assert json.loads(reply["body"]) == {"model": "m"}, "the enclave client adds no cache secret"
+        reply = client.http_client.post(
+            "https://proxy.example/v1/chat/completions", json={"model": "m", "user_cache_secret": ""}
+        ).json()
+        assert json.loads(reply["body"]) == {"model": "m", "user_cache_secret": ""}, "nor changes one"
         assert reply["enclave"] == "https://enclave.example"
         assert network.ehbp.requests[-1].read() != b'{"model":"m"}', "the body was sealed"
         for target in (

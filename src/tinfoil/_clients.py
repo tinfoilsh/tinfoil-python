@@ -71,7 +71,8 @@ class _Attested:
     """What the enclave and router clients share: the verified enclave and the chain their requests go through.
     The chain, from the inside out: the proxy header, one replay after a key rejection, the cache secret, and
     origin pinning. The cache secret sits above the attested transport, so the field it adds is sealed with the
-    rest of the body or sent over the pinned connection. ``http_client`` is the caller's ``httpx`` client over
+    rest of the body or sent over the pinned connection; an empty secret, as on the enclave clients, adds none.
+    ``http_client`` is the caller's ``httpx`` client over
     the chain; ``secure`` is a second one over the same chain that OpenAI clients send through, which changes
     to the caller's client, such as its headers, authentication or event hooks, cannot reach."""
 
@@ -254,12 +255,15 @@ class EnclaveHTTPClient(_AttestedClient):
     that the proxy can forward them.
     ``verification_check``, when set, is called with each verification that
     passes the trust and the policy before the client uses the enclave's keys; raising
-    rejects the enclave, and the rejection is not retried.
-    ``user_cache_secret``, when set, is the default prompt-cache scope for
-    the client's requests; only Tinfoil's router reads it. ``timeout`` is
+    rejects the enclave, and the rejection is not retried. ``timeout`` is
     the ``httpx`` timeout of ``http_client`` and of the client's own
     attestation fetches, which are bounded as a whole besides, at 30
     seconds each; it defaults to ``DEFAULT_HTTP_TIMEOUT``.
+
+    The client sends request bodies as they are: it never adds or changes a
+    ``user_cache_secret`` member, so a caller that points it at Tinfoil's
+    router and wants a scoped prompt cache sets that member in each request
+    body, for example with the ``openai`` package's ``extra_body``.
 
     The trust argument and the options are checked before any network I/O,
     including that the trust can be satisfied at all; a value of another
@@ -276,12 +280,11 @@ class EnclaveHTTPClient(_AttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
-        user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
         enclave, resolved, proxy_url, self._trust = _enclave_parts(host, trust, transport, policy, verification_check)
         keyed = AttestedTransport(enclave, mode_for(resolved), timeout=timeout)
-        self._attested = _Attested(keyed, proxy_url, user_cache_secret or "")
+        self._attested = _Attested(keyed, proxy_url, "")
         try:
             keyed.ensure_verified()
         except BaseException:
@@ -314,12 +317,11 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
-        user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
         enclave, resolved, proxy_url, copied = _enclave_parts(host, trust, transport, policy, verification_check)
         keyed = AsyncAttestedTransport(enclave, async_mode_for(resolved), timeout=timeout)
-        client = cls(_attested=_AsyncAttested(keyed, proxy_url, user_cache_secret or ""), _trust=copied)
+        client = cls(_attested=_AsyncAttested(keyed, proxy_url, ""), _trust=copied)
         try:
             await keyed.ensure_verified()
         except BaseException:

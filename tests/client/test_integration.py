@@ -42,7 +42,7 @@ needs_api_key = pytest.mark.skipif(not API_KEY, reason="TINFOIL_API_KEY is not s
 
 @pytest.mark.parametrize("mode", [TLS(), EHBP()])
 def test_enclave_client(mode: Transport) -> None:
-    with EnclaveHTTPClient(ENCLAVE, RepoPin(REPO), transport=mode, user_cache_secret=CACHE_SECRET) as client:
+    with EnclaveHTTPClient(ENCLAVE, RepoPin(REPO), transport=mode) as client:
         assert client.current is not None, "the client is verified when it's returned"
         before = client.ensure_verified()
         assert before.metadata.verified_at == client.current.metadata.verified_at, (
