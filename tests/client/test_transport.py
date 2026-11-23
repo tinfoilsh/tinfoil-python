@@ -146,6 +146,7 @@ def test_refresh_coalesces_requests_and_explicit_verify(
     callers = 17
     arrived = threading.Barrier(callers, timeout=5)  # every caller starts at once, so they contend for one refresh
     all_waiting = threading.Event()  # set once every caller but the owner waits at the refresh
+    fetching = threading.Event()  # set once the owner's refresh reaches the fetch
     release = threading.Event()
     lock = threading.Lock()
     attempts = 0
@@ -175,6 +176,7 @@ def test_refresh_coalesces_requests_and_explicit_verify(
         nonlocal attempts
         with lock:
             attempts += 1
+        fetching.set()
         release.wait(5)
         if refresh_error is not None:
             raise refresh_error
@@ -206,6 +208,8 @@ def test_refresh_coalesces_requests_and_explicit_verify(
     for thread in threads:
         thread.start()
     assert all_waiting.wait(5), "every caller but the owner waits at the refresh"
+    # The owner can reach the fetch after the others are waiting, so wait for it rather than race it.
+    assert fetching.wait(5), "the owner's refresh fetches"
     assert attempts == 1
     release.set()
     for thread in threads:
