@@ -6,16 +6,17 @@ proves. It opens no
 connections and keeps no state between calls, so fetching documents, caching
 a verification and enforcing its expiry all belong to the caller.
 
-It raises two error types: a ``UsageError`` when the verifier is built or
-called with invalid inputs, and a ``VerificationError`` when the document
-must not be trusted.
+It returns a ``VerificationReport`` for a document that it accepts, and
+raises two error types: a ``UsageError`` when the verifier is built or
+called with invalid inputs, and a ``VerificationError``, which carries the
+report of the rejected verification, when the document must not be trusted.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from tinfoil._sdkinfo import SDK_NAME, sdk_version
@@ -65,13 +66,31 @@ from tinfoil.verifier._options import (
     Registries,
 )
 from tinfoil.verifier._policy import ARTIFACT_FORMAT
-from tinfoil.verifier._quote import LegacyReferenceValues, QuoteOptions, TestOnlyRoots, assemble, authenticate
+from tinfoil.verifier._quote import (
+    AssemblyError,
+    LegacyReferenceValues,
+    QuoteOptions,
+    TestOnlyRoots,
+    assemble,
+    authenticate,
+    code_measurement,
+)
+from tinfoil.verifier._report import (
+    PROVENANCE_EMBEDDED,
+    STEP_SKIPPED,
+    CPUEvidence,
+    ExpectedFacts,
+    ReportBuilder,
+    VerificationReport,
+    measured_keys,
+)
 from tinfoil.verifier._verification import (
+    SOURCE_EMBEDDED,
     SOURCE_ENDORSEMENT,
     ArtifactVerification,
     SoftwareIdentity,
-    Verification,
     VerificationMetadata,
+    VerifiedFacts,
 )
 from tinfoil.verifier._x509.certificate import X509Error
 
@@ -129,7 +148,7 @@ class Verifier:
     It does read the clock. ``verify_v3`` samples it once and judges
     everything time-bound against that instant: the freshness witnesses and
     approvals, and the vendor certificate and CRL validity windows of the
-    CPU evidence. The same instant is reported as ``metadata.verified_at``.
+    CPU evidence. The same instant is reported as the report's ``metadata.verified_at``.
     ``verify_v3_at`` takes that instant from the caller instead. So the same
     document is accepted today and rejected once its witnesses go stale.
     """
@@ -185,7 +204,7 @@ class Verifier:
                 )
         reference_pins(self._trust, project)
 
-    def verify_v3(self, doc: bytes, nonce: bytes, pin: Pin) -> Verification:
+    def verify_v3(self, doc: bytes, nonce: bytes, pin: Pin) -> VerificationReport:
         """Appraise a nonce-bound v3 attestation document, with whichever collateral format (v2 or v3) the document
         carries, at the current time.
 
@@ -193,20 +212,27 @@ class Verifier:
         Anything but a ``Pin``, such as a bare reference string, is a
         UsageError.
 
+        An accepted document is returned as a ``VerificationReport`` whose
+        ``verified_facts`` hold what the document proved. A rejected one
+        raises a ``VerificationError`` whose ``report`` shows the step that
+        failed and what the steps before it established. A UsageError
+        carries no report, since verification never started.
+
         The caller owns both expectations that cannot come from the
         document: the nonce it generated, and any additional workload
-        constraints. On success it must bind traffic to the returned keys
-        and enforce ``freshness_expires_at``. Hardware collateral bounds
-        the result even when every reference is embedded.
+        constraints. On success it must bind traffic to the keys in the
+        report's ``verified_facts`` and enforce their
+        ``freshness_expires_at``. Hardware collateral bounds the result even
+        when every reference is embedded.
         """
         # The only clock read.
         return self.verify_v3_at(doc, nonce, pin, datetime.now(UTC))
 
-    def verify_v3_at(self, doc: bytes, nonce: bytes, pin: Pin, verification_time: datetime) -> Verification:
+    def verify_v3_at(self, doc: bytes, nonce: bytes, pin: Pin, verification_time: datetime) -> VerificationReport:
         """``verify_v3`` for an archived document. ``verification_time`` replaces the current time in every
         time-bound check: the freshness witnesses and approvals, and the vendor certificate and CRL validity windows
-        of the CPU evidence. ``metadata.verified_at`` reports it, and a naive or missing time is a UsageError.
-        ``pin`` means what it means to ``verify_v3``.
+        of the CPU evidence. The report's ``metadata.verified_at`` reports it, and a naive or missing time is a
+        UsageError. ``pin`` means what it means to ``verify_v3``.
 
         The caller must authenticate ``verification_time`` independently,
         for example from a trusted timestamp recorded when the document was
@@ -226,7 +252,14 @@ class Verifier:
             raise UsageError("nonce must be bytes")
         repo, project = _pin_parts(pin)
         _require_pin(trust, repo, project)
-        return _verify_v3(trust, bytes(doc), bytes(nonce), repo, project, verification_time)
+        steps = ReportBuilder(
+            VerificationMetadata(
+                verifier=SoftwareIdentity(name=SDK_NAME, version=sdk_version()),
+                verified_at=verification_time.astimezone(UTC),
+            )
+        )
+        facts = _verify_v3(trust, bytes(doc), bytes(nonce), repo, project, verification_time, steps)
+        return steps.passed_all(facts)
 
 
 def _pin_parts(pin: Pin) -> tuple[str, str]:
@@ -415,34 +448,52 @@ def _trust_policy(config: object, policy: object, *, overrides: Overrides | None
 
 
 @contextmanager
-def _layer(layer: str) -> Iterator[None]:
-    """Attribute any failure inside to ``layer``: an error that already carries a verify type, such as the UsageError
-    for a caller's mistake, passes through; anything else becomes a VerificationError for the layer that rejected
-    the document, with the failure as its cause."""
+def _layer(layer: str, steps: ReportBuilder) -> Iterator[None]:
+    """Attribute any failure inside to ``layer``: an error that already carries a verify type passes through, a
+    UsageError for a caller's mistake as it is and a VerificationError with the report attached; anything else
+    becomes a VerificationError for the layer that rejected the document, with the failure as its cause. Either
+    VerificationError carries the report of what ``steps`` recorded, with its own layer as the failed step."""
     try:
         yield
+    except VerificationError as err:
+        if err.report is None:
+            err.report = steps.failed(err.layer, err.message)
+            err.args = (err.layer, err.message, err.report)
+        raise
     except VerifyError:
         raise
     except Exception as err:
-        raise VerificationError(layer, str(err)) from err
+        raise VerificationError(layer, str(err), steps.failed(layer, str(err))) from err
 
 
 def _verify_v3(
-    trust: TrustPolicy, doc_bytes: bytes, nonce: bytes, repo: str, project: str, now: datetime
-) -> Verification:
-    """The pipeline: envelope, reference values, CPU evidence, policy; then the record."""
+    trust: TrustPolicy,
+    doc_bytes: bytes,
+    nonce: bytes,
+    repo: str,
+    project: str,
+    now: datetime,
+    steps: ReportBuilder,
+) -> VerifiedFacts:
+    """The pipeline: envelope, reference values, CPU evidence, policy; then the verified facts. It records each step
+    that passes in ``steps``, with the facts that the step establishes, from the values that the step already
+    computes."""
     # A malformed pin is a usage error for any document.
     code_pin = _repository_pin(repo) if repo != "" else None
     reference_pins(trust, project)
 
-    with _layer(LAYER_ENVELOPE):
+    with _layer(LAYER_ENVELOPE, steps):
         try:
             doc = parse(doc_bytes, nonce)
         except InvalidInputError as err:
             raise UsageError(str(err)) from err
+    steps.passed(LAYER_ENVELOPE)
+    # Parsing checked only that the document is consistent with itself, so these stay unverified until the policy
+    # step binds them.
+    measured = steps.measured = measured_keys(doc.crypto_material_items())
 
     # Reference values and CPU evidence are appraised against the same instant.
-    with _layer(LAYER_PROVENANCE):
+    with _layer(LAYER_PROVENANCE, steps):
         collateral_format = doc.collateral_format()
         if collateral_format == FORMAT_V3:
             if project == "" and code_pin is not None:
@@ -458,15 +509,35 @@ def _verify_v3(
             refs = _code_references(trust, doc, code_pin, now)
         else:
             raise ReferencesError(f"unsupported collateral format {collateral_format!r}")
+    if _embedded(refs):
+        steps.set(LAYER_PROVENANCE, STEP_SKIPPED, PROVENANCE_EMBEDDED)
+    else:
+        steps.passed(LAYER_PROVENANCE)
+    steps.expected = ExpectedFacts(
+        config_repo=refs.artifact.repo,
+        artifact=refs.artifact,
+        config=refs.config,
+        platform=refs.platform,
+        code_measurement=code_measurement(refs.quote, doc.cpu_evidence().format),
+    )
 
-    with _layer(LAYER_QUOTE):
+    with _layer(LAYER_QUOTE, steps):
         authenticated = authenticate(doc.cpu_evidence(), doc.cpu_endorsements(), now, trust.quote_options)
+    steps.passed(LAYER_QUOTE)
+    steps.measured = replace(measured, cpu=CPUEvidence(measurement=authenticated.measurement))
 
-    with _layer(LAYER_POLICY):
-        assembled = assemble(doc, refs.quote, trust.pinned_registers, authenticated)
+    with _layer(LAYER_POLICY, steps):
+        try:
+            assembled = assemble(doc, refs.quote, trust.pinned_registers, authenticated)
+        except AssemblyError as err:
+            if err.expected is not None:
+                steps.resolved(err.expected)
+            raise
+        steps.resolved(assembled.expected)
         assembled.validate()
+    steps.passed(LAYER_POLICY)
 
-    return Verification(
+    return VerifiedFacts(
         code_digest=refs.artifact.digest,
         code_tag=refs.artifact.tag,
         config_repo=refs.artifact.repo,
@@ -479,9 +550,18 @@ def _verify_v3(
         config=refs.config,
         runtime=refs.artifact if refs.config is not None else None,
         platform=refs.platform,
-        metadata=VerificationMetadata(
-            verifier=SoftwareIdentity(name=SDK_NAME, version=sdk_version()), verified_at=now.astimezone(UTC)
-        ),
+    )
+
+
+def _embedded(refs: EndorsementResult) -> bool:
+    """Whether the caller embedded every reference value, the config, the runtime and the platform, so that
+    provenance authenticated nothing."""
+    return (
+        refs.config is not None
+        and refs.config.source == SOURCE_EMBEDDED
+        and refs.artifact.source == SOURCE_EMBEDDED
+        and refs.platform is not None
+        and refs.platform.source == SOURCE_EMBEDDED
     )
 
 

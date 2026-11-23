@@ -1,4 +1,4 @@
-"""The facts that verification proves about a document, and the record that carries them."""
+"""The facts that verification proves about a document."""
 
 from __future__ import annotations
 
@@ -85,19 +85,20 @@ class VerificationMetadata:
     verifier: SoftwareIdentity
     """The SDK that performed the verification."""
     verified_at: datetime
-    """The instant the document was appraised at: read once from the local clock by ``verify_v3``, or the caller's
+    """The instant that the document was appraised at: read once from the local clock by ``verify_v3``, or the caller's
     verification time for ``verify_v3_at``. It is not a freshness guarantee."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Verification:
-    """The facts proven during the verification of an attestation document, and metadata that the verifier adds
-    about the verification itself.
+class VerifiedFacts:
+    """The facts proven by the verification of an attestation document, including the channel keys that a caller
+    binds its traffic to.
 
-    The verifier creates one from a verified document; a hand-built value
-    carries no proof. Every field is immutable: the registers are
-    ``bytes``, the items are a tuple of frozen records and the times are
-    timezone-aware datetimes.
+    The verifier creates one, as the ``verified_facts`` of a report on a
+    document that it accepted; a hand-built value carries no proof. Every
+    field is immutable: the registers are ``bytes``, the items are a tuple
+    of frozen records and the times are timezone-aware datetimes. The
+    metadata of the verification is on the report, not here.
     """
 
     code_digest: str
@@ -124,7 +125,6 @@ class Verification:
     """The runtime that a config-based verification accepted; None for verification against a code release."""
     platform: ArtifactVerification | None = None
     """The platform endorsements that a config-based verification accepted; None for a code release."""
-    metadata: VerificationMetadata
 
     @property
     def tls_public_key_fp(self) -> str | None:
@@ -150,44 +150,19 @@ class Verification:
             "code_digest": self.code_digest,
             "code_tag": self.code_tag,
             "config_repo": self.config_repo,
-            "code_measurement": _measurement_dict(self.code_measurement),
-            "enclave_measurement": _measurement_dict(self.enclave_measurement),
+            "code_measurement": measurement_dict(self.code_measurement),
+            "enclave_measurement": measurement_dict(self.enclave_measurement),
             "crypto_material": [
                 {"id": item.id, "format": item.format, "data": item.data} for item in self.crypto_material
             ],
         }
         if self.config is not None:
-            out["config"] = _established(
-                {
-                    "source": self.config.source,
-                    "name": self.config.name,
-                    "digest": self.config.digest,
-                    "reference": self.config.reference,
-                    "signing_key_hint": self.config.signing_key_hint,
-                    "approval_time": _time(self.config.approval_time),
-                    "registry_id": self.config.registry_id,
-                    "signature_time": _time(self.config.signature_time),
-                }
-            )
+            out["config"] = config_dict(self.config)
         for name, artifact in (("runtime", self.runtime), ("platform", self.platform)):
             if artifact is not None:
-                out[name] = _established(
-                    {
-                        "source": artifact.source,
-                        "repo": artifact.repo,
-                        "tag": artifact.tag,
-                        "digest": artifact.digest,
-                        "name": artifact.name,
-                        "commit": artifact.commit,
-                        "approval_time": _time(artifact.approval_time),
-                    }
-                )
+                out[name] = artifact_dict(artifact)
         if self.freshness_expires_at is not None:
-            out["freshness_expires_at"] = _time(self.freshness_expires_at)
-        out["metadata"] = {
-            "verifier": {"name": self.metadata.verifier.name, "version": self.metadata.verifier.version},
-            "verified_at": _time(self.metadata.verified_at),
-        }
+            out["freshness_expires_at"] = time_str(self.freshness_expires_at)
         return out
 
     def to_json(self, *, indent: int | None = None) -> str:
@@ -206,7 +181,38 @@ def crypto_material_data(items: tuple[CryptoMaterialItem, ...], item_id: str, it
     return None
 
 
-def _measurement_dict(measurement: Measurement | Expected) -> dict[str, Any]:
+def config_dict(config: ConfigVerification) -> dict[str, Any]:
+    """``config`` as ``to_dict`` lays it out, without the facts that were not established."""
+    return _established(
+        {
+            "source": config.source,
+            "name": config.name,
+            "digest": config.digest,
+            "reference": config.reference,
+            "signing_key_hint": config.signing_key_hint,
+            "approval_time": time_str(config.approval_time),
+            "registry_id": config.registry_id,
+            "signature_time": time_str(config.signature_time),
+        }
+    )
+
+
+def artifact_dict(artifact: ArtifactVerification) -> dict[str, Any]:
+    """``artifact`` as ``to_dict`` lays it out, without the facts that were not established."""
+    return _established(
+        {
+            "source": artifact.source,
+            "repo": artifact.repo,
+            "tag": artifact.tag,
+            "digest": artifact.digest,
+            "name": artifact.name,
+            "commit": artifact.commit,
+            "approval_time": time_str(artifact.approval_time),
+        }
+    )
+
+
+def measurement_dict(measurement: Measurement | Expected) -> dict[str, Any]:
     """A measurement as its platform and the registers that are set, each as lowercase hex."""
     if isinstance(measurement, SEVSNP | ExpectedSEVSNP):
         out: dict[str, Any] = {"platform": PLATFORM_SEV_SNP}
@@ -222,7 +228,7 @@ def _measurement_dict(measurement: Measurement | Expected) -> dict[str, Any]:
     return out
 
 
-def _time(at: datetime | None) -> str | None:
+def time_str(at: datetime | None) -> str | None:
     if at is None:
         return None
     return at.astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -241,7 +247,7 @@ __all__ = [
     "ConfigVerification",
     "ReferenceSource",
     "SoftwareIdentity",
-    "Verification",
     "VerificationMetadata",
+    "VerifiedFacts",
     "crypto_material_data",
 ]

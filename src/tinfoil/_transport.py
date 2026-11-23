@@ -31,7 +31,7 @@ from tinfoil._keys import PeerLacksKeyError, key_rejection
 from tinfoil._tls import NO_TLS, AsyncPinnedTransport, PinnedTransport
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP, TLS, TimeoutTypes, Transport
 from tinfoil._url import validate_proxy_url
-from tinfoil.verifier import Verification
+from tinfoil.verifier import VerifiedFacts
 
 CLIENT_CLOSED = "client is closed"
 """The message of the ConfigurationError that a closed client raises."""
@@ -45,8 +45,8 @@ USE_CLIENT_DEFAULT = httpx.USE_CLIENT_DEFAULT
 
 _T = TypeVar("_T", "RetiringTransport", "AsyncRetiringTransport")
 
-VerifyMethod = Callable[..., Verification]
-AsyncVerifyMethod = Callable[..., Coroutine[Any, Any, Verification]]
+VerifyMethod = Callable[..., VerifiedFacts]
+AsyncVerifyMethod = Callable[..., Coroutine[Any, Any, VerifiedFacts]]
 
 
 class Mode(Protocol):
@@ -60,7 +60,7 @@ class Mode(Protocol):
     def validate_request(self, request: httpx.Request) -> None:
         """Raises ConfigurationError for a request the mode cannot protect, before any network I/O."""
 
-    def new_transport(self, verified: Verification) -> httpx.BaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.BaseTransport:
         """A transport tied to ``verified``'s keys. It reports an error meaning the peer does not hold those keys,
         detected before the application processes the request, as a ``PeerLacksKeyError``."""
 
@@ -73,7 +73,7 @@ class AsyncMode(Protocol):
 
     def validate_request(self, request: httpx.Request) -> None: ...
 
-    def new_transport(self, verified: Verification) -> httpx.AsyncBaseTransport: ...
+    def new_transport(self, verified: VerifiedFacts) -> httpx.AsyncBaseTransport: ...
 
 
 class TLSMode:
@@ -85,7 +85,7 @@ class TLSMode:
     def validate_request(self, request: httpx.Request) -> None:
         _validate_tls(request)
 
-    def new_transport(self, verified: Verification) -> httpx.BaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.BaseTransport:
         return PinnedTransport(_tls_key(verified))
 
 
@@ -97,7 +97,7 @@ class AsyncTLSMode:
     def validate_request(self, request: httpx.Request) -> None:
         _validate_tls(request)
 
-    def new_transport(self, verified: Verification) -> httpx.AsyncBaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.AsyncBaseTransport:
         return AsyncPinnedTransport(_tls_key(verified))
 
 
@@ -109,7 +109,7 @@ class EHBPMode:
     def validate_request(self, request: httpx.Request) -> None:
         check_ehbp(request)
 
-    def new_transport(self, verified: Verification) -> httpx.BaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.BaseTransport:
         return SealingTransport(server_identity(_hpke_key(verified)))
 
 
@@ -121,7 +121,7 @@ class AsyncEHBPMode:
     def validate_request(self, request: httpx.Request) -> None:
         check_ehbp(request)
 
-    def new_transport(self, verified: Verification) -> httpx.AsyncBaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.AsyncBaseTransport:
         return AsyncSealingTransport(server_identity(_hpke_key(verified)))
 
 
@@ -168,14 +168,14 @@ def async_mode_for(transport: Transport) -> AsyncMode:
     raise ConfigurationError(f"transport must be a TLS or EHBP value, not {type(transport).__name__}")
 
 
-def _tls_key(verified: Verification) -> str:
+def _tls_key(verified: VerifiedFacts) -> str:
     key = verified.tls_public_key_fp
     if key is None:
         raise AttestationError('document endorses no "tls" key')
     return key
 
 
-def _hpke_key(verified: Verification) -> str:
+def _hpke_key(verified: VerifiedFacts) -> str:
     key = verified.hpke_public_key
     if key is None:
         raise AttestationError(NO_HPKE_KEY)
@@ -190,7 +190,7 @@ class _State(Generic[_T]):
 
     __slots__ = ("discarded", "rejected", "transport", "verification")
 
-    def __init__(self, verification: Verification, transport: _T) -> None:
+    def __init__(self, verification: VerifiedFacts, transport: _T) -> None:
         self.verification = verification
         self.transport: _T = transport
         self.rejected = False
@@ -238,25 +238,25 @@ class AttestedTransport(httpx.BaseTransport):
             self._invalidate(state)
             raise key_rejection(err)  # noqa: B904 - the cause is set
 
-    def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
+    def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerifiedFacts:
         """A verification that is valid now, verifying first only if the current one has expired or been
         invalidated. Returning means requests can be sent under it."""
         return self._verified(False, Enclave.verify, self._timeout(timeout), None).verification
 
-    def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
+    def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerifiedFacts:
         """Verifies again even if the current verification is still valid. An AttestationError discards the
         current verification, so that the next request verifies again; any other failure keeps it."""
         return self._verified(True, Enclave.verify, self._timeout(timeout), None).verification
 
     def verify_once(
         self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, deadline: float | None = None
-    ) -> Verification:
+    ) -> VerifiedFacts:
         """``reverify`` without a retry of a failed attempt, so a caller trying several enclaves moves on
         quickly. ``deadline`` is a ``time.monotonic`` instant the attempt must finish by."""
         return self._verified(True, Enclave.verify_once, self._timeout(timeout), deadline).verification
 
     @property
-    def current(self) -> Verification | None:
+    def current(self) -> VerifiedFacts | None:
         """The last successful verification without checking it, or None before the first. It may have expired,
         been invalidated or been discarded by a failed re-verification; ``ensure_verified`` returns one that is
         valid."""
@@ -375,13 +375,13 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
             state.rejected = True
             raise key_rejection(err)  # noqa: B904 - the cause is set
 
-    async def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
+    async def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerifiedFacts:
         """A verification that is valid now, verifying first only if the current one has expired or been
         invalidated."""
         state = await self._verified(False, Enclave.verify_async, self._timeout(timeout), None)
         return state.verification
 
-    async def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
+    async def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerifiedFacts:
         """Verifies again even if the current verification is still valid. An AttestationError discards the
         current verification, as for ``AttestedTransport.reverify``."""
         state = await self._verified(True, Enclave.verify_async, self._timeout(timeout), None)
@@ -389,13 +389,13 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
 
     async def verify_once(
         self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, deadline: float | None = None
-    ) -> Verification:
+    ) -> VerifiedFacts:
         """``reverify`` without a retry of a failed attempt."""
         state = await self._verified(True, Enclave.verify_once_async, self._timeout(timeout), deadline)
         return state.verification
 
     @property
-    def current(self) -> Verification | None:
+    def current(self) -> VerifiedFacts | None:
         """The last successful verification without checking it, or None before the first. It may have expired,
         been invalidated or been discarded by a failed re-verification."""
         return None if self._current is None else self._current.verification

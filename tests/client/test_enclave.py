@@ -35,8 +35,8 @@ from tinfoil.verifier import (
     CryptoMaterialItem,
     Pin,
     Policy,
-    Verification,
     VerificationError,
+    VerifiedFacts,
     Verifier,
 )
 
@@ -96,7 +96,7 @@ def test_initialization_recovery(
     monkeypatch.setattr(time, "sleep", slept.append)
     calls = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -123,7 +123,7 @@ def test_initialization_recovery(
 def test_verify_once_does_not_retry() -> None:
     calls = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal calls
         calls += 1
         raise network_error("unavailable")
@@ -144,7 +144,7 @@ async def test_initialization_recovery_async(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(asyncio, "sleep", sleep)
     calls = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -159,7 +159,7 @@ async def test_initialization_recovery_async(monkeypatch: pytest.MonkeyPatch) ->
 def test_verification_check_sees_every_verification() -> None:
     checked: list[str] = []
 
-    def check(v: Verification) -> None:
+    def check(v: VerifiedFacts) -> None:
         checked.append(v.code_tag)
 
     enclave = fake_enclave(lambda: verification("key"), check=check)
@@ -172,12 +172,12 @@ def test_verification_check_rejects_without_retry() -> None:
     rejection = RuntimeError("unapproved release")
     calls = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal calls
         calls += 1
         return verification("key")
 
-    def check(_: Verification) -> None:
+    def check(_: VerifiedFacts) -> None:
         raise rejection
 
     with pytest.raises(AttestationError) as err:
@@ -196,13 +196,13 @@ def test_slow_verification_check_fetches_fresh_evidence(slow_calls: int) -> None
     checks = 0
     fetches = 0
 
-    def check(_: Verification) -> None:
+    def check(_: VerifiedFacts) -> None:
         nonlocal checks
         checks += 1
         if checks <= slow_calls:
             time.sleep(0.25)  # outlasts the short deadline
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal fetches
         fetches += 1
         validity = timedelta(seconds=0.1) if fetches <= slow_calls else timedelta(hours=1)
@@ -224,7 +224,7 @@ class TestDeadline:
     """``deadline`` bounds each attempt as a whole: the fetch, the verification and the check."""
 
     def test_slow_verification_is_refused_after_the_deadline(self) -> None:
-        def fetch() -> Verification:
+        def fetch() -> VerifiedFacts:
             time.sleep(0.1)  # a slow verifier
             return verification("key")
 
@@ -235,7 +235,7 @@ class TestDeadline:
     def test_slow_check_is_refused_after_the_deadline(self) -> None:
         checked = 0
 
-        def check(_: Verification) -> None:
+        def check(_: VerifiedFacts) -> None:
             nonlocal checked
             checked += 1
             time.sleep(0.1)
@@ -245,7 +245,7 @@ class TestDeadline:
         assert checked == 1, "the deadline leaves no budget for a retry"
 
     def test_passed_deadline_sends_nothing(self) -> None:
-        def fetch() -> Verification:
+        def fetch() -> VerifiedFacts:
             pytest.fail("a passed deadline must not start an attempt")
 
         with pytest.raises(NetworkError, match=DEADLINE_EXCEEDED):
@@ -256,7 +256,7 @@ class TestDeadline:
         monkeypatch.setattr(time, "sleep", lambda _: None)
         calls = 0
 
-        def fetch() -> Verification:
+        def fetch() -> VerifiedFacts:
             nonlocal calls
             calls += 1
             raise network_error("unavailable")
@@ -270,7 +270,7 @@ class TestDeadline:
 
     @pytest.mark.asyncio
     async def test_async_slow_verification_is_refused_after_the_deadline(self) -> None:
-        async def fetch() -> Verification:
+        async def fetch() -> VerifiedFacts:
             await asyncio.sleep(0.1)
             return verification("key")
 
@@ -286,7 +286,7 @@ def test_verification_without_a_deadline_is_rejected() -> None:
     says so rather than reporting an expiry, and the rejection is retried like any other attestation failure."""
     fetches = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal fetches
         fetches += 1
         return verification("key", deadline=None)
@@ -317,7 +317,7 @@ def test_verification_without_a_deadline_is_rejected() -> None:
 )
 def test_transport_keys(items: list[tuple[str, str, str]], want_hpke: str | None, want_error: str | None) -> None:
     base = verification("fp", tls="", hpke=None)
-    verified = Verification(
+    verified = VerifiedFacts(
         code_digest=base.code_digest,
         code_tag=base.code_tag,
         config_repo=base.config_repo,
@@ -325,7 +325,6 @@ def test_transport_keys(items: list[tuple[str, str, str]], want_hpke: str | None
         enclave_measurement=base.enclave_measurement,
         crypto_material=tuple(CryptoMaterialItem(*item) for item in items),
         freshness_expires_at=base.freshness_expires_at,
-        metadata=base.metadata,
     )
     if want_error is not None:
         with pytest.raises(AttestationError, match=want_error):

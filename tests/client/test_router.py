@@ -26,7 +26,7 @@ from tinfoil._router import (
     parse_routers,
 )
 from tinfoil._transport import CLIENT_CLOSED, AsyncAttestedTransport, AttestedTransport
-from tinfoil.verifier import Pin, Verification
+from tinfoil.verifier import Pin, VerifiedFacts
 
 from .test_transport import AsyncFakeMode, FakeMode
 
@@ -46,7 +46,7 @@ def probing(verdicts: dict[str, Exception | None], probes: list[str]) -> Callabl
     """``new_transport`` whose enclaves verify by ``verdicts``: None passes, an exception fails."""
 
     def new_transport(enclave: Enclave) -> AttestedTransport:
-        def fetch() -> Verification:
+        def fetch() -> VerifiedFacts:
             probes.append(enclave.host)
             failure = verdicts.get(enclave.host, network_error("unreachable"))
             if failure is not None:
@@ -140,7 +140,7 @@ def test_discovery_bounds_total_probe_time(atc: Recorder, monkeypatch: pytest.Mo
     probes: list[str] = []
 
     def new_transport(enclave: Enclave) -> AttestedTransport:
-        def fetch() -> Verification:
+        def fetch() -> VerifiedFacts:
             probes.append(enclave.host)
             time.sleep(0.25)  # an unreachable router
             raise network_error("unreachable")
@@ -170,7 +170,7 @@ async def test_cancelled_discovery_closes_the_candidate_in_flight(atc: Recorder)
     built: list[AsyncAttestedTransport] = []
 
     def new_transport(enclave: Enclave) -> AsyncAttestedTransport:
-        async def fetch() -> Verification:
+        async def fetch() -> VerifiedFacts:
             probing_started.set()
             await asyncio.Event().wait()  # a router that never answers
             raise AssertionError("unreachable")
@@ -192,7 +192,7 @@ def test_interrupted_discovery_closes_the_candidate_in_flight(atc: Recorder) -> 
     built: list[AttestedTransport] = []
 
     def new_transport(enclave: Enclave) -> AttestedTransport:
-        def fetch() -> Verification:
+        def fetch() -> VerifiedFacts:
             raise KeyboardInterrupt
 
         built.append(AttestedTransport(Enclave(enclave.host, enclave.pin, _fetch=fetch), FakeMode()))
@@ -211,7 +211,7 @@ async def test_discovery_async(atc: Recorder) -> None:
     probes: list[str] = []
 
     def new_transport(enclave: Enclave) -> AsyncAttestedTransport:
-        async def fetch() -> Verification:
+        async def fetch() -> VerifiedFacts:
             probes.append(enclave.host)
             if enclave.host == "a.example":
                 raise network_error("down")

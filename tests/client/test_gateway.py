@@ -51,7 +51,7 @@ from tinfoil._gateway import (
 from tinfoil._keys import PeerLacksKeyError, key_rejection
 from tinfoil._transport import CLIENT_CLOSED
 from tinfoil._types import TimeoutTypes
-from tinfoil.verifier import EndorsedArtifacts, Policy, Verification
+from tinfoil.verifier import EndorsedArtifacts, Policy, VerifiedFacts
 
 MODEL = "test-model"
 INITIAL = "initial.example"
@@ -76,10 +76,10 @@ class FakeKeyed:
         self.verified = verification(host)
 
     @property
-    def current(self) -> Verification | None:
+    def current(self) -> VerifiedFacts | None:
         return self.verified if self.transport is not None else None
 
-    def ensure_verified(self, *, timeout: object = None) -> Verification:
+    def ensure_verified(self, *, timeout: object = None) -> VerifiedFacts:
         if self.transport is None:
             self.transport = self.connect(self.host)
         return self.verified
@@ -1175,10 +1175,10 @@ async def test_async_gateway_transport() -> None:
             self.verified = verification(host)
 
         @property
-        def current(self) -> Verification | None:
+        def current(self) -> VerifiedFacts | None:
             return self.verified
 
-        async def ensure_verified(self) -> Verification:
+        async def ensure_verified(self) -> VerifiedFacts:
             return self.verified
 
     class AsyncFakeChain(httpx.AsyncBaseTransport):

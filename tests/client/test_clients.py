@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from tests.client.helpers import EHBPServer, response, verification
+from tests.client.helpers import EHBPServer, report_of, response, verification
 from tinfoil import _cachesecret, _ehbp, _fetch, _router
 from tinfoil._chain import ENCLAVE_URL_HEADER
 from tinfoil._clients import (
@@ -29,7 +29,7 @@ from tinfoil._gateway import Catalog, CatalogEntry, ModelPin
 from tinfoil._transport import CLIENT_CLOSED
 from tinfoil._trust import AuthorizedBy, EitherPin, EmbeddedConfig, ProjectPin, RepoPin, SignedBy, Trust
 from tinfoil._types import EHBP
-from tinfoil.verifier import EndorsedArtifacts, Pin, Policy, Verification, Verifier
+from tinfoil.verifier import EndorsedArtifacts, Pin, Policy, VerificationReport, VerifiedFacts, Verifier
 
 Handler = Callable[[httpx.Request], httpx.Response]
 ATTESTATION_PATH = "/.well-known/tinfoil-attestation"
@@ -41,7 +41,7 @@ class Network:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.requests: list[httpx.Request] = []
-        self.documents: dict[str, Verification | Exception] = {}
+        self.documents: dict[str, VerifiedFacts | Exception] = {}
         self.pins: list[Pin] = []
         self.handler: Handler = lambda _: response(200, b"ok")
         self.ehbp = EHBPServer()
@@ -64,11 +64,11 @@ class Network:
             return response(200, document.code_tag.encode())
         return self.handler(request)
 
-    def verify(self, doc: bytes, nonce: bytes, pin: Pin) -> Verification:
+    def verify(self, doc: bytes, nonce: bytes, pin: Pin) -> VerificationReport:
         self.pins.append(pin)
         for document in self.documents.values():
-            if isinstance(document, Verification) and document.code_tag.encode() == doc:
-                return document
+            if isinstance(document, VerifiedFacts) and document.code_tag.encode() == doc:
+                return report_of(document)
         raise AssertionError("unknown document")
 
     def hosts(self) -> list[str]:
@@ -78,7 +78,7 @@ class Network:
 
     def serve(
         self, host: str, *, tag: str | None = None, hpke: str | None = None, deadline: datetime | str | None = "default"
-    ) -> Verification:
+    ) -> VerifiedFacts:
         document = verification(
             "key",
             tls="ab" * 32,
@@ -370,7 +370,7 @@ class TestEnclaveClient:
         network.serve("enclave.example")
         seen: list[str] = []
 
-        def check(v: Verification) -> None:
+        def check(v: VerifiedFacts) -> None:
             seen.append(v.code_tag)
             raise RuntimeError("rejected by the test")
 

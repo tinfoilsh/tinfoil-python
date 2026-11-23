@@ -40,12 +40,15 @@ from tinfoil.verifier import (
     KEY_X25519_HPKE_V1_FORMAT,
     REGISTER_SIZE,
     SEVSNP,
+    STEP_PASSED,
     CryptoMaterialItem,
     ExpectedSEVSNP,
     Pin,
     SoftwareIdentity,
-    Verification,
+    Step,
     VerificationMetadata,
+    VerificationReport,
+    VerifiedFacts,
     cert_pubkey_fp,
 )
 
@@ -65,7 +68,7 @@ def verification(
     tls: str | None = None,
     hpke: str | None = HPKE_KEY,
     tag: str | None = None,
-) -> Verification:
+) -> VerifiedFacts:
     """A verification endorsing a TLS fingerprint and an HPKE key. ``key`` is the TLS fingerprint and the code
     tag unless ``tls`` or ``tag`` overrides it; ``deadline`` defaults to an hour from now, and None leaves the
     verification without a deadline."""
@@ -78,7 +81,7 @@ def verification(
     expires = in_an_hour() if deadline == "default" else deadline
     assert expires is None or isinstance(expires, datetime)
     register = bytes(REGISTER_SIZE)
-    return Verification(
+    return VerifiedFacts(
         code_digest="d" * 64,
         code_tag=key if tag is None else tag,
         config_repo="org/repo",
@@ -86,20 +89,28 @@ def verification(
         enclave_measurement=SEVSNP(launch=register),
         crypto_material=tuple(items),
         freshness_expires_at=expires,
+    )
+
+
+def report_of(facts: VerifiedFacts) -> VerificationReport:
+    """The report of a verification that every step accepted, with ``facts`` as its verified facts."""
+    return VerificationReport(
+        steps=tuple(Step(layer, STEP_PASSED) for layer in ("envelope", "provenance", "quote", "policy")),
+        verified_facts=facts,
         metadata=VerificationMetadata(SoftwareIdentity("test", "0"), datetime.now(UTC)),
     )
 
 
 def fake_enclave(
-    fetch: Callable[[], Verification],
+    fetch: Callable[[], VerifiedFacts],
     *,
     host: str = HOST,
     repo: str = "org/repo",
-    check: Callable[[Verification], None] | None = None,
+    check: Callable[[VerifiedFacts], None] | None = None,
 ) -> Enclave:
     """An enclave that verifies by calling ``fetch`` instead of fetching and verifying a document."""
 
-    async def fetch_async() -> Verification:
+    async def fetch_async() -> VerifiedFacts:
         return fetch()
 
     return Enclave(host, Pin(repo=repo), verification_check=check, _fetch=fetch, _fetch_async=fetch_async)

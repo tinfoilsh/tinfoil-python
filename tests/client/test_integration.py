@@ -1,4 +1,4 @@
-"""Live tests against Tinfoil's router, enclave and gateway. Verification needs no credential; the tests that send
+"""Live tests against Tinfoil's router, enclave and gateway. VerifiedFacts needs no credential; the tests that send
 inference requests run only with ``TINFOIL_API_KEY`` set."""
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from tinfoil import (
     create_client,
     fetch_catalog,
 )
-from tinfoil.verifier import Verification
+from tinfoil.verifier import VerifiedFacts
 
 pytestmark = pytest.mark.integration
 
@@ -45,11 +45,9 @@ def test_enclave_client(mode: Transport) -> None:
     with EnclaveHTTPClient(ENCLAVE, RepoPin(REPO), transport=mode) as client:
         assert client.current is not None, "the client is verified when it's returned"
         before = client.ensure_verified()
-        assert before.metadata.verified_at == client.current.metadata.verified_at, (
-            "the constructor's verification is reused"
-        )
+        assert before is client.current, "the constructor's verification is reused"
         after = client.reverify()
-        assert after.metadata.verified_at >= before.metadata.verified_at
+        assert after is not before
         headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
         reply = client.http_client.get(client.base_url + "v1/models", headers=headers)
         assert reply.status_code == 200
@@ -97,7 +95,7 @@ def test_drop_in_client_streams_and_transcribes() -> None:
 def test_verification_check_rejects_once() -> None:
     seen: list[str | None] = []
 
-    def check(verified: Verification) -> None:
+    def check(verified: VerifiedFacts) -> None:
         seen.append(verified.tls_public_key_fp)
         raise RuntimeError("rejected by the test")
 

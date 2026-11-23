@@ -56,12 +56,12 @@ from tinfoil.verifier import (
     Pin,
     UsageError,
     VerificationError,
+    VerifiedFacts,
     Verifier,
     _measurement,
     _verifier,
     random_nonce,
 )
-from tinfoil.verifier import Verification as PublicVerification
 from tinfoil.verifier._document import document
 from tinfoil.verifier._document.collateral.collateral import NotFoundError
 from tinfoil.verifier._endorsement import approval, provenance, reference
@@ -383,14 +383,14 @@ def _verify(decoded: Input) -> Result:
         return _malformed(stage)
     appraisal = decoded.verification_time or datetime.now(UTC)
     try:
-        verified = verifier.verify_v3_at(
+        report = verifier.verify_v3_at(
             decoded.document or b"", decoded.nonce or b"", Pin(repo=decoded.repo, project=decoded.project), appraisal
         )
     except UsageError:
         return _malformed(stage)
     except VerificationError as err:
         return _verification_rejected(stage, err)
-    outputs = _accept_outputs(verified)
+    outputs = _accept_outputs(report.verified_facts)
     if outputs is None:
         return _rejected(stage, ENVELOPE_REJECTED, "document endorses no TLS fingerprint or no HPKE key")
     return Result({"stage": stage, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
@@ -416,8 +416,11 @@ def _verification_rejected(stage: str, err: VerificationError) -> Result:
     return _rejected(stage, code, str(err))
 
 
-def _accept_outputs(verified: PublicVerification) -> dict[str, Any] | None:
-    """The accept facts of a verification, or None when it endorses no TLS fingerprint or no HPKE key."""
+def _accept_outputs(verified: VerifiedFacts | None) -> dict[str, Any] | None:
+    """The accept facts of a verification, or None when it has no verified facts or endorses no TLS fingerprint or
+    no HPKE key."""
+    if verified is None:
+        return None
     tls_fp = verified.tls_public_key_fp
     hpke_key = verified.hpke_public_key
     if tls_fp is None or hpke_key is None:
@@ -673,12 +676,12 @@ def _live_verify(raw: Any) -> Result:
     except (FetchError, httpx.HTTPError, OSError, ValueError) as err:
         return _internal(stage, f"fetching attestation from {host}: {err}")
     try:
-        verified = verifier.verify_v3(document_bytes, nonce, Pin(repo=repo, project=project))
+        report = verifier.verify_v3(document_bytes, nonce, Pin(repo=repo, project=project))
     except UsageError as err:
         return _malformed(stage, str(err))
     except VerificationError as err:
         return _verification_rejected(stage, err)
-    outputs = _accept_outputs(verified)
+    outputs = _accept_outputs(report.verified_facts)
     if outputs is None:
         return _rejected(stage, ENVELOPE_REJECTED, "document endorses no TLS fingerprint or no HPKE key")
     # Channel binding: the endorsed TLS key must be the key the live enclave presents on the wire.

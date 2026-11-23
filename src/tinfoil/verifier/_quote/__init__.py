@@ -19,6 +19,7 @@ from tinfoil.verifier._quote.quote import (
     assemble,
     assemble_with,
     authenticate,
+    code_measurement,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "assemble",
     "assemble_with",
     "authenticate",
+    "code_measurement",
 ]

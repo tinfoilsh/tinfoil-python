@@ -74,7 +74,7 @@ from tinfoil._url import (
     refuse_enclave_origin_proxy,
     with_trailing_slash,
 )
-from tinfoil.verifier import Policy, Verification
+from tinfoil.verifier import Policy, VerifiedFacts
 
 ASYNC_CONSTRUCTOR = "{name} is built with 'await {name}.create(...)'"
 
@@ -151,13 +151,13 @@ class _AttestedClient:
         return self._attested.keyed.enclave.host
 
     @property
-    def current(self) -> Verification | None:
+    def current(self) -> VerifiedFacts | None:
         """The last successful verification without checking it, or None before the first. It may have expired,
         been rejected or been discarded by a failed ``reverify`` or refresh; ``ensure_verified`` returns one that
         is valid."""
         return self._attested.keyed.current
 
-    def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
+    def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerifiedFacts:
         """A verification that is valid now, verifying first only if the cached one has expired or been rejected.
         It also prepares the TLS pin or HPKE key for it, so returning means requests can be sent. ``timeout``
         bounds each network operation of a verification: ``httpx.USE_CLIENT_DEFAULT``, the default, selects the
@@ -165,7 +165,7 @@ class _AttestedClient:
         besides."""
         return self._attested.keyed.ensure_verified(timeout=timeout)
 
-    def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
+    def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerifiedFacts:
         """Verifies again even if the cached verification is still valid. ``timeout`` is as for
         ``ensure_verified``. A failure raises as usual; an AttestationError also discards the cached verification
         and retires the connections that were made under it, so that no later request is sent under it and the
@@ -210,17 +210,17 @@ class _AsyncAttestedClient:
         return self._attested.keyed.enclave.host
 
     @property
-    def current(self) -> Verification | None:
+    def current(self) -> VerifiedFacts | None:
         """The last successful verification without checking it, or None before the first. It may have expired,
         been rejected or been discarded by a failed ``reverify`` or refresh."""
         return self._attested.keyed.current
 
-    async def ensure_verified(self) -> Verification:
+    async def ensure_verified(self) -> VerifiedFacts:
         """A verification that is valid now, verifying first only if the cached one has expired or been rejected.
         Cancelling the task ends its wait, not a verification other callers share."""
         return await self._attested.keyed.ensure_verified()
 
-    async def reverify(self) -> Verification:
+    async def reverify(self) -> VerifiedFacts:
         """Verifies again even if the cached verification is still valid. As for the synchronous client, an
         AttestationError discards the cached verification, so that the next request verifies again, while a
         NetworkError, a ConfigurationError or a cancellation keeps one that is still fresh."""
@@ -581,7 +581,7 @@ class GatewayHTTPClient:
 
     def ensure_verified(
         self, model: str, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT
-    ) -> Verification:
+    ) -> VerifiedFacts:
         """A verification that is valid now of a replica serving ``model``, verifying replicas only if needed.
         ``timeout`` bounds each network operation of the catalog and attestation fetches that the call makes:
         ``httpx.USE_CLIENT_DEFAULT``, the default, selects the client's own, None disables the timeout, and each
@@ -678,7 +678,7 @@ class AsyncGatewayHTTPClient:
         """The catalog's models that the client's policy serves, sorted, without verifying replicas."""
         return await self._transport.models()
 
-    async def ensure_verified(self, model: str) -> Verification:
+    async def ensure_verified(self, model: str) -> VerifiedFacts:
         """A verification that is valid now of a replica serving ``model``."""
         return await self._transport.ensure_verified(model)
 

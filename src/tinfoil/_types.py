@@ -8,7 +8,7 @@ from typing import TypeAlias, final
 
 import httpx
 
-from tinfoil.verifier import Verification
+from tinfoil.verifier import VerifiedFacts
 
 TimeoutTypes: TypeAlias = float | tuple[float | None, float | None, float | None, float | None] | httpx.Timeout | None
 """A timeout as ``httpx.Client`` accepts it: seconds for every operation, None for no limit, a
@@ -21,7 +21,7 @@ and pool wait, which is what the ``openai`` package applies to inference request
 attestation fetches, which are also bounded as a whole: an attestation document and the router list within
 30 seconds, the gateway catalog within 10 seconds."""
 
-VerificationCheck: TypeAlias = Callable[[Verification], None]
+VerificationCheck: TypeAlias = Callable[[VerifiedFacts], None]
 """A caller's check of a verification that passed the verifier, called before the client uses the enclave's keys.
 Raising rejects the enclave; the exception becomes the cause of an AttestationError and is not retried."""
 

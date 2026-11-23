@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Final, TypeAlias
+from typing import TYPE_CHECKING, Final, TypeAlias
+
+if TYPE_CHECKING:
+    from tinfoil.verifier._report import VerificationReport
 
 Layer: TypeAlias = str
 """The verification layer that rejected a document. The ``LAYER_*`` constants name the layers that exist today;
@@ -53,17 +56,25 @@ class VerificationError(VerifyError):
     witness that has gone stale is reported the same way as a forged one,
     and a fresh document from the enclave may verify. The message is the
     only distinction today; there is no code to test.
+
+    ``report`` is the ``VerificationReport`` of the rejected verification:
+    the step that failed, which has this error's layer and message, and the
+    partial facts that the steps before it established. It never holds
+    verified facts. The verifier always sets it; it is None only on an error
+    that was built by hand.
     """
 
     layer: Layer
     message: str
+    report: VerificationReport | None
 
-    def __init__(self, layer: Layer, message: str) -> None:
+    def __init__(self, layer: Layer, message: str, report: VerificationReport | None = None) -> None:
         # ``args`` holds the constructor's own arguments, so that the error
         # survives ``copy`` and ``pickle``, which rebuild it from them.
-        super().__init__(layer, message)
+        super().__init__(layer, message, report)
         self.layer = layer
         self.message = message
+        self.report = report
 
     def __str__(self) -> str:
         return f"{self.layer}: {self.message}"

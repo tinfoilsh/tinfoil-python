@@ -11,10 +11,12 @@ keys; a verifier may instead be built with the caller's own signing keys, with
 a config authorizer that applies the caller's policy to the config bytes, or
 with embedded references that the caller trusts outright, and then no bundle
 authenticates the component that the caller supplied. The result is
-a ``Verification``: the facts that the document proved, including the endorsed
-TLS key fingerprint and HPKE public key that a client binds its connection
-to, and the deadline after which a cached result must not authorize new
-requests.
+a ``VerificationReport``: the outcome of each step (``envelope``,
+``provenance``, ``quote`` and ``policy``) and its ``verified_facts``, a
+``VerifiedFacts`` that holds the facts that the document proved, including
+the endorsed TLS key fingerprint and HPKE public key that a client binds its
+connection to, and the deadline after which a cached result must not
+authorize new requests.
 
 The verifier opens no connections and keeps no state between calls. Fetching
 documents, caching a verification and enforcing its expiry belong to the
@@ -22,10 +24,16 @@ caller. The only clock it reads is the appraisal time of ``verify_v3``;
 ``verify_v3_at`` takes that instant from the caller instead.
 
 Every rejection is a ``VerificationError`` tagged with the layer that
-rejected the document; a verifier built or called with invalid inputs raises
-a ``UsageError``. Both derive from ``VerifyError``. The measurement parsers
-(``parse_register`` and the ``parse_expected_*`` helpers) and the measurement
-records raise a plain ``ValueError`` for a malformed register.
+rejected the document. Its ``report`` is the ``VerificationReport`` of the
+rejected verification, with the step that failed and the ``PartialFacts``
+that the steps before it established: the ``ExpectedFacts`` that provenance
+authenticated and the ``MeasuredFacts`` that the document and its hardware
+evidence claim. A report holds the channel keys only as fingerprints, and
+only ``verified_facts`` may bind a channel. A verifier built or called with
+invalid inputs raises a ``UsageError``, which carries no report. Both derive
+from ``VerifyError``. The measurement parsers (``parse_register`` and the
+``parse_expected_*`` helpers) and the measurement records raise a plain
+``ValueError`` for a malformed register.
 
 Measurements are closed sets with one frozen record per platform:
 ``SEVSNP`` or ``TDX`` for what the hardware measured, ``ExpectedSEVSNP`` or
@@ -36,7 +44,7 @@ Measurements are closed sets with one frozen record per platform:
 ``cert_pubkey_fp`` computes the SPKI fingerprint form in which documents
 endorse TLS keys. Checking that a TLS connection presents the endorsed key is
 the transport's job: compare ``cert_pubkey_fp`` of the peer certificate with
-``Verification.tls_public_key_fp`` after the handshake and before the first
+``VerifiedFacts.tls_public_key_fp`` after the handshake and before the first
 byte is written.
 
 A ``Verifier`` is built from a config trust and a ``Policy``, which are plain
@@ -103,6 +111,20 @@ from tinfoil.verifier._options import (
     PublicKey,
     Registries,
 )
+from tinfoil.verifier._report import (
+    STEP_FAILED,
+    STEP_NOT_RUN,
+    STEP_PASSED,
+    STEP_SKIPPED,
+    CPUEvidence,
+    ExpectedFacts,
+    MeasuredFacts,
+    PartialFacts,
+    Step,
+    StepStatus,
+    VerificationReport,
+    hpke_public_key_fp,
+)
 from tinfoil.verifier._verification import (
     SOURCE_EMBEDDED,
     SOURCE_ENDORSEMENT,
@@ -111,8 +133,8 @@ from tinfoil.verifier._verification import (
     ConfigVerification,
     ReferenceSource,
     SoftwareIdentity,
-    Verification,
     VerificationMetadata,
+    VerifiedFacts,
     crypto_material_data,
 )
 from tinfoil.verifier._verifier import Pin, Verifier, parse_reference
@@ -134,9 +156,14 @@ __all__ = [
     "SOURCE_EMBEDDED",
     "SOURCE_ENDORSEMENT",
     "SOURCE_POLICY",
+    "STEP_FAILED",
+    "STEP_NOT_RUN",
+    "STEP_PASSED",
+    "STEP_SKIPPED",
     "TDX",
     "ArtifactTrust",
     "ArtifactVerification",
+    "CPUEvidence",
     "ConfigAuthorizer",
     "ConfigEndorsement",
     "ConfigSigningKeys",
@@ -148,10 +175,13 @@ __all__ = [
     "EmbeddedConfigReference",
     "EndorsedArtifacts",
     "Expected",
+    "ExpectedFacts",
     "ExpectedSEVSNP",
     "ExpectedTDX",
     "Layer",
+    "MeasuredFacts",
     "Measurement",
+    "PartialFacts",
     "Pin",
     "Policy",
     "PublicKey",
@@ -161,14 +191,18 @@ __all__ = [
     "Registries",
     "RuntimeReference",
     "SoftwareIdentity",
+    "Step",
+    "StepStatus",
     "UsageError",
-    "Verification",
     "VerificationError",
     "VerificationMetadata",
+    "VerificationReport",
+    "VerifiedFacts",
     "Verifier",
     "VerifyError",
     "cert_pubkey_fp",
     "crypto_material_data",
+    "hpke_public_key_fp",
     "load_public_key",
     "parse_expected_sevsnp",
     "parse_expected_tdx",

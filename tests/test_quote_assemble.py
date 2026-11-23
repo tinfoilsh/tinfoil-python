@@ -21,7 +21,7 @@ from tinfoil.verifier._endorsement.provenance import (
     shape_from_predicate,
     signed_predicate,
 )
-from tinfoil.verifier._measurement import ExpectedSEVSNP, ExpectedTDX
+from tinfoil.verifier._measurement import SEVSNP, ExpectedSEVSNP, ExpectedTDX
 from tinfoil.verifier._policy import PLATFORM_SEV_SNP, Artifact, parse
 from tinfoil.verifier._quote import (
     AssembledSEVSNP,
@@ -36,9 +36,12 @@ from tinfoil.verifier._quote import (
     assemble,
     assemble_with,
     authenticate,
+    code_measurement,
 )
+from tinfoil.verifier._quote import quote as quote_module
 from tinfoil.verifier._quote.quote import TestOnlyRoots as Roots
 from tinfoil.verifier._quote.resolve import AssemblyError as ResolveAssemblyError
+from tinfoil.verifier._quote.resolve import ResolvedValues
 from tinfoil.verifier._quote.sev.expectations import SevPolicyError
 from tinfoil.verifier._quote.tdx.expectations import TdxPolicyError
 from tinfoil.verifier._runtime import FORMAT_VERSION, Measurements, SNPLaunch, TDXLaunch
@@ -150,6 +153,7 @@ def test_golden_sev_assembles_and_validates() -> None:
     assert assembled.code_measurement == g.refs.sevsnp
     assert assembled.policy_name == g.artifact.machines[g.quote.identity]
     assert assembled.quote == g.quote
+    assert assembled.expected == SEVSNP(launch=g.refs.sevsnp.launch or b""), "the release fixes the whole launch"
     assembled.validate()
     assert assembled.expectations.options.report_data == g.report_data
     assert assembled.expectations.options.measurement == g.quote.measurement.launch
@@ -167,11 +171,12 @@ def test_golden_sev_assembles_and_validates() -> None:
     # SEV assembly does not consume the code artifact's VM shape.
     assemble(g.doc, dataclasses.replace(g.refs, shape=None), None, g.quote).validate()
 
-    # A machine absent from the artifact rejects.
-    with pytest.raises(AssemblyError, match="not endorsed"):
+    # A machine absent from the artifact rejects, before any register is resolved.
+    with pytest.raises(AssemblyError, match="not endorsed") as unendorsed:
         assemble(
             g.doc, dataclasses.replace(g.refs, endorsements=dataclasses.replace(g.artifact, machines={})), None, g.quote
         )
+    assert unendorsed.value.expected is None
 
     # The release leaves nothing open on SEV-SNP, so a pin must repeat the launch measurement.
     assemble(g.doc, g.refs, ExpectedSEVSNP(launch=g.quote.measurement.launch), g.quote).validate()
@@ -182,9 +187,47 @@ def test_golden_sev_assembles_and_validates() -> None:
 
     # A release that fixes nothing leaves the register to the pins, and nothing else fixes it.
     open_code = dataclasses.replace(g.refs, sevsnp=ExpectedSEVSNP())
-    with pytest.raises(AssemblyError, match="nothing fixes the expected launch measurement"):
+    with pytest.raises(AssemblyError, match="nothing fixes the expected launch measurement") as unresolved:
         assemble(g.doc, open_code, None, g.quote)
+    assert unresolved.value.expected is None, "a register that nothing fixes leaves the expectation unresolved"
     assemble(g.doc, open_code, ExpectedSEVSNP(launch=g.quote.measurement.launch), g.quote).validate()
+
+
+def test_a_failure_after_resolution_carries_the_resolved_registers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assembly that fails once every register was resolved reports them, so that a report can show the full
+    expectation next to the rejection."""
+    g = golden("golden-tdx", "tdx-golden-happy")
+    launch = bytes([1]) * 48
+    resolved = ResolvedValues(
+        policy=g.artifact.policies[next(iter(g.artifact.policies))],
+        policy_name="p",
+        code=ExpectedSEVSNP(launch=launch),
+        expected=ExpectedSEVSNP(launch=launch),
+    )
+    monkeypatch.setattr(quote_module, "_resolve", lambda *_: resolved)
+    with pytest.raises(AssemblyError, match="expected an SEV-SNP measurement for a tdx quote") as mismatch:
+        assemble(g.doc, g.refs, None, g.quote)
+    assert mismatch.value.expected == SEVSNP(launch=launch)
+
+
+def test_code_measurement_follows_the_evidence_format() -> None:
+    g = golden("golden", "golden-happy")
+    assert code_measurement(g.refs, SEVSNP_REPORT_V1_FORMAT) == g.refs.sevsnp
+    assert code_measurement(g.refs, TDX_QUOTE_V1_FORMAT) == g.refs.tdx
+    assert code_measurement(g.refs, "unknown") is None
+    runtime = Measurements(
+        format_version=FORMAT_VERSION,
+        snp_launch=SNPLaunch(measurement="ab" * 48),
+        tdx_launch=TDXLaunch(mrtd="01" * 48, rtmr0="02" * 48, rtmr1="03" * 48, rtmr2="04" * 48, rtmr3="05" * 48),
+    )
+    config = ConfigReferenceValues(endorsements=g.artifact, runtime=runtime, hash=bytes(32))
+    assert code_measurement(config, SEVSNP_REPORT_V1_FORMAT) == ExpectedSEVSNP(launch=bytes([0xAB]) * 48)
+    assert code_measurement(config, TDX_QUOTE_V1_FORMAT) == ExpectedTDX(
+        mrtd=bytes([1]) * 48, rtmr0=bytes([2]) * 48, rtmr1=bytes([3]) * 48, rtmr2=bytes([4]) * 48, rtmr3=bytes([5]) * 48
+    )
+    assert code_measurement(dataclasses.replace(config, runtime=None), SEVSNP_REPORT_V1_FORMAT) is None
+    malformed = dataclasses.replace(runtime, snp_launch=SNPLaunch(measurement="zz"))
+    assert code_measurement(dataclasses.replace(config, runtime=malformed), SEVSNP_REPORT_V1_FORMAT) is None
 
 
 def test_golden_sev_under_the_config_contract_binds_host_data() -> None:
@@ -225,6 +268,7 @@ def test_golden_tdx_assembles_and_validates() -> None:
     assert assembled.code_measurement == g.refs.tdx
     assert assembled.platform_measurement_name is not None
     assert assembled.platform_measurement_name in g.artifact.measurements
+    assert assembled.expected == g.quote.measurement, "the golden quote attests every expected register"
     assembled.validate()
     body = assembled.expectations.options.td_quote_body
     assert body.report_data == g.report_data

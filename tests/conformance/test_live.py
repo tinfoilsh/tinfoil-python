@@ -28,17 +28,22 @@ from tests import pki
 from tinfoil.verifier import (
     KEY_SPKI_FP_SHA256_V1_FORMAT,
     KEY_X25519_HPKE_V1_FORMAT,
+    LAYER_ENVELOPE,
+    LAYER_POLICY,
     LAYER_PROVENANCE,
     LAYER_QUOTE,
     SEVSNP,
+    STEP_PASSED,
     CryptoMaterialItem,
     ExpectedSEVSNP,
     Pin,
     SoftwareIdentity,
+    Step,
     UsageError,
-    Verification,
     VerificationError,
     VerificationMetadata,
+    VerificationReport,
+    VerifiedFacts,
     cert_pubkey_fp,
 )
 
@@ -62,15 +67,21 @@ NOT_A_HOST = [
 ]
 
 
-def verification(*items: CryptoMaterialItem) -> Verification:
-    """A record such as the verifier would build, endorsing ``items``."""
-    return Verification(
+def verification(*items: CryptoMaterialItem) -> VerificationReport:
+    """A report such as the verifier would build for an accepted document, endorsing ``items``."""
+    facts = VerifiedFacts(
         code_digest="11" * 32,
         code_tag="v1.0.0",
         config_repo=REPO,
         code_measurement=ExpectedSEVSNP(launch=LAUNCH),
         enclave_measurement=SEVSNP(launch=LAUNCH),
         crypto_material=items,
+    )
+    return VerificationReport(
+        steps=tuple(
+            Step(layer, STEP_PASSED) for layer in (LAYER_ENVELOPE, LAYER_PROVENANCE, LAYER_QUOTE, LAYER_POLICY)
+        ),
+        verified_facts=facts,
         metadata=VerificationMetadata(
             verifier=SoftwareIdentity(name="tinfoil-python", version="0"), verified_at=datetime.now(UTC)
         ),
@@ -94,17 +105,17 @@ class VerifierDouble:
     """Stands in for the public verifier: records every call and answers with a fixed outcome."""
 
     calls: list[tuple[bytes, bytes, str | None, str | None, datetime | None]]
-    outcome: Verification | Exception
+    outcome: VerificationReport | Exception
 
-    def verify_v3(self, doc: bytes, nonce: bytes, pin: Pin) -> Verification:
+    def verify_v3(self, doc: bytes, nonce: bytes, pin: Pin) -> VerificationReport:
         type(self).calls.append((doc, nonce, pin.repo, pin.project, None))
         return self._answer()
 
-    def verify_v3_at(self, doc: bytes, nonce: bytes, pin: Pin, verification_time: datetime) -> Verification:
+    def verify_v3_at(self, doc: bytes, nonce: bytes, pin: Pin, verification_time: datetime) -> VerificationReport:
         type(self).calls.append((doc, nonce, pin.repo, pin.project, verification_time))
         return self._answer()
 
-    def _answer(self) -> Verification:
+    def _answer(self) -> VerificationReport:
         outcome = type(self).outcome
         if isinstance(outcome, Exception):
             raise outcome
@@ -264,7 +275,7 @@ def test_live_verify_gives_no_verdict_when_the_fetch_fails(
     ],
 )
 def test_live_verify_maps_the_verifier_outcome(
-    outcome: Verification | Exception,
+    outcome: VerificationReport | Exception,
     exit_code: int,
     code: str,
     double: type[VerifierDouble],

@@ -2,7 +2,7 @@
 document endorses. It is private: the pinned transport in ``tinfoil._tls`` compares it with the endorsed
 fingerprint, and the conformance adapter's live-verify check uses it.
 
-The verifier reports the fingerprint (``Verification.tls_public_key_fp``) and computes it from certificate bytes
+The verifier reports the fingerprint (``VerifiedFacts.tls_public_key_fp``) and computes it from certificate bytes
 (``cert_pubkey_fp``); reading the peer certificate off a connection and building the check on it is the
 transport's job, so that the verifier never takes a socket or a connection object.
 """

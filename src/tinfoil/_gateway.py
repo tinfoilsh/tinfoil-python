@@ -61,7 +61,7 @@ from tinfoil._transport import (
     _cancelling,
 )
 from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
-from tinfoil.verifier import Pin, Policy, Verification, Verifier, parse_reference
+from tinfoil.verifier import Pin, Policy, VerifiedFacts, Verifier, parse_reference
 
 DEFAULT_GATEWAY_URL = "https://inference-gateway.tinfoil.sh/v1/"
 """Tinfoil's gateway, the base URL a gateway client uses when none is given."""
@@ -128,7 +128,7 @@ class ReplicaVerification:
     """The repository reference the replica was verified against."""
     pinned_model: str
     """The pinned model the verification serves, or empty when the model was not pinned."""
-    verification: Verification
+    verification: VerifiedFacts
 
 
 def fetch_catalog(host: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
@@ -465,16 +465,16 @@ class Keyed(Protocol):
     """What a replica transport reads from its attested transport."""
 
     @property
-    def current(self) -> Verification | None: ...
+    def current(self) -> VerifiedFacts | None: ...
 
-    def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = ...) -> Verification: ...
+    def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = ...) -> VerifiedFacts: ...
 
 
 class AsyncKeyed(Protocol):
     @property
-    def current(self) -> Verification | None: ...
+    def current(self) -> VerifiedFacts | None: ...
 
-    async def ensure_verified(self) -> Verification: ...
+    async def ensure_verified(self) -> VerifiedFacts: ...
 
 
 class ReplicaTransport:
@@ -585,7 +585,7 @@ class _Shared(Generic[_T]):
             models.append(model)
         return sorted(models)
 
-    def verifications(self, current: Callable[[_T], Verification | None]) -> list[ReplicaVerification]:
+    def verifications(self, current: Callable[[_T], VerifiedFacts | None]) -> list[ReplicaVerification]:
         with self.lock:
             entries = list(self.enclaves.items())
         results: list[ReplicaVerification] = []
@@ -775,7 +775,7 @@ class GatewayTransport(httpx.BaseTransport):
 
     def ensure_verified(
         self, model: str, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT
-    ) -> Verification:
+    ) -> VerifiedFacts:
         """A valid verification of a replica serving ``model``. Replicas are tried in a fixed order for the model,
         so repeated calls verify the same replica while it stays valid."""
         self._check_open()
@@ -866,7 +866,7 @@ class GatewayTransport(httpx.BaseTransport):
 
     def _verified(
         self, replica: _Replica, timeout: TimeoutTypes | UseClientDefault
-    ) -> tuple[ReplicaTransport, Verification]:
+    ) -> tuple[ReplicaTransport, VerifiedFacts]:
         """``replica``'s transport once its replica verifies, so a caller can fall over to another replica before
         sealing anything to it."""
         transport = self._transport(replica)
@@ -1001,7 +1001,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         self._check_open()
         return self._shared.models_of(await self.catalog())
 
-    async def ensure_verified(self, model: str) -> Verification:
+    async def ensure_verified(self, model: str) -> VerifiedFacts:
         """A valid verification of a replica serving ``model``."""
         self._check_open()
         hosts, replica = self._shared.resolve(model, await self.catalog())
@@ -1084,7 +1084,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         keyed = AsyncAttestedTransport(self._shared.enclave_for(replica), AsyncEHBPMode(), timeout=self._shared.timeout)
         return AsyncReplicaTransport(keyed, replica_chain_async(keyed, replica.host, self._shared.base_url))
 
-    async def _verified(self, replica: _Replica) -> tuple[AsyncReplicaTransport, Verification]:
+    async def _verified(self, replica: _Replica) -> tuple[AsyncReplicaTransport, VerifiedFacts]:
         transport = self._transport(replica)
         return transport, await transport.keyed.ensure_verified()
 
