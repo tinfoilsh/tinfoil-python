@@ -329,13 +329,13 @@ class TestEnclaveClient:
 
     @pytest.mark.parametrize("recovers", [True, False], ids=["recovers", "still-fails"])
     def test_failed_reverify_discards_the_cached_verification(self, network: Network, recovers: bool) -> None:
-        network.serve("enclave.example", tag="first")
+        first = network.serve("enclave.example", tag="first")
         network.handler = network.ehbp.handle
         client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP())
         network.documents["enclave.example"] = AttestationError("document fails verification")
         with pytest.raises(AttestationError, match="fails verification"):
             client.reverify()
-        assert client.current is None, "the cached verification was discarded"
+        assert client.current is first, "current is still the last successful verification"
         network.requests = []
         if recovers:
             second = network.serve("enclave.example", tag="second")
@@ -345,6 +345,7 @@ class TestEnclaveClient:
             with pytest.raises(AttestationError, match="fails verification"):
                 client.http_client.post("https://enclave.example/v1/x", content=b"hi")
             assert {r.url.path for r in network.requests} == {ATTESTATION_PATH}, "nothing was sent"
+            assert client.current is first, "a failed attempt doesn't change current"
         client.close()
 
     def test_failed_reverify_keeps_the_cached_verification_on_a_network_error(self, network: Network) -> None:
@@ -436,13 +437,13 @@ class TestRouterClient:
         network.handler = lambda request: (
             listed if request.url.host == "atc.tinfoil.sh" else network.ehbp.handle(request)
         )
-        network.serve("b.example", tag="first")
+        first = network.serve("b.example", tag="first")
         client = RouterHTTPClient(transport=EHBP(), user_cache_secret="s")
         assert client.enclave == "b.example"
         network.documents["b.example"] = AttestationError("document fails verification")
         with pytest.raises(AttestationError, match="fails verification"):
             client.reverify()
-        assert client.current is None
+        assert client.current is first
         network.hosts()
         second = network.serve("b.example", tag="second")
         assert client.http_client.post("https://b.example/v1/x", content=b"hi").content == b"echo:hi"
@@ -537,7 +538,7 @@ class TestGatewayClient:
 
     def test_failed_refresh_discards_the_replicas_verification(self, network: Network) -> None:
         entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("replica.example",))}
-        network.serve("replica.example", deadline=datetime.now(UTC) + timedelta(seconds=0.2))
+        first = network.serve("replica.example", deadline=datetime.now(UTC) + timedelta(seconds=0.2))
         client = GatewayHTTPClient(url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s")
         client.ensure_verified("m")
         assert [v.host for v in client.current] == ["replica.example"]
@@ -545,7 +546,7 @@ class TestGatewayClient:
         network.documents["replica.example"] = AttestationError("document fails verification")
         with pytest.raises(AttestationError, match="fails verification"):
             client.ensure_verified("m")
-        assert client.current == [], "the replica's verification was discarded"
+        assert [v.verification for v in client.current] == [first], "current keeps the last successful one"
         network.serve("replica.example", tag="second")
         assert client.ensure_verified("m").code_tag == "second"
         client.close()
@@ -584,9 +585,10 @@ async def test_async_clients(network: Network) -> None:
     network.documents["enclave.example"] = AttestationError("document fails verification")
     with pytest.raises(AttestationError, match="fails verification"):
         await client.reverify()
-    assert client.current is None, "an attestation failure discards it"
+    assert client.current is first, "an attestation failure discards it, but current keeps it"
     with pytest.raises(AttestationError, match="fails verification"):
         await client.http_client.post("https://enclave.example/v1/x", content=b"hi")
+    assert client.current is first
     second = network.serve("enclave.example", tag="second")
     assert (await client.http_client.post("https://enclave.example/v1/x", content=b"hi")).content == b"echo:hi"
     assert (await client.ensure_verified()) is second
