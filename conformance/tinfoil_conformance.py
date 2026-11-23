@@ -9,7 +9,7 @@ Test tooling, not part of the published package. Run from a source checkout:
         [--nonce HEX]
 
 The exit code is the verdict that the suite reads; stdout is diagnostic. The
-contract is tinfoil-conformance ``docs/CONFORMANCE_ADAPTER_SPEC.md`` v1.2.0.
+contract is tinfoil-conformance ``docs/CONFORMANCE_ADAPTER_SPEC.md`` v1.3.0.
 
 Every v3 stage decodes its Input first, so malformed input is reported as such
 (exit 30) before anything else. The full-verify stage is one ``verify_v3_at``
@@ -17,8 +17,10 @@ call on the public ``Verifier``, or on one built with the injected roots when
 the Input supplies any, so the shared fixtures appraise exactly the code that
 production runs; the layer on its ``VerificationError`` names the rejection.
 The block stages isolate a single layer by calling into the document,
-endorsement and quote modules that the verifier uses. A stage that this
-adapter does not implement exits 20 (unsupported), never with a verdict.
+endorsement and quote modules that the verifier uses. The container stage
+runs the verifier's own container step instead, on a config that it takes
+as given. A stage that this adapter does not implement exits 20
+(unsupported), never with a verdict.
 
 ``live-verify`` and ``capture`` are the integration lane: the only commands
 that open a connection. Both fetch a fresh nonce-bound document from the
@@ -57,6 +59,7 @@ from tinfoil.verifier import (
     UsageError,
     VerificationError,
     Verifier,
+    _config,
     _measurement,
     _verifier,
     random_nonce,
@@ -91,6 +94,7 @@ STAGE_ASSEMBLE_POLICY = "v3-assemble-policy"
 STAGE_AUTHENTICATE_QUOTE = "v3-authenticate-quote"
 STAGE_AUTHENTICATE_APPROVAL = "v3-authenticate-approval"
 STAGE_VERIFY_TIMESTAMP = "v3-verify-timestamp"
+STAGE_AUTHENTICATE_CONTAINERS = "v3-authenticate-containers"
 STAGE_LIVE_VERIFY = "live-verify"
 STAGE_CAPTURE = "capture"
 
@@ -104,6 +108,7 @@ ALL_STAGES = (
     STAGE_AUTHENTICATE_QUOTE,
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
+    STAGE_AUTHENTICATE_CONTAINERS,
 )
 STAGES_SUPPORTED: tuple[str, ...] = (
     STAGE_VERIFY,
@@ -113,6 +118,7 @@ STAGES_SUPPORTED: tuple[str, ...] = (
     STAGE_AUTHENTICATE_QUOTE,
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
+    STAGE_AUTHENTICATE_CONTAINERS,
 )
 
 # The measurement types of the wire contract.
@@ -361,6 +367,8 @@ def _run_stage(stage: str, raw: Any) -> Result:
         return _authenticate_quote(decoded)
     if stage == STAGE_VERIFY_TIMESTAMP:
         return _verify_timestamp(decoded)
+    if stage == STAGE_AUTHENTICATE_CONTAINERS:
+        return _authenticate_containers(decoded)
     return _unsupported(stage)
 
 
@@ -607,6 +615,41 @@ def _check_envelope(decoded: Input) -> Result:
     except (document.DocumentError, document.InvalidInputError):
         return _rejected(STAGE_CHECK_ENVELOPE, ENVELOPE_REJECTED)
     return Result({"stage": STAGE_CHECK_ENVELOPE, "accepted": True}, EXIT_ACCEPTED)
+
+
+def _authenticate_containers(decoded: Input) -> Result:
+    """The builds that the document's config requires, each against the build attestation of its image.
+
+    The stage authenticates what the config requires, not the config: its
+    bytes are read as the document carries them. An injected trusted root
+    that does not parse or a document that does not decode is malformed
+    input. A document without a config entry, a requirement that cannot be
+    read in full and every verification failure are provenance rejections.
+    The accept output lists one container per requirement, in config order,
+    and is empty for a config that requires none.
+    """
+    stage = STAGE_AUTHENTICATE_CONTAINERS
+    try:
+        client = provenance.ProvenanceClient(_trusted_root(decoded))
+        parsed = _decode_document(decoded)
+    except (sigstore_trusted_root.TrustedRootError, MalformedInput):
+        return _malformed(stage)
+    try:
+        verified = _config.resolve_containers(client, parsed, parsed.config_endorsement().config)
+    except (NotFoundError, ValueError):
+        return _rejected(stage, PROVENANCE_REJECTED)
+    containers = [
+        {
+            "container": container.container,
+            "digest": container.digest,
+            "repository": container.repository,
+            "workflow": container.workflow,
+            "ref": container.ref,
+            "commit": container.commit,
+        }
+        for container in verified
+    ]
+    return Result({"stage": stage, "accepted": True, "outputs": {"containers": containers}}, EXIT_ACCEPTED)
 
 
 def _verify_timestamp(decoded: Input) -> Result:

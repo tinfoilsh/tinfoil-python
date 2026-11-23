@@ -30,6 +30,7 @@ _FACTS = (
     "hpke_public_key",
     "signing_key_hint",
     "timestamp",
+    "containers",
 )
 
 _WELL_FORMED: dict[str, Any] = {
@@ -427,6 +428,97 @@ def test_assemble_policy_stage() -> None:
         result = adapter.run(adapter.STAGE_ASSEMBLE_POLICY, raw)
         assert result.exit_code == want, (name, result.output)
     assert statement is not None
+
+
+def test_authenticate_containers_stage() -> None:
+    """The recorded build attestation of a published image, which authenticates under the embedded root, against a
+    config that requires that build."""
+    from tests import document_builder
+    from tests import test_endorsement_container as recorded
+    from tinfoil.verifier._document.collateral.collateral import FORMAT_V3
+
+    stage = adapter.STAGE_AUTHENTICATE_CONTAINERS
+    requirement = f"""    provenance:
+      github:
+        repository: {recorded.RECORDED_REPOSITORY}
+        repository_id: 924941172
+        workflow: build.yml
+        ref: refs/tags/build-v*
+"""
+    proof = {
+        "id": "container",
+        "role": "reference-values",
+        "format": "https://tinfoil.sh/collateral/container-provenance/v1",
+        "subjects": [],
+        "data": {
+            "digest": recorded.RECORDED_DIGEST,
+            "sigstore_bundle": json.loads(recorded.RECORDED_BUNDLE.read_bytes()),
+        },
+    }
+
+    def document(*entries: dict[str, Any]) -> str:
+        _, raw = document_builder.build(
+            document_builder.test_nonce(), collateral_entries=list(entries), collateral_format=FORMAT_V3
+        )
+        return _b64(raw)
+
+    def raw_input(provenance: str, *proofs: dict[str, Any]) -> dict[str, Any]:
+        image = f"ghcr.io/{recorded.RECORDED_REPOSITORY}@sha256:{recorded.RECORDED_DIGEST}"
+        config = f"containers:\n  - name: app\n    image: {image}\n{provenance}"
+        entry = {
+            "id": "tinfoil-config",
+            "role": "reference-values",
+            "format": "https://tinfoil.sh/collateral/config/v1",
+            "subjects": [],
+            "data": {"config_base64": _b64(config.encode())},
+        }
+        return {"schema_version": "1", "document_b64": document(entry, *proofs)}
+
+    result = adapter.run(stage, raw_input(requirement, proof))
+    assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
+    assert result.output == {
+        "stage": stage,
+        "accepted": True,
+        "outputs": {
+            "containers": [
+                {
+                    "container": "app",
+                    "digest": recorded.RECORDED_DIGEST,
+                    "repository": recorded.RECORDED_REPOSITORY,
+                    "workflow": "build.yml",
+                    "ref": recorded.RECORDED_REF,
+                    "commit": recorded.RECORDED_COMMIT,
+                }
+            ]
+        },
+    }
+    # A config that requires nothing reports an empty list, not an absent member.
+    result = adapter.run(stage, raw_input(""))
+    assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
+    assert result.output == {"stage": stage, "accepted": True, "outputs": {"containers": []}}
+    world_root = _world_inputs()[1]["sigstore_trusted_root_json_b64"]
+    for name, raw, want in [
+        ("missing proof", raw_input(requirement), adapter.EXIT_REJECTED),
+        ("another workflow", raw_input(requirement.replace("build.yml", "release.yml"), proof), adapter.EXIT_REJECTED),
+        ("unreadable requirement", raw_input(requirement + "      gitlab: {}\n", proof), adapter.EXIT_REJECTED),
+        ("no config", {"schema_version": "1", "document_b64": document(proof)}, adapter.EXIT_REJECTED),
+        (
+            "injected root replaces the embedded one",
+            {**raw_input(requirement, proof), "sigstore_trusted_root_json_b64": world_root},
+            adapter.EXIT_REJECTED,
+        ),
+        ("no document", {"schema_version": "1"}, adapter.EXIT_MALFORMED),
+        ("undecodable document", {"schema_version": "1", "document_b64": _b64(b"{}")}, adapter.EXIT_MALFORMED),
+        (
+            "unparseable root",
+            {**raw_input(requirement, proof), "sigstore_trusted_root_json_b64": _b64(b"{}")},
+            adapter.EXIT_MALFORMED,
+        ),
+    ]:
+        result = adapter.run(stage, raw)
+        assert result.exit_code == want, (name, result.output)
+        code = "MALFORMED_INPUT" if want == adapter.EXIT_MALFORMED else "PROVENANCE_REJECTED"
+        assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": code}}, name
 
 
 def test_authenticate_approval_stage() -> None:
