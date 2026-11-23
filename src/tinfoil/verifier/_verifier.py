@@ -299,6 +299,7 @@ class _ConfigChoice:
     registry_ids: tuple[str, ...] | None = None
     authorizer: Callable[..., None] | None = None
     embedded: EmbeddedConfigReference | None = None
+    embedded_data: bytes | None = None
 
 
 def _config_choice(config: object, runtime: bytes | None) -> _ConfigChoice:
@@ -327,7 +328,8 @@ def _config_choice(config: object, runtime: bytes | None) -> _ConfigChoice:
             raise UsageError("config authorizer must be callable")
         return _ConfigChoice(authorizer=config.authorize)
     if isinstance(config, EmbeddedConfig | EmbeddedConfigReference):
-        return _ConfigChoice(embedded=resolve_config(config, runtime))
+        reference, data = resolve_config(config, runtime)
+        return _ConfigChoice(embedded=reference, embedded_data=data)
     raise UsageError(
         "config trust must be a Registries, ConfigSigningKeys, ConfigAuthorizer, EmbeddedConfig or "
         f"EmbeddedConfigReference value, not {type(config).__name__}"
@@ -378,7 +380,12 @@ def _trust_policy(config: object, policy: object, *, overrides: Overrides | None
         max_age = freshness_max_age
     artifacts, freshness_keys = _artifact_choice(policy.artifacts)
     choice = _config_choice(config, artifacts.runtime)
-    embedded = ResolvedReferences(config=choice.embedded, runtime=artifacts.runtime, platform=artifacts.platform)
+    embedded = ResolvedReferences(
+        config=choice.embedded,
+        runtime=artifacts.runtime,
+        platform=artifacts.platform,
+        config_data=choice.embedded_data,
+    )
 
     try:
         if overrides is None or overrides.sigstore_root is None:

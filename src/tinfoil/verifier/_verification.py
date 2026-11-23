@@ -63,7 +63,8 @@ class ConfigVerification:
     signature_time: datetime | None = None
     containers: tuple[ContainerVerification, ...] = ()
     """The container images whose build the config requires and the attestation proves. Empty when the config
-    requires none, its bytes are not in the attestation, or the config is embedded."""
+    requires none or the verifier has no bytes to read: the attestation does not carry them and the caller did not
+    embed them."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

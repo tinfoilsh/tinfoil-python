@@ -878,12 +878,14 @@ def test_option_fields_of_the_wrong_type_are_usage_errors() -> None:
     assert embedded.runtime == inputs.runtime
     assert embedded.platform == inputs.platform
     assert embedded.config.digest == digest
+    assert embedded.config_data == inputs.config.data
     manifest[:] = b"{}" + bytes(len(manifest) - 2)
     platform[:] = bytes(len(platform))
     config[:] = bytes(len(config))
     assert embedded.runtime == inputs.runtime
     assert embedded.platform == inputs.platform
     assert embedded.config.digest == digest
+    assert embedded.config_data == inputs.config.data
     assert isinstance(embedded.runtime, bytes)
     assert isinstance(embedded.platform, bytes)
 
@@ -1287,15 +1289,64 @@ def test_endorsed_config_requires_container_provenance_when_the_document_carries
     assert approved(carried=None).containers == ()
 
 
-def test_embedded_config_is_not_read_for_container_provenance() -> None:
+def test_embedded_config_requiring_container_provenance() -> None:
+    """An embedded config is held to the builds that it requires. The requirements of one embedded in full come
+    from the caller's bytes, so a document cannot leave them out; one embedded by reference is checked when the
+    document carries the bytes of that digest."""
     inputs = vf.embedded_inputs()
     config = config_with_containers(container("app") + CONTAINER_REQUIREMENT)
-    embedded = EmbeddedConfig(data=config, name=vf.EMBEDDED_CONFIG_NAME)
-    v = vf.embedded_verifier(dataclasses.replace(inputs, config=embedded))
-    _, _, doc = vf.embedded_document(FORMAT_V3)
-    assert config_references(trust_of(v), doc, "", NOW).config == ConfigVerification(
-        source=SOURCE_EMBEDDED, name=vf.EMBEDDED_CONFIG_NAME, digest=hashlib.sha256(config).hexdigest()
+    digest = hashlib.sha256(config).hexdigest()
+    in_full = dataclasses.replace(inputs, config=EmbeddedConfig(data=config, name=vf.EMBEDDED_CONFIG_NAME))
+    reference = EmbeddedConfigReference(
+        name=vf.EMBEDDED_CONFIG_NAME, digest=digest, runtime=runtime_from_config(config)
     )
+    by_reference = dataclasses.replace(inputs, config=reference)
+    proof = container_proof(RECORDED_DIGEST, json.loads(RECORDED_BUNDLE.read_bytes()))
+    proven = (
+        ContainerVerification(
+            container="app",
+            digest=RECORDED_DIGEST,
+            repository=RECORDED_REPOSITORY,
+            workflow="build.yml",
+            ref=RECORDED_REF,
+            commit=RECORDED_COMMIT,
+        ),
+    )
+
+    def carried(data: bytes) -> dict[str, Any]:
+        return vf.reference_entry(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": b64(data)})
+
+    def verified(trusted: vf.EmbeddedInputs, *entries: dict[str, Any]) -> ConfigVerification:
+        _, _, doc = vf.embedded_document(FORMAT_V3, *entries)
+        refs = config_references(trust_of(vf.embedded_verifier(trusted)), doc, "", NOW)
+        assert refs.config is not None
+        return refs.config
+
+    def rejected_for_a_missing_proof(trusted: vf.EmbeddedInputs, *entries: dict[str, Any]) -> None:
+        raw, nonce, _ = vf.embedded_document(FORMAT_V3, *entries)
+        with pytest.raises(VerificationError, match="container 'app' requires provenance") as rejected:
+            vf.embedded_verifier(trusted).verify_v3(raw, nonce, Pin())
+        rejected_at(rejected.value, LAYER_PROVENANCE)
+        assert isinstance(rejected.value.__cause__, ReferencesError)
+        assert isinstance(rejected.value.__cause__.__cause__, NotFoundError)
+
+    # In full: proven, proof missing, no requirement, and a requirement that the verifier cannot read.
+    assert verified(in_full, proof) == ConfigVerification(
+        source=SOURCE_EMBEDDED, name=vf.EMBEDDED_CONFIG_NAME, digest=digest, containers=proven
+    )
+    rejected_for_a_missing_proof(in_full)
+    assert verified(inputs).containers == ()
+    unreadable = EmbeddedConfig(data=config + b"      gitlab: {}\n", name=vf.EMBEDDED_CONFIG_NAME)
+    with pytest.raises(UsageError, match=r"containers\[0\]\.provenance has unknown field 'gitlab'"):
+        vf.embedded_verifier(dataclasses.replace(inputs, config=unreadable))
+
+    # By reference: the document carries the bytes (proven, proof missing), no bytes, or another config's bytes.
+    assert verified(by_reference, carried(config), proof) == ConfigVerification(
+        source=SOURCE_EMBEDDED, name=vf.EMBEDDED_CONFIG_NAME, digest=digest, containers=proven
+    )
+    rejected_for_a_missing_proof(by_reference, carried(config))
+    assert verified(by_reference).containers == ()
+    assert verified(by_reference, carried(config + b"\n")).containers == ()
 
 
 # --- freshness ------------------------------------------------------------------------------

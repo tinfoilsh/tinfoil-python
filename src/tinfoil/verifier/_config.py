@@ -213,7 +213,11 @@ def _resolve_config(
     embedded = trust.embedded.config
     if embedded is not None:
         # reference_pins matched the pins against it.
-        return embedded.runtime, ConfigVerification(source=SOURCE_EMBEDDED, name=embedded.name, digest=embedded.digest)
+        data = _embedded_config_bytes(trust.embedded.config_data, embedded.digest, doc)
+        containers = resolve_containers(trust.endorsements, doc, data)
+        return embedded.runtime, ConfigVerification(
+            source=SOURCE_EMBEDDED, name=embedded.name, digest=embedded.digest, containers=containers
+        )
     config = doc.config_endorsement()
     if trust.config_authorizer is not None:
         data = config.config
@@ -259,8 +263,9 @@ def resolve_containers(
 ) -> tuple[ContainerVerification, ...]:
     """Authenticate the build of every container image for which the config requires provenance.
 
-    ``config`` is the bytes bound to the approved digest; a document that
-    omits them carries no requirement that the verifier can read. The
+    ``config`` is the bytes bound to the approved digest; without them
+    there is no requirement that the verifier can read. A caller that embeds
+    a config in full supplies them. Otherwise the document carries them: the
     attested runtime attaches them for every config that declares
     provenance, which config validation ties to disclosure.
     """
@@ -287,6 +292,20 @@ def resolve_containers(
             )
         )
     return tuple(containers)
+
+
+def _embedded_config_bytes(data: bytes | None, digest: str, doc: Document) -> bytes | None:
+    """The bytes of the embedded config with the given SHA-256 ``digest``: the caller's ``data``, or for a config
+    embedded by reference those that the document carries, if it carries the bytes of that digest."""
+    if data is not None:
+        return data
+    try:
+        carried = doc.config_endorsement().config
+    except NotFoundError:
+        return None
+    if carried is None or hashlib.sha256(carried).hexdigest() != digest:
+        return None
+    return carried
 
 
 def _resolve_runtime(

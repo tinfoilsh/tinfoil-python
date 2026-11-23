@@ -13,7 +13,14 @@ from tinfoil.verifier._errors import UsageError
 from tinfoil.verifier._options import EmbeddedArtifacts, EmbeddedConfig, EmbeddedConfigReference
 from tinfoil.verifier._policy import ARTIFACT_FORMAT_V2, PolicyError
 from tinfoil.verifier._policy import parse as parse_policy_artifact
-from tinfoil.verifier._runtime import ManifestError, RuntimeConfigError, decode_manifest, parse_manifest
+from tinfoil.verifier._runtime import (
+    ContainerConfigError,
+    ManifestError,
+    RuntimeConfigError,
+    container_provenance_from_config,
+    decode_manifest,
+    parse_manifest,
+)
 from tinfoil.verifier._runtime import runtime_from_config as _runtime_from_config
 
 _CONFIG_DIGEST_SIZE = 32
@@ -21,11 +28,13 @@ _CONFIG_DIGEST_SIZE = 32
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResolvedReferences:
-    """Embedded references after validation, with config bytes reduced to their reference."""
+    """Embedded references after validation, with config bytes reduced to their reference and kept beside it."""
 
     config: EmbeddedConfigReference | None = None
     runtime: bytes | None = None
     platform: bytes | None = None
+    config_data: bytes | None = None
+    """The bytes of a config embedded in full. A config embedded by reference has none."""
 
 
 def resolve_artifacts(artifacts: EmbeddedArtifacts) -> ResolvedReferences:
@@ -56,16 +65,21 @@ def resolve_artifacts(artifacts: EmbeddedArtifacts) -> ResolvedReferences:
     return ResolvedReferences(runtime=runtime_bytes, platform=platform_bytes)
 
 
-def resolve_config(config: EmbeddedConfig | EmbeddedConfigReference, runtime: bytes | None) -> EmbeddedConfigReference:
-    """Check a caller-trusted config, and reduce config bytes to their reference.
+def resolve_config(
+    config: EmbeddedConfig | EmbeddedConfigReference, runtime: bytes | None
+) -> tuple[EmbeddedConfigReference, bytes | None]:
+    """Check a caller-trusted config, and reduce config bytes to their reference. The bytes are returned beside
+    it, None for a config that was given by reference.
 
-    Config bytes must be within the size bounds and carry a runtime pin; a
-    config reference must have a well-formed name when it has one, a
+    Config bytes must be within the size bounds, carry a runtime pin and
+    declare container build requirements that can be read in full, if any;
+    a config reference must have a well-formed name when it has one, a
     lowercase SHA-256 digest and a valid runtime pin whose repository, tag and
     digest are strings. ``runtime``, an embedded manifest that ``resolve_artifacts``
     checked, must be the one that the config pins. Every failure is a
     UsageError.
     """
+    data: bytes | None = None
     if isinstance(config, EmbeddedConfig):
         if not isinstance(config.data, bytes | bytearray | memoryview):
             raise UsageError("embedded config data must be bytes")
@@ -76,7 +90,8 @@ def resolve_config(config: EmbeddedConfig | EmbeddedConfigReference, runtime: by
             raise UsageError("embedded config size is outside allowed bounds")
         try:
             pinned = _runtime_from_config(data)
-        except RuntimeConfigError as err:
+            container_provenance_from_config(data)
+        except (RuntimeConfigError, ContainerConfigError) as err:
             raise UsageError(str(err)) from err
         reference = EmbeddedConfigReference(name=config.name, digest=hashlib.sha256(data).hexdigest(), runtime=pinned)
     else:
@@ -101,7 +116,7 @@ def resolve_config(config: EmbeddedConfig | EmbeddedConfigReference, runtime: by
             parse_manifest(runtime, reference.runtime)
     except (ApprovalError, EncodingError, RuntimeCollateralError, ManifestError) as err:
         raise UsageError(str(err)) from err
-    return reference
+    return reference, data
 
 
 def _bytes_or_none(what: str, value: object) -> bytes | None:
