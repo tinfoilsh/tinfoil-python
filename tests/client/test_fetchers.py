@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from tests import document_builder
-from tests.client.helpers import Recorder, report_of, response, verification
+from tests.client.helpers import Recorder, facts_of, report_of, response, verification
 from tinfoil import _enclave, _fetch, _router
 from tinfoil._clients import AsyncEnclaveHTTPClient, AsyncRouterHTTPClient, EnclaveHTTPClient, RouterHTTPClient
 from tinfoil._errors import AttestationError, ConfigurationError, NetworkError
@@ -157,8 +157,7 @@ class TestCustomFetchers:
     def test_the_fetcher_serves_every_verification_of_an_enclave_client(self, direct: Recorder) -> None:
         calls = Calls()
         client = EnclaveHTTPClient("enclave.example", RepoPin("o/r"), transport=EHBP(), fetch_attestation=calls.fetch)
-        assert client.current is not None
-        assert client.current.code_tag == "doc:enclave.example"
+        assert facts_of(client.last_verification()[0]).code_tag == "doc:enclave.example"
         client.reverify()
         assert calls.hosts == ["enclave.example", "enclave.example"]
         assert len(set(calls.nonces)) == 2, "each verification has a fresh nonce"

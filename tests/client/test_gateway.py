@@ -16,10 +16,10 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from tests.client.helpers import Recorder, response, verification
+from tests.client.helpers import Recorder, facts_of, report_of, response, verification
 from tinfoil import _cachesecret, _fetch, _gateway
 from tinfoil._chain import ENCLAVE_URL_HEADER, replayable
-from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, network_error
+from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, TinfoilError, network_error
 from tinfoil._gateway import (
     CACHE_PREFIX_HEADER,
     MAX_CATALOG_BYTES,
@@ -50,8 +50,8 @@ from tinfoil._gateway import (
 )
 from tinfoil._keys import PeerLacksKeyError, key_rejection
 from tinfoil._transport import CLIENT_CLOSED
-from tinfoil._types import TimeoutTypes
-from tinfoil.verifier import EndorsedArtifacts, Policy, VerifiedFacts
+from tinfoil._types import LastVerification, TimeoutTypes
+from tinfoil.verifier import EndorsedArtifacts, Policy, VerificationReport
 
 MODEL = "test-model"
 INITIAL = "initial.example"
@@ -73,15 +73,20 @@ class FakeKeyed:
         self.host = host
         self.connect = connect
         self.transport: httpx.BaseTransport | None = None
-        self.verified = verification(host)
+        self.verified = report_of(verification(host))
+        self.last: LastVerification = (None, None)
 
-    @property
-    def current(self) -> VerifiedFacts | None:
-        return self.verified if self.transport is not None else None
+    def last_verification(self) -> LastVerification:
+        return self.last
 
-    def ensure_verified(self, *, timeout: object = None) -> VerifiedFacts:
+    def ensure_verified(self, *, timeout: object = None) -> VerificationReport:
         if self.transport is None:
-            self.transport = self.connect(self.host)
+            try:
+                self.transport = self.connect(self.host)
+            except TinfoilError as err:
+                self.last = (None, err)
+                raise
+            self.last = (self.verified, None)
         return self.verified
 
 
@@ -760,11 +765,11 @@ class TestVerifications:
         seal = seal_transport(lambda _: httpx.MockTransport(fixed_response(204)))
         for host in ("b.example", "a.example"):
             seal._transport(_Replica(host, "tinfoilsh/model")).keyed.ensure_verified()
-        got = seal.verifications()
+        got = seal.last_verification()
         assert [v.host for v in got] == ["a.example", "b.example"]
         assert got[0].reference == "tinfoilsh/model"
         assert got[0].pinned_model == ""
-        assert seal_transport(lambda _: httpx.MockTransport(fixed_response(204))).verifications() == []
+        assert seal_transport(lambda _: httpx.MockTransport(fixed_response(204))).last_verification() == []
 
     def test_ensure_verified_falls_over(self) -> None:
         hosts = ("a.example", "b.example", "c.example")
@@ -778,10 +783,15 @@ class TestVerifications:
             return httpx.MockTransport(fixed_response(204))
 
         seal = seal_transport(connect, catalog_entries=catalog(hosts))
-        verified = seal.ensure_verified(MODEL)
+        verified = facts_of(seal.ensure_verified(MODEL))
         assert verified.code_tag == order[2]
         assert attempts == order, "replicas are tried in the model's fixed order until one verifies"
-        assert [v.host for v in seal.verifications()] == [order[2]]
+        entries = {v.host: v for v in seal.last_verification()}
+        assert sorted(entries) == sorted(order), "every replica tried has an entry, failed ones included"
+        assert facts_of(entries[order[2]].report).code_tag == order[2]
+        for host in order[:2]:
+            assert entries[host].report is None, "each replica's entry holds its own last attempt"
+            assert isinstance(entries[host].error, NetworkError)
         unreachable = seal_transport(
             lambda _: (_ for _ in ()).throw(network_error("verification failed")), catalog_entries=catalog(hosts)
         )
@@ -818,20 +828,20 @@ class TestVerifications:
 
         post().read()
         streaming = post("/stream")  # a response in flight through a.example
-        assert [v.host for v in seal.verifications()] == ["a.example"]
+        assert [v.host for v in seal.last_verification()] == ["a.example"]
         entries["current"] = catalog(("a.example",))  # equal content: nothing changes
         post().read()
         assert closes == {}
         entries["current"] = catalog(("b.example",))
         post().read()
-        assert [v.host for v in seal.verifications()] == ["b.example"], "a.example is no longer retained"
+        assert [v.host for v in seal.last_verification()] == ["b.example"], "a.example is no longer retained"
         assert closes == {}, "the evicted replica stays open while its response is in flight"
         streaming.close()
         assert closes == {"a.example": 1}, "and closes once the response is done"
         entries["current"] = catalog(("a.example",))
         post().read()
         assert closes == {"a.example": 1, "b.example": 1}, "an idle evicted replica closes at once"
-        assert [v.host for v in seal.verifications()] == ["a.example"], "a relisted host gets a new transport"
+        assert [v.host for v in seal.last_verification()] == ["a.example"], "a relisted host gets a new transport"
         seal.close()
         assert closes == {"a.example": 2, "b.example": 1}
 
@@ -1160,7 +1170,7 @@ def test_models_and_current_without_network(monkeypatch: pytest.MonkeyPatch) -> 
         user_cache_secret="test-secret",
     )
     assert seal.models() == ["pinned"]
-    assert seal.verifications() == []
+    assert seal.last_verification() == []
     with pytest.raises(ConfigurationError, match="is not pinned"):
         seal.ensure_verified("unpinned")
 
@@ -1172,13 +1182,12 @@ async def test_async_gateway_transport() -> None:
     class AsyncFakeKeyed:
         def __init__(self, host: str) -> None:
             self.host = host
-            self.verified = verification(host)
+            self.verified = report_of(verification(host))
 
-        @property
-        def current(self) -> VerifiedFacts | None:
-            return self.verified
+        def last_verification(self) -> LastVerification:
+            return (self.verified, None)
 
-        async def ensure_verified(self) -> VerifiedFacts:
+        async def ensure_verified(self) -> VerificationReport:
             return self.verified
 
     class AsyncFakeChain(httpx.AsyncBaseTransport):
@@ -1212,8 +1221,8 @@ async def test_async_gateway_transport() -> None:
     assert len(bodies) == 2
     assert bodies[0] == bodies[1]
     assert json.loads(bodies[0])["cache_salt"] == SPEC_SALT
-    assert (await seal.ensure_verified(MODEL)).code_tag == INITIAL
-    assert [v.host for v in seal.verifications()] == [INITIAL, "next.example"]
+    assert facts_of(await seal.ensure_verified(MODEL)).code_tag == INITIAL
+    assert [v.host for v in seal.last_verification()] == [INITIAL, "next.example"]
     await seal.aclose()
     with pytest.raises(ConfigurationError, match="closed"):
         await seal.models()

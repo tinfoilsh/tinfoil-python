@@ -9,12 +9,12 @@ import socket
 import ssl
 import struct
 import threading
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 from cryptography import x509
@@ -33,6 +33,9 @@ from pyhpke import AEADId, CipherSuite, KDFId, KEMId, KEMKey
 
 from tests import pki
 from tinfoil._enclave import Enclave
+from tinfoil._errors import TinfoilError
+from tinfoil._transport import AsyncAttestedTransport, AttestedTransport
+from tinfoil._types import LastVerification, OnVerification
 from tinfoil.verifier import (
     CRYPTO_MATERIAL_ID_HPKE,
     CRYPTO_MATERIAL_ID_TLS,
@@ -101,19 +104,80 @@ def report_of(facts: VerifiedFacts) -> VerificationReport:
     )
 
 
+def reporting(fetch: Callable[[], VerifiedFacts | VerificationReport]) -> Callable[[], VerificationReport]:
+    """``fetch`` as an enclave's fetch seam, which returns reports: verified facts that it returns become the report
+    of a verification that every step accepted."""
+
+    def fetch_report() -> VerificationReport:
+        got = fetch()
+        return got if isinstance(got, VerificationReport) else report_of(got)
+
+    return fetch_report
+
+
+def reporting_async(
+    fetch: Callable[[], Awaitable[VerifiedFacts | VerificationReport]],
+) -> Callable[[], Awaitable[VerificationReport]]:
+    """``reporting`` for an asynchronous fetch."""
+
+    async def fetch_report() -> VerificationReport:
+        got = await fetch()
+        return got if isinstance(got, VerificationReport) else report_of(got)
+
+    return fetch_report
+
+
 def fake_enclave(
-    fetch: Callable[[], VerifiedFacts],
+    fetch: Callable[[], VerifiedFacts | VerificationReport],
     *,
     host: str = HOST,
     repo: str = "org/repo",
     check: Callable[[VerifiedFacts], None] | None = None,
+    on_verification: OnVerification | None = None,
 ) -> Enclave:
     """An enclave that verifies by calling ``fetch`` instead of fetching and verifying a document."""
+    fetch_report = reporting(fetch)
 
-    async def fetch_async() -> VerifiedFacts:
-        return fetch()
+    async def fetch_async() -> VerificationReport:
+        return fetch_report()
 
-    return Enclave(host, Pin(repo=repo), verification_check=check, _fetch=fetch, _fetch_async=fetch_async)
+    return Enclave(
+        host,
+        Pin(repo=repo),
+        verification_check=check,
+        on_verification=on_verification,
+        _fetch=fetch_report,
+        _fetch_async=fetch_async,
+    )
+
+
+def facts_of(report: VerificationReport | None) -> VerifiedFacts:
+    """The verified facts of a report that a client returned for a verification that passed."""
+    assert report is not None
+    assert report.verified_facts is not None
+    return report.verified_facts
+
+
+class _HasLast(Protocol):
+    def last_verification(self) -> LastVerification: ...
+
+
+def last_facts(client: _HasLast) -> VerifiedFacts | None:
+    """The verified facts of the client's last attempt, or None when it failed or there was none."""
+    report, _ = client.last_verification()
+    return None if report is None else report.verified_facts
+
+
+def last_error(client: _HasLast) -> TinfoilError | None:
+    """The error of the client's last attempt, or None when it passed or there was none."""
+    return client.last_verification()[1]
+
+
+def current_facts(keyed: AttestedTransport | AsyncAttestedTransport) -> VerifiedFacts | None:
+    """The verified facts of the transport's current state, valid or not, or None when it has none: what the
+    transport would send under once the state is valid."""
+    state = keyed._current
+    return None if state is None else state.facts
 
 
 def response(status: int = 200, content: bytes = b"", headers: dict[str, str] | None = None) -> httpx.Response:

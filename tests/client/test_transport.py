@@ -13,7 +13,19 @@ from typing import Any
 import httpx
 import pytest
 
-from tests.client.helpers import HOST, fake_enclave, response, verification
+from tests.client.helpers import (
+    HOST,
+    current_facts,
+    facts_of,
+    fake_enclave,
+    last_error,
+    last_facts,
+    report_of,
+    reporting,
+    reporting_async,
+    response,
+    verification,
+)
 from tinfoil import _transport
 from tinfoil._enclave import DEADLINE_EXCEEDED, FRESHNESS_EXPIRED
 from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, network_error
@@ -35,7 +47,7 @@ from tinfoil._transport import (
     resolve_transport,
 )
 from tinfoil._types import EHBP, TLS
-from tinfoil.verifier import VerifiedFacts
+from tinfoil.verifier import VerificationReport, VerifiedFacts
 
 Fetch = Callable[[], VerifiedFacts]
 NewTransport = Callable[[VerifiedFacts], httpx.BaseTransport]
@@ -105,13 +117,13 @@ def test_ensure_verified_reuses_a_valid_verification() -> None:
         return verification("key")
 
     keyed = transport(fetch)
-    assert keyed.current is None
+    assert current_facts(keyed) is None
     for _ in range(2):
         keyed.ensure_verified()
     assert calls == 1, "a valid verification is reused"
     keyed.reverify()
     assert calls == 2, "reverify always verifies"
-    assert keyed.current is not None
+    assert current_facts(keyed) is not None
 
 
 def test_expired_keys_never_authorize_a_request() -> None:
@@ -240,7 +252,7 @@ def test_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadline() -> Non
         return verification("slow")
 
     keyed = transport(fetch)
-    owner_result: list[VerifiedFacts | BaseException] = []
+    owner_result: list[VerificationReport | BaseException] = []
 
     def own() -> None:
         try:
@@ -258,11 +270,11 @@ def test_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadline() -> Non
     assert not release.is_set(), "the owner's refresh is still running"
     release.set()
     owner.join(5)
-    assert isinstance(owner_result[0], VerifiedFacts)
-    assert owner_result[0].code_tag == "slow"
+    assert isinstance(owner_result[0], VerificationReport)
+    assert facts_of(owner_result[0]).code_tag == "slow"
     assert attempts == 1, "the joining caller started no refresh of its own"
-    assert keyed.current is not None
-    assert keyed.ensure_verified().code_tag == "slow", "the refresh that outlasted the deadline still counts"
+    assert current_facts(keyed) is not None
+    assert facts_of(keyed.ensure_verified()).code_tag == "slow", "the refresh that outlasted the deadline still counts"
 
 
 @pytest.mark.asyncio
@@ -277,7 +289,7 @@ async def test_async_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadl
         return verification("slow")
 
     enclave = fake_enclave(lambda: verification("slow"))
-    enclave._fetch_async = fetch_async
+    enclave._fetch_async = reporting_async(fetch_async)
     keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
     owner = asyncio.create_task(keyed.reverify())
     await asyncio.sleep(0.01)
@@ -288,9 +300,9 @@ async def test_async_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadl
     assert time.monotonic() - begun < 2.0
     assert not owner.done(), "the owner's refresh survives the joining caller's deadline"
     release.set()
-    assert (await owner).code_tag == "slow"
+    assert facts_of(await owner).code_tag == "slow"
     assert attempts == 1
-    assert (await keyed.ensure_verified()).code_tag == "slow"
+    assert facts_of(await keyed.ensure_verified()).code_tag == "slow"
 
 
 def test_requests_use_the_explicit_verification() -> None:
@@ -307,10 +319,10 @@ def test_requests_use_the_explicit_verification() -> None:
     keyed = transport(fetch, FakeMode(build))
     keyed.ensure_verified()
     verified = keyed.reverify()
-    assert verified.code_tag == "new"
+    assert facts_of(verified).code_tag == "new"
     assert get(keyed).headers["Key"] == "01" * 32
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "new"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "new"
     assert attempts == 2
 
 
@@ -340,7 +352,8 @@ def test_key_rejection_invalidates_without_replay(name: str, err: BaseException,
         raise err
 
     keyed = AttestedTransport(fake_enclave(fetch), FakeMode(lambda _: httpx.MockTransport(handler)))
-    keyed._refresh_once(lambda enclave, **_: verification("old"), None, None)  # the initial state, as a test seam
+    # The initial state, as a test seam.
+    keyed._refresh_once(lambda enclave, **_: report_of(verification("old")), None, None, [])
     with pytest.raises(type(err) if not lacks_key else AttestationError) as raised:
         get(keyed)
     assert is_key_rejection(raised.value) == lacks_key, name
@@ -353,8 +366,8 @@ def test_key_rejection_invalidates_without_replay(name: str, err: BaseException,
     state = keyed._current
     assert state is not None
     assert state.rejected == lacks_key
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "old"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "old"
     assert sends == 1
     assert refreshes == 0
     if not lacks_key:
@@ -362,7 +375,7 @@ def test_key_rejection_invalidates_without_replay(name: str, err: BaseException,
     failing = network_error("refresh failed")
     with pytest.raises(NetworkError, match="refresh failed"):
         get(keyed)
-    assert keyed.current.code_tag == "old"
+    assert tag(current_facts(keyed)) == "old"
     assert sends == 1, "a failed refresh must not authorize the rejected state"
     failing = None
     with pytest.raises(AttestationError):
@@ -419,7 +432,7 @@ def test_transport_failure_fails_verification() -> None:
         keyed.ensure_verified()
     with pytest.raises(AttestationError, match="endorses no key"):
         get(keyed)
-    assert keyed.current is None, "a verification the mode can't use is never kept"
+    assert current_facts(keyed) is None, "a verification the mode can't use is never kept"
     assert calls == 2, "each attempt verifies once, without a retry"
 
 
@@ -477,8 +490,8 @@ def test_refresh_rejects_an_expired_verification() -> None:
     state = keyed._current
     assert state is not None
     assert state.discarded, "an expired replacement is an attestation failure, which discards the old one"
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "old", "current keeps the last successful verification"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "old", "current keeps the last successful verification"
 
 
 def test_refresh_rejects_a_verification_that_expires_during_creation() -> None:
@@ -498,7 +511,7 @@ def test_refresh_rejects_a_verification_that_expires_during_creation() -> None:
     with pytest.raises(AttestationError, match=FRESHNESS_EXPIRED):
         get(keyed)
     assert sent == 0, "a verification that expired before publication never authorizes a request"
-    assert keyed.current is None
+    assert current_facts(keyed) is None
 
 
 def test_late_rejection_does_not_invalidate_the_replacement() -> None:
@@ -522,7 +535,7 @@ def test_late_rejection_does_not_invalidate_the_replacement() -> None:
         return httpx.MockTransport(handler)
 
     keyed = transport(fetch, FakeMode(build))
-    keyed._refresh_once(lambda enclave, **_: verification("old"), None, None)
+    keyed._refresh_once(lambda enclave, **_: report_of(verification("old")), None, None, [])
     finished: list[BaseException] = []
 
     def send() -> None:
@@ -542,8 +555,8 @@ def test_late_rejection_does_not_invalidate_the_replacement() -> None:
     state = keyed._current
     assert state is not None
     assert state.valid(), "the replacement stays valid"
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "new"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "new"
     assert verifications == 1
 
 
@@ -566,7 +579,7 @@ def test_refresh_retires_replaced_connections() -> None:
     with pytest.raises(AttestationError, match="endorses no key"):
         keyed.reverify()
     assert second.closes == 1, "a refresh that fails with an attestation failure discards the current transport"
-    assert keyed.current is not None
+    assert current_facts(keyed) is not None
 
 
 def test_retiring_waits_for_responses_in_flight() -> None:
@@ -612,7 +625,7 @@ def test_closed_transport_refuses_everything() -> None:
     keyed.ensure_verified()
     keyed.close()
     assert created[0].closes == 1
-    assert keyed.current is None
+    assert current_facts(keyed) is None
     for call in (keyed.ensure_verified, keyed.reverify, lambda: get(keyed)):
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
             call()
@@ -633,7 +646,7 @@ async def test_async_refresh_coalesces_and_survives_cancellation() -> None:
         return fetch()
 
     enclave = fake_enclave(fetch)
-    enclave._fetch_async = fetch_async
+    enclave._fetch_async = reporting_async(fetch_async)
     keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
     waiters = [asyncio.create_task(keyed.ensure_verified()) for _ in range(8)]
     canceled = asyncio.create_task(keyed.reverify())
@@ -644,9 +657,9 @@ async def test_async_refresh_coalesces_and_survives_cancellation() -> None:
     assert attempts == 0, "the shared verification survives a waiter's cancellation"
     release.set()
     for waiter in waiters:
-        assert (await waiter).code_tag == "new"
+        assert facts_of(await waiter).code_tag == "new"
     assert attempts == 1
-    assert keyed.current is not None
+    assert current_facts(keyed) is not None
 
 
 @pytest.mark.asyncio
@@ -668,7 +681,7 @@ async def test_async_close_during_a_refresh_refuses_its_waiters() -> None:
         return fetch()
 
     enclave = fake_enclave(fetch)
-    enclave._fetch_async = fetch_async
+    enclave._fetch_async = reporting_async(fetch_async)
     keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
     waiters = [asyncio.create_task(keyed.ensure_verified()) for _ in range(2)]
     await started.wait()
@@ -683,7 +696,7 @@ async def test_async_close_during_a_refresh_refuses_its_waiters() -> None:
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
             await waiter
     assert attempts == 0, "the cancelled verification never completed"
-    assert keyed.current is None
+    assert current_facts(keyed) is None
     release.set()
     with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
         await keyed.ensure_verified()
@@ -795,18 +808,21 @@ def test_failed_reverify_discards_a_fresh_verification(recovers: bool) -> None:
     enclave.failure = AttestationError("nonce mismatch")
     with pytest.raises(AttestationError, match="nonce mismatch"):
         keyed.reverify()
-    assert tag(keyed.current) == "v1", "current is still the last successful verification"
+    assert tag(current_facts(keyed)) == "v1", "the discarded state stays current, but no request is sent under it"
+    assert last_facts(keyed) is None, "the last verification is the failure, not the earlier success"
+    assert isinstance(last_error(keyed), AttestationError)
     assert enclave.transports["v1"].closes == 1, "the connections made under the discarded one were closed"
     if recovers:
         enclave.failure = None
         sent(get(keyed))
         assert enclave.sent_under == ["v1", "v2"], "the next request went out under a new verification"
-        assert tag(keyed.current) == "v2"
+        assert tag(current_facts(keyed)) == "v2"
     else:
         with pytest.raises(AttestationError, match="nonce mismatch"):
             get(keyed)
         assert enclave.sent_under == ["v1"], "nothing was sent"
-        assert tag(keyed.current) == "v1", "a failed attempt doesn't change current"
+        assert tag(current_facts(keyed)) == "v1", "a failed attempt doesn't replace the discarded state"
+        assert last_facts(keyed) is None
 
 
 @pytest.mark.parametrize(
@@ -859,7 +875,8 @@ def test_failed_refresh_after_a_key_rejection_discards_the_verification() -> Non
     enclave.failure = AttestationError("the rotated key isn't attested")
     with pytest.raises(AttestationError, match="isn't attested"):
         get(keyed)
-    assert tag(keyed.current) == "v1", "current keeps the rejected verification that the failure discarded"
+    assert tag(current_facts(keyed)) == "v1", "the failure discarded the rejected state, which stays current"
+    assert isinstance(last_error(keyed), AttestationError), "the failed refresh is the last verification"
     assert enclave.transports["v1"].closes == 1
     enclave.failure = None
     rejecting = False
@@ -870,7 +887,10 @@ def test_failed_refresh_after_a_key_rejection_discards_the_verification() -> Non
 def test_failed_refresh_at_expiry_discards_the_verification() -> None:
     enclave, keyed = scripted()
     keyed._refresh_once(
-        lambda enclave, **_: verification("old", deadline=datetime.now(UTC) + timedelta(seconds=0.1)), None, None
+        lambda enclave, **_: report_of(verification("old", deadline=datetime.now(UTC) + timedelta(seconds=0.1))),
+        None,
+        None,
+        [],
     )
     old = keyed._current
     assert old is not None
@@ -878,7 +898,7 @@ def test_failed_refresh_at_expiry_discards_the_verification() -> None:
     enclave.failure = AttestationError("bad document")
     with pytest.raises(AttestationError, match="bad document"):
         get(keyed)
-    assert keyed.current is old.verification
+    assert current_facts(keyed) is old.facts
     assert old.discarded
     assert old.transport._closed, "the expired verification's connections were closed"
     assert enclave.sent_under == []
@@ -890,14 +910,14 @@ def test_failed_reverify_keeps_a_newer_verification() -> None:
 
     def publish_then_fail() -> VerifiedFacts:
         # Another publisher's verification lands while this re-verification is in flight.
-        keyed._refresh_once(lambda enclave, **_: verification("newer"), None, None)
+        keyed._refresh_once(lambda enclave, **_: report_of(verification("newer")), None, None, [])
         raise AttestationError("nonce mismatch")
 
-    keyed.enclave._fetch = publish_then_fail
+    keyed.enclave._fetch = reporting(publish_then_fail)
     with pytest.raises(AttestationError, match="nonce mismatch"):
         keyed.reverify()
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "newer", "the failure discards only the verification that it was replacing"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "newer", "the failure discards only the verification that it was replacing"
     sent(get(keyed))
     assert enclave.sent_under == ["newer"]
 
@@ -910,18 +930,18 @@ async def test_async_failed_reverify_discards_a_fresh_verification(recovers: boo
     enclave.failure = AttestationError("nonce mismatch")
     with pytest.raises(AttestationError, match="nonce mismatch"):
         await keyed.reverify()
-    assert tag(keyed.current) == "v1"
+    assert tag(current_facts(keyed)) == "v1"
     assert enclave.transports["v1"].closes == 1
     if recovers:
         enclave.failure = None
         await async_sent(keyed)
         assert enclave.sent_under == ["v1", "v2"]
-        assert tag(keyed.current) == "v2"
+        assert tag(current_facts(keyed)) == "v2"
     else:
         with pytest.raises(AttestationError, match="nonce mismatch"):
             await async_get(keyed)
         assert enclave.sent_under == ["v1"]
-        assert tag(keyed.current) == "v1"
+        assert tag(current_facts(keyed)) == "v1"
     await keyed.aclose()
 
 
@@ -954,7 +974,7 @@ async def test_async_cancelled_reverify_keeps_a_fresh_verification() -> None:
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
-    keyed.enclave._fetch_async = blocked
+    keyed.enclave._fetch_async = reporting_async(blocked)
     reverify = asyncio.create_task(keyed.reverify())
     await started.wait()
     reverify.cancel()
@@ -971,15 +991,15 @@ async def test_async_failed_reverify_keeps_a_newer_verification() -> None:
     await keyed.ensure_verified()
 
     async def publish_then_fail() -> VerifiedFacts:
-        async def newer(_: object, **__: object) -> VerifiedFacts:
-            return verification("newer")
+        async def newer(_: object, **__: object) -> VerificationReport:
+            return report_of(verification("newer"))
 
         await keyed._refresh_once(newer, None, None)
         raise AttestationError("nonce mismatch")
 
-    keyed.enclave._fetch_async = publish_then_fail
+    keyed.enclave._fetch_async = reporting_async(publish_then_fail)
     with pytest.raises(AttestationError, match="nonce mismatch"):
         await keyed.reverify()
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "newer"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "newer"
     await keyed.aclose()

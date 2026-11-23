@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tests.client.helpers import HOST, Recorder, fake_enclave, response, verification
+from tests.client.helpers import HOST, Recorder, facts_of, fake_enclave, reporting_async, response, verification
 from tinfoil import _enclave, _fetch
 from tinfoil._enclave import (
     DEADLINE_EXCEEDED,
@@ -107,7 +107,7 @@ def test_initialization_recovery(
 
     enclave = fake_enclave(fetch)
     if attempts == 2 and last is None:
-        assert enclave.verify().code_tag == "fresh"
+        assert facts_of(enclave.verify()).code_tag == "fresh"
     else:
         with pytest.raises(TinfoilError) as err:
             enclave.verify()
@@ -151,7 +151,7 @@ async def test_initialization_recovery_async(monkeypatch: pytest.MonkeyPatch) ->
             raise network_error("first attempt")
         return verification("fresh")
 
-    assert (await fake_enclave(fetch).verify_async()).code_tag == "fresh"
+    assert facts_of(await fake_enclave(fetch).verify_async()).code_tag == "fresh"
     assert calls == 2
     assert slept == [1.0]
 
@@ -163,7 +163,7 @@ def test_verification_check_sees_every_verification() -> None:
         checked.append(v.code_tag)
 
     enclave = fake_enclave(lambda: verification("key"), check=check)
-    assert enclave.verify().code_tag == "key"
+    assert facts_of(enclave.verify()).code_tag == "key"
     enclave.verify()
     assert checked == ["key", "key"]
 
@@ -213,7 +213,7 @@ def test_slow_verification_check_fetches_fresh_evidence(slow_calls: int) -> None
         with pytest.raises(AttestationError, match=FRESHNESS_EXPIRED):
             enclave.verify()
     else:
-        verified = enclave.verify()
+        verified = facts_of(enclave.verify())
         assert verified.freshness_expires_at is not None
         assert verified.freshness_expires_at - datetime.now(UTC) > timedelta(minutes=59)
     assert fetches == 2, "an expiry after the check is retried with fresh evidence"
@@ -230,7 +230,7 @@ class TestDeadline:
 
         with pytest.raises(NetworkError, match=DEADLINE_EXCEEDED):
             fake_enclave(fetch).verify_once(deadline=time.monotonic() + 0.02)
-        assert fake_enclave(fetch).verify_once(deadline=time.monotonic() + 5).code_tag == "key"
+        assert facts_of(fake_enclave(fetch).verify_once(deadline=time.monotonic() + 5)).code_tag == "key"
 
     def test_slow_check_is_refused_after_the_deadline(self) -> None:
         checked = 0
@@ -274,10 +274,10 @@ class TestDeadline:
             await asyncio.sleep(0.1)
             return verification("key")
 
-        enclave = Enclave(HOST, Pin(repo="org/repo"), _fetch_async=fetch)
+        enclave = Enclave(HOST, Pin(repo="org/repo"), _fetch_async=reporting_async(fetch))
         with pytest.raises(NetworkError, match=DEADLINE_EXCEEDED):
             await enclave.verify_once_async(deadline=time.monotonic() + 0.02)
-        assert (await enclave.verify_once_async(deadline=time.monotonic() + 5)).code_tag == "key"
+        assert facts_of(await enclave.verify_once_async(deadline=time.monotonic() + 5)).code_tag == "key"
 
 
 def test_verification_without_a_deadline_is_rejected() -> None:

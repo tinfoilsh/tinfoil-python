@@ -1,4 +1,5 @@
-"""The types shared by the client modules: timeouts, the verification check and the ``Transport`` option."""
+"""The types shared by the client modules: timeouts, the verification check and callback, and the ``Transport``
+option."""
 
 from __future__ import annotations
 
@@ -8,7 +9,8 @@ from typing import TypeAlias, final
 
 import httpx
 
-from tinfoil.verifier import VerifiedFacts
+from tinfoil._errors import TinfoilError
+from tinfoil.verifier import VerificationReport, VerifiedFacts
 
 TimeoutTypes: TypeAlias = float | tuple[float | None, float | None, float | None, float | None] | httpx.Timeout | None
 """A timeout as ``httpx.Client`` accepts it: seconds for every operation, None for no limit, a
@@ -22,8 +24,28 @@ attestation fetches, which are also bounded as a whole: an attestation document 
 30 seconds, the gateway catalog within 10 seconds."""
 
 VerificationCheck: TypeAlias = Callable[[VerifiedFacts], None]
-"""A caller's check of a verification that passed the verifier, called before the client uses the enclave's keys.
-Raising rejects the enclave; the exception becomes the cause of an AttestationError and is not retried."""
+"""A caller's check of the verified facts of a verification that passed the verifier, called before the client uses
+the enclave's keys. Raising rejects the enclave; the exception becomes the cause of an AttestationError and is not
+retried. It never sees a report or partial facts: it decides about trust, so it sees only facts that were
+verified."""
+
+LastVerification: TypeAlias = tuple[VerificationReport | None, TinfoilError | None]
+"""The outcome of a client's most recent verification attempt, as ``(report, error)``: the report and None when
+the attempt passed, None and the client error that it reported when it failed, and ``(None, None)`` before the
+first attempt. When the verifier rejected the document, the verifier's ``VerificationError``, whose ``report``
+shows the failed step and the partial facts, is the error's ``__cause__``. A failed fetch, a
+``verification_check`` rejection and a document whose keys the client cannot use come after or before the
+verifier, so no report is reachable from them."""
+
+OnVerification: TypeAlias = Callable[[str, VerificationReport | None, TinfoilError | None], None]
+"""A caller's callback that a client calls once for every verification attempt, after the attempt's outcome is
+decided, with the host of the enclave that it verified and the attempt's ``(report, error)``, as
+``last_verification`` returns them: the first verification, a retry, a refresh after expiry or a key rotation, an
+explicit ``reverify``, each router that discovery tries and each gateway replica. A verification that concurrent
+requests share is one attempt. The client holds none of its locks while it calls it, so the callback may call the
+client, for example ``last_verification``. It returns nothing and cannot change the outcome; a decision about
+trust belongs in the ``verification_check``. A callback that blocks or raises is a bug in the caller's code: an
+exception that it raises propagates to the caller of the operation that verified."""
 
 
 @final
@@ -68,6 +90,8 @@ __all__ = [
     "DEFAULT_HTTP_TIMEOUT",
     "EHBP",
     "TLS",
+    "LastVerification",
+    "OnVerification",
     "TimeoutTypes",
     "Transport",
     "VerificationCheck",

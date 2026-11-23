@@ -18,7 +18,7 @@ from tinfoil._errors import (
     from_verify,
 )
 from tinfoil._fetch import fetch_document, fetch_document_async, is_authority
-from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
+from tinfoil._types import DEFAULT_HTTP_TIMEOUT, OnVerification, TimeoutTypes, VerificationCheck
 from tinfoil.verifier import (
     CRYPTO_MATERIAL_ID_HPKE,
     CRYPTO_MATERIAL_ID_TLS,
@@ -27,6 +27,7 @@ from tinfoil.verifier import (
     ConfigTrust,
     Pin,
     Policy,
+    VerificationReport,
     VerifiedFacts,
     Verifier,
     VerifyError,
@@ -44,14 +45,19 @@ supplied an approval time, whether every reference is embedded or a caller-autho
 embedded runtime and platform references, so nothing bounds the time the enclave's keys may be used for."""
 DEADLINE_EXCEEDED = "verification did not complete before its deadline"
 """The message of the NetworkError for a verification that ran past the deadline it was given."""
+NO_VERIFIED_FACTS = "verification passed without verified facts"
+"""The message of the AttestationError for a report that claims a pass but holds no verified facts, which the
+verifier never returns."""
 
 VERIFICATION_RETRIES = 1
 CANDIDATE_VERIFICATION_RETRIES = 0
 VERIFICATION_RETRY_DELAY = 1.0
 
-Fetch = Callable[[], VerifiedFacts]
+Fetch = Callable[[], VerificationReport]
 """A test seam: replaces fetching and verifying a document."""
-AsyncFetch = Callable[[], Awaitable[VerifiedFacts]]
+AsyncFetch = Callable[[], Awaitable[VerificationReport]]
+Retried = Callable[[TinfoilError], None]
+"""Called with each failed attempt that a verification retries, before the retry starts."""
 
 DocumentFetch = Callable[[str, bytes, TimeoutTypes, "float | None"], bytes]
 """How an enclave obtains its raw attestation document: ``(host, nonce, timeout, deadline)`` to the document, where
@@ -83,8 +89,10 @@ class Enclave:
     set, is a host that fetches attestation from the enclave on the
     client's behalf. ``pin`` is the ``Pin`` it is verified against. ``verifier``
     is the policy, which several enclaves can share; None selects the defaults.
-    ``verification_check``, when set, is called with each verification
-    that passes the verifier; raising rejects it without a retry.
+    ``verification_check``, when set, is called with the verified facts of
+    each verification that passes the verifier; raising rejects it without
+    a retry. ``on_verification``, when set, is what ``notify`` reports each
+    attempt to.
     ``fetch_document`` and ``fetch_document_async``, when set, obtain the
     raw document in place of a direct fetch from ``host`` or ``relay``.
 
@@ -96,6 +104,7 @@ class Enclave:
         "_check",
         "_fetch",
         "_fetch_async",
+        "_on_verification",
         "fetch_document",
         "fetch_document_async",
         "host",
@@ -112,6 +121,7 @@ class Enclave:
         relay: str = "",
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
+        on_verification: OnVerification | None = None,
         fetch_document: DocumentFetch | None = None,
         fetch_document_async: AsyncDocumentFetch | None = None,
         _fetch: Fetch | None = None,
@@ -135,38 +145,67 @@ class Enclave:
         self.pin = pin
         self.verifier = verifier
         self._check = verification_check
+        self._on_verification = on_verification
         self.fetch_document = fetch_document
         self.fetch_document_async = fetch_document_async
         self._fetch = _fetch
         self._fetch_async = _fetch_async
 
-    def verify(self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None) -> VerifiedFacts:
+    def verify(
+        self,
+        *,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
+        deadline: float | None = None,
+        retried: Retried | None = None,
+    ) -> VerificationReport:
         """Fetch and verify the enclave's attestation, retrying once after a network or attestation failure. The
-        verification it returns is fresh and has passed the verification check. ``timeout`` bounds each network
-        operation of the fetch; ``deadline``, a ``time.monotonic`` instant, bounds the whole of each attempt,
-        the fetch, the verification and the check included, and no retry starts once it has passed: an attempt
-        that completes after it is a NetworkError."""
-        return self._verify(VERIFICATION_RETRIES, timeout, deadline)
+        report it returns is fresh, and its verified facts have passed the verification check. ``timeout`` bounds
+        each network operation of the fetch; ``deadline``, a ``time.monotonic`` instant, bounds the whole of each
+        attempt, the fetch, the verification and the check included, and no retry starts once it has passed: an
+        attempt that completes after it is a NetworkError. Each attempt that fails and is retried is passed to
+        ``retried`` before the retry starts; the outcome of the last attempt is the result."""
+        return self._verify(VERIFICATION_RETRIES, timeout, deadline, retried)
 
     def verify_once(
-        self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
-    ) -> VerifiedFacts:
-        """``verify`` without the retry, so a caller trying several enclaves moves on quickly."""
-        return self._verify(CANDIDATE_VERIFICATION_RETRIES, timeout, deadline)
+        self,
+        *,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
+        deadline: float | None = None,
+        retried: Retried | None = None,
+    ) -> VerificationReport:
+        """``verify`` without the retry, so a caller trying several enclaves moves on quickly. It never calls
+        ``retried``."""
+        return self._verify(CANDIDATE_VERIFICATION_RETRIES, timeout, deadline, retried)
 
     async def verify_async(
-        self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
-    ) -> VerifiedFacts:
+        self,
+        *,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
+        deadline: float | None = None,
+        retried: Retried | None = None,
+    ) -> VerificationReport:
         """``verify`` on the event loop."""
-        return await self._verify_async(VERIFICATION_RETRIES, timeout, deadline)
+        return await self._verify_async(VERIFICATION_RETRIES, timeout, deadline, retried)
 
     async def verify_once_async(
-        self, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT, deadline: float | None = None
-    ) -> VerifiedFacts:
+        self,
+        *,
+        timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
+        deadline: float | None = None,
+        retried: Retried | None = None,
+    ) -> VerificationReport:
         """``verify_once`` on the event loop."""
-        return await self._verify_async(CANDIDATE_VERIFICATION_RETRIES, timeout, deadline)
+        return await self._verify_async(CANDIDATE_VERIFICATION_RETRIES, timeout, deadline, retried)
 
-    def _verify(self, retries: int, timeout: TimeoutTypes, deadline: float | None) -> VerifiedFacts:
+    def notify(self, report: VerificationReport | None, error: TinfoilError | None) -> None:
+        """Reports the outcome of an attempt to verify the enclave to the ``on_verification`` callback, if there is
+        one. The caller must hold no lock that the callback could need."""
+        if self._on_verification is not None:
+            self._on_verification(self.host, report, error)
+
+    def _verify(
+        self, retries: int, timeout: TimeoutTypes, deadline: float | None, retried: Retried | None
+    ) -> VerificationReport:
         first: TinfoilError | None = None
         for attempt in range(retries + 1):
             try:
@@ -183,10 +222,14 @@ class Enclave:
                         err.__context__ = first
                     raise
                 first = err
+                if retried is not None:
+                    retried(err)
             time.sleep(VERIFICATION_RETRY_DELAY)
         raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
 
-    async def _verify_async(self, retries: int, timeout: TimeoutTypes, deadline: float | None) -> VerifiedFacts:
+    async def _verify_async(
+        self, retries: int, timeout: TimeoutTypes, deadline: float | None, retried: Retried | None
+    ) -> VerificationReport:
         first: TinfoilError | None = None
         for attempt in range(retries + 1):
             try:
@@ -204,12 +247,18 @@ class Enclave:
                         err.__context__ = first
                     raise
                 first = err
+                if retried is not None:
+                    retried(err)
             await asyncio.sleep(VERIFICATION_RETRY_DELAY)
         raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
 
-    def _admit(self, verified: VerifiedFacts) -> None:
-        """Checks that a fetched verification is fresh and passes the verification check. The check can run past
-        the deadline, so freshness is checked again after it; a retry then fetches fresh evidence."""
+    def _admit(self, report: VerificationReport) -> None:
+        """Checks that a fetched verification is fresh and that its verified facts pass the verification check. The
+        check can run past the deadline, so freshness is checked again after it; a retry then fetches fresh
+        evidence."""
+        verified = report.verified_facts
+        if verified is None:
+            raise AttestationError(NO_VERIFIED_FACTS)
         check_freshness(verified)
         if self._check is not None:
             try:
@@ -218,7 +267,7 @@ class Enclave:
                 raise attestation_error(VerificationRejected(self.host, err))  # noqa: B904 - the cause is set
         check_freshness(verified)
 
-    def _fetch_verification(self, timeout: TimeoutTypes, deadline: float | None) -> VerifiedFacts:
+    def _fetch_verification(self, timeout: TimeoutTypes, deadline: float | None) -> VerificationReport:
         nonce = random_nonce()
         if self.fetch_document is not None:
             doc = self.fetch_document(self.host, nonce, timeout, deadline)
@@ -228,7 +277,7 @@ class Enclave:
             doc = fetch_document(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
         return self._verify_document(doc, nonce)
 
-    async def _fetch_verification_async(self, timeout: TimeoutTypes, deadline: float | None) -> VerifiedFacts:
+    async def _fetch_verification_async(self, timeout: TimeoutTypes, deadline: float | None) -> VerificationReport:
         nonce = random_nonce()
         if self.fetch_document_async is not None:
             doc = await self.fetch_document_async(self.host, nonce, timeout, deadline)
@@ -239,16 +288,18 @@ class Enclave:
         # VerifiedFacts is CPU-bound, so it runs off the event loop.
         return await asyncio.to_thread(self._verify_document, doc, nonce)
 
-    def _verify_document(self, doc: bytes, nonce: bytes) -> VerifiedFacts:
+    def _verify_document(self, doc: bytes, nonce: bytes) -> VerificationReport:
+        """The report of ``doc``'s verification. A rejection is an AttestationError caused by the verifier's
+        VerificationError, which carries the report; a document whose keys a transport cannot use is an
+        AttestationError of the client's own, with no report."""
         try:
             report = self.verifier.verify_v3(doc, nonce, self.pin)
         except VerifyError as err:
             raise from_verify(err) from err
-        verified = report.verified_facts
-        if verified is None:
-            raise AttestationError("verification passed without verified facts")
-        validate_transport_keys(verified)
-        return verified
+        if report.verified_facts is None:
+            raise AttestationError(NO_VERIFIED_FACTS)
+        validate_transport_keys(report.verified_facts)
+        return report
 
 
 def check_deadline(deadline: float | None) -> None:
@@ -304,10 +355,12 @@ __all__ = [
     "DEADLINE_EXCEEDED",
     "FRESHNESS_EXPIRED",
     "NO_FRESHNESS_DEADLINE",
+    "NO_VERIFIED_FACTS",
     "VERIFICATION_RETRY_DELAY",
     "AsyncDocumentFetch",
     "DocumentFetch",
     "Enclave",
+    "Retried",
     "VerificationRejected",
     "check_deadline",
     "check_freshness",

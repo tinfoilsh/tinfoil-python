@@ -26,7 +26,7 @@ from tinfoil import (
     create_client,
     fetch_catalog,
 )
-from tinfoil.verifier import VerifiedFacts
+from tinfoil.verifier import STEP_PASSED, VerifiedFacts
 
 pytestmark = pytest.mark.integration
 
@@ -43,11 +43,17 @@ needs_api_key = pytest.mark.skipif(not API_KEY, reason="TINFOIL_API_KEY is not s
 @pytest.mark.parametrize("mode", [TLS(), EHBP()])
 def test_enclave_client(mode: Transport) -> None:
     with EnclaveHTTPClient(ENCLAVE, RepoPin(REPO), transport=mode) as client:
-        assert client.current is not None, "the client is verified when it's returned"
+        last, error = client.last_verification()
+        assert last is not None, "the client is verified when it's returned"
+        assert error is None
+        assert all(step.status == STEP_PASSED for step in last.steps), "a live code release is endorsed"
+        assert last.verified_facts is not None
+        assert last.partial_facts is None
         before = client.ensure_verified()
-        assert before is client.current, "the constructor's verification is reused"
+        assert before is last, "the constructor's verification is reused"
         after = client.reverify()
-        assert after is not before
+        assert after.metadata.verified_at >= before.metadata.verified_at
+        assert client.last_verification() == (after, None)
         headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
         reply = client.http_client.get(client.base_url + "v1/models", headers=headers)
         assert reply.status_code == 200
@@ -60,8 +66,7 @@ def test_router_openai_client(mode: Transport) -> None:
     with OpenAIClient(attested, api_key=API_KEY) as client:
         assert client.http_client is attested
         verified = attested.ensure_verified()
-        assert attested.current is not None
-        assert verified.freshness_expires_at == attested.current.freshness_expires_at, "a valid verification is reused"
+        assert verified is attested.last_verification()[0], "a valid verification is reused"
         assert attested.base_url == f"https://{attested.enclave}/", "the enclave is the router discovery chose"
         completion = client.chat.completions.create(
             model=MODEL, messages=[{"role": "user", "content": "Is this a test?"}]
@@ -107,14 +112,15 @@ def test_verification_check_rejects_once() -> None:
 @needs_api_key
 @pytest.mark.asyncio
 async def test_async_router_client() -> None:
-    client = AsyncOpenAIClient(await AsyncRouterHTTPClient.create(transport=EHBP()), api_key=API_KEY)
+    router = await AsyncRouterHTTPClient.create(transport=EHBP())
+    client = AsyncOpenAIClient(router, api_key=API_KEY)
     try:
         stream = await client.chat.completions.create(
             model=MODEL, messages=[{"role": "user", "content": "Hello from the async integration test"}], stream=True
         )
         collected = "".join([chunk.choices[0].delta.content or "" async for chunk in stream if chunk.choices])
         assert collected
-        assert client.http_client.current is not None
+        assert router.last_verification()[0] is not None
     finally:
         await client.close()
     drop_in = await create_async_client(api_key=API_KEY)
@@ -128,9 +134,10 @@ async def test_async_router_client() -> None:
 
 def test_router_discovery() -> None:
     with RouterHTTPClient(transport=EHBP()) as client:
-        assert client.current is not None
+        last, _ = client.last_verification()
+        assert last is not None
         assert client.base_url == f"https://{client.enclave}/"
-        assert client.ensure_verified().freshness_expires_at == client.current.freshness_expires_at
+        assert client.ensure_verified() is last
 
 
 def test_gateway() -> None:
@@ -141,6 +148,7 @@ def test_gateway() -> None:
         assert models
         # The client's own catalog decides what it serves; a separately fetched snapshot may already differ.
         model = models[0]
-        verified = gateway.ensure_verified(model)
+        verified = gateway.ensure_verified(model).verified_facts
+        assert verified is not None
         assert verified.hpke_public_key
-        assert [v.host for v in gateway.current]
+        assert [v.host for v in gateway.last_verification() if v.report is not None]
