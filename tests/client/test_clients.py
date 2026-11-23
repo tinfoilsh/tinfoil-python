@@ -959,3 +959,23 @@ async def test_async_clients_report_every_attempt(network: Network, monkeypatch:
     [entry] = gateway.last_verification()
     assert entry.report is verified
     await gateway.close()
+
+
+def test_a_raising_callback_changes_no_outcome(network: Network, caplog: pytest.LogCaptureFixture) -> None:
+    """An exception from ``on_verification`` is logged, and neither fails the verification nor makes discovery
+    skip a router that verified."""
+
+    def boom(host: str, report: VerificationReport | None, error: TinfoilError | None) -> None:
+        raise NetworkError("the callback failed")
+
+    document = network.serve("enclave.example")
+    client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification=boom)
+    assert last_facts(client) is document
+    assert "on_verification callback for enclave.example raised" in caplog.text
+    client.close()
+    network.handler = lambda _: response(200, b'["a.example"]')
+    chosen = network.serve("a.example")
+    router = RouterHTTPClient(transport=EHBP(), user_cache_secret="s", on_verification=boom)
+    assert router.enclave == "a.example", "the router that verified is kept"
+    assert last_facts(router) is chosen
+    router.close()

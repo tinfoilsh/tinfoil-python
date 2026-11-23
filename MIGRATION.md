@@ -39,7 +39,7 @@ The pre-releases configured clients with options that were checked against each 
 | `Verifier.caller_authorizes_config` | Removed |
 | `verify_v3(...)` and `verify_v3_at(...)` returning a `Verification` | A `VerificationReport`; the facts are its `verified_facts`, a `VerifiedFacts`, which is `Verification` renamed without `metadata`. The metadata is the report's `metadata`. A `VerificationError` carries the rejection's report as `report` |
 | `verification_check` called with a `Verification` | Called with the `VerifiedFacts` |
-| `client.current`, the last successful verification | `client.last_verification()`, the most recent attempt as `(report, error)`: a later failure replaces an earlier success. On a gateway client it is a list of `ReplicaVerification`, whose `verification` is now `report` or `error` |
+| `client.current`, the last successful verification | `client.last_verification()`, the most recent attempt as `(report, error)`: a later failure replaces an earlier success. On a gateway client it is a list of `ReplicaVerification`, whose `verification` field is replaced by `report`, set when the replica's last attempt passed, and `error`, set when it failed |
 | `ensure_verified()` and `reverify()` returning a `Verification` | A `VerificationReport`; read its `verified_facts` |
 | Watching verifications | `on_verification=` on every HTTP client, called with the host, the report and the error of every attempt |
 
@@ -99,7 +99,8 @@ http_client = EnclaveHTTPClient(
     EitherPin("tinfoilsh/confidential-model-router", "tinfoilsh/confidential-model-router"),
 )
 client = OpenAIClient(http_client, api_key=os.environ["TINFOIL_API_KEY"])
-verified = http_client.ensure_verified()
+verified = http_client.ensure_verified().verified_facts
+assert verified is not None
 print(verified.code_tag, verified.tls_public_key_fp)
 print(verified.to_json())
 ```

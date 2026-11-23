@@ -65,8 +65,10 @@ def test_record_is_frozen() -> None:
     v = record()
     with pytest.raises(dataclasses.FrozenInstanceError):
         v.code_digest = "changed"  # type: ignore[misc]
+    nested = record(config=ConfigVerification(source=SOURCE_POLICY, digest="cd" * 32))
+    assert nested.config is not None
     with pytest.raises(dataclasses.FrozenInstanceError):
-        v.config = None  # type: ignore[misc]
+        nested.config.digest = "changed"  # type: ignore[misc]
 
 
 def test_to_dict_lays_out_registers_as_hex_and_times_in_utc() -> None:

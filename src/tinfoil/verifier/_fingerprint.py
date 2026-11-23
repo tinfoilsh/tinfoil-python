@@ -13,7 +13,7 @@ from tinfoil.verifier._errors import UsageError
 
 def cert_pubkey_fp(cert_der: bytes) -> str:
     """The SPKI SHA-256 fingerprint of a DER certificate's public key (any key type), lowercase hex: the form that
-    ``Verification.tls_public_key_fp`` reports. A certificate that does not parse is a UsageError."""
+    ``VerifiedFacts.tls_public_key_fp`` reports. A certificate that does not parse is a UsageError."""
     if not cert_der:
         raise UsageError("no certificate")
     try:

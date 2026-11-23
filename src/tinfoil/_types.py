@@ -38,14 +38,15 @@ shows the failed step and the partial facts, is the error's ``__cause__``. A fai
 verifier, so no report is reachable from them."""
 
 OnVerification: TypeAlias = Callable[[str, VerificationReport | None, TinfoilError | None], None]
-"""A caller's callback that a client calls once for every verification attempt, after the attempt's outcome is
-decided, with the host of the enclave that it verified and the attempt's ``(report, error)``, as
-``last_verification`` returns them: the first verification, a retry, a refresh after expiry or a key rotation, an
-explicit ``reverify``, each router that discovery tries and each gateway replica. A verification that concurrent
-requests share is one attempt. The client holds none of its locks while it calls it, so the callback may call the
-client, for example ``last_verification``. It returns nothing and cannot change the outcome; a decision about
-trust belongs in the ``verification_check``. A callback that blocks or raises is a bug in the caller's code: an
-exception that it raises propagates to the caller of the operation that verified."""
+"""A caller's callback that a client calls once for every verification attempt, after the attempt's outcome is decided,
+with the host of the enclave that it verified and the attempt's ``(report, error)``, as ``last_verification`` returns
+them: the first verification, a retry, a refresh after expiry or a key rotation, an explicit ``reverify``, each
+router that discovery tries and each gateway replica. A verification that concurrent requests share is one attempt.
+The client holds none of its locks while it calls it, so the callback may call the client, for example
+``last_verification``. It returns nothing and cannot change the outcome: an ``Exception`` that it raises is logged to
+the ``tinfoil`` logger and otherwise ignored, so that it never turns a verification into a failure or makes discovery
+or the gateway skip a router or replica. A decision about trust belongs in the ``verification_check``. A callback
+that blocks or raises is a bug in the caller's code."""
 
 
 @final

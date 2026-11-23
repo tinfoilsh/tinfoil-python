@@ -28,8 +28,9 @@ rejected the document. Its ``report`` is the ``VerificationReport`` of the
 rejected verification, with the step that failed and the ``PartialFacts``
 that the steps before it established: the ``ExpectedFacts`` that provenance
 authenticated and the ``MeasuredFacts`` that the document and its hardware
-evidence claim. A report holds the channel keys only as fingerprints, and
-only ``verified_facts`` may bind a channel. A verifier built or called with
+evidence claim. Partial facts hold the channel keys only as fingerprints;
+the keys themselves are only in ``verified_facts``, which alone may bind a
+channel. A verifier built or called with
 invalid inputs raises a ``UsageError``, which carries no report. Both derive
 from ``VerifyError``. The measurement parsers (``parse_register`` and the
 ``parse_expected_*`` helpers) and the measurement records raise a plain

@@ -203,7 +203,7 @@ successful one. A `UsageError` has no report, since verification never
 started.
 
 `PartialFacts` hold two groups. `expected`, an `ExpectedFacts`, is set once
-provenance passed: the accepted `artifact`, `config` and `platform`, the
+provenance passed or was skipped: the accepted `artifact`, `config` and `platform`, the
 `code_measurement` that the release fixes, in the layout of the platform that
 the document's CPU evidence names, and, once the policy step resolved it,
 `measurement`, every register that the quote must attest, even if a later

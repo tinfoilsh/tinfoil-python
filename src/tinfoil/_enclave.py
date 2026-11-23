@@ -5,6 +5,7 @@ endorses."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -48,6 +49,8 @@ DEADLINE_EXCEEDED = "verification did not complete before its deadline"
 NO_VERIFIED_FACTS = "verification passed without verified facts"
 """The message of the AttestationError for a report that claims a pass but holds no verified facts, which the
 verifier never returns."""
+
+_LOG = logging.getLogger("tinfoil")
 
 VERIFICATION_RETRIES = 1
 CANDIDATE_VERIFICATION_RETRIES = 0
@@ -199,9 +202,15 @@ class Enclave:
 
     def notify(self, report: VerificationReport | None, error: TinfoilError | None) -> None:
         """Reports the outcome of an attempt to verify the enclave to the ``on_verification`` callback, if there is
-        one. The caller must hold no lock that the callback could need."""
-        if self._on_verification is not None:
+        one. The caller must hold no lock that the callback could need. The callback cannot change the outcome, so an
+        exception that it raises is logged rather than raised: raised, a client error from it would read as a failed
+        verification to router discovery and the gateway's replica fallback."""
+        if self._on_verification is None:
+            return
+        try:
             self._on_verification(self.host, report, error)
+        except Exception:
+            _LOG.exception("on_verification callback for %s raised", self.host)
 
     def _verify(
         self, retries: int, timeout: TimeoutTypes, deadline: float | None, retried: Retried | None
