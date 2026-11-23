@@ -6,8 +6,9 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import httpx
 import pytest
@@ -74,6 +75,16 @@ class Closing(httpx.BaseTransport):
         return self.handler(request)
 
     def close(self) -> None:
+        self.closes += 1
+
+
+class AsyncClosing(Closing, httpx.AsyncBaseTransport):
+    """``Closing`` for asynchronous transports."""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return self.handler(request)
+
+    async def aclose(self) -> None:
         self.closes += 1
 
 
@@ -459,11 +470,8 @@ def test_refresh_rejects_an_expired_verification() -> None:
     keyed.ensure_verified()
     with pytest.raises(AttestationError, match=FRESHNESS_EXPIRED):
         keyed.reverify()
-    state = keyed._current
-    assert state is not None
-    assert state.valid(), "a failed refresh leaves a valid verification in place"
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "old"
+    assert keyed._current is None, "an expired replacement is an attestation failure, which discards the old one"
+    assert keyed.current is None
 
 
 def test_refresh_rejects_a_verification_that_expires_during_creation() -> None:
@@ -536,21 +544,22 @@ def test_refresh_retires_replaced_connections() -> None:
     created: list[Closing] = []
 
     def build(_: Verification) -> httpx.BaseTransport:
-        if len(created) == 1:
-            created.append(Closing())
-            raise AttestationError("the new verification endorses no key for this transport")
         closing = Closing()
         created.append(closing)
+        if len(created) == 3:
+            raise AttestationError("the new verification endorses no key for this transport")
         return closing
 
     keyed = transport(lambda: verification("key"), FakeMode(build))
     keyed.ensure_verified()
     first = created[0]
-    with pytest.raises(AttestationError, match="endorses no key"):
-        keyed.reverify()
-    assert first.closes == 0, "a failed refresh keeps the current transport"
     keyed.reverify()
     assert first.closes == 1, "connections tied to the replaced keys are closed"
+    second = created[1]
+    with pytest.raises(AttestationError, match="endorses no key"):
+        keyed.reverify()
+    assert second.closes == 1, "a refresh that fails with an attestation failure discards the current transport"
+    assert keyed.current is None
 
 
 def test_retiring_waits_for_responses_in_flight() -> None:
@@ -712,3 +721,248 @@ async def test_async_key_rejection_and_close() -> None:
     await keyed.aclose()
     with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
         await keyed.ensure_verified()
+
+
+class ScriptedEnclave:
+    """A scripted enclave: each verification returns the next tag, or raises ``failure`` while it is set, and
+    each request records the tag of the verification that it was sent under."""
+
+    def __init__(self) -> None:
+        self.verifications = 0
+        self.failure: BaseException | None = None
+        self.sent_under: list[str] = []
+        self.transports: dict[str, AsyncClosing] = {}
+
+    def fetch(self) -> Verification:
+        if self.failure is not None:
+            raise self.failure
+        self.verifications += 1
+        return verification("key", tag=f"v{self.verifications}")
+
+    def build(self, verified: Verification) -> AsyncClosing:
+        def handler(_: httpx.Request) -> httpx.Response:
+            self.sent_under.append(verified.code_tag)
+            # A streamed body, which a response built with content is not, stays in flight until it is closed.
+            return httpx.Response(200, stream=httpx.ByteStream(b"ok"))
+
+        closing = self.transports[verified.code_tag] = AsyncClosing(handler)
+        return closing
+
+
+def sent(reply: httpx.Response) -> None:
+    """Checks that a request went through and closes its response, so that it is no longer in flight."""
+    assert reply.status_code == 200
+    reply.close()
+
+
+async def async_sent(keyed: AsyncAttestedTransport) -> None:
+    """``sent`` for a request through an asynchronous transport."""
+    reply = await keyed.handle_async_request(httpx.Request("GET", f"https://{HOST}/v1/models"))
+    assert reply.status_code == 200
+    await reply.aclose()
+
+
+def scripted() -> tuple[ScriptedEnclave, AttestedTransport]:
+    enclave = ScriptedEnclave()
+    return enclave, transport(enclave.fetch, FakeMode(enclave.build))
+
+
+def scripted_async() -> tuple[ScriptedEnclave, AsyncAttestedTransport]:
+    enclave = ScriptedEnclave()
+    return enclave, AsyncAttestedTransport(fake_enclave(enclave.fetch), AsyncFakeMode(enclave.build))
+
+
+def async_get(keyed: AsyncAttestedTransport) -> Coroutine[Any, Any, httpx.Response]:
+    return keyed.handle_async_request(httpx.Request("GET", f"https://{HOST}/v1/models"))
+
+
+@pytest.mark.parametrize("recovers", [True, False], ids=["recovers", "still-fails"])
+def test_failed_reverify_discards_a_fresh_verification(recovers: bool) -> None:
+    enclave, keyed = scripted()
+    sent(get(keyed))
+    enclave.failure = AttestationError("nonce mismatch")
+    with pytest.raises(AttestationError, match="nonce mismatch"):
+        keyed.reverify()
+    assert keyed.current is None, "the fresh verification was discarded"
+    assert enclave.transports["v1"].closes == 1, "the connections made under it were closed"
+    if recovers:
+        enclave.failure = None
+        sent(get(keyed))
+        assert enclave.sent_under == ["v1", "v2"], "the next request went out under a new verification"
+    else:
+        with pytest.raises(AttestationError, match="nonce mismatch"):
+            get(keyed)
+        assert enclave.sent_under == ["v1"], "nothing was sent"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [network_error("attestation source unreachable"), ConfigurationError("misconfigured fetcher")],
+    ids=["network", "configuration"],
+)
+def test_failed_reverify_keeps_a_fresh_verification_on_other_failures(failure: Exception) -> None:
+    enclave, keyed = scripted()
+    sent(get(keyed))
+    enclave.failure = failure
+    with pytest.raises(type(failure)):
+        keyed.reverify()
+    sent(get(keyed))
+    assert enclave.sent_under == ["v1", "v1"], "the next request went out under the cached verification"
+    assert enclave.verifications == 1
+    assert enclave.transports["v1"].closes == 0
+
+
+def test_failed_reverify_keeps_a_fresh_verification_on_interruption() -> None:
+    enclave, keyed = scripted()
+    sent(get(keyed))
+    enclave.failure = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        keyed.reverify()
+    sent(get(keyed))
+    assert enclave.sent_under == ["v1", "v1"]
+
+
+def test_failed_refresh_after_a_key_rejection_discards_the_verification() -> None:
+    enclave, keyed = scripted()
+    rejecting = True
+
+    def build(verified: Verification) -> httpx.BaseTransport:
+        closing = enclave.build(verified)
+        handler = closing.handler
+
+        def maybe_reject(request: httpx.Request) -> httpx.Response:
+            if rejecting:
+                raise PeerLacksKeyError(AttestationError(CERT_MISMATCH))
+            return handler(request)
+
+        closing.handler = maybe_reject
+        return closing
+
+    keyed.mode = FakeMode(build)
+    with pytest.raises(AttestationError) as rejected:
+        get(keyed)
+    assert is_key_rejection(rejected.value)
+    enclave.failure = AttestationError("the rotated key isn't attested")
+    with pytest.raises(AttestationError, match="isn't attested"):
+        get(keyed)
+    assert keyed.current is None, "the recovery's attestation failure discarded the rejected verification"
+    assert enclave.transports["v1"].closes == 1
+    enclave.failure = None
+    rejecting = False
+    sent(get(keyed))
+    assert enclave.sent_under == ["v2"]
+
+
+def test_failed_refresh_at_expiry_discards_the_verification() -> None:
+    enclave, keyed = scripted()
+    keyed._refresh_once(
+        lambda enclave, **_: verification("old", deadline=datetime.now(UTC) + timedelta(seconds=0.1)), None, None
+    )
+    old = keyed._current
+    assert old is not None
+    time.sleep(0.15)
+    enclave.failure = AttestationError("bad document")
+    with pytest.raises(AttestationError, match="bad document"):
+        get(keyed)
+    assert keyed.current is None
+    assert old.transport._closed, "the expired verification's connections were closed"
+    assert enclave.sent_under == []
+
+
+def test_failed_reverify_keeps_a_newer_verification() -> None:
+    enclave, keyed = scripted()
+    keyed.ensure_verified()
+
+    def publish_then_fail() -> Verification:
+        # Another publisher's verification lands while this re-verification is in flight.
+        keyed._refresh_once(lambda enclave, **_: verification("newer"), None, None)
+        raise AttestationError("nonce mismatch")
+
+    keyed.enclave._fetch = publish_then_fail
+    with pytest.raises(AttestationError, match="nonce mismatch"):
+        keyed.reverify()
+    assert keyed.current is not None
+    assert keyed.current.code_tag == "newer", "the failure discards only the verification that it was replacing"
+    sent(get(keyed))
+    assert enclave.sent_under == ["newer"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovers", [True, False], ids=["recovers", "still-fails"])
+async def test_async_failed_reverify_discards_a_fresh_verification(recovers: bool) -> None:
+    enclave, keyed = scripted_async()
+    await async_sent(keyed)
+    enclave.failure = AttestationError("nonce mismatch")
+    with pytest.raises(AttestationError, match="nonce mismatch"):
+        await keyed.reverify()
+    assert keyed.current is None
+    assert enclave.transports["v1"].closes == 1
+    if recovers:
+        enclave.failure = None
+        await async_sent(keyed)
+        assert enclave.sent_under == ["v1", "v2"]
+    else:
+        with pytest.raises(AttestationError, match="nonce mismatch"):
+            await async_get(keyed)
+        assert enclave.sent_under == ["v1"]
+    await keyed.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [network_error("attestation source unreachable"), ConfigurationError("misconfigured fetcher")],
+    ids=["network", "configuration"],
+)
+async def test_async_failed_reverify_keeps_a_fresh_verification_on_other_failures(failure: Exception) -> None:
+    enclave, keyed = scripted_async()
+    await async_sent(keyed)
+    enclave.failure = failure
+    with pytest.raises(type(failure)):
+        await keyed.reverify()
+    await async_sent(keyed)
+    assert enclave.sent_under == ["v1", "v1"]
+    assert enclave.verifications == 1
+    await keyed.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_cancelled_reverify_keeps_a_fresh_verification() -> None:
+    enclave, keyed = scripted_async()
+    await async_sent(keyed)
+    started = asyncio.Event()
+
+    async def blocked() -> Verification:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    keyed.enclave._fetch_async = blocked
+    reverify = asyncio.create_task(keyed.reverify())
+    await started.wait()
+    reverify.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reverify
+    await async_sent(keyed)
+    assert enclave.sent_under == ["v1", "v1"], "the caller's cancellation keeps the cached verification"
+    await keyed.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_failed_reverify_keeps_a_newer_verification() -> None:
+    _, keyed = scripted_async()
+    await keyed.ensure_verified()
+
+    async def publish_then_fail() -> Verification:
+        async def newer(_: object, **__: object) -> Verification:
+            return verification("newer")
+
+        await keyed._refresh_once(newer, None, None)
+        raise AttestationError("nonce mismatch")
+
+    keyed.enclave._fetch_async = publish_then_fail
+    with pytest.raises(AttestationError, match="nonce mismatch"):
+        await keyed.reverify()
+    assert keyed.current is not None
+    assert keyed.current.code_tag == "newer"
+    await keyed.aclose()

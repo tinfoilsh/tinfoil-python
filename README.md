@@ -197,6 +197,8 @@ The gateway's `url` already carries the API path, so `OpenAIClient` takes no `ap
 
 On an enclave or router client, `client.http_client.current` is the last successful verification, or `None` before the first; `ensure_verified()` returns one that is valid now, verifying again first if the cached one has expired. Both are a `tinfoil.verifier.Verification`: the facts that the attestation document proved, such as `code_tag`, `code_digest`, `config_repo`, `enclave_measurement`, `tls_public_key_fp`, `hpke_public_key` and `freshness_expires_at`, with `metadata.verified_at` recorded from the local clock. `to_json()` serializes the record.
 
+`reverify()` verifies again even if the cached verification is still valid. When a re-verification fails with an `AttestationError`, whether it is a call to `reverify()` or a refresh that the client makes on its own, the client discards the cached verification and its connections, so that no later request is sent under it: the next request verifies again, and fails if the enclave still doesn't verify. A `NetworkError` keeps a cached verification that is still fresh.
+
 ```python
 import os
 
@@ -208,7 +210,7 @@ verified = client.http_client.ensure_verified()
 print(verified.code_tag, verified.code_digest)
 print(verified.to_json(indent=2))
 
-current = client.http_client.current  # the same record, or None before the first verification
+current = client.http_client.current  # the same record, or None before the first verification or after a discard
 if current is not None:
     print(current.freshness_expires_at)
 ```

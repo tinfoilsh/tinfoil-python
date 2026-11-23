@@ -3,9 +3,13 @@
 An ``AttestedTransport`` verifies its enclave on first use, and again when
 the verification expires or is rejected, and sends each request over a
 transport tied to the keys of the current verification. Concurrent callers
-share one verification. A key rejection invalidates the verification the
+share one verification. A key rejection invalidates the verification that the
 request was sent under and is reported through ``is_key_rejection``;
-replaying the request is up to the layer above.
+replaying the request is up to the layer above. A re-verification that fails
+with an AttestationError discards the verification that it was replacing,
+even one that is still fresh, and retires its connections, so that the next
+request verifies again; any other failure keeps a verification that is still
+fresh.
 """
 
 from __future__ import annotations
@@ -236,7 +240,8 @@ class AttestedTransport(httpx.BaseTransport):
         return self._verified(False, Enclave.verify, self._timeout(timeout), None).verification
 
     def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
-        """Verifies again even if the current verification is still valid."""
+        """Verifies again even if the current verification is still valid. An AttestationError discards the
+        current verification, so that the next request verifies again; any other failure keeps it."""
         return self._verified(True, Enclave.verify, self._timeout(timeout), None).verification
 
     def verify_once(
@@ -248,8 +253,9 @@ class AttestedTransport(httpx.BaseTransport):
 
     @property
     def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None before the first. It may have expired
-        or been invalidated; ``ensure_verified`` returns one that is valid."""
+        """The last successful verification without checking it, or None before the first and after a failed
+        re-verification discards it. It may have expired or been invalidated; ``ensure_verified`` returns one
+        that is valid."""
         with self._lock:
             return None if self._current is None else self._current.verification
 
@@ -302,6 +308,15 @@ class AttestedTransport(httpx.BaseTransport):
             force = False
 
     def _refresh_once(self, verify: VerifyMethod, timeout: TimeoutTypes, deadline: float | None) -> None:
+        with self._lock:
+            replacing = self._current
+        try:
+            self._publish(verify, timeout, deadline)
+        except AttestationError:
+            self._discard(replacing)
+            raise
+
+    def _publish(self, verify: VerifyMethod, timeout: TimeoutTypes, deadline: float | None) -> None:
         verified = verify(self.enclave, timeout=timeout, deadline=deadline)
         transport = RetiringTransport(self.mode.new_transport(verified))
         with self._lock:
@@ -317,6 +332,15 @@ class AttestedTransport(httpx.BaseTransport):
         if replaced is not None:
             # Connections of the replaced state are tied to its keys.
             replaced.transport.retire()
+
+    def _discard(self, replacing: _State[RetiringTransport] | None) -> None:
+        """Discards ``replacing``, the state that a re-verification was replacing when it failed with an
+        AttestationError, and retires its connections. A newer state that was published since is kept."""
+        with self._lock:
+            if replacing is None or self._current is not replacing:
+                return
+            self._current = None
+        replacing.transport.retire()
 
     def _invalidate(self, state: _State[RetiringTransport]) -> None:
         with self._lock:
@@ -352,7 +376,8 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
         return state.verification
 
     async def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
-        """Verifies again even if the current verification is still valid."""
+        """Verifies again even if the current verification is still valid. An AttestationError discards the
+        current verification, as for ``AttestedTransport.reverify``."""
         state = await self._verified(True, Enclave.verify_async, self._timeout(timeout), None)
         return state.verification
 
@@ -365,7 +390,8 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
 
     @property
     def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None before the first."""
+        """The last successful verification without checking it, or None before the first and after a failed
+        re-verification discards it."""
         return None if self._current is None else self._current.verification
 
     async def aclose(self) -> None:
@@ -418,6 +444,14 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
             task.exception()
 
     async def _refresh_once(self, verify: AsyncVerifyMethod, timeout: TimeoutTypes, deadline: float | None) -> None:
+        replacing = self._current
+        try:
+            await self._publish(verify, timeout, deadline)
+        except AttestationError:
+            await self._discard(replacing)
+            raise
+
+    async def _publish(self, verify: AsyncVerifyMethod, timeout: TimeoutTypes, deadline: float | None) -> None:
         verified = await verify(self.enclave, timeout=timeout, deadline=deadline)
         transport = AsyncRetiringTransport(self.mode.new_transport(verified))
         if self._closed:
@@ -430,6 +464,13 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
         replaced, self._current = self._current, state
         if replaced is not None:
             await replaced.transport.retire()
+
+    async def _discard(self, replacing: _State[AsyncRetiringTransport] | None) -> None:
+        """``AttestedTransport._discard`` on the event loop."""
+        if replacing is None or self._current is not replacing:
+            return
+        self._current = None
+        await replacing.transport.retire()
 
 
 def _time_left(deadline: float | None) -> float | None:
