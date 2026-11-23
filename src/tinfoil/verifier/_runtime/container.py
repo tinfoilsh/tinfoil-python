@@ -35,8 +35,8 @@ _REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _REPOSITORY_ID_RE = re.compile(rf"[1-9][0-9]{{0,{_MAX_REPOSITORY_ID_DIGITS - 1}}}")
 _WORKFLOW_RE = re.compile(r"[A-Za-z0-9_.-]+\.ya?ml")
 _REF_RE = re.compile(r"refs/(?:tags|heads)/[A-Za-z0-9_.*-]+(?:/[A-Za-z0-9_.*-]+)*")
-# The name excludes the ASCII whitespace characters, spelled out because
-# ``\s`` also excludes other separators.
+# The name excludes the whitespace that the other SDKs exclude, spelled out
+# because Python's ``\s`` matches more characters.
 _IMAGE_DIGEST_RE = re.compile(r"[^@\t\n\f\r ]+@sha256:([0-9a-f]{64})")
 
 

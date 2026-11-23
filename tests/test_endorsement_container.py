@@ -108,7 +108,8 @@ def minted_bundle(
 ) -> dict[str, Any]:
     """A build attestation signed in ``world``, as JSON-ready data: a SLSA statement about the recorded image digest
     unless ``subjects`` says otherwise."""
-    subjects = subjects or [{"name": "ghcr.io/" + RECORDED_REPOSITORY, "digest": {"sha256": RECORDED_DIGEST}}]
+    if subjects is None:
+        subjects = [{"name": "ghcr.io/" + RECORDED_REPOSITORY, "digest": {"sha256": RECORDED_DIGEST}}]
     payload = statement(subjects, predicate_type, {"buildDefinition": {}, "runDetails": {}})
     return world.fulcio_bundle(payload, identity or minted_identity())
 
