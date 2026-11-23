@@ -46,16 +46,16 @@ def decode_sigstore_ref(entry: Entry) -> SigstoreRef:
     digest = _json.string(data, "digest")
     if digest == "":
         raise MissingMemberError(f"{entry.format} collateral entry {entry.id!r} is missing digest")
-    bundle = _require_bundle(entry, data)
+    bundle = require_bundle(entry, data)
     return SigstoreRef(repo=_json.string(data, "repo"), tag=_json.string(data, "tag"), digest=digest, bundle=bundle)
 
 
 def decode_freshness(entry: Entry) -> Freshness:
     data = unmarshal_data(entry, entry.format, _FRESHNESS_MEMBERS)
-    return Freshness(format=entry.format, bundle=_require_bundle(entry, data))
+    return Freshness(format=entry.format, bundle=require_bundle(entry, data))
 
 
-def _require_bundle(entry: Entry, data: _json.JsonObject) -> _json.JsonValue:
+def require_bundle(entry: Entry, data: _json.JsonObject) -> _json.JsonValue:
     """Reject an entry whose sigstore_bundle member is missing or null.
 
     Whether a present bundle verifies is for provenance to judge.

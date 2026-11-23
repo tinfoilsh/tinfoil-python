@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
@@ -14,6 +15,7 @@ from tests import document_builder as builder
 from tinfoil.verifier._document import document as doc
 from tinfoil.verifier._document.collateral import collateral, entry
 from tinfoil.verifier._document.collateral.collateral import NotFoundError
+from tinfoil.verifier._document.collateral.container import CONTAINER_PROVENANCE_V1_FORMAT
 from tinfoil.verifier._json import JsonObject
 
 
@@ -381,6 +383,43 @@ def test_freshness_selects_artifact_id() -> None:
     for witness_id in ("", "missing-freshness"):
         with pytest.raises(NotFoundError):
             parsed.freshness(witness_id)
+
+
+def test_container_provenance_selects_the_image_digest() -> None:
+    nonce = builder.test_nonce()
+    first, second = "ab" * 32, "cd" * 32
+
+    def proof(id_: str, digest: str, media: str) -> dict[str, Any]:
+        return {
+            "id": id_,
+            "role": entry.ROLE_REFERENCE_VALUES,
+            "format": CONTAINER_PROVENANCE_V1_FORMAT,
+            "data": {"digest": digest, "sigstore_bundle": {"mediaType": media}},
+        }
+
+    _, doc_bytes = builder.build(
+        nonce, collateral_entries=[proof("one", first, "one"), proof("two", second, "two"), proof("again", first, "x")]
+    )
+    parsed = doc.parse(doc_bytes, nonce)
+    for digest, media in ((first, "one"), (second, "two")):
+        provenance = parsed.container_provenance(digest)
+        assert provenance.digest == digest
+        assert isinstance(provenance.bundle, JsonObject)
+        assert provenance.bundle["mediaType"] == media
+    # What the accessor returns cannot be used to change what the document holds.
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        parsed.container_provenance(first).bundle = None  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        parsed.container_provenance(first).bundle["mediaType"] = "changed"  # type: ignore[index]
+    missing = "ef" * 32
+    with pytest.raises(
+        NotFoundError, match=f"{CONTAINER_PROVENANCE_V1_FORMAT} reference-values entry for sha256:{missing}"
+    ):
+        parsed.container_provenance(missing)
+
+    _, malformed_bytes = builder.build(nonce, collateral_entries=[proof("one", first.upper(), "one")])
+    with pytest.raises(doc.DocumentError, match="container digest is not lowercase hex"):
+        doc.parse(malformed_bytes, nonce)
 
 
 def test_sigstore_references() -> None:

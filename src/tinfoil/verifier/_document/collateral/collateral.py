@@ -11,6 +11,11 @@ from tinfoil.verifier._document.collateral.config import (
     ConfigEndorsement,
     decode_config_endorsement,
 )
+from tinfoil.verifier._document.collateral.container import (
+    CONTAINER_PROVENANCE_V1_FORMAT,
+    ContainerProvenance,
+    decode_container_provenance,
+)
 from tinfoil.verifier._document.collateral.entry import (
     ROLE_ENDORSEMENT,
     ROLE_REFERENCE_VALUES,
@@ -102,6 +107,8 @@ class Set:
     runtime: Runtime | None = None
     freshness: dict[str, Freshness] = field(default_factory=dict)
     """The freshness witnesses by entry id."""
+    containers: dict[str, ContainerProvenance] = field(default_factory=dict)
+    """The container build attestations by image digest."""
     platform_count: int = 0
     config_platform_ref: SigstoreRef | None = None
 
@@ -134,6 +141,7 @@ def decode(entries: tuple[Entry, ...]) -> Set:
     config: ConfigEndorsement | None = None
     runtime: Runtime | None = None
     freshness: dict[str, Freshness] = {}
+    containers: dict[str, ContainerProvenance] = {}
     platform_count = 0
     config_platform_ref: SigstoreRef | None = None
 
@@ -179,6 +187,9 @@ def decode(entries: tuple[Entry, ...]) -> Set:
                 sigstore_platform = decoded_ref
             if entry.id == PLATFORM_ID:
                 config_platform_ref = decoded_ref
+        elif entry.role == ROLE_REFERENCE_VALUES and entry.format == CONTAINER_PROVENANCE_V1_FORMAT:
+            decoded_container = decode_container_provenance(entry)
+            containers.setdefault(decoded_container.digest, decoded_container)
         elif entry.role == ROLE_REFERENCE_VALUES and entry.format == SIGSTORE_FRESHNESS_V1_FORMAT:
             # validate already rejected duplicate ids.
             freshness[entry.id] = decode_freshness(entry)
@@ -190,6 +201,7 @@ def decode(entries: tuple[Entry, ...]) -> Set:
         config=config,
         runtime=runtime,
         freshness=freshness,
+        containers=containers,
         platform_count=platform_count,
         config_platform_ref=config_platform_ref,
     )

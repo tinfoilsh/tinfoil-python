@@ -31,6 +31,7 @@ from tinfoil.verifier._document.collateral.config import (
     CONFIG_ID,
     CONFIG_V1_FORMAT,
 )
+from tinfoil.verifier._document.collateral.container import CONTAINER_PROVENANCE_V1_FORMAT, ContainerProvenance
 from tinfoil.verifier._document.collateral.runtime import (
     PLATFORM_ID,
     RUNTIME_ID,
@@ -414,6 +415,58 @@ def test_decode_accepts_empty_tag_and_repo_and_unverified_bundles() -> None:
         )
     )
     decode(ref("ref", SIGSTORE_FRESHNESS_V1_FORMAT, {"sigstore_bundle": {}}))
+
+
+# --- container provenance -----------------------------------------------------
+
+
+def container(entry_id: str, data: dict[str, Any], role: str = entry.ROLE_REFERENCE_VALUES) -> dict[str, Any]:
+    return ref(entry_id, CONTAINER_PROVENANCE_V1_FORMAT, data, role)
+
+
+def test_decode_keys_container_provenance_by_image_digest() -> None:
+    """A document carries one build attestation per image; the first entry for a digest wins."""
+    first, second = "ab" * 32, "cd" * 32
+    got = decode(
+        container("one", {"digest": first, "sigstore_bundle": {"a": 1}}),
+        container("two", {"digest": second, "sigstore_bundle": {"b": 2}}),
+        container("again", {"digest": first, "sigstore_bundle": {"c": 3}}),
+    )
+    assert got.containers == {
+        first: ContainerProvenance(digest=first, bundle=strict_parse(b'{"a":1}')),
+        second: ContainerProvenance(digest=second, bundle=strict_parse(b'{"b":2}')),
+    }
+    assert decode(sev_entries()[0]).containers == {}
+    # Under the endorsement role the format has no decoder, so the entry is checked for shape only.
+    assert decode(container("one", {"unknown": 1}, entry.ROLE_ENDORSEMENT)).containers == {}
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"digest": ("ab" * 32).upper(), "sigstore_bundle": {}}, "container digest is not lowercase hex"),
+        ({"digest": "sha256:" + "ab" * 32, "sigstore_bundle": {}}, "container digest is not lowercase hex"),
+        ({"digest": "ab" * 31, "sigstore_bundle": {}}, "container digest must be 32 bytes, got 31"),
+        ({"sigstore_bundle": {}}, "container digest must be 32 bytes, got 0"),
+        ({"digest": "ab" * 32}, "is missing sigstore_bundle"),
+        ({"digest": "ab" * 32, "sigstore_bundle": None}, "is missing sigstore_bundle"),
+        (
+            {"digest": "ab" * 32, "sigstore_bundle": {}, "repo": "o/r"},
+            f"parsing {CONTAINER_PROVENANCE_V1_FORMAT} collateral entry 'one'",
+        ),
+    ],
+    ids=[
+        "uppercase digest",
+        "prefixed digest",
+        "short digest",
+        "missing digest",
+        "missing bundle",
+        "null bundle",
+        "unknown member",
+    ],
+)
+def test_decode_rejects_malformed_container_provenance(data: dict[str, Any], message: str) -> None:
+    raises_decode(container("one", data), match=message)
 
 
 # --- runtime ------------------------------------------------------------------
