@@ -9,7 +9,8 @@ replaying the request is up to the layer above. A re-verification that fails
 with an AttestationError discards the verification that it was replacing,
 even one that is still fresh, and retires its connections, so that the next
 request verifies again; any other failure keeps a verification that is still
-fresh.
+fresh. A discarded verification stays the last successful one that ``current``
+returns, but no request is sent under it.
 """
 
 from __future__ import annotations
@@ -183,17 +184,20 @@ def _hpke_key(verified: Verification) -> str:
 
 class _State(Generic[_T]):
     """One successful verification and the transport created for its keys. They are published together, so a
-    request never sends under keys other than those of the verification it checked."""
+    request never sends under keys other than those of the verification it checked. ``rejected`` marks a state
+    whose keys a request found the peer doesn't hold, and ``discarded`` one that a re-verification failing with
+    an AttestationError was replacing; either makes the state invalid while it stays the current one."""
 
-    __slots__ = ("rejected", "transport", "verification")
+    __slots__ = ("discarded", "rejected", "transport", "verification")
 
     def __init__(self, verification: Verification, transport: _T) -> None:
         self.verification = verification
         self.transport: _T = transport
         self.rejected = False
+        self.discarded = False
 
     def valid(self) -> bool:
-        return not self.rejected and is_fresh(self.verification)
+        return not self.rejected and not self.discarded and is_fresh(self.verification)
 
 
 class _Refresh:
@@ -253,9 +257,9 @@ class AttestedTransport(httpx.BaseTransport):
 
     @property
     def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None before the first and after a failed
-        re-verification discards it. It may have expired or been invalidated; ``ensure_verified`` returns one
-        that is valid."""
+        """The last successful verification without checking it, or None before the first. It may have expired,
+        been invalidated or been discarded by a failed re-verification; ``ensure_verified`` returns one that is
+        valid."""
         with self._lock:
             return None if self._current is None else self._current.verification
 
@@ -335,11 +339,13 @@ class AttestedTransport(httpx.BaseTransport):
 
     def _discard(self, replacing: _State[RetiringTransport] | None) -> None:
         """Discards ``replacing``, the state that a re-verification was replacing when it failed with an
-        AttestationError, and retires its connections. A newer state that was published since is kept."""
+        AttestationError, and retires its connections. The state stays current, so that ``current`` still returns
+        its verification, but it is no longer valid, so that the next request verifies again. A newer state that
+        was published since is kept."""
         with self._lock:
             if replacing is None or self._current is not replacing:
                 return
-            self._current = None
+            replacing.discarded = True
         replacing.transport.retire()
 
     def _invalidate(self, state: _State[RetiringTransport]) -> None:
@@ -390,8 +396,8 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
 
     @property
     def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None before the first and after a failed
-        re-verification discards it."""
+        """The last successful verification without checking it, or None before the first. It may have expired,
+        been invalidated or been discarded by a failed re-verification."""
         return None if self._current is None else self._current.verification
 
     async def aclose(self) -> None:
@@ -469,7 +475,7 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
         """``AttestedTransport._discard`` on the event loop."""
         if replacing is None or self._current is not replacing:
             return
-        self._current = None
+        replacing.discarded = True
         await replacing.transport.retire()
 
 

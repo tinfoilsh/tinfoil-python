@@ -152,9 +152,9 @@ class _AttestedClient:
 
     @property
     def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None before the first and after a failed
-        ``reverify`` or refresh discards it. It may have expired or been rejected; ``ensure_verified`` returns one
-        that is valid."""
+        """The last successful verification without checking it, or None before the first. It may have expired,
+        been rejected or been discarded by a failed ``reverify`` or refresh; ``ensure_verified`` returns one that
+        is valid."""
         return self._attested.keyed.current
 
     def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
@@ -169,8 +169,8 @@ class _AttestedClient:
         """Verifies again even if the cached verification is still valid. ``timeout`` is as for
         ``ensure_verified``. A failure raises as usual; an AttestationError also discards the cached verification
         and retires the connections that were made under it, so that no later request is sent under it and the
-        next request verifies again. A NetworkError, a ConfigurationError or an interruption keeps a cached
-        verification that is still fresh."""
+        next request verifies again; ``current`` still returns it. A NetworkError, a ConfigurationError or an
+        interruption keeps a cached verification that is still fresh."""
         return self._attested.keyed.reverify(timeout=timeout)
 
     def close(self) -> None:
@@ -211,7 +211,8 @@ class _AsyncAttestedClient:
 
     @property
     def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None."""
+        """The last successful verification without checking it, or None before the first. It may have expired,
+        been rejected or been discarded by a failed ``reverify`` or refresh."""
         return self._attested.keyed.current
 
     async def ensure_verified(self) -> Verification:

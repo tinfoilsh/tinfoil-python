@@ -470,8 +470,11 @@ def test_refresh_rejects_an_expired_verification() -> None:
     keyed.ensure_verified()
     with pytest.raises(AttestationError, match=FRESHNESS_EXPIRED):
         keyed.reverify()
-    assert keyed._current is None, "an expired replacement is an attestation failure, which discards the old one"
-    assert keyed.current is None
+    state = keyed._current
+    assert state is not None
+    assert state.discarded, "an expired replacement is an attestation failure, which discards the old one"
+    assert keyed.current is not None
+    assert keyed.current.code_tag == "old", "current keeps the last successful verification"
 
 
 def test_refresh_rejects_a_verification_that_expires_during_creation() -> None:
@@ -559,7 +562,7 @@ def test_refresh_retires_replaced_connections() -> None:
     with pytest.raises(AttestationError, match="endorses no key"):
         keyed.reverify()
     assert second.closes == 1, "a refresh that fails with an attestation failure discards the current transport"
-    assert keyed.current is None
+    assert keyed.current is not None
 
 
 def test_retiring_waits_for_responses_in_flight() -> None:
@@ -776,6 +779,11 @@ def async_get(keyed: AsyncAttestedTransport) -> Coroutine[Any, Any, httpx.Respon
     return keyed.handle_async_request(httpx.Request("GET", f"https://{HOST}/v1/models"))
 
 
+def tag(current: Verification | None) -> str | None:
+    """The code tag of ``current``, a transport's last successful verification, or None for none."""
+    return None if current is None else current.code_tag
+
+
 @pytest.mark.parametrize("recovers", [True, False], ids=["recovers", "still-fails"])
 def test_failed_reverify_discards_a_fresh_verification(recovers: bool) -> None:
     enclave, keyed = scripted()
@@ -783,16 +791,18 @@ def test_failed_reverify_discards_a_fresh_verification(recovers: bool) -> None:
     enclave.failure = AttestationError("nonce mismatch")
     with pytest.raises(AttestationError, match="nonce mismatch"):
         keyed.reverify()
-    assert keyed.current is None, "the fresh verification was discarded"
-    assert enclave.transports["v1"].closes == 1, "the connections made under it were closed"
+    assert tag(keyed.current) == "v1", "current is still the last successful verification"
+    assert enclave.transports["v1"].closes == 1, "the connections made under the discarded one were closed"
     if recovers:
         enclave.failure = None
         sent(get(keyed))
         assert enclave.sent_under == ["v1", "v2"], "the next request went out under a new verification"
+        assert tag(keyed.current) == "v2"
     else:
         with pytest.raises(AttestationError, match="nonce mismatch"):
             get(keyed)
         assert enclave.sent_under == ["v1"], "nothing was sent"
+        assert tag(keyed.current) == "v1", "a failed attempt doesn't change current"
 
 
 @pytest.mark.parametrize(
@@ -845,7 +855,7 @@ def test_failed_refresh_after_a_key_rejection_discards_the_verification() -> Non
     enclave.failure = AttestationError("the rotated key isn't attested")
     with pytest.raises(AttestationError, match="isn't attested"):
         get(keyed)
-    assert keyed.current is None, "the recovery's attestation failure discarded the rejected verification"
+    assert tag(keyed.current) == "v1", "current keeps the rejected verification that the failure discarded"
     assert enclave.transports["v1"].closes == 1
     enclave.failure = None
     rejecting = False
@@ -864,7 +874,8 @@ def test_failed_refresh_at_expiry_discards_the_verification() -> None:
     enclave.failure = AttestationError("bad document")
     with pytest.raises(AttestationError, match="bad document"):
         get(keyed)
-    assert keyed.current is None
+    assert keyed.current is old.verification
+    assert old.discarded
     assert old.transport._closed, "the expired verification's connections were closed"
     assert enclave.sent_under == []
 
@@ -895,16 +906,18 @@ async def test_async_failed_reverify_discards_a_fresh_verification(recovers: boo
     enclave.failure = AttestationError("nonce mismatch")
     with pytest.raises(AttestationError, match="nonce mismatch"):
         await keyed.reverify()
-    assert keyed.current is None
+    assert tag(keyed.current) == "v1"
     assert enclave.transports["v1"].closes == 1
     if recovers:
         enclave.failure = None
         await async_sent(keyed)
         assert enclave.sent_under == ["v1", "v2"]
+        assert tag(keyed.current) == "v2"
     else:
         with pytest.raises(AttestationError, match="nonce mismatch"):
             await async_get(keyed)
         assert enclave.sent_under == ["v1"]
+        assert tag(keyed.current) == "v1"
     await keyed.aclose()
 
 
