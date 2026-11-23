@@ -152,8 +152,9 @@ class _AttestedClient:
 
     @property
     def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None. It may have expired or been rejected;
-        ``ensure_verified`` returns one that is valid."""
+        """The last successful verification without checking it, or None before the first and after a failed
+        ``reverify`` or refresh discards it. It may have expired or been rejected; ``ensure_verified`` returns one
+        that is valid."""
         return self._attested.keyed.current
 
     def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
@@ -166,7 +167,10 @@ class _AttestedClient:
 
     def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
         """Verifies again even if the cached verification is still valid. ``timeout`` is as for
-        ``ensure_verified``."""
+        ``ensure_verified``. A failure raises as usual; an AttestationError also discards the cached verification
+        and retires the connections that were made under it, so that no later request is sent under it and the
+        next request verifies again. A NetworkError, a ConfigurationError or an interruption keeps a cached
+        verification that is still fresh."""
         return self._attested.keyed.reverify(timeout=timeout)
 
     def close(self) -> None:
@@ -216,7 +220,9 @@ class _AsyncAttestedClient:
         return await self._attested.keyed.ensure_verified()
 
     async def reverify(self) -> Verification:
-        """Verifies again even if the cached verification is still valid."""
+        """Verifies again even if the cached verification is still valid. As for the synchronous client, an
+        AttestationError discards the cached verification, so that the next request verifies again, while a
+        NetworkError, a ConfigurationError or a cancellation keeps one that is still fresh."""
         return await self._attested.keyed.reverify()
 
     async def close(self) -> None:
