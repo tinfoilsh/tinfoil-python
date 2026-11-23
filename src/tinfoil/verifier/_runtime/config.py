@@ -48,39 +48,8 @@ def _read_cvm_version(data: bytes) -> str:
     at the top level, a non-scalar value and a binary-tagged value are
     rejected.
     """
-    try:
-        documents = yaml.compose_all(data, Loader=yaml.SafeLoader)
-        root = next(documents, None)
-        second = None if root is None else next(documents, None)
-    except (yaml.YAMLError, ValueError) as err:
-        # The scanner raises a ValueError of its own for a quoted escape
-        # that names a code point beyond the Unicode range.
-        raise RuntimeConfigError(f"{_PREFIX}: {err}") from err
-    except RecursionError as err:
-        # Composition recurses once per nesting level, so a document nested
-        # deeper than the interpreter allows is rejected rather than crashing.
-        raise RuntimeConfigError(f"{_PREFIX}: config is nested too deeply") from err
-    if root is None:
-        raise RuntimeConfigError(f"{_PREFIX}: EOF")
-    if second is not None:
-        raise RuntimeConfigError("config must contain exactly one YAML document")
-    if not isinstance(root, yaml.MappingNode):
-        raise RuntimeConfigError(f"{_PREFIX}: config is not a mapping")
-    value_node: object = None
-    seen: set[str] = set()
-    for key_node, item_node in root.value:
-        if not isinstance(key_node, yaml.ScalarNode):
-            raise RuntimeConfigError(f"{_PREFIX}: mapping keys must be scalars")
-        if key_node.tag == _MERGE_TAG:
-            raise RuntimeConfigError(f"{_PREFIX}: merge keys are not supported")
-        if key_node.tag != _STR_TAG or not isinstance(key_node.value, str):
-            raise RuntimeConfigError(f"{_PREFIX}: config keys must be plain strings")
-        key: str = key_node.value
-        if key in seen:
-            raise RuntimeConfigError(f"{_PREFIX}: mapping key {key!r} already defined")
-        seen.add(key)
-        if key == "cvm-version":
-            value_node = item_node
+    root = compose_config(data, _PREFIX, RuntimeConfigError)
+    value_node = mapping_members(root, _PREFIX, RuntimeConfigError).get("cvm-version")
     if value_node is None:
         return ""
     if not isinstance(value_node, yaml.ScalarNode):
@@ -91,3 +60,53 @@ def _read_cvm_version(data: bytes) -> str:
     if not isinstance(text, str):
         raise RuntimeConfigError(f"{_PREFIX}: cvm-version must be a scalar")
     return text
+
+
+def compose_config(data: bytes, prefix: str, error: type[ValueError]) -> yaml.MappingNode:
+    """The config's one YAML document, composed without constructing it; it must be a mapping. A failure raises
+    ``error``, with ``prefix`` naming what was being read."""
+    try:
+        documents = yaml.compose_all(data, Loader=yaml.SafeLoader)
+        root = next(documents, None)
+        second = None if root is None else next(documents, None)
+    except (yaml.YAMLError, ValueError) as err:
+        # The scanner raises a ValueError of its own for a quoted escape
+        # that names a code point beyond the Unicode range.
+        raise error(f"{prefix}: {err}") from err
+    except RecursionError as err:
+        # Composition recurses once per nesting level, so a document nested
+        # deeper than the interpreter allows is rejected rather than crashing.
+        raise error(f"{prefix}: config is nested too deeply") from err
+    if root is None:
+        raise error(f"{prefix}: EOF")
+    if second is not None:
+        raise error("config must contain exactly one YAML document")
+    if not isinstance(root, yaml.MappingNode):
+        raise error(f"{prefix}: config is not a mapping")
+    return root
+
+
+def mapping_members(
+    node: yaml.MappingNode, prefix: str, error: type[ValueError], merged: list[yaml.Node] | None = None
+) -> dict[str, yaml.Node]:
+    """The members of a mapping by key. Every key must be a plain string and no key may repeat. The value of the
+    mapping's merge key is appended to ``merged``; without ``merged``, a merge key is rejected. A failure raises
+    ``error``, with ``prefix`` naming what was being read."""
+    members: dict[str, yaml.Node] = {}
+    for key_node, item_node in node.value:
+        if not isinstance(key_node, yaml.ScalarNode):
+            raise error(f"{prefix}: mapping keys must be scalars")
+        if key_node.tag == _MERGE_TAG:
+            if merged is None:
+                raise error(f"{prefix}: merge keys are not supported")
+            if merged:
+                raise error(f"{prefix}: mapping key {key_node.value!r} already defined")
+            merged.append(item_node)
+            continue
+        if key_node.tag != _STR_TAG or not isinstance(key_node.value, str):
+            raise error(f"{prefix}: config keys must be plain strings")
+        key: str = key_node.value
+        if key in members:
+            raise error(f"{prefix}: mapping key {key!r} already defined")
+        members[key] = item_node
+    return members
