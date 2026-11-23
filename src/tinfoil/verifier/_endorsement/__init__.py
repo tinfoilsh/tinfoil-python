@@ -1,5 +1,6 @@
 """Reference values that verification trusts: release provenance, platform endorsements, freshness witnesses,
-runtime provenance and signed approvals, each verified offline against the embedded trust material."""
+runtime provenance, container provenance and signed approvals, each verified offline against the embedded trust
+material."""
 
 from tinfoil.verifier._endorsement.approval import (
     ARTIFACT_FRESHNESS_PREDICATE_TYPE,
@@ -33,6 +34,11 @@ from tinfoil.verifier._endorsement.approval import (
     validate_registry_id,
     validate_revision,
     verify_signing_certificate,
+)
+from tinfoil.verifier._endorsement.container import (
+    Container,
+    ContainerProvenanceError,
+    authenticate_container,
 )
 from tinfoil.verifier._endorsement.freshness import (
     FRESHNESS_PREDICATE_FORMAT,
@@ -108,6 +114,8 @@ __all__ = [
     "ConfigStatement",
     "ConfigVerified",
     "ConfigVerifier",
+    "Container",
+    "ContainerProvenanceError",
     "FreshnessArtifact",
     "FreshnessError",
     "FreshnessPolicy",
@@ -125,6 +133,7 @@ __all__ = [
     "TimePolicyError",
     "WitnessEndorsement",
     "WitnessSubject",
+    "authenticate_container",
     "authenticate_freshness",
     "authenticate_runtime",
     "new_time_policy",

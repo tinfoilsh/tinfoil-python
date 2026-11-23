@@ -1,9 +1,9 @@
 """Release provenance: Sigstore-signed reference values verified against pinned GitHub workflow identities.
 
 A ``ProvenanceClient`` holds one trusted root. Its methods authenticate
-the code bundle, the platform-endorsements bundle, freshness witnesses
-and runtime provenance, and build the approval verifiers that use the
-same root.
+the code bundle, the platform-endorsements bundle, freshness witnesses,
+runtime provenance and container provenance, and build the approval
+verifiers that use the same root.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from tinfoil.verifier import _json
 from tinfoil.verifier._document.collateral.runtime import Runtime as RuntimeCollateral
 from tinfoil.verifier._document.collateral.runtime import RuntimeReference
+from tinfoil.verifier._endorsement import container as container_module
 from tinfoil.verifier._endorsement import freshness as freshness_module
 from tinfoil.verifier._endorsement import runtime as runtime_module
 from tinfoil.verifier._endorsement._common import ProvenanceError as ProvenanceError
@@ -25,6 +26,7 @@ from tinfoil.verifier._endorsement._common import platform_endorsements_identity
 from tinfoil.verifier._endorsement._common import signing_identity as signing_identity
 from tinfoil.verifier._endorsement._common import workflow_identity as workflow_identity
 from tinfoil.verifier._endorsement.approval import ConfigVerifier, FreshnessVerifier
+from tinfoil.verifier._endorsement.container import Container
 from tinfoil.verifier._endorsement.reference import (
     PLATFORM_ENDORSEMENTS_REPO,
     AuthenticatedArtifact,
@@ -38,6 +40,7 @@ from tinfoil.verifier._endorsement.runtime import (
 from tinfoil.verifier._measurement import ExpectedSEVSNP, ExpectedTDX, parse_register
 from tinfoil.verifier._policy import ARTIFACT_FORMAT, ARTIFACT_FORMAT_V2, Artifact, PolicyError, Shape
 from tinfoil.verifier._policy import parse as parse_policy_artifact
+from tinfoil.verifier._runtime.container import ContainerProvenance
 from tinfoil.verifier._sigstore.bundle import BundleError, Statement, parse_bundle, parse_statement
 from tinfoil.verifier._sigstore.certificate import (
     CertificateBundleError,
@@ -176,6 +179,11 @@ class ProvenanceClient:
     def authenticate_runtime(self, material: RuntimeCollateral, expected: RuntimeReference) -> RuntimeArtifact:
         """Authenticate runtime collateral against a config's runtime pin; see ``runtime``."""
         return runtime_module.authenticate_runtime(self, material, expected)
+
+    def authenticate_container(self, bundle: _json.JsonValue, required: ContainerProvenance) -> Container:
+        """Authenticate a container build attestation against the build that a config requires; see
+        ``container``."""
+        return container_module.authenticate_container(self, bundle, required)
 
     def config_verifier(self, keys: Sequence[AnyPublicKey]) -> ConfigVerifier:
         """A verifier of key-signed config approvals under ``keys``."""

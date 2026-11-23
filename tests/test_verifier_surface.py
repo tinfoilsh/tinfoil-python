@@ -45,6 +45,7 @@ EXPECTED_ALL = (
     "ConfigSigningKeys",
     "ConfigTrust",
     "ConfigVerification",
+    "ContainerVerification",
     "CryptoMaterialItem",
     "EmbeddedArtifacts",
     "EmbeddedConfig",
@@ -238,6 +239,7 @@ from {module} import (
     ConfigEndorsement,
     ConfigSigningKeys,
     ConfigTrust,
+    ContainerVerification,
     EmbeddedArtifacts,
     EmbeddedConfig,
     EmbeddedConfigReference,
@@ -311,13 +313,15 @@ def report(verified: Verification) -> str:
     data: str | None = crypto_material_data(verified.crypto_material, "tls", "format")
     expires: datetime | None = verified.freshness_expires_at
     name = verified.config.name if verified.config is not None else ""
+    builds: tuple[ContainerVerification, ...] = verified.config.containers if verified.config is not None else ()
     runtime_tag = verified.runtime.tag if verified.runtime is not None else ""
     verified_at: datetime = verified.metadata.verified_at
     registers: list[Register | None] = pins(verified.code_measurement)
     return "".join(
         (verified.code_digest, verified.code_tag, verified.config_repo, describe(verified.enclave_measurement),
          fp or "", key or "", data or "", str(expires), name, runtime_tag, verified_at.isoformat(),
-         str(len(registers)), verified.to_json(), verified.to_json(indent=2),
+         str(len(registers)), "".join(build.commit for build in builds), verified.to_json(),
+         verified.to_json(indent=2),
          str(verified.to_dict()), str(source_of(verified)))
     )
 

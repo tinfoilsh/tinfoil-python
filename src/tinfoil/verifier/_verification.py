@@ -29,6 +29,19 @@ SOURCE_POLICY: Final[ReferenceSource] = "policy"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ContainerVerification:
+    """A container image built by the GitHub Actions workflow that its config requires."""
+
+    container: str
+    digest: str
+    repository: str
+    workflow: str
+    ref: str
+    """The ref that the build ran from, which the required ref pattern matched."""
+    commit: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ConfigVerification:
     """The config bound to hardware, and how it was accepted.
 
@@ -48,6 +61,9 @@ class ConfigVerification:
     registry_id: str = ""
     """Authenticated by the certificate, or the public registry for legacy registry approvals."""
     signature_time: datetime | None = None
+    containers: tuple[ContainerVerification, ...] = ()
+    """The container images whose build the config requires and the attestation proves. Empty when the config
+    requires none, its bytes are not in the attestation, or the config is embedded."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -169,6 +185,11 @@ class Verification:
                     "signature_time": _time(self.config.signature_time),
                 }
             )
+            if self.config.containers:
+                out["config"]["containers"] = [
+                    {field.name: getattr(container, field.name) for field in fields(container)}
+                    for container in self.config.containers
+                ]
         for name, artifact in (("runtime", self.runtime), ("platform", self.platform)):
             if artifact is not None:
                 out[name] = _established(
@@ -239,6 +260,7 @@ __all__ = [
     "SOURCE_POLICY",
     "ArtifactVerification",
     "ConfigVerification",
+    "ContainerVerification",
     "ReferenceSource",
     "SoftwareIdentity",
     "Verification",

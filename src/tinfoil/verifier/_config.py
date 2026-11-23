@@ -15,6 +15,7 @@ from tinfoil.verifier._document.collateral.collateral import (
     ARTIFACT_FRESHNESS_V1_FORMAT,
     FRESHNESS_ID_PLATFORM,
     FRESHNESS_ID_RUNTIME,
+    NotFoundError,
 )
 from tinfoil.verifier._document.collateral.runtime import RuntimeReference
 from tinfoil.verifier._document.document import Document
@@ -33,6 +34,7 @@ from tinfoil.verifier._endorsement.approval import (
     FreshnessVerifier,
     parse_name,
 )
+from tinfoil.verifier._endorsement.container import ContainerProvenanceError
 from tinfoil.verifier._endorsement.provenance import ProvenanceClient
 from tinfoil.verifier._endorsement.reference import AuthenticatedArtifact, ReleaseReferenceError, parse_reference
 from tinfoil.verifier._errors import LAYER_PROVENANCE, UsageError, VerificationError
@@ -41,13 +43,14 @@ from tinfoil.verifier._options import AuthorizeConfig, PublicKey
 from tinfoil.verifier._policy import ARTIFACT_FORMAT_V2, Artifact
 from tinfoil.verifier._policy import parse as parse_policy_artifact
 from tinfoil.verifier._quote import ConfigReferenceValues, QuoteOptions, ReferenceValues
-from tinfoil.verifier._runtime import Manifest, parse_manifest, runtime_from_config
+from tinfoil.verifier._runtime import Manifest, container_provenance_from_config, parse_manifest, runtime_from_config
 from tinfoil.verifier._verification import (
     SOURCE_EMBEDDED,
     SOURCE_ENDORSEMENT,
     SOURCE_POLICY,
     ArtifactVerification,
     ConfigVerification,
+    ContainerVerification,
 )
 from tinfoil.verifier._x509.certificate import X509Error, load_public_key_der, load_public_key_pem
 
@@ -221,8 +224,9 @@ def _resolve_config(
         except Exception as err:
             # The authorizer's error is the cause and never chooses the error type.
             raise VerificationError(LAYER_PROVENANCE, f"authorizing config: {err}") from err
+        containers = resolve_containers(trust.endorsements, doc, data)
         digest = hashlib.sha256(data).hexdigest()
-        return runtime_from_config(data), ConfigVerification(source=SOURCE_POLICY, digest=digest)
+        return runtime_from_config(data), ConfigVerification(source=SOURCE_POLICY, digest=digest, containers=containers)
     if config.bundle is None:
         raise ReferencesError("unsigned config requires a config authorizer")
     try:
@@ -236,6 +240,7 @@ def _resolve_config(
     if config.reference != approved.reference:
         raise ReferencesError("config endorsement reference does not match the verified approval")
     expected = approved.runtime if approved.runtime is not None else runtime_from_config(config.config or b"")
+    containers = resolve_containers(trust.endorsements, doc, config.config)
     return expected, ConfigVerification(
         source=SOURCE_ENDORSEMENT,
         name=approved.name,
@@ -245,7 +250,43 @@ def _resolve_config(
         approval_time=approved.approval_time,
         registry_id=approved.registry_id,
         signature_time=approved.signature_time,
+        containers=containers,
     )
+
+
+def resolve_containers(
+    endorsements: ProvenanceClient, doc: Document, config: bytes | None
+) -> tuple[ContainerVerification, ...]:
+    """Authenticate the build of every container image for which the config requires provenance.
+
+    ``config`` is the bytes bound to the approved digest; a document that
+    omits them carries no requirement that the verifier can read. The
+    attested runtime attaches them for every config that declares
+    provenance, which config validation ties to disclosure.
+    """
+    if not config:
+        return ()
+    containers: list[ContainerVerification] = []
+    for requirement in container_provenance_from_config(config):
+        try:
+            material = doc.container_provenance(requirement.digest)
+        except NotFoundError as err:
+            raise ReferencesError(f"container {requirement.container!r} requires provenance: {err}") from err
+        try:
+            authenticated = endorsements.authenticate_container(material.bundle, requirement)
+        except ContainerProvenanceError as err:
+            raise ReferencesError(f"container {requirement.container!r}: {err}") from err
+        containers.append(
+            ContainerVerification(
+                container=requirement.container,
+                digest=authenticated.digest,
+                repository=authenticated.repository,
+                workflow=authenticated.workflow,
+                ref=authenticated.ref,
+                commit=authenticated.commit,
+            )
+        )
+    return tuple(containers)
 
 
 def _resolve_runtime(
@@ -335,4 +376,5 @@ __all__ = [
     "load_public_key",
     "reference_pins",
     "requires_config_collateral",
+    "resolve_containers",
 ]

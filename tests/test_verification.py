@@ -16,6 +16,7 @@ from tinfoil.verifier._verification import (
     SOURCE_POLICY,
     ArtifactVerification,
     ConfigVerification,
+    ContainerVerification,
     SoftwareIdentity,
     Verification,
     VerificationMetadata,
@@ -25,6 +26,14 @@ from tinfoil.verifier._verification import (
 REGISTER = bytes([0xAB]) * 48
 AT = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
 FUTURE_FORMAT = "https://example.com/key/future/v1"
+CONTAINER = ContainerVerification(
+    container="app",
+    digest="56" * 32,
+    repository="org/app",
+    workflow="release.yml",
+    ref="refs/tags/v1.0.0",
+    commit="1" * 40,
+)
 
 
 def record(**overrides: object) -> Verification:
@@ -70,6 +79,11 @@ def test_record_is_frozen() -> None:
         v.code_digest = "changed"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         v.metadata.verified_at = AT  # type: ignore[misc]
+    config = ConfigVerification(source=SOURCE_POLICY, containers=(CONTAINER,))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        config.containers = ()  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        config.containers[0].container = "changed"  # type: ignore[misc]
 
 
 def test_to_dict_lays_out_registers_as_hex_and_times_in_utc() -> None:
@@ -81,6 +95,7 @@ def test_to_dict_lays_out_registers_as_hex_and_times_in_utc() -> None:
         signing_key_hint="hint",
         approval_time=AT - timedelta(hours=1),
         registry_id="https://registry.tinfoil.sh/scopes/public",
+        containers=(CONTAINER,),
     )
     runtime = ArtifactVerification(source=SOURCE_EMBEDDED, repo="tinfoilsh/cvmimage", tag="v0.15.0", digest="12" * 32)
     platform = ArtifactVerification(
@@ -119,6 +134,16 @@ def test_to_dict_lays_out_registers_as_hex_and_times_in_utc() -> None:
             "signing_key_hint": "hint",
             "approval_time": "2026-08-06T11:00:00Z",
             "registry_id": "https://registry.tinfoil.sh/scopes/public",
+            "containers": [
+                {
+                    "container": "app",
+                    "digest": "56" * 32,
+                    "repository": "org/app",
+                    "workflow": "release.yml",
+                    "ref": "refs/tags/v1.0.0",
+                    "commit": "1" * 40,
+                }
+            ],
         },
         "runtime": {
             "source": "embedded",

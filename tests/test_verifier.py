@@ -1,5 +1,6 @@
 """The verifier: its options and their conflicts, the pipeline's layer attribution, repository pins, embedded
-references, caller-authorized configs, endorsed configs over a synthetic Sigstore world, and freshness deadlines."""
+references, caller-authorized configs, endorsed configs over a synthetic Sigstore world, container provenance, and
+freshness deadlines."""
 
 from __future__ import annotations
 
@@ -22,6 +23,16 @@ from tests.test_endorsement_approval import (
     config_core,
     config_payload,
     freshness_payload,
+)
+from tests.test_endorsement_container import (
+    MINTED_COMMIT,
+    MINTED_REF,
+    RECORDED_BUNDLE,
+    RECORDED_COMMIT,
+    RECORDED_DIGEST,
+    RECORDED_REF,
+    RECORDED_REPOSITORY,
+    minted_bundle,
 )
 from tinfoil.verifier._config import (
     ReferencesError,
@@ -49,8 +60,9 @@ from tinfoil.verifier._document.collateral.config import (
     CONFIG_V1_FORMAT,
     ConfigEndorsement,
 )
+from tinfoil.verifier._document.collateral.container import CONTAINER_PROVENANCE_V1_FORMAT
 from tinfoil.verifier._document.collateral.runtime import PLATFORM_ID, RUNTIME_ID, RUNTIME_REPO, RuntimeReference
-from tinfoil.verifier._document.document import NONCE_SIZE
+from tinfoil.verifier._document.document import NONCE_SIZE, Document
 from tinfoil.verifier._endorsement.approval import (
     CONFIG_FRESHNESS_DOMAIN_V2,
     KIND_RUNTIME,
@@ -91,6 +103,7 @@ from tinfoil.verifier._verification import (
     SOURCE_ENDORSEMENT,
     SOURCE_POLICY,
     ConfigVerification,
+    ContainerVerification,
 )
 from tinfoil.verifier._verifier import Overrides, Pin, Verifier, _build, parse_reference
 
@@ -1143,6 +1156,146 @@ def test_configured_keys_preserve_proof_verification() -> None:
             )
         with pytest.raises(ReferencesError, match="pinned identity"):
             config_references(trust_of(v), doc, "org/other", now)
+
+
+# --- container provenance ---------------------------------------------------------------------
+
+CONTAINER_REQUIREMENT = f"""    provenance:
+      github:
+        repository: {RECORDED_REPOSITORY}
+        repository_id: 924941172
+        workflow: build.yml
+        ref: refs/tags/build-v*
+"""
+
+
+def container(name: str) -> str:
+    """A config's container entry that runs the recorded image."""
+    return f"  - name: {name}\n    image: ghcr.io/{RECORDED_REPOSITORY}@sha256:{RECORDED_DIGEST}\n"
+
+
+def config_with_containers(containers: str) -> bytes:
+    """The embedded inputs' config with ``containers`` declared."""
+    inputs = vf.embedded_inputs()
+    assert isinstance(inputs.config, EmbeddedConfig)
+    return inputs.config.data + b"containers:\n" + containers.encode()
+
+
+def container_proof(digest: str, bundle: dict[str, Any]) -> dict[str, Any]:
+    return vf.reference_entry(
+        "container", CONTAINER_PROVENANCE_V1_FORMAT, {"digest": digest, "sigstore_bundle": bundle}
+    )
+
+
+def test_config_requiring_container_provenance() -> None:
+    """A caller-authorized config whose containers require a build is accepted only with the recorded build
+    attestation of their image, which authenticates under the embedded Sigstore root."""
+    v = vf.embedded_verifier(dataclasses.replace(vf.embedded_inputs(), config=ConfigAuthorizer(authorize_all)))
+    recorded = json.loads(RECORDED_BUNDLE.read_bytes())
+
+    def document(containers: str, *proofs: dict[str, Any]) -> tuple[bytes, bytes, Document]:
+        data = {"config_base64": b64(config_with_containers(containers))}
+        return vf.embedded_document(FORMAT_V3, vf.reference_entry(CONFIG_ID, CONFIG_V1_FORMAT, data), *proofs)
+
+    def rejection(containers: str, *proofs: dict[str, Any]) -> VerificationError:
+        raw, nonce, _ = document(containers, *proofs)
+        with pytest.raises(VerificationError) as rejected:
+            v.verify_v3(raw, nonce, Pin())
+        rejected_at(rejected.value, LAYER_PROVENANCE)
+        return rejected.value
+
+    proof = container_proof(RECORDED_DIGEST, recorded)
+    raw, nonce, doc = document(
+        container("first") + CONTAINER_REQUIREMENT + container("second") + CONTAINER_REQUIREMENT + container("free"),
+        proof,
+    )
+    refs = config_references(trust_of(v), doc, "", NOW)
+    assert refs.config is not None
+    first = ContainerVerification(
+        container="first",
+        digest=RECORDED_DIGEST,
+        repository=RECORDED_REPOSITORY,
+        workflow="build.yml",
+        ref=RECORDED_REF,
+        commit=RECORDED_COMMIT,
+    )
+    assert refs.config.containers == (first, dataclasses.replace(first, container="second"))
+    with pytest.raises(VerificationError) as hardware:
+        v.verify_v3(raw, nonce, Pin())
+    rejected_at(hardware.value, LAYER_QUOTE)
+
+    _, _, unconstrained = document(container("app"), proof)
+    assert config_references(trust_of(v), unconstrained, "", NOW).config == ConfigVerification(
+        source=SOURCE_POLICY, digest=hashlib.sha256(config_with_containers(container("app"))).hexdigest()
+    )
+
+    missing = rejection(container("app") + CONTAINER_REQUIREMENT)
+    assert "container 'app' requires provenance" in missing.message
+    assert isinstance(missing.__cause__, ReferencesError)
+    assert isinstance(missing.__cause__.__cause__, NotFoundError)
+    other_image = rejection(container("app") + CONTAINER_REQUIREMENT, container_proof("ab" * 32, recorded))
+    assert isinstance(other_image.__cause__, ReferencesError)
+    assert isinstance(other_image.__cause__.__cause__, NotFoundError)
+    other_workflow = rejection(container("app") + CONTAINER_REQUIREMENT.replace("build.yml", "release.yml"), proof)
+    assert "container 'app': verifying container provenance" in other_workflow.message
+    unreadable = rejection(container("app") + CONTAINER_REQUIREMENT + "      gitlab: {}\n", proof)
+    assert "containers[0].provenance has unknown field 'gitlab'" in unreadable.message
+
+
+def test_endorsed_config_requires_container_provenance_when_the_document_carries_it() -> None:
+    world = World()
+    inputs = vf.embedded_inputs()
+    config = config_with_containers(container("app") + CONTAINER_REQUIREMENT)
+    core = config_core(
+        vf.EMBEDDED_CONFIG_NAME,
+        hashlib.sha256(config).hexdigest(),
+        registry_id=PUBLIC_REGISTRY_ID,
+        runtime=runtime_from_config(config),
+    )
+    payload = complete(world, core, CONFIG_FRESHNESS_DOMAIN_V2, world.now)
+    artifacts = EmbeddedArtifacts(runtime=inputs.runtime, platform=inputs.platform)
+    v = vf.world_verifier(world, ConfigSigningKeys([world.key.public_key()]), Policy(artifacts=artifacts))
+
+    def approved(*proofs: dict[str, Any], carried: bytes | None = config) -> ConfigVerification:
+        data = {"endorsement_ref": endorsement_reference(payload), "sigstore_bundle": world.keyed_bundle(payload)}
+        if carried is not None:
+            data["config_base64"] = b64(carried)
+        _, _, doc = vf.embedded_document(FORMAT_V3, config_entry(CONFIG_ENDORSEMENT_V2_FORMAT, **data), *proofs)
+        refs = config_references(trust_of(v), doc, "org/project@v1", world.now)
+        assert refs.config is not None
+        return refs.config
+
+    proof = container_proof(RECORDED_DIGEST, minted_bundle(world))
+    assert approved(proof).containers == (
+        ContainerVerification(
+            container="app",
+            digest=RECORDED_DIGEST,
+            repository=RECORDED_REPOSITORY,
+            workflow="build.yml",
+            ref=MINTED_REF,
+            commit=MINTED_COMMIT,
+        ),
+    )
+    with pytest.raises(ReferencesError, match="container 'app' requires provenance") as missing:
+        approved()
+    assert isinstance(missing.value.__cause__, NotFoundError)
+    # The build attestation of another trust domain does not authenticate here.
+    foreign = container_proof(RECORDED_DIGEST, minted_bundle(World()))
+    with pytest.raises(ReferencesError, match="container 'app': verifying container provenance"):
+        approved(foreign)
+    # A document that omits the config bytes carries no requirement that the verifier can read.
+    assert approved(carried=None).containers == ()
+
+
+def test_embedded_config_is_not_read_for_container_provenance() -> None:
+    inputs = vf.embedded_inputs()
+    config = config_with_containers(container("app") + CONTAINER_REQUIREMENT)
+    embedded = EmbeddedConfig(data=config, name=vf.EMBEDDED_CONFIG_NAME)
+    v = vf.embedded_verifier(dataclasses.replace(inputs, config=embedded))
+    _, _, doc = vf.embedded_document(FORMAT_V3)
+    assert config_references(trust_of(v), doc, "", NOW).config == ConfigVerification(
+        source=SOURCE_EMBEDDED, name=vf.EMBEDDED_CONFIG_NAME, digest=hashlib.sha256(config).hexdigest()
+    )
 
 
 # --- freshness ------------------------------------------------------------------------------
