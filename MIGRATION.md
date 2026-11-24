@@ -22,7 +22,7 @@ The pre-releases configured clients with options that were checked against each 
 | `transport_mode="tls"` | `transport=TLS()`, or nothing: it is the default |
 | `transport_mode="ehbp"` | `transport=EHBP()` |
 | `transport_mode="ehbp", base_url=proxy` | `transport=EHBP(proxy_url=mount)`, where `mount` is where the proxy is mounted, without the API path: `base_url="https://proxy.example/v1/"` becomes `proxy_url="https://proxy.example/"`, and the OpenAI client adds `/v1/` |
-| `base_url=` a path on the enclave's own origin | Removed; pass `api_path=` to `OpenAIClient` for an API that is not at `/v1/` |
+| `base_url=` a path on the enclave's own origin | Removed; pass `api_path=` to `OpenAIClient` for an API that is not at `/v1/`. It must be an RFC 3986 absolute path; an empty `api_path` is a `ConfigurationError` rather than `/v1/`, so leave it out for the default |
 | `TransportMode`, `DEFAULT_TRANSPORT_MODE` | `Transport`, `TLS`, `EHBP` |
 | A gateway client's `url` carrying the API path, `https://inference-gateway.tinfoil.sh/v1/` by default | The gateway's origin or the URL that it is mounted under, without the API path: `https://inference-gateway.tinfoil.sh/` by default, and `url="https://gateway.example/v1/"` becomes `url="https://gateway.example/"`. `OpenAIClient` joins its `api_path`, `/v1/` by default, under it, as under a proxy URL, and the catalog and the attestation relay join under a mounted URL's path rather than going to the host's root. `DEFAULT_GATEWAY_URL` has no `/v1/` |
 | `user_cache_secret=` on an enclave client | Removed; the enclave client sends bodies as they are. Set `user_cache_secret` in each request body, for example with `extra_body`. The router and gateway clients keep the option |

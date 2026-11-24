@@ -212,7 +212,6 @@ class TestConstruction:
         ("proxy_url", "api_path", "want"),
         [
             (None, None, "https://enclave.example/v1/"),
-            (None, "", "https://enclave.example/v1/"),
             (None, "/openai/v1", "https://enclave.example/openai/v1/"),
             (None, "/openai/v1/", "https://enclave.example/openai/v1/"),
             ("https://proxy.example/relay", None, "https://proxy.example/relay/v1/"),
@@ -236,6 +235,7 @@ class TestConstruction:
     @pytest.mark.parametrize(
         "api_path",
         [
+            "",
             "v1/",
             "//v1/",
             "https://other.example/v1/",
@@ -251,6 +251,22 @@ class TestConstruction:
             "/v1/%zz/",
             "/v1/\x00/",
             "/v1/\n/",
+            "/v1/%5c/",
+            "/v1/%5C/",
+            "/v1\\admin/",
+            "/v1 /",
+            "/v1/\t/",
+            "/v\u00e9/",
+            '/v1/"/',
+            "/v1/</",
+            "/v1/>/",
+            "/v1/[/",
+            "/v1/]/",
+            "/v1/^/",
+            "/v1/`/",
+            "/v1/{/",
+            "/v1/|/",
+            "/v1/}/",
         ],
     )
     def test_rejects_an_api_path_that_could_leave_its_root(self, offline: Recorder, api_path: str) -> None:
@@ -261,6 +277,14 @@ class TestConstruction:
             join_api_path("https://enclave.example/", api_path)
         with pytest.raises(ConfigurationError, match="invalid API path: want a string"):
             OpenAIClient(http_client, api_path=b"/v1/", api_key="k")  # type: ignore[arg-type]
+        http_client.close()
+
+    def test_accepts_every_rfc_3986_path_character(self, offline: Recorder) -> None:
+        http_client = enclave()
+        for api_path in ("/aZ09-._~!$&'()*+,;=:@/", "/%ff/", "/%41%2e%2e/", "/.well-known/", "/.../", "/"):
+            assert OpenAIClient(http_client, api_path=api_path, api_key="k").base_url == (
+                "https://enclave.example" + api_path
+            )
         http_client.close()
 
     @pytest.mark.parametrize(

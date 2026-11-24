@@ -12,7 +12,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from functools import cached_property
 from typing import Any, NoReturn, Protocol, Self, TypedDict, Unpack
-from urllib.parse import unquote
+from urllib.parse import unquote_to_bytes
 
 import httpx
 import openai
@@ -348,9 +348,11 @@ class OpenAIClient(_AttestedOpenAI):
     Requests go to ``api_path`` under the client's ``base_url``: under the
     ``EHBP`` proxy URL when one is set, under the enclave's own origin
     otherwise, and under the gateway's URL for a gateway client.
-    ``api_path`` defaults to ``/v1/``; it must be an absolute path, without
-    a query, a fragment, an encoded slash, or a ``.`` or ``..`` segment,
-    percent-encoded or not.
+    ``api_path`` defaults to ``/v1/`` when it is None; one that is given
+    must be an RFC 3986 absolute path, without a query, a fragment, an
+    encoded slash or backslash, or a ``.`` or ``..`` segment,
+    percent-encoded or not, and anything else, the empty path included, is
+    a ConfigurationError.
 
     The remaining keyword arguments are ``OpenAIOptions``, the ``openai``
     package's. The SDK sets ``http_client`` and the base URL itself, after
@@ -527,15 +529,16 @@ def _async_attachment(client: object, api_path: str | None) -> tuple[httpx.Async
 
 
 _PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_PATH_CHARS = re.compile(r"[A-Za-z0-9\-._~!$&'()*+,;=:@%/]*")
+"""The characters of an RFC 3986 path: ``pchar``, whose percent escapes ``_PERCENT_ESCAPE`` checks, and ``/``."""
 
 
 def join_api_path(root: str, api_path: str | None) -> str:
-    """``api_path``, or ``DEFAULT_API_PATH`` when it is None or empty, joined under ``root``, a proxy URL or an
-    origin, whether or not ``root`` ends with a slash. The result ends with a slash, so that request paths join
-    under it. An ``api_path`` that is not an absolute path that can only name a path under its root is a
-    ConfigurationError."""
-    if api_path is None or api_path == "":
+    """``api_path``, or ``DEFAULT_API_PATH`` when it is None, joined under ``root``, a proxy URL, an origin or a
+    gateway's URL, whether or not ``root`` ends with a slash. The result ends with a slash, so that request paths
+    join under it. An ``api_path`` that is not an absolute path that can only name a path under its root, the
+    empty path included, is a ConfigurationError: a caller who wants the default leaves it out."""
+    if api_path is None:
         api_path = DEFAULT_API_PATH
     validate_api_path(api_path)
     joined = root.removesuffix("/") + api_path
@@ -543,21 +546,25 @@ def join_api_path(root: str, api_path: str | None) -> str:
 
 
 def validate_api_path(api_path: object) -> None:
-    """Requires an absolute path without a query, a fragment, an encoded slash, or a ``.`` or ``..`` segment,
-    percent-encoded or not, so that it can only name a path under its root. Raises ConfigurationError."""
+    """Requires an RFC 3986 absolute path without a query, a fragment, an encoded slash or backslash, or a ``.`` or
+    ``..`` segment, percent-encoded or not, so that it can only name a path under its root and is sent as it is
+    written. The empty path is not absolute. Raises ConfigurationError."""
     if not isinstance(api_path, str):
         raise ConfigurationError(f"invalid API path: want a string, not {type(api_path).__name__}")
     if not api_path.startswith("/") or api_path.startswith("//"):
         raise ConfigurationError(f"invalid API path {api_path!r}: it must be an absolute path, such as /v1/")
     if "?" in api_path or "#" in api_path:
         raise ConfigurationError(f"invalid API path {api_path!r}: it must not carry a query or a fragment")
-    if _PERCENT_ESCAPE.search(api_path) or _CONTROL.search(api_path):
+    if _PERCENT_ESCAPE.search(api_path):
         raise ConfigurationError(f"invalid API path {api_path!r}: it does not parse")
+    if not _PATH_CHARS.fullmatch(api_path):
+        raise ConfigurationError(f"invalid API path {api_path!r}: it must consist only of RFC 3986 path characters")
     for segment in api_path.split("/"):
-        decoded = unquote(segment)
-        if decoded in (".", "..") or "/" in decoded:
+        decoded = unquote_to_bytes(segment)
+        if decoded in (b".", b"..") or b"/" in decoded or b"\\" in decoded:
             raise ConfigurationError(
-                f'invalid API path {api_path!r}: it must not contain a "." or ".." segment or an encoded slash'
+                f'invalid API path {api_path!r}: it must not contain a "." or ".." segment or an encoded slash or '
+                "backslash"
             )
 
 
