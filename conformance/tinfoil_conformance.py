@@ -16,8 +16,8 @@ Every v3 stage decodes its Input first, so malformed input is reported as such
 call on the public ``Verifier``, or on one built with the injected roots when
 the Input supplies any, so the shared fixtures appraise exactly the code that
 production runs; the layer on its ``VerificationError`` names the rejection,
-and the output carries the verifier's report in the wire form that
-``report_of`` describes.
+and the output carries the verifier's report in the JSON form that every
+Tinfoil SDK writes.
 The block stages isolate a single layer by calling into the document,
 endorsement and quote modules that the verifier uses. A stage that this
 adapter does not implement exits 20 (unsupported), never with a verdict.
@@ -406,39 +406,10 @@ def _verify(decoded: Input) -> Result:
 
 
 def report_of(report: VerificationReport) -> dict[str, Any]:
-    """``report`` in the wire contract that every SDK's adapter shares: the layer and status of each step, and on
-    a rejection the partial facts. Step messages are each SDK's own error text, so the wire carries none.
-
-    The expected facts are the code digest, the code measurement for the platform that the document's evidence
-    names, and the full expected ``measurement`` once the policy step resolved it; the measured facts are the CPU
-    measurement once the quote step passed and the key fingerprints, the HPKE one being the lowercase-hex SHA-256
-    of the key's bytes. A fact that the report does not hold is left out.
-    """
-    out: dict[str, Any] = {"steps": [{"layer": step.layer, "status": step.status} for step in report.steps]}
-    partial = report.partial_facts
-    if partial is None:
-        return out
-    wire: dict[str, Any] = {}
-    if partial.expected is not None:
-        expected: dict[str, Any] = {}
-        if partial.expected.artifact.digest:
-            expected["code_digest"] = partial.expected.artifact.digest
-        if partial.expected.code_measurement is not None:
-            expected["code_measurement"] = _expected_of(partial.expected.code_measurement)
-        if partial.expected.measurement is not None:
-            expected["measurement"] = _measurement_of(partial.expected.measurement)
-        wire["expected"] = expected
-    if partial.measured is not None:
-        measured: dict[str, Any] = {}
-        if partial.measured.cpu is not None:
-            measured["cpu_measurement"] = _measurement_of(partial.measured.cpu.measurement)
-        if partial.measured.tls_public_key_fp:
-            measured["tls_public_key_fp"] = partial.measured.tls_public_key_fp
-        if partial.measured.hpke_public_key_fp:
-            measured["hpke_public_key_fp"] = partial.measured.hpke_public_key_fp
-        wire["measured"] = measured
-    out["partial_facts"] = wire
-    return out
+    """``report`` in the JSON form that every Tinfoil SDK writes, as ``VerificationReport.to_dict`` writes it. The
+    harness compares the form across SDKs, except for the step messages, which are each SDK's own error text, and
+    the metadata, which describes the run rather than the document."""
+    return report.to_dict()
 
 
 def _verifier_for(decoded: Input) -> Verifier:
