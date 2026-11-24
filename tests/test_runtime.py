@@ -400,3 +400,113 @@ def test_config_decode_rejects() -> None:
 )
 def test_config_decode_accepts(name: str, config: str) -> None:
     assert runtime_from_config(config.encode()) == WANT
+
+
+# --- the config format follows the pinned version ----------------------------
+#
+# From cvm-version 0.15.5-rc.1 a config is canonical JSON and YAML is refused;
+# earlier versions keep YAML.
+
+
+def json_config(version: str) -> str:
+    return f'{{"containers":[],"cpus":2,"cvm-version":"{version}@sha256:{DIGEST}","shim":{{"upstream-port":8080}}}}'
+
+
+def yaml_config(version: str) -> str:
+    return f"cvm-version: {version}@sha256:{DIGEST}\ncpus: 2\n"
+
+
+CANONICAL = json_config("0.15.5-rc.1")
+MAX_JSON_INTEGER = 2**53 - 1
+
+
+def replaced(old: str, new: str) -> str:
+    """The canonical config with one piece of its text replaced."""
+    assert old in CANONICAL
+    return CANONICAL.replace(old, new, 1)
+
+
+@pytest.mark.parametrize(
+    ("config", "tag"),
+    [
+        pytest.param(json_config("0.15.5-rc.1"), "v0.15.5-rc.1", id="JSON at the first JSON version"),
+        pytest.param(json_config("v0.15.5-rc.1"), "v0.15.5-rc.1", id="JSON with a v prefix"),
+        pytest.param(json_config("0.15.5-rc.1+gpu"), "v0.15.5-rc.1+gpu", id="JSON with build metadata"),
+        pytest.param(json_config("0.15.5"), "v0.15.5", id="JSON for the release"),
+        pytest.param(json_config("0.16.0"), "v0.16.0", id="JSON for a later version"),
+        pytest.param(yaml_config("0.15.5-rc.0"), "v0.15.5-rc.0", id="YAML before the JSON version"),
+        pytest.param(yaml_config("0.15.4"), "v0.15.4", id="YAML for an earlier release"),
+        pytest.param(json_config("0.15.4"), "v0.15.4", id="flow-style YAML before it"),
+        pytest.param(json_config("0.15.4") + "\n", "v0.15.4", id="flow-style YAML before it, not canonical"),
+        pytest.param(replaced('"cpus":2', f'"cpus":{MAX_JSON_INTEGER}'), "v0.15.5-rc.1", id="largest integer"),
+        pytest.param(replaced('"cpus":2', f'"cpus":-{MAX_JSON_INTEGER}'), "v0.15.5-rc.1", id="smallest integer"),
+    ],
+)
+def test_config_format_accepts(config: str, tag: str) -> None:
+    assert runtime_from_config(config.encode()) == RuntimeReference(repo=RUNTIME_REPO, tag=tag, digest=DIGEST)
+
+
+@pytest.mark.parametrize(
+    ("config", "match"),
+    [
+        pytest.param(yaml_config("0.15.5-rc.1"), "take a JSON config", id="YAML at the first JSON version"),
+        pytest.param(yaml_config("0.15.5-rc.1+gpu"), "take a JSON config", id="YAML with build metadata"),
+        pytest.param(yaml_config("1.0.0"), "take a JSON config", id="YAML for a later version"),
+        pytest.param(replaced('"cpus":2', '"cpus": 2'), "canonical form", id="whitespace"),
+        pytest.param(CANONICAL + "\n", "canonical form", id="trailing newline"),
+        pytest.param(
+            replaced('"containers":[],"cpus":2,', '"cpus":2,"containers":[],'),
+            "canonical form",
+            id="members out of order",
+        ),
+        # The escape is assembled so that the config holds a backslash, not the letter that it names.
+        pytest.param(replaced('"cpus"', '"' + "\\" + 'u0063pus"'), "canonical form", id="escaped character"),
+        pytest.param(replaced('"cpus":2', '"cpus":null'), "null is not allowed", id="null"),
+        pytest.param(replaced('"cpus":2', '"cpus":2.5'), "number 2.5 .* is not an integer", id="fraction"),
+        pytest.param(replaced('"cpus":2', '"cpus":2e0'), "number 2e0 .* is not an integer", id="exponent"),
+        pytest.param(replaced('"cpus":2', '"cpus":2.0'), "number 2.0 .* is not an integer", id="integral fraction"),
+        pytest.param(
+            replaced('"cpus":2', f'"cpus":{MAX_JSON_INTEGER + 1}'), "is not an integer between", id="integer too large"
+        ),
+        pytest.param(
+            replaced('"cpus":2', f'"cpus":-{MAX_JSON_INTEGER + 1}'), "is not an integer between", id="integer too small"
+        ),
+        # More digits than the interpreter converts to an integer.
+        pytest.param(replaced('"cpus":2', '"cpus":' + "9" * 5000), "is not an integer between", id="integer too long"),
+        pytest.param(replaced('"cpus":2', '"cpus":-0'), "canonical form", id="negative zero"),
+        pytest.param(replaced('"upstream-port":8080', '"upstream-port":null'), "null is not allowed", id="nested null"),
+        pytest.param(replaced('"containers":[]', '"containers":[1.5]'), "is not an integer", id="fraction in an array"),
+        pytest.param(
+            replaced('"cpus":2,', '"cpus":2,"cpus":2,'), "mapping key 'cpus' already defined", id="repeated member"
+        ),
+        # JSON that the strict parser refuses is left to the YAML reader, which refuses the version.
+        pytest.param(
+            replaced('"upstream-port":8080', '"upstream-port":8080,"upstream-port":8080'),
+            "take a JSON config",
+            id="repeated nested member",
+        ),
+        pytest.param(
+            replaced('"containers":[]', '"containers":' + "[" * 20_000 + "]" * 20_000),
+            "nested too deeply",
+            id="nesting beyond the parser's bound",
+        ),
+        pytest.param(CANONICAL + CANONICAL, "^parsing config runtime pin: ", id="second value"),
+        pytest.param(replaced("@sha256:" + DIGEST, ""), "must pin", id="unpinned version"),
+        pytest.param(replaced("0.15.5-rc.1", "0.16"), "must be a full semantic version", id="partial version"),
+    ],
+)
+def test_config_format_rejects(config: str, match: str) -> None:
+    raises_config(config.encode(), match)
+
+
+def test_json_config_members_sort_by_utf16_code_units() -> None:
+    """The canonical order of member names is by UTF-16 code units. A name outside the Basic Multilingual Plane is a
+    surrogate pair there, which sorts below a name near the top of the plane although its code point is higher."""
+    astral, high = chr(0x1F600), chr(0xFB33)
+    assert astral > high
+    assert astral.encode("utf-16-be") < high.encode("utf-16-be")
+    pin = f'"cvm-version":"0.15.5-rc.1@sha256:{DIGEST}"'
+    by_code_unit = f'{{{pin},"{astral}":1,"{high}":2}}'.encode()
+    by_code_point = f'{{{pin},"{high}":2,"{astral}":1}}'.encode()
+    assert runtime_from_config(by_code_unit) == RuntimeReference(repo=RUNTIME_REPO, tag="v0.15.5-rc.1", digest=DIGEST)
+    raises_config(by_code_point, "canonical form")
