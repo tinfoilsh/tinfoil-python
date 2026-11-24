@@ -28,7 +28,7 @@ from tests.client.helpers import (
 )
 from tinfoil import _transport
 from tinfoil._enclave import DEADLINE_EXCEEDED, FRESHNESS_EXPIRED
-from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, network_error
+from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, TinfoilError, network_error
 from tinfoil._keys import KeyRejectedError, PeerLacksKeyError, is_key_rejection
 from tinfoil._tls import CERT_MISMATCH, NO_TLS
 from tinfoil._transport import (
@@ -1003,3 +1003,126 @@ async def test_async_failed_reverify_keeps_a_newer_verification() -> None:
     assert current_facts(keyed) is not None
     assert tag(current_facts(keyed)) == "newer"
     await keyed.aclose()
+
+
+class Raising:
+    """An ``on_verification`` callback that records each call and then raises."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, VerificationReport | None, TinfoilError | None]] = []
+
+    def __call__(self, host: str, report: VerificationReport | None, error: TinfoilError | None) -> None:
+        self.calls.append((host, report, error))
+        raise RuntimeError("the callback failed")
+
+
+def test_a_raising_callback_leaves_the_outcome_to_every_waiting_caller() -> None:
+    """The callback raising changes neither the outcome nor what a second caller waiting on the same verification
+    gets, and later attempts are still reported."""
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def fetch() -> VerifiedFacts:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            release.wait(5)
+        return verification(f"v{calls}")
+
+    callback = Raising()
+    keyed = AttestedTransport(fake_enclave(fetch, on_verification=callback), FakeMode())
+    results: list[VerificationReport | BaseException] = []
+
+    def call() -> None:
+        try:
+            results.append(keyed.ensure_verified())
+        except BaseException as err:
+            results.append(err)
+
+    owner = threading.Thread(target=call)
+    owner.start()
+    assert started.wait(5)
+    waiter = threading.Thread(target=call)
+    waiter.start()
+    time.sleep(0.05)
+    release.set()
+    owner.join(5)
+    waiter.join(5)
+    assert len(results) == 2
+    assert all(isinstance(result, VerificationReport) for result in results), results
+    assert results[0] is results[1], "the waiting caller got the same outcome"
+    assert calls == 1
+    assert keyed.last_verification() == (results[0], None)
+    assert len(callback.calls) == 1
+    later = keyed.reverify()
+    assert facts_of(later).code_tag == "v2"
+    assert callback.calls[-1] == (HOST, later, None), "a later attempt is still reported"
+
+
+@pytest.mark.asyncio
+async def test_async_a_raising_callback_leaves_the_outcome_to_every_waiting_caller() -> None:
+    release = asyncio.Event()
+    calls = 0
+
+    async def fetch_async() -> VerifiedFacts:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await release.wait()
+        return verification(f"v{calls}")
+
+    callback = Raising()
+    enclave = fake_enclave(lambda: verification("unused"), on_verification=callback)
+    enclave._fetch_async = reporting_async(fetch_async)
+    keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
+    owner = asyncio.create_task(keyed.ensure_verified())
+    await asyncio.sleep(0.01)
+    waiter = asyncio.create_task(keyed.ensure_verified())
+    await asyncio.sleep(0.01)
+    release.set()
+    first, second = await asyncio.gather(owner, waiter)
+    assert first is second, "the waiting caller got the same outcome"
+    assert calls == 1
+    assert keyed.last_verification() == (first, None)
+    assert len(callback.calls) == 1
+    later = await keyed.reverify()
+    assert facts_of(later).code_tag == "v2"
+    assert callback.calls[-1] == (HOST, later, None), "a later attempt is still reported"
+    await keyed.aclose()
+
+
+def test_a_raising_callback_leaves_a_failure_to_every_waiting_caller() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def fetch() -> VerifiedFacts:
+        started.set()
+        release.wait(5)
+        raise AttestationError("rejected")
+
+    callback = Raising()
+    keyed = AttestedTransport(fake_enclave(fetch, on_verification=callback), FakeMode())
+    results: list[BaseException | VerificationReport] = []
+
+    def call() -> None:
+        try:
+            results.append(keyed.ensure_verified())
+        except BaseException as err:
+            results.append(err)
+
+    owner = threading.Thread(target=call)
+    owner.start()
+    assert started.wait(5)
+    waiter = threading.Thread(target=call)
+    waiter.start()
+    time.sleep(0.05)
+    release.set()
+    owner.join(5)
+    waiter.join(5)
+    assert len(results) == 2
+    assert all(isinstance(result, AttestationError) for result in results), results
+    assert results[0] is results[1], "the waiting caller got the same failure, not the callback's exception"
+    assert keyed.last_verification() == (None, results[0])
+    assert callback.calls[-1] == (HOST, None, results[0])
