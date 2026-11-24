@@ -59,7 +59,7 @@ def resolve_artifacts(artifacts: EmbeddedArtifacts) -> ResolvedReferences:
 def resolve_config(config: EmbeddedConfig | EmbeddedConfigReference, runtime: bytes | None) -> EmbeddedConfigReference:
     """Check a caller-trusted config, and reduce config bytes to their reference.
 
-    Config bytes must be within the size bounds and be a JSON config with a runtime pin; a
+    Config bytes must be within the size bounds and carry a runtime pin; a
     config reference must have a well-formed name when it has one, a
     lowercase SHA-256 digest and a valid runtime pin whose repository, tag and
     digest are strings. ``runtime``, an embedded manifest that ``resolve_artifacts``
@@ -77,9 +77,7 @@ def resolve_config(config: EmbeddedConfig | EmbeddedConfigReference, runtime: by
         try:
             pinned = _runtime_from_config(data)
         except RuntimeConfigError as err:
-            raise UsageError(
-                f"{err}; embed a JSON config, or an EmbeddedConfigReference with the config's digest and runtime pin"
-            ) from err
+            raise UsageError(str(err)) from err
         reference = EmbeddedConfigReference(name=config.name, digest=hashlib.sha256(data).hexdigest(), runtime=pinned)
     else:
         reference = config

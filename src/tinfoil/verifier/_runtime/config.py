@@ -6,10 +6,8 @@ from __future__ import annotations
 from tinfoil.verifier import _json
 from tinfoil.verifier._document.collateral.runtime import RUNTIME_REPO, RuntimeReference
 
-_VERSION_KEY = "cvm-version"
 _DIGEST_SEPARATOR = "@sha256:"
 _PREFIX = "parsing config runtime pin"
-_NOT_A_JSON_CONFIG = f"{_PREFIX}: not a JSON config that states cvm-version; YAML configs are not read"
 
 
 class RuntimeConfigError(ValueError):
@@ -20,8 +18,7 @@ def runtime_from_config(data: bytes) -> RuntimeReference:
     """Extract the immutable runtime pin without changing the config bytes.
 
     The publisher and guest own validation of the workload's other fields;
-    only ``cvm-version`` is read here, from a JSON config. A YAML config is
-    not read.
+    only ``cvm-version`` is read here.
     """
     version, found, digest = _read_cvm_version(data).partition(_DIGEST_SEPARATOR)
     if not found:
@@ -35,15 +32,8 @@ def runtime_from_config(data: bytes) -> RuntimeReference:
 
 
 def _read_cvm_version(data: bytes) -> str:
-    """The top-level ``cvm-version`` string of a config that is one JSON object. Anything else, such as a YAML config,
-    is an error."""
+    """The top-level ``cvm-version`` string, or "" when the key is absent or null."""
     try:
-        config = _json.strict_parse(data)
+        return _json.string(_json.object_(_json.strict_parse(data), "config"), "cvm-version")
     except _json.JsonError as err:
-        raise RuntimeConfigError(_NOT_A_JSON_CONFIG) from err
-    if not isinstance(config, _json.JsonObject):
-        raise RuntimeConfigError(_NOT_A_JSON_CONFIG)
-    pin = config.get(_VERSION_KEY)
-    if not isinstance(pin, str):
-        raise RuntimeConfigError(_NOT_A_JSON_CONFIG)
-    return pin
+        raise RuntimeConfigError(f"{_PREFIX}: {err}") from err

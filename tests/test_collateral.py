@@ -543,7 +543,7 @@ def test_config_collateral_allows_optional_bytes() -> None:
 
 
 def test_config_endorsement() -> None:
-    config_bytes = b'{"cvm-version":"1.0.0"}'
+    config_bytes = b"cvm-version: 1.0.0\n"
     reference = "sha256:" + "ab" * 32
     data: dict[str, Any] = {
         "endorsement_ref": reference,

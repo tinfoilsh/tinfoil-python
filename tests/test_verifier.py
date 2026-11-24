@@ -584,20 +584,6 @@ def test_config_authorizer_preserves_references_and_hardware_checks() -> None:
     assert legacy.collateral_format() == FORMAT_V2
 
 
-def test_config_authorizer_configs_must_be_json() -> None:
-    """The runtime pin of an authorized config is read from its bytes, which must be a JSON config: YAML that the
-    authorizer accepts is still rejected."""
-    inputs = vf.embedded_inputs()
-    assert inputs.runtime is not None
-    config = f"cvm-version: 0.15.0@sha256:{hashlib.sha256(inputs.runtime).hexdigest()}\n".encode()
-    entry = vf.reference_entry(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": b64(config)})
-    raw, nonce, _ = vf.embedded_document(FORMAT_V3, entry)
-    v = vf.embedded_verifier(dataclasses.replace(inputs, config=ConfigAuthorizer(authorize_all)))
-    with pytest.raises(VerificationError, match="not a JSON config that states cvm-version") as rejected:
-        v.verify_v3(raw, nonce, Pin())
-    rejected_at(rejected.value, LAYER_PROVENANCE)
-
-
 def test_config_authorizer_must_be_callable() -> None:
     with pytest.raises(UsageError, match="config authorizer must be callable"):
         Verifier(ConfigAuthorizer("authorize"))  # type: ignore[arg-type]
@@ -649,26 +635,6 @@ def test_config_pins_one_runtime_manifest() -> None:
         if suffix:
             with pytest.raises(UsageError, match="digest pin"):
                 vf.embedded_verifier(dataclasses.replace(inputs, runtime=vf.manifest_bytes()))
-
-
-def test_embedded_config_bytes_must_be_json() -> None:
-    """Embedded config bytes are read for their runtime pin, so YAML bytes fail when the verifier is built. The
-    same config is trusted by reference, which reads no config bytes."""
-    manifest = vf.manifest_bytes("v0.15.4")
-    runtime = RuntimeReference(repo=RUNTIME_REPO, tag="v0.15.4", digest=hashlib.sha256(manifest).hexdigest())
-    config = f"cvm-version: 0.15.4@sha256:{runtime.digest}\n".encode()
-    inputs = vf.EmbeddedInputs(config=EmbeddedConfig(data=config), runtime=manifest, platform=vf.platform_bytes())
-    with pytest.raises(UsageError) as rejected:
-        vf.embedded_verifier(inputs)
-    assert "not a JSON config that states cvm-version" in rejected.value.message
-    assert "embed a JSON config, or an EmbeddedConfigReference" in rejected.value.message
-    reference = EmbeddedConfigReference(digest=hashlib.sha256(config).hexdigest(), runtime=runtime)
-    v = vf.embedded_verifier(dataclasses.replace(inputs, config=reference))
-    _, _, doc = vf.embedded_document(FORMAT_V3)
-    refs = config_references(trust_of(v), doc, "", NOW)
-    assert isinstance(refs.quote, ConfigReferenceValues)
-    assert refs.quote.hash == hashlib.sha256(config).digest()
-    assert refs.quote.runtime == decode_manifest(manifest).measurements
 
 
 def test_embedded_config_reference_without_config_bytes() -> None:

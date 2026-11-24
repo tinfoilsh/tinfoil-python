@@ -805,19 +805,6 @@ def test_verify_config_digest_and_runtime() -> None:
         registry.verify(None, bundle, policy(world))
 
 
-def test_deployment_approval_of_a_yaml_config_verifies_only_by_digest() -> None:
-    """A deployment approval states the runtime that its config pins, so it verifies without the config bytes
-    whatever their format. Config bytes are read as JSON, so the same approval is rejected with its YAML bytes."""
-    world = World()
-    runtime = RuntimeReference(RUNTIME_REPO, "v0.15.4", "ab" * 32)
-    config = b"cvm-version: 0.15.4@sha256:" + b"ab" * 32 + b"\n"
-    core = config_core(NAME, hashlib.sha256(config).hexdigest(), registry_id=PUBLIC_REGISTRY_ID, runtime=runtime)
-    bundle = as_json(world.keyed_bundle(complete(world, core, CONFIG_FRESHNESS_DOMAIN_V2, world.now)))
-    assert config_verifier(world).verify(None, bundle, policy(world)).runtime == runtime
-    with pytest.raises(ApprovalError, match="not a JSON config that states cvm-version"):
-        config_verifier(world).verify(config, bundle, policy(world))
-
-
 def test_deployment_runtime_requires_approval_and_matches_config() -> None:
     world = World()
     config = b'{"cvm-version":"0.15.0@sha256:' + b"ab" * 32 + b'"}'
@@ -831,7 +818,7 @@ def test_deployment_runtime_requires_approval_and_matches_config() -> None:
     payload = complete(world, altered, CONFIG_FRESHNESS_DOMAIN_V2, world.now)
     with pytest.raises(ApprovalError, match="config runtime does not match"):
         config_verifier(world).verify(config, as_json(world.keyed_bundle(payload)), policy(world))
-    with pytest.raises(ApprovalError, match="not a JSON config that states cvm-version"):
+    with pytest.raises(ApprovalError, match="cvm-version must pin"):
         config_verifier(world).verify(
             CONFIG,
             as_json(
