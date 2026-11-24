@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass
 
 _BAD_NUMBER = re.compile(r"0[0-9]+")
+_NUMERIC = re.compile(r"[0-9]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +43,42 @@ def build(version: str) -> str:
     """The build-metadata suffix including "+", or ""."""
     parsed = _parse(version)
     return parsed.build if parsed else ""
+
+
+def compare(v: str, w: str) -> int:
+    """-1, 0 or 1 as ``v`` is below, equal to or above ``w`` in semantic version precedence.
+
+    Build metadata does not count. An invalid version is below every valid
+    one and equal to every other invalid one.
+    """
+    left, right = _precedence(v), _precedence(w)
+    if left is None or right is None:
+        return (left is not None) - (right is not None)
+    return (left > right) - (left < right)
+
+
+_Precedence = tuple[list[tuple[int, str]], bool, list[tuple[bool, int, str]]]
+
+
+def _precedence(version: str) -> _Precedence | None:
+    """A key that orders valid versions by precedence: MAJOR, MINOR and PATCH as numbers, then a release above its
+    pre-releases, then the pre-release identifiers from the left, where a numeric identifier is below any other
+    and a longer list is above its own prefix.
+
+    A number is written without leading zeros, so it orders by its length
+    and then its text; no digit string is converted, however long.
+    """
+    parsed = _parse(version)
+    if parsed is None:
+        return None
+    core = canonical(version)[1:].removesuffix(parsed.prerelease)
+    numbers = [(len(number), number) for number in core.split(".")]
+    identifiers = parsed.prerelease[1:].split(".") if parsed.prerelease else []
+    return (
+        numbers,
+        not identifiers,
+        [(False, len(item), item) if _NUMERIC.fullmatch(item) else (True, 0, item) for item in identifiers],
+    )
 
 
 def _parse(version: str) -> _Parsed | None:
