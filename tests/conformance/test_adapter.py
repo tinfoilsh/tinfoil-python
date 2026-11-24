@@ -631,8 +631,8 @@ def test_verify_timestamp_stage_uses_the_approval_window() -> None:
 
 
 def test_read_config_runtime_stage() -> None:
-    """The runtime stage reads the pin from the config that a document carries: JSON from the first JSON version on,
-    YAML before it."""
+    """The runtime stage reads the pin from the JSON config that a document carries. A YAML config is rejected
+    whatever version it pins, and so is a JSON config that pins a version before the first JSON version."""
     stage = adapter.STAGE_READ_CONFIG_RUNTIME
     digest = "ab" * 32
 
@@ -649,25 +649,23 @@ def test_read_config_runtime_stage() -> None:
     json_config = f'{{"cvm-version":"0.15.5-rc.1@sha256:{digest}"}}'
     yaml_config = f"cvm-version: 0.15.4@sha256:{digest}\n"
 
-    for name, config, tag in [
-        ("JSON config", json_config, "v0.15.5-rc.1"),
-        ("YAML config", yaml_config, "v0.15.4"),
-    ]:
-        result = adapter.run(stage, raw(plain(config)))
-        assert result.exit_code == adapter.EXIT_ACCEPTED, (name, result.output)
-        assert result.output == {
-            "stage": stage,
-            "accepted": True,
-            "outputs": {"runtime": {"repo": "tinfoilsh/cvmimage", "tag": tag, "digest": digest}},
-        }
+    result = adapter.run(stage, raw(plain(json_config)))
+    assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
+    assert result.output == {
+        "stage": stage,
+        "accepted": True,
+        "outputs": {"runtime": {"repo": "tinfoilsh/cvmimage", "tag": "v0.15.5-rc.1", "digest": digest}},
+    }
     reference_only = entry(
         "https://tinfoil.sh/collateral/config-endorsement/v2",
         {"endorsement_ref": "sha256:" + digest, "sigstore_bundle": {}},
     )
     for name, document_input, want in [
+        ("YAML config", raw(plain(yaml_config)), adapter.EXIT_REJECTED),
         ("YAML for a JSON version", raw(plain(yaml_config.replace("0.15.4", "0.15.5-rc.1"))), adapter.EXIT_REJECTED),
+        ("JSON before a JSON version", raw(plain(json_config.replace("0.15.5-rc.1", "0.15.4"))), adapter.EXIT_REJECTED),
         ("JSON not in its one form", raw(plain(json_config.replace('":"', '": "', 1))), adapter.EXIT_REJECTED),
-        ("no pin", raw(plain("cpus: 2\n")), adapter.EXIT_REJECTED),
+        ("no pin", raw(plain('{"cpus":2}')), adapter.EXIT_REJECTED),
         ("no config", raw(), adapter.EXIT_REJECTED),
         ("reference without config bytes", raw(reference_only), adapter.EXIT_REJECTED),
         ("no document", {"schema_version": "1"}, adapter.EXIT_MALFORMED),

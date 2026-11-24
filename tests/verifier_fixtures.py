@@ -28,7 +28,7 @@ SNP_LAUNCH = "ab" * MEASUREMENT_SIZE
 TDX_MRTD = "cd" * MEASUREMENT_SIZE
 
 
-def manifest_bytes(version: str = "v0.15.0", snp_launch: str = SNP_LAUNCH, mrtd: str = TDX_MRTD) -> bytes:
+def manifest_bytes(version: str = "v0.15.5", snp_launch: str = SNP_LAUNCH, mrtd: str = TDX_MRTD) -> bytes:
     """A runtime manifest of format version 1."""
     return json.dumps(
         {
@@ -43,9 +43,10 @@ def manifest_bytes(version: str = "v0.15.0", snp_launch: str = SNP_LAUNCH, mrtd:
     ).encode()
 
 
-def config_bytes(manifest: bytes, version: str = "0.15.0") -> bytes:
+def config_bytes(manifest: bytes, version: str = "0.15.5") -> bytes:
     """A config whose ``cvm-version`` pins ``manifest``."""
-    return f"cvm-version: {version}@sha256:{hashlib.sha256(manifest).hexdigest()}\n".encode()
+    pin = f"{version}@sha256:{hashlib.sha256(manifest).hexdigest()}"
+    return json.dumps({"cvm-version": pin}, separators=(",", ":")).encode()
 
 
 def platform_bytes() -> bytes:

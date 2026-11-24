@@ -112,7 +112,7 @@ The SDK is layered. An HTTP client carries a route, its verification and its tra
 | `ProjectPin(project, registry_ids=None)` | v3 collateral for a config registry project, `org/project[@revision][@sha256:digest]`, that Tinfoil's public registry endorses, or one of `registry_ids`. An empty list is a `ConfigurationError`; list `tinfoil.verifier.PUBLIC_REGISTRY_ID` to keep the public registry beside your own |
 | `SignedBy(keys, project=None)` | v3 configs that your own ECDSA P-256 keys signed, optionally restricted to `project` |
 | `AuthorizedBy(authorize)` | v3 configs that your callback accepts |
-| `EmbeddedConfig(data, name="")` | v3 collateral for exactly the config bytes that you supply |
+| `EmbeddedConfig(data, name="")` | v3 collateral for exactly the JSON config bytes that you supply |
 | `EitherPin(repo, project)` | v2 collateral for `repo` or v3 collateral for `project`, for the migration from v2 to v3 |
 
 Each is a frozen dataclass, and a value of any other type, such as a bare string, is a `ConfigurationError`.

@@ -584,6 +584,20 @@ def test_config_authorizer_preserves_references_and_hardware_checks() -> None:
     assert legacy.collateral_format() == FORMAT_V2
 
 
+def test_config_authorizer_configs_must_be_json() -> None:
+    """The runtime pin of an authorized config is read from its bytes, which must be a JSON config: YAML that the
+    authorizer accepts is still rejected."""
+    inputs = vf.embedded_inputs()
+    assert inputs.runtime is not None
+    config = f"cvm-version: 0.15.5@sha256:{hashlib.sha256(inputs.runtime).hexdigest()}\n".encode()
+    entry = vf.reference_entry(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": b64(config)})
+    raw, nonce, _ = vf.embedded_document(FORMAT_V3, entry)
+    v = vf.embedded_verifier(dataclasses.replace(inputs, config=ConfigAuthorizer(authorize_all)))
+    with pytest.raises(VerificationError, match="not a JSON config that states cvm-version") as rejected:
+        v.verify_v3(raw, nonce, Pin())
+    rejected_at(rejected.value, LAYER_PROVENANCE)
+
+
 def test_config_authorizer_must_be_callable() -> None:
     with pytest.raises(UsageError, match="config authorizer must be callable"):
         Verifier(ConfigAuthorizer("authorize"))  # type: ignore[arg-type]
@@ -616,11 +630,11 @@ def test_config_pins_one_runtime_manifest() -> None:
     _, _, doc = vf.embedded_document(FORMAT_V3)
     for suffix in ("", "+gpu", "+mini", "+containers.initrd-1"):
         if suffix:
-            manifest = vf.manifest_bytes("v0.15.0" + suffix, snp_launch="ef" * 48, mrtd="12" * 48)
+            manifest = vf.manifest_bytes("v0.15.5" + suffix, snp_launch="ef" * 48, mrtd="12" * 48)
         else:
             manifest = vf.manifest_bytes()
         inputs = vf.EmbeddedInputs(
-            config=EmbeddedConfig(data=vf.config_bytes(manifest, "0.15.0" + suffix), name=vf.EMBEDDED_CONFIG_NAME),
+            config=EmbeddedConfig(data=vf.config_bytes(manifest, "0.15.5" + suffix), name=vf.EMBEDDED_CONFIG_NAME),
             runtime=manifest,
             platform=vf.platform_bytes(),
         )
@@ -630,11 +644,31 @@ def test_config_pins_one_runtime_manifest() -> None:
         assert isinstance(inputs.config, EmbeddedConfig)
         assert refs.quote.hash == hashlib.sha256(inputs.config.data).digest()
         assert refs.quote.runtime == decode_manifest(manifest).measurements
-        assert refs.artifact.tag == "v0.15.0"
+        assert refs.artifact.tag == "v0.15.5"
         assert refs.artifact.source == SOURCE_EMBEDDED
         if suffix:
             with pytest.raises(UsageError, match="digest pin"):
                 vf.embedded_verifier(dataclasses.replace(inputs, runtime=vf.manifest_bytes()))
+
+
+def test_embedded_config_bytes_must_be_json() -> None:
+    """Embedded config bytes are read for their runtime pin, so YAML bytes fail when the verifier is built. The
+    same config is trusted by reference, which reads no config bytes."""
+    manifest = vf.manifest_bytes("v0.15.4")
+    runtime = RuntimeReference(repo=RUNTIME_REPO, tag="v0.15.4", digest=hashlib.sha256(manifest).hexdigest())
+    config = f"cvm-version: 0.15.4@sha256:{runtime.digest}\n".encode()
+    inputs = vf.EmbeddedInputs(config=EmbeddedConfig(data=config), runtime=manifest, platform=vf.platform_bytes())
+    with pytest.raises(UsageError) as rejected:
+        vf.embedded_verifier(inputs)
+    assert "not a JSON config that states cvm-version" in rejected.value.message
+    assert "embed a JSON config, or an EmbeddedConfigReference" in rejected.value.message
+    reference = EmbeddedConfigReference(digest=hashlib.sha256(config).hexdigest(), runtime=runtime)
+    v = vf.embedded_verifier(dataclasses.replace(inputs, config=reference))
+    _, _, doc = vf.embedded_document(FORMAT_V3)
+    refs = config_references(trust_of(v), doc, "", NOW)
+    assert isinstance(refs.quote, ConfigReferenceValues)
+    assert refs.quote.hash == hashlib.sha256(config).digest()
+    assert refs.quote.runtime == decode_manifest(manifest).measurements
 
 
 def test_embedded_config_reference_without_config_bytes() -> None:
@@ -1089,14 +1123,14 @@ def test_configured_keys_preserve_proof_verification() -> None:
     world = World()
     other = World()
     trusted_root = world.trusted_root_json(fulcio=False, ctlogs=False)
-    config = b"cvm-version: 0.15.0@sha256:" + b"ab" * 32 + b"\n"
+    config = b'{"cvm-version":"0.15.5@sha256:' + b"ab" * 32 + b'"}'
     payload = config_payload(world, world.now, config, vf.EMBEDDED_CONFIG_NAME)
     config_data = {
         "endorsement_ref": endorsement_reference(payload),
         "config_base64": b64(config),
         "sigstore_bundle": world.keyed_bundle(payload),
     }
-    artifact = FreshnessArtifact(KIND_RUNTIME, RUNTIME_REPO, "v0.15.0", runtime_name("v0.15.0"), "ab" * 32)
+    artifact = FreshnessArtifact(KIND_RUNTIME, RUNTIME_REPO, "v0.15.5", runtime_name("v0.15.5"), "ab" * 32)
     approval = freshness_payload(world, artifact, world.now)
     freshness_data = {"sigstore_bundle": world.keyed_bundle(approval, key=other.key)}
     _, _, doc = vf.embedded_document(
