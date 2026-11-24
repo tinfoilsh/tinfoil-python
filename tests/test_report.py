@@ -20,6 +20,7 @@ from tinfoil.verifier import (
     LAYER_POLICY,
     LAYER_PROVENANCE,
     LAYER_QUOTE,
+    REPORT_SCHEMA_VERSION,
     SOURCE_EMBEDDED,
     SOURCE_ENDORSEMENT,
     SOURCE_POLICY,
@@ -29,8 +30,11 @@ from tinfoil.verifier import (
     STEP_SKIPPED,
     ArtifactVerification,
     ConfigVerification,
+    CPUEvidence,
     ExpectedFacts,
     ExpectedSEVSNP,
+    MeasuredFacts,
+    PartialFacts,
     Pin,
     SoftwareIdentity,
     VerificationError,
@@ -181,6 +185,7 @@ def test_report_to_dict() -> None:
     report = sample_report()
     got = report.to_dict()
     assert got == {
+        "schema_version": REPORT_SCHEMA_VERSION,
         "steps": [
             {"layer": "envelope", "status": "passed"},
             {"layer": "provenance", "status": "failed", "message": "provenance: bad bundle"},
@@ -188,8 +193,9 @@ def test_report_to_dict() -> None:
             {"layer": "policy", "status": "not_run"},
         ],
         "partial_facts": {"measured": {}},
-        "metadata": {"verifier": {"name": "tinfoil-python", "version": "1"}, "verified_at": "2026-08-06T12:00:00Z"},
+        "metadata": {"verified_at": "2026-08-06T12:00:00Z", "verifier": {"name": "tinfoil-python", "version": "1"}},
     }
+    assert REPORT_SCHEMA_VERSION == 1
     assert json.loads(report.to_json()) == got
     assert json.loads(report.to_json(indent=2)) == got
     launch = bytes([1]) * 48
@@ -203,6 +209,26 @@ def test_report_to_dict() -> None:
         "code_measurement": {"platform": "sev-snp", "launch": launch.hex()},
         "measurement": {"platform": "sev-snp", "launch": launch.hex()},
     }
+    cpu = dataclasses.replace(
+        report.partial_facts,
+        measured=MeasuredFacts(cpu=CPUEvidence(measurement=SEVSNP(launch=launch)), tls_public_key_fp="cd" * 32),
+    )
+    assert dataclasses.replace(report, partial_facts=cpu).to_dict()["partial_facts"] == {
+        "measured": {"cpu_measurement": {"platform": "sev-snp", "launch": launch.hex()}, "tls_public_key_fp": "cd" * 32}
+    }
+    # A release that fixes no register on the platform has no code measurement in the form.
+    unfixed = dataclasses.replace(_expected(launch), code_measurement=ExpectedSEVSNP())
+    without = dataclasses.replace(report, partial_facts=PartialFacts(expected=unfixed)).to_dict()
+    assert "code_measurement" not in without["partial_facts"]["expected"]
+
+
+def test_report_metadata_names_the_verifier_only_when_its_version_is_known() -> None:
+    """An SDK that runs from a source tree without an installed package can't name its version, so its report leaves
+    the verifier out rather than writing a placeholder."""
+    for verifier in (SoftwareIdentity("tinfoil-python", "unknown"), SoftwareIdentity("tinfoil-python", "")):
+        metadata = VerificationMetadata(verifier=verifier, verified_at=NOW)
+        report = dataclasses.replace(sample_report(), metadata=metadata)
+        assert report.to_dict()["metadata"] == {"verified_at": "2026-08-06T12:00:00Z"}
 
 
 def _expected(launch: bytes) -> ExpectedFacts:
