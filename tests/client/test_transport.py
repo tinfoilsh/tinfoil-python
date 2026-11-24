@@ -1005,6 +1005,24 @@ async def test_async_failed_reverify_keeps_a_newer_verification() -> None:
     await keyed.aclose()
 
 
+def waiting_on_refresh(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """An event that is set once a caller waits on a refresh that another caller runs."""
+    waiting = threading.Event()
+
+    class ObservedDone(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            waiting.set()
+            return super().wait(timeout)
+
+    class ObservedRefresh(_transport._Refresh):
+        def __init__(self) -> None:
+            super().__init__()
+            self.done = ObservedDone()
+
+    monkeypatch.setattr(_transport, "_Refresh", ObservedRefresh)
+    return waiting
+
+
 class Raising:
     """An ``on_verification`` callback that records each call and then raises."""
 
@@ -1016,7 +1034,7 @@ class Raising:
         raise RuntimeError("the callback failed")
 
 
-def test_a_raising_callback_leaves_the_outcome_to_every_waiting_caller() -> None:
+def test_a_raising_callback_leaves_the_outcome_to_every_waiting_caller(monkeypatch: pytest.MonkeyPatch) -> None:
     """The callback raising changes neither the outcome nor what a second caller waiting on the same verification
     gets, and later attempts are still reported."""
     started = threading.Event()
@@ -1041,12 +1059,13 @@ def test_a_raising_callback_leaves_the_outcome_to_every_waiting_caller() -> None
         except BaseException as err:
             results.append(err)
 
+    waiting = waiting_on_refresh(monkeypatch)
     owner = threading.Thread(target=call)
     owner.start()
     assert started.wait(5)
     waiter = threading.Thread(target=call)
     waiter.start()
-    time.sleep(0.05)
+    assert waiting.wait(5), "the second caller waits on the owner's verification"
     release.set()
     owner.join(5)
     waiter.join(5)
@@ -1093,11 +1112,14 @@ async def test_async_a_raising_callback_leaves_the_outcome_to_every_waiting_call
     await keyed.aclose()
 
 
-def test_a_raising_callback_leaves_a_failure_to_every_waiting_caller() -> None:
+def test_a_raising_callback_leaves_a_failure_to_every_waiting_caller(monkeypatch: pytest.MonkeyPatch) -> None:
     started = threading.Event()
     release = threading.Event()
+    fetches = 0
 
     def fetch() -> VerifiedFacts:
+        nonlocal fetches
+        fetches += 1
         started.set()
         release.wait(5)
         raise AttestationError("rejected")
@@ -1112,17 +1134,19 @@ def test_a_raising_callback_leaves_a_failure_to_every_waiting_caller() -> None:
         except BaseException as err:
             results.append(err)
 
+    waiting = waiting_on_refresh(monkeypatch)
     owner = threading.Thread(target=call)
     owner.start()
     assert started.wait(5)
     waiter = threading.Thread(target=call)
     waiter.start()
-    time.sleep(0.05)
+    assert waiting.wait(5), "the second caller waits on the owner's verification"
     release.set()
     owner.join(5)
     waiter.join(5)
     assert len(results) == 2
     assert all(isinstance(result, AttestationError) for result in results), results
     assert results[0] is results[1], "the waiting caller got the same failure, not the callback's exception"
+    assert fetches == 2, "one verification, with its retry, that both callers shared"
     assert keyed.last_verification() == (None, results[0])
     assert callback.calls[-1] == (HOST, None, results[0])
