@@ -109,20 +109,20 @@ def test_verify_stage_reports_usage_errors_as_malformed_and_rejections_by_layer(
     assert result.exit_code == adapter.EXIT_MALFORMED
     result = adapter.run(stage, _WELL_FORMED)
     assert result.exit_code == adapter.EXIT_REJECTED
-    assert result.output == {
-        "stage": stage,
-        "accepted": False,
-        "rejection": {"code": "ENVELOPE_REJECTED"},
-        "report": {
-            "steps": [
-                {"layer": "envelope", "status": "failed"},
-                {"layer": "provenance", "status": "not_run"},
-                {"layer": "quote", "status": "not_run"},
-                {"layer": "policy", "status": "not_run"},
-            ],
-            "partial_facts": {},
-        },
-    }
+    report = result.output.pop("report")
+    assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": "ENVELOPE_REJECTED"}}
+    # The report is in the JSON form that the SDK exports, messages and metadata included.
+    assert report["schema_version"] == 1
+    assert [(step["layer"], step["status"]) for step in report["steps"]] == [
+        ("envelope", "failed"),
+        ("provenance", "not_run"),
+        ("quote", "not_run"),
+        ("policy", "not_run"),
+    ]
+    assert report["steps"][0]["message"]
+    assert report["partial_facts"] == {}
+    assert "verified_facts" not in report
+    assert "verified_at" in report["metadata"]
     result = adapter.run(stage, {**_WELL_FORMED, "document_b64": ""})
     assert result.output["rejection"] == {"code": "ENVELOPE_REJECTED"}
     from tests import document_builder
@@ -226,6 +226,23 @@ _REJECTION_LAYERS = {
 }
 
 
+def assert_contains(got: Any, want: Any, path: str = "$") -> None:
+    """``got`` has every member of ``want`` with the same value, at any depth; arrays match element by element. A
+    vector states the members of the report's JSON form that it expects, not the whole form."""
+    if isinstance(want, dict):
+        assert isinstance(got, dict), f"{path} is {got!r}, want an object"
+        for key, value in want.items():
+            assert key in got, f"{path}.{key} is missing"
+            assert_contains(got[key], value, f"{path}.{key}")
+    elif isinstance(want, list):
+        assert isinstance(got, list), f"{path} is {got!r}, want an array"
+        assert len(got) == len(want), f"{path} is {got!r}, want {len(want)} elements"
+        for index, (got_item, want_item) in enumerate(zip(got, want, strict=True)):
+            assert_contains(got_item, want_item, f"{path}[{index}]")
+    else:
+        assert got == want, f"{path} is {got!r}, want {want!r}"
+
+
 def check_report(output: dict[str, Any]) -> None:
     """A full-verify output's report agrees with its verdict and keeps the report's rules: the four layers in
     order; on an accept, every step passed or was skipped and there are no partial facts; on a rejection, the
@@ -244,10 +261,13 @@ def check_report(output: dict[str, Any]) -> None:
     steps = report["steps"]
     assert [step["layer"] for step in steps] == list(_LAYERS)
     assert all(step["status"] in ("passed", "failed", "skipped", "not_run") for step in steps), steps
+    assert report["schema_version"] == 1
     if output["accepted"]:
         assert all(step["status"] in ("passed", "skipped") for step in steps), steps
         assert "partial_facts" not in report
+        assert "verified_facts" in report
         return
+    assert "verified_facts" not in report
     failed = [index for index, step in enumerate(steps) if step["status"] == "failed"]
     assert len(failed) == 1, steps
     assert _LAYERS[failed[0]] == _REJECTION_LAYERS[output["rejection"]["code"]]
@@ -289,8 +309,7 @@ def test_vector(fixture: dict[str, Any]) -> None:
         failed = [step["layer"] for step in result.output["report"]["steps"] if step["status"] == "failed"]
         assert failed == [expected["failed_step"]]
     if expected.get("report"):
-        assert result.output["report"]["steps"] == expected["report"]["steps"]
-        assert result.output["report"].get("partial_facts") == expected["report"].get("partial_facts")
+        assert_contains(result.output["report"], expected["report"])
     if expected["accepted"]:
         assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
         assert result.output["accepted"] is True

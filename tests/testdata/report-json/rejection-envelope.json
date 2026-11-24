@@ -1,0 +1,30 @@
+{
+  "description": "A rejection at the envelope step: \"partial_facts\": {}.",
+  "report": {
+    "schema_version": 1,
+    "steps": [
+      {
+        "layer": "envelope",
+        "status": "failed",
+        "message": "challenge nonce does not match the expected nonce"
+      },
+      {
+        "layer": "provenance",
+        "status": "not_run"
+      },
+      {
+        "layer": "quote",
+        "status": "not_run"
+      },
+      {
+        "layer": "policy",
+        "status": "not_run"
+      }
+    ],
+    "partial_facts": {},
+    "metadata": {
+      "verified_at": "2025-01-01T00:00:01Z"
+    }
+  },
+  "vector": "v3/freshness/fr1-nonce-stale.json"
+}

@@ -1,0 +1,58 @@
+{
+  "description": "A rejection at the policy step on SEV-SNP after the registers were resolved: expected with measurement, and measured with cpu_measurement.",
+  "report": {
+    "schema_version": 1,
+    "steps": [
+      {
+        "layer": "envelope",
+        "status": "passed"
+      },
+      {
+        "layer": "provenance",
+        "status": "passed"
+      },
+      {
+        "layer": "quote",
+        "status": "passed"
+      },
+      {
+        "layer": "policy",
+        "status": "failed",
+        "message": "report field MEASUREMENT is 111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111. Expect 999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999"
+      }
+    ],
+    "partial_facts": {
+      "expected": {
+        "config_repo": "tinfoilsh/confidential-inference-proxy",
+        "artifact": {
+          "source": "endorsement",
+          "repo": "tinfoilsh/confidential-inference-proxy",
+          "tag": "v1.0.0",
+          "digest": "3b29117bcc96bb282879514cc03c32f3f7eb8a7bd031b829dd3864c591b87c50",
+          "name": "cip",
+          "commit": "cd91fd8cc7c365681f4d5eb072ca26fdc933d7cd"
+        },
+        "code_measurement": {
+          "platform": "sev-snp",
+          "launch": "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999"
+        },
+        "measurement": {
+          "platform": "sev-snp",
+          "launch": "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999"
+        }
+      },
+      "measured": {
+        "cpu_measurement": {
+          "platform": "sev-snp",
+          "launch": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "tls_public_key_fp": "d1a3788930750184f2fe268a222b5c65bab974069573c4afbf656454f066b6e3",
+        "hpke_public_key_fp": "0ad65990ea9e81ed17576feb434b30f7f5e5eff386f3128be695d92577f9dd36"
+      }
+    },
+    "metadata": {
+      "verified_at": "2025-01-01T00:00:01Z"
+    }
+  },
+  "vector": "v3/golden/s14-measurement.json"
+}

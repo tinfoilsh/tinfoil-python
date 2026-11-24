@@ -1,0 +1,54 @@
+{
+  "description": "A code release on SEV-SNP that every step accepts. The TLS and HPKE keys appear only in crypto_material.",
+  "report": {
+    "schema_version": 1,
+    "steps": [
+      {
+        "layer": "envelope",
+        "status": "passed"
+      },
+      {
+        "layer": "provenance",
+        "status": "passed"
+      },
+      {
+        "layer": "quote",
+        "status": "passed"
+      },
+      {
+        "layer": "policy",
+        "status": "passed"
+      }
+    ],
+    "verified_facts": {
+      "config_repo": "tinfoilsh/confidential-inference-proxy",
+      "code_digest": "3b29117bcc96bb282879514cc03c32f3f7eb8a7bd031b829dd3864c591b87c50",
+      "code_tag": "v1.0.0",
+      "code_measurement": {
+        "platform": "sev-snp",
+        "launch": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "enclave_measurement": {
+        "platform": "sev-snp",
+        "launch": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "crypto_material": [
+        {
+          "id": "tls",
+          "format": "https://tinfoil.sh/key/spki-fp-sha256/v1",
+          "data": "d1a3788930750184f2fe268a222b5c65bab974069573c4afbf656454f066b6e3"
+        },
+        {
+          "id": "hpke",
+          "format": "https://tinfoil.sh/key/x25519-hpke/v1",
+          "data": "58c9b3756d738466ace1e27f83a7fe21b3356ec362694aef1506c5f35c766a01"
+        }
+      ],
+      "freshness_expires_at": "2025-01-08T00:00:01Z"
+    },
+    "metadata": {
+      "verified_at": "2025-01-01T00:00:01Z"
+    }
+  },
+  "vector": "v3/golden/golden-happy.json"
+}

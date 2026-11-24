@@ -235,8 +235,49 @@ def explain(document: bytes, nonce: bytes, pin: Pin) -> str:
     return report.to_json(indent=2)
 ```
 
-A report and its facts are frozen; `to_dict()` and `to_json()` give a plain
-copy, as for the verified facts below.
+A report and its facts are frozen. `to_dict()` returns the report in the
+JSON form that every Tinfoil SDK writes, as a `dict` of JSON values, and
+`to_json()` returns it as a string, compact or with `indent`:
+
+```json
+{
+  "schema_version": 1,
+  "steps": [
+    {"layer": "envelope", "status": "passed"},
+    {"layer": "provenance", "status": "passed"},
+    {"layer": "quote", "status": "passed"},
+    {"layer": "policy", "status": "failed", "message": "<detail>"}
+  ],
+  "partial_facts": {
+    "expected": {"config_repo": "...", "artifact": {}, "code_measurement": {}, "measurement": {}},
+    "measured": {"cpu_measurement": {}, "tls_public_key_fp": "<hex>", "hpke_public_key_fp": "<hex>"}
+  },
+  "metadata": {
+    "verified_at": "2026-11-24T16:00:00Z",
+    "verifier": {"name": "tinfoil-python", "version": "<version>"}
+  }
+}
+```
+
+Keys are snake_case, hex is lowercase and times are RFC 3339 in UTC, written
+with `Z`. A report has `verified_facts` on success and `partial_facts` on a
+rejection, never both. A fact that was not established is left out, never
+written as `null` or `""`, while an established fact that is empty stays, as
+in `"measured": {}`. A measurement names its platform and its registers:
+`{"platform": "sev-snp", "launch": ...}` or `{"platform": "tdx", "mrtd": ...,
+"rtmr0": ..., "rtmr1": ..., "rtmr2": ..., "rtmr3": ...}`, and a code
+measurement leaves out the registers that the release leaves to the platform.
+The channel keys appear only in `verified_facts.crypto_material`. A step has a
+`message` only when it failed or was skipped. `metadata.verifier` is present
+when the installed package names its version. `REPORT_SCHEMA_VERSION` is the
+form's version: adding a member keeps it, and removing, renaming or
+redefining one bumps it.
+
+The JSON is for display and transport only, and it never authorizes
+anything. Nothing in this package reads it back into a report or into
+verified facts, and anyone can write verified facts in JSON, so a client
+binds a channel only to the `VerifiedFacts` of a verification that it ran
+itself, never to a key that it read from the JSON.
 
 ## Reading the verified facts
 
@@ -265,8 +306,9 @@ hardware measured (`SEVSNP` or `TDX`, every register set). `config`,
 whose authority (`source` is `"endorsement"`, `"embedded"` or `"policy"`);
 a string fact that was not established is `""` and a time is `None`.
 
-`to_dict()` and `to_json()` give a plain copy with registers as lowercase
-hex and times as ISO 8601 in UTC:
+`to_dict()` and `to_json()` write the facts as the `verified_facts` member of
+the report's JSON form, with registers as lowercase hex and times as RFC 3339
+in UTC:
 
 ```python
 as_dict = verified.to_dict()

@@ -1,0 +1,31 @@
+{
+  "description": "A document that endorses no keys and carries no config reference, verified with the default verifier and the project pin org/project: the envelope passes with \"measured\": {}, and provenance fails. Its input is TestReportJSONGoldenProvenanceRejectionWithoutKeys in verify/report_json_test.go.",
+  "report": {
+    "schema_version": 1,
+    "steps": [
+      {
+        "layer": "envelope",
+        "status": "passed"
+      },
+      {
+        "layer": "provenance",
+        "status": "failed",
+        "message": "collateral entry not found: document carries no \"tinfoil-config\" reference-values entry"
+      },
+      {
+        "layer": "quote",
+        "status": "not_run"
+      },
+      {
+        "layer": "policy",
+        "status": "not_run"
+      }
+    ],
+    "partial_facts": {
+      "measured": {}
+    },
+    "metadata": {
+      "verified_at": "2026-01-02T02:04:05Z"
+    }
+  }
+}

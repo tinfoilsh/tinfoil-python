@@ -113,6 +113,7 @@ from tinfoil.verifier._options import (
     Registries,
 )
 from tinfoil.verifier._report import (
+    REPORT_SCHEMA_VERSION,
     STEP_FAILED,
     STEP_NOT_RUN,
     STEP_PASSED,
@@ -153,6 +154,7 @@ __all__ = [
     "NONCE_SIZE",
     "PUBLIC_REGISTRY_ID",
     "REGISTER_SIZE",
+    "REPORT_SCHEMA_VERSION",
     "SEVSNP",
     "SOURCE_EMBEDDED",
     "SOURCE_ENDORSEMENT",
