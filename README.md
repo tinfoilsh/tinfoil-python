@@ -191,33 +191,58 @@ http_client = GatewayHTTPClient(
 client = OpenAIClient(http_client, api_key=os.environ["TINFOIL_API_KEY"])
 ```
 
-The gateway's `url` already carries the API path, so `OpenAIClient` takes no `api_path` with a gateway client. `GatewayHTTPClient` also has `models()` for the catalog's model names and `ensure_verified(model)` for a model's verification.
+The gateway's `url` already carries the API path, so `OpenAIClient` takes no `api_path` with a gateway client. `GatewayHTTPClient` also has `models()` for the catalog's model names and `ensure_verified(model)` for the report of a model's verification.
 
 ## Reading the verification
 
-On an enclave or router client, `client.http_client.current` is the last successful verification, unchecked, or `None` before the first: it may have expired or been discarded; `ensure_verified()` returns one that is valid now, verifying again first if the cached one is no longer valid. Both are a `tinfoil.verifier.Verification`: the facts that the attestation document proved, such as `code_tag`, `code_digest`, `config_repo`, `enclave_measurement`, `tls_public_key_fp`, `hpke_public_key` and `freshness_expires_at`, with `metadata.verified_at` recorded from the local clock. `to_json()` serializes the record.
+Each verification produces a verification report, a `tinfoil.verifier.VerificationReport`: the outcome of each step (`envelope`, `provenance`, `quote` and `policy`), its `verified_facts` when no step failed (a step may be skipped, as provenance is when every reference value is embedded), and `metadata.verified_at`, recorded from the local clock. The verified facts, a `VerifiedFacts`, are what the attestation document proved, such as `code_tag`, `code_digest`, `config_repo`, `enclave_measurement`, `tls_public_key_fp`, `hpke_public_key` and `freshness_expires_at`. `to_json()` serializes a report.
 
-`reverify()` verifies again even if the cached verification is still valid. When a re-verification fails with an `AttestationError`, whether it is a call to `reverify()` or a refresh that the client makes on its own, the client discards the verification that it was replacing and that verification's connections, so that no later request is sent under it: the next request verifies again, and fails if the enclave still doesn't verify. `current` still returns the discarded verification, as the last successful one, until a verification succeeds. A newer verification that was published while the failed re-verification ran is kept. A `NetworkError`, a `ConfigurationError` or a cancellation keeps a cached verification that is still fresh.
+On an enclave or router client, `client.http_client.ensure_verified()` returns the report of a verification that is valid now, verifying again first if the cached one is no longer valid, and `reverify()` verifies again even if the cached one is still valid. `last_verification()` returns the most recent attempt, without I/O, as a `(report, error)` tuple: the report and `None` when it passed, and `None` and the error that the client raised when it failed, or `(None, None)` before the first attempt. Every attempt counts: the first verification, its retry, a refresh after expiry or a key rotation, and `reverify()`. A report that it returns may have expired since.
+
+When the verifier rejects a document, the client raises an `AttestationError` whose `__cause__` is the verifier's `VerificationError`, and that error's `report` shows the step that failed and the partial facts that the steps before it established: the expected facts that provenance authenticated, and the facts that the document claims, such as its key fingerprints and, once the quote authenticated, its CPU measurement. The key fingerprints in a failed report are unverified, and a failed report holds the keys only as fingerprints: channel keys come only from the `verified_facts` of a report that passed, and only they can bind a connection. A failed fetch is a `NetworkError`, and a `verification_check` rejection an `AttestationError` of its own, so neither has a report.
+
+When a re-verification fails with an `AttestationError`, whether it is a call to `reverify()` or a refresh that the client makes on its own, the client discards the verification that it was replacing and that verification's connections, so that no later request is sent under it: the next request verifies again, and fails if the enclave still doesn't verify. A newer verification that was published while the failed re-verification ran is kept. A `NetworkError`, a `ConfigurationError` or a cancellation keeps a cached verification that is still fresh.
 
 ```python
 import os
 
-from tinfoil import create_client
+from tinfoil import AttestationError, create_client
+from tinfoil.verifier import VerificationError
 
 client = create_client(api_key=os.environ["TINFOIL_API_KEY"])
 
-verified = client.http_client.ensure_verified()
-print(verified.code_tag, verified.code_digest)
-print(verified.to_json(indent=2))
+report = client.http_client.ensure_verified()
+facts = report.verified_facts
+assert facts is not None
+print(facts.code_tag, facts.code_digest)
+print(report.to_json(indent=2))
 
-current = client.http_client.current  # the same record, or None before the first verification
-if current is not None:
-    print(current.freshness_expires_at)
+try:
+    client.http_client.reverify()
+except AttestationError as err:
+    if isinstance(err.__cause__, VerificationError) and err.__cause__.report is not None:
+        print(err.__cause__.report.failed_step)
+
+last, error = client.http_client.last_verification()  # the most recent attempt
 ```
 
-A gateway client verifies one replica per model, so its accessors differ: `ensure_verified(model)` returns a valid verification of a replica serving `model`, and `current` is a list of `ReplicaVerification` records, one per replica used so far and retained by the client (a replica reached by redirect may not be in the catalog), each with the replica's `host`, the `models` requested through it, the `reference` it was verified against and its `verification`.
+To watch every attempt as it happens, pass `on_verification=` to an HTTP client: it is called with the host of the enclave that was verified and the attempt's report and error, the same pair that `last_verification()` returns, once for each attempt, including each router that discovery tries and each gateway replica. The client holds none of its locks while it calls it, so the callback may call the client. It cannot change the outcome: an exception that it raises is logged to the `tinfoil` logger and otherwise ignored, so that a failing callback never turns a verification into a failure or makes the client skip a router or replica. A decision about trust belongs in `verification_check`.
 
-To reject a verified enclave by its facts, pass `verification_check=` to an HTTP client. To change what the verifier itself requires, pass `policy=` a `tinfoil.verifier.Policy`: `pinned_registers` pins registers that the enclave must have measured, `freshness_max_age` bounds how old a witness or approval may be, and `artifacts` supplies your own runtime and platform artifacts or freshness keys. Every HTTP client takes `policy`, and a gateway `ModelPin` takes one that replaces the gateway's for that model. The client builds its verifier from the trust and the policy, so an invalid policy is a `ConfigurationError` before any network I/O.
+```python
+from tinfoil import RouterHTTPClient
+from tinfoil.verifier import VerificationReport
+
+
+def log(host: str, report: VerificationReport | None, error: Exception | None) -> None:
+    print(host, "verified" if report is not None else f"failed: {error}")
+
+
+http_client = RouterHTTPClient(on_verification=log)
+```
+
+A gateway client verifies one replica per model, so its accessors differ: `ensure_verified(model)` returns the report of a valid verification of a replica serving `model`, and `last_verification()` is a list of `ReplicaVerification` records, one per replica that the client has tried and still retains (a replica reached by redirect may not be in the catalog), failed replicas included, each with the replica's `host`, the `models` requested through it, the `reference` that it was verified against, and its last attempt as `report` or `error`.
+
+To reject a verified enclave by its facts, pass `verification_check=` to an HTTP client; it receives the `VerifiedFacts` of each verification that passes the verifier. To change what the verifier itself requires, pass `policy=` a `tinfoil.verifier.Policy`: `pinned_registers` pins registers that the enclave must have measured, `freshness_max_age` bounds how old a witness or approval may be, and `artifacts` supplies your own runtime and platform artifacts or freshness keys. Every HTTP client takes `policy`, and a gateway `ModelPin` takes one that replaces the gateway's for that model. The client builds its verifier from the trust and the policy, so an invalid policy is a `ConfigurationError` before any network I/O.
 
 ```python
 from tinfoil import EnclaveHTTPClient, RepoPin
@@ -315,7 +340,7 @@ with create_client(api_key=os.environ["TINFOIL_API_KEY"]) as client:
 
 ## Verifying attestation documents yourself
 
-The verifier that every client uses is its own package, `tinfoil.verifier`. It appraises an attestation document that you fetched against the repository or registry project that you trust and returns the facts that it proved; it opens no connections. See [its README](src/tinfoil/verifier/README.md) for the API.
+The verifier that every client uses is its own package, `tinfoil.verifier`. It appraises an attestation document that you fetched against the repository or registry project that you trust and returns a verification report whose verified facts are what the document proved, or raises a `VerificationError` that carries the report of the rejection; it opens no connections. See [its README](src/tinfoil/verifier/README.md) for the API.
 
 ```python
 from tinfoil.verifier import Verifier, random_nonce
@@ -326,16 +351,16 @@ nonce = random_nonce()
 
 ### Pinning your own TLS connection
 
-In the default TLS transport mode, the enclave and router clients pin their TLS connections for you; in EHBP mode, and in the gateway clients, they seal request bodies to the attested key instead. If you bring your own transport, check that the connection presents the attested key yourself: after the handshake and before the first byte is written, compare `tinfoil.verifier.cert_pubkey_fp` of the peer certificate with the verification's `tls_public_key_fp`. That is `None` when the document endorses no TLS key, so refuse the connection then too. The check adds to the certificate validation that the TLS context performs; it does not replace it.
+In the default TLS transport mode, the enclave and router clients pin their TLS connections for you; in EHBP mode, and in the gateway clients, they seal request bodies to the attested key instead. If you bring your own transport, check that the connection presents the attested key yourself: after the handshake and before the first byte is written, compare `tinfoil.verifier.cert_pubkey_fp` of the peer certificate with the `tls_public_key_fp` of the report's verified facts. That is `None` when the document endorses no TLS key, so refuse the connection then too. The check adds to the certificate validation that the TLS context performs; it does not replace it.
 
 ```python
 import socket
 import ssl
 
-from tinfoil.verifier import Verification, cert_pubkey_fp
+from tinfoil.verifier import VerifiedFacts, cert_pubkey_fp
 
 
-def open_pinned(host: str, verified: Verification) -> ssl.SSLSocket:
+def open_pinned(host: str, verified: VerifiedFacts) -> ssl.SSLSocket:
     expected = verified.tls_public_key_fp
     if expected is None:
         raise RuntimeError("the attestation document endorses no TLS key")

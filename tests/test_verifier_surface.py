@@ -37,9 +37,14 @@ EXPECTED_ALL = (
     "SOURCE_EMBEDDED",
     "SOURCE_ENDORSEMENT",
     "SOURCE_POLICY",
+    "STEP_FAILED",
+    "STEP_NOT_RUN",
+    "STEP_PASSED",
+    "STEP_SKIPPED",
     "TDX",
     "ArtifactTrust",
     "ArtifactVerification",
+    "CPUEvidence",
     "ConfigAuthorizer",
     "ConfigEndorsement",
     "ConfigSigningKeys",
@@ -51,10 +56,13 @@ EXPECTED_ALL = (
     "EmbeddedConfigReference",
     "EndorsedArtifacts",
     "Expected",
+    "ExpectedFacts",
     "ExpectedSEVSNP",
     "ExpectedTDX",
     "Layer",
+    "MeasuredFacts",
     "Measurement",
+    "PartialFacts",
     "Pin",
     "Policy",
     "PublicKey",
@@ -64,14 +72,18 @@ EXPECTED_ALL = (
     "Registries",
     "RuntimeReference",
     "SoftwareIdentity",
+    "Step",
+    "StepStatus",
     "UsageError",
-    "Verification",
     "VerificationError",
     "VerificationMetadata",
+    "VerificationReport",
+    "VerifiedFacts",
     "Verifier",
     "VerifyError",
     "cert_pubkey_fp",
     "crypto_material_data",
+    "hpke_public_key_fp",
     "load_public_key",
     "parse_expected_sevsnp",
     "parse_expected_tdx",
@@ -98,10 +110,15 @@ CONSTANTS = (
     "SOURCE_EMBEDDED",
     "SOURCE_ENDORSEMENT",
     "SOURCE_POLICY",
+    "STEP_FAILED",
+    "STEP_NOT_RUN",
+    "STEP_PASSED",
+    "STEP_SKIPPED",
 )
 FUNCTIONS = (
     "cert_pubkey_fp",
     "crypto_material_data",
+    "hpke_public_key_fp",
     "load_public_key",
     "parse_expected_sevsnp",
     "parse_expected_tdx",
@@ -120,8 +137,8 @@ CONNECTION_CHECKS = ("connection_cert_fp", "pin_tls_key")
 # Exported aliases of builtin types, which carry no module of their own.
 BUILTIN_ALIASES = ("Layer", "Register")
 
-# Exported type aliases that are neither classes nor functions: a Literal and four unions.
-TYPE_ALIASES = ("ArtifactTrust", "ConfigTrust", "Expected", "Measurement", "ReferenceSource")
+# Exported type aliases that are neither classes nor functions: two Literals and four unions.
+TYPE_ALIASES = ("ArtifactTrust", "ConfigTrust", "Expected", "Measurement", "ReferenceSource", "StepStatus")
 
 # The exported key type is a class of the cryptography library, not of this package.
 FOREIGN_CLASSES = ("PublicKey",)
@@ -222,7 +239,7 @@ def test_the_package_is_typed() -> None:
 
 
 PROBE = '''
-"""A consumer of the verifier surface: builds a verifier, verifies, reads the record."""
+"""A consumer of the verifier surface: builds a verifier, verifies, reads the report."""
 
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
@@ -233,6 +250,9 @@ from {module} import (
     PUBLIC_REGISTRY_ID,
     REGISTER_SIZE,
     SOURCE_EMBEDDED,
+    STEP_FAILED,
+    STEP_NOT_RUN,
+    STEP_PASSED,
     ArtifactTrust,
     ConfigAuthorizer,
     ConfigEndorsement,
@@ -257,12 +277,17 @@ from {module} import (
     RuntimeReference,
     SEVSNP,
     TDX,
+    PartialFacts,
+    Step,
+    StepStatus,
     UsageError,
-    Verification,
     VerificationError,
+    VerificationReport,
+    VerifiedFacts,
     Verifier,
     VerifyError,
     crypto_material_data,
+    hpke_public_key_fp,
     load_public_key,
     parse_expected_tdx,
     parse_reference,
@@ -298,28 +323,44 @@ def authorize(endorsement: ConfigEndorsement) -> None:
         raise ValueError("no config")
 
 
-def source_of(verified: Verification) -> ReferenceSource | None:
+def source_of(verified: VerifiedFacts) -> ReferenceSource | None:
     source: ReferenceSource | None = verified.config.source if verified.config is not None else None
     if verified.runtime is not None and verified.runtime.source == SOURCE_EMBEDDED:
         return SOURCE_EMBEDDED
     return source
 
 
-def report(verified: Verification) -> str:
+def report(result: VerificationReport) -> str:
+    verified = result.verified_facts
+    if verified is None:
+        fail("an accepted report has no verified facts")
     fp: str | None = verified.tls_public_key_fp
     key: str | None = verified.hpke_public_key
     data: str | None = crypto_material_data(verified.crypto_material, "tls", "format")
     expires: datetime | None = verified.freshness_expires_at
     name = verified.config.name if verified.config is not None else ""
     runtime_tag = verified.runtime.tag if verified.runtime is not None else ""
-    verified_at: datetime = verified.metadata.verified_at
+    verified_at: datetime = result.metadata.verified_at
     registers: list[Register | None] = pins(verified.code_measurement)
     return "".join(
         (verified.code_digest, verified.code_tag, verified.config_repo, describe(verified.enclave_measurement),
          fp or "", key or "", data or "", str(expires), name, runtime_tag, verified_at.isoformat(),
          str(len(registers)), verified.to_json(), verified.to_json(indent=2),
-         str(verified.to_dict()), str(source_of(verified)))
+         str(verified.to_dict()), str(source_of(verified)), result.to_json())
     )
+
+
+def rejected(err: VerificationError) -> str:
+    result: VerificationReport | None = err.report
+    assert result is not None and result.verified_facts is None
+    failed: Step | None = result.failed_step
+    assert failed is not None and failed.status == STEP_FAILED and failed.layer == err.layer
+    statuses: list[StepStatus] = [step.status for step in result.steps]
+    assert statuses[1:] == [STEP_NOT_RUN] * 3 and STEP_PASSED not in statuses
+    partial: PartialFacts | None = result.partial_facts
+    assert partial is not None and partial.expected is None and partial.measured is None
+    assert hpke_public_key_fp("00") == "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+    return result.to_json()
 
 
 def main() -> None:
@@ -374,6 +415,7 @@ def main() -> None:
         assert layer == LAYER_ENVELOPE
         assert isinstance(err, VerifyError)
         assert str(err) == f"{{layer}}: {{err.message}}"
+        assert rejected(err)
         print(layer)
     else:
         fail("an empty document verified")

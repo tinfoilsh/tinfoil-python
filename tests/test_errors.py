@@ -15,7 +15,8 @@ def test_verification_error_carries_its_layer_and_message() -> None:
     assert err.layer == LAYER_QUOTE
     assert err.message == "signature does not verify"
     assert str(err) == "quote: signature does not verify"
-    assert err.args == (LAYER_QUOTE, "signature does not verify")
+    assert err.report is None, "only the verifier attaches a report"
+    assert err.args == (LAYER_QUOTE, "signature does not verify", None)
     assert isinstance(err, VerifyError)
 
 

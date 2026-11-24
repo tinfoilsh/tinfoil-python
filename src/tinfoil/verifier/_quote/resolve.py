@@ -18,6 +18,10 @@ class AssemblyError(ValueError):
     """A policy that cannot be completed for the quote: an unendorsed machine, a pin conflict, an open register, a
     quote that is not the document's own, or a policy that the platform cannot translate."""
 
+    expected: Measurement | None = None
+    """Every register that the quote had to attest, when assembly failed after it resolved them all, so that a
+    caller can report them next to the rejection; None when it failed before."""
+
 
 # The register names come from the dataclass so that a register added to it cannot be left out of the pin merge or
 # the completeness check; each label is the register's conventional upper-case name (MRTD, RTMR0, ...).

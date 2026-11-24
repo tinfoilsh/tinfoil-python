@@ -37,6 +37,11 @@ The pre-releases configured clients with options that were checked against each 
 | `Verifier(pinned_registers=e, freshness_max_age=a)` | `Verifier(policy=Policy(pinned_registers=e, freshness_max_age=a))` |
 | `freshness_max_age=timedelta(0)`, a bound of zero | A `UsageError` (a `ConfigurationError` from a client), since it would reject every witness; `None` still selects the seven-day default |
 | `Verifier.caller_authorizes_config` | Removed |
+| `verify_v3(...)` and `verify_v3_at(...)` returning a `Verification` | A `VerificationReport`; the facts are its `verified_facts`, a `VerifiedFacts`, which is `Verification` renamed without `metadata`. The metadata is the report's `metadata`. A `VerificationError` carries the rejection's report as `report` |
+| `verification_check` called with a `Verification` | Called with the `VerifiedFacts` |
+| `client.current`, the last successful verification | `client.last_verification()`, the most recent attempt as `(report, error)`: a later failure replaces an earlier success. On a gateway client it is a list of `ReplicaVerification`, whose `verification` field is replaced by `report`, set when the replica's last attempt passed, and `error`, set when it failed |
+| `ensure_verified()` and `reverify()` returning a `Verification` | A `VerificationReport`; read its `verified_facts` |
+| Watching verifications | `on_verification=` on every HTTP client, called with the host, the report and the error of every attempt |
 
 The checks that rejected conflicting options are gone with them, since those combinations can no longer be written. The one check that spans two fields that remains is `EmbeddedArtifacts` with both artifacts embedded and `freshness_keys` set, since nothing would be left for the keys to verify.
 
@@ -62,9 +67,9 @@ The table maps each name and option of 0.15 to its replacement; a sentence follo
 | `base_url=` | `transport=EHBP(proxy_url=...)` for a proxy, where the URL is where the proxy is mounted; `api_path=` on `OpenAIClient` for an API path other than `/v1/`. A `base_url` among the `openai` options has no effect. |
 | `user_cache_secret=` | The same name on the router and gateway clients, which use a random secret that is generated once per process when it is unset; pass a value for a secret that is stable across processes. An enclave client has no cache-secret option. |
 | `timeout=` on `TinfoilAI` | `timeout=` on `OpenAIClient`, which is the `openai` package's per-request timeout, and `timeout=` on the HTTP client, the attested client's: the attestation fetch and requests through `http_client`. |
-| `get_verification_document()`, `VerificationDocument` | `client.http_client.current`, a `tinfoil.verifier.Verification` with `code_tag`, `code_digest`, `config_repo`, `enclave_measurement`, `tls_public_key_fp`, `hpke_public_key`, `freshness_expires_at`, `metadata.verified_at` and `to_json()`. It is `None` before the first verification; `ensure_verified()` always returns one. |
+| `get_verification_document()`, `VerificationDocument` | `client.http_client.ensure_verified()`, a `tinfoil.verifier.VerificationReport` whose `verified_facts` have `code_tag`, `code_digest`, `config_repo`, `enclave_measurement`, `tls_public_key_fp`, `hpke_public_key` and `freshness_expires_at`, with `metadata.verified_at` and `to_json()` on the report. `last_verification()` returns the most recent attempt, as `(report, error)`, without I/O. |
 | `ValueError` on bad options | `ConfigurationError`, beside `AttestationError` (the enclave could not be trusted) and `NetworkError` (attestation material could not be fetched). All three subclass `TinfoilError`. The `openai` package's errors are unchanged, and re-exported from `tinfoil`. |
-| `tinfoil.attestation`, `tinfoil.sigstore`, `tinfoil.github` | `tinfoil.verifier`: `Verifier().verify_v3(document, nonce, Pin(repo=repo, project=project))` returns a `Verification`, or raises `VerificationError` when the evidence is rejected and `UsageError` when the call is invalid, as when `Pin()` meets a verifier with default config trust. |
+| `tinfoil.attestation`, `tinfoil.sigstore`, `tinfoil.github` | `tinfoil.verifier`: `Verifier().verify_v3(document, nonce, Pin(repo=repo, project=project))` returns a `VerificationReport` whose `verified_facts` are what the document proved, or raises `VerificationError`, which carries the report of the rejection, when the evidence is rejected and `UsageError` when the call is invalid, as when `Pin()` meets a verifier with default config trust. |
 
 ## Examples
 
@@ -94,7 +99,8 @@ http_client = EnclaveHTTPClient(
     EitherPin("tinfoilsh/confidential-model-router", "tinfoilsh/confidential-model-router"),
 )
 client = OpenAIClient(http_client, api_key=os.environ["TINFOIL_API_KEY"])
-verified = http_client.ensure_verified()
+verified = http_client.ensure_verified().verified_facts
+assert verified is not None
 print(verified.code_tag, verified.tls_public_key_fp)
 print(verified.to_json())
 ```

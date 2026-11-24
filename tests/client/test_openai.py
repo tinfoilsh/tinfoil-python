@@ -23,7 +23,7 @@ import pytest
 from openai._resource import AsyncAPIResource, SyncAPIResource
 from openai.providers import bedrock
 
-from tests.client.helpers import Recorder, response, verification
+from tests.client.helpers import Recorder, report_of, response, verification
 from tinfoil import _cachesecret, _fetch
 from tinfoil._clients import (
     AsyncEnclaveHTTPClient,
@@ -73,7 +73,7 @@ def offline(monkeypatch: pytest.MonkeyPatch) -> Recorder:
     )
     monkeypatch.setattr(_fetch, "_TRANSPORT", recorder.transport)
     monkeypatch.setattr(_fetch, "_ASYNC_TRANSPORT", recorder.async_transport)
-    monkeypatch.setattr(Verifier, "verify_v3", lambda self, doc, nonce, pin: verification("ab" * 32))
+    monkeypatch.setattr(Verifier, "verify_v3", lambda self, doc, nonce, pin: report_of(verification("ab" * 32)))
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     return recorder
 

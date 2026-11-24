@@ -64,6 +64,8 @@ from tinfoil._transport import (
 from tinfoil._trust import Trust, verifier_inputs
 from tinfoil._types import (
     DEFAULT_HTTP_TIMEOUT,
+    LastVerification,
+    OnVerification,
     TimeoutTypes,
     Transport,
     VerificationCheck,
@@ -74,7 +76,7 @@ from tinfoil._url import (
     refuse_enclave_origin_proxy,
     with_trailing_slash,
 )
-from tinfoil.verifier import Policy, Verification
+from tinfoil.verifier import Policy, VerificationReport
 
 ASYNC_CONSTRUCTOR = "{name} is built with 'await {name}.create(...)'"
 
@@ -150,27 +152,30 @@ class _AttestedClient:
         an ``EHBP`` proxy URL."""
         return self._attested.keyed.enclave.host
 
-    @property
-    def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None before the first. It may have expired,
-        been rejected or been discarded by a failed ``reverify`` or refresh; ``ensure_verified`` returns one that
-        is valid."""
-        return self._attested.keyed.current
+    def last_verification(self) -> LastVerification:
+        """The most recent verification attempt, without I/O, as ``(report, error)``: the report and None if it
+        passed, and None and the client error that it raised if it failed, with the verifier's
+        ``VerificationError`` and its report as that error's ``__cause__`` when the verifier rejected the
+        document. Every attempt counts: the first verification, its retry, a refresh after expiry or a key
+        rotation, and ``reverify``. A report that it returns may have expired or been rejected since;
+        ``ensure_verified`` returns one that is valid. For a router client it describes the router that the
+        client chose."""
+        return self._attested.keyed.last_verification()
 
-    def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
-        """A verification that is valid now, verifying first only if the cached one has expired or been rejected.
-        It also prepares the TLS pin or HPKE key for it, so returning means requests can be sent. ``timeout``
-        bounds each network operation of a verification: ``httpx.USE_CLIENT_DEFAULT``, the default, selects the
-        client's own, None disables the timeout, and the attestation fetch as a whole is bounded at 30 seconds
-        besides."""
+    def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerificationReport:
+        """The report of a verification that is valid now, verifying first only if the cached one has expired or
+        been rejected. It also prepares the TLS pin or HPKE key for it, so returning means requests can be sent.
+        ``timeout`` bounds each network operation of a verification: ``httpx.USE_CLIENT_DEFAULT``, the default,
+        selects the client's own, None disables the timeout, and the attestation fetch as a whole is bounded at 30
+        seconds besides."""
         return self._attested.keyed.ensure_verified(timeout=timeout)
 
-    def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
-        """Verifies again even if the cached verification is still valid. ``timeout`` is as for
-        ``ensure_verified``. A failure raises as usual; an AttestationError also discards the cached verification
-        and retires the connections that were made under it, so that no later request is sent under it and the
-        next request verifies again; ``current`` still returns it. A NetworkError, a ConfigurationError or an
-        interruption keeps a cached verification that is still fresh."""
+    def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerificationReport:
+        """Verifies again even if the cached verification is still valid, and returns the new report. ``timeout``
+        is as for ``ensure_verified``. A failure raises as usual; an AttestationError also discards the cached
+        verification and retires the connections that were made under it, so that no later request is sent under
+        it and the next request verifies again. A NetworkError, a ConfigurationError or an interruption keeps a
+        cached verification that is still fresh."""
         return self._attested.keyed.reverify(timeout=timeout)
 
     def close(self) -> None:
@@ -209,21 +214,21 @@ class _AsyncAttestedClient:
         """The host of the enclave the client verifies."""
         return self._attested.keyed.enclave.host
 
-    @property
-    def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None before the first. It may have expired,
-        been rejected or been discarded by a failed ``reverify`` or refresh."""
-        return self._attested.keyed.current
+    def last_verification(self) -> LastVerification:
+        """The most recent verification attempt, without I/O, as for the synchronous client. It is not a
+        coroutine."""
+        return self._attested.keyed.last_verification()
 
-    async def ensure_verified(self) -> Verification:
-        """A verification that is valid now, verifying first only if the cached one has expired or been rejected.
-        Cancelling the task ends its wait, not a verification other callers share."""
+    async def ensure_verified(self) -> VerificationReport:
+        """The report of a verification that is valid now, verifying first only if the cached one has expired or
+        been rejected. Cancelling the task ends its wait, not a verification other callers share."""
         return await self._attested.keyed.ensure_verified()
 
-    async def reverify(self) -> Verification:
-        """Verifies again even if the cached verification is still valid. As for the synchronous client, an
-        AttestationError discards the cached verification, so that the next request verifies again, while a
-        NetworkError, a ConfigurationError or a cancellation keeps one that is still fresh."""
+    async def reverify(self) -> VerificationReport:
+        """Verifies again even if the cached verification is still valid, and returns the new report. As for the
+        synchronous client, an AttestationError discards the cached verification, so that the next request
+        verifies again, while a NetworkError, a ConfigurationError or a cancellation keeps one that is still
+        fresh."""
         return await self._attested.keyed.reverify()
 
     async def close(self) -> None:
@@ -246,6 +251,7 @@ def _enclave_parts(
     transport: Transport | None,
     policy: Policy | None,
     verification_check: VerificationCheck | None,
+    on_verification: OnVerification | None,
     fetch_attestation: object,
     *,
     asynchronous: bool,
@@ -266,6 +272,7 @@ def _enclave_parts(
         inputs.pin,
         verifier=verifier,
         verification_check=verification_check,
+        on_verification=on_verification,
         fetch_document=fetch_document,
         fetch_document_async=fetch_document_async,
     )
@@ -286,9 +293,13 @@ class EnclaveHTTPClient(_AttestedClient):
     that the proxy can forward them. ``fetch_attestation`` is how the client
     obtains each attestation document: an ``AttestationFetcher`` callable or
     an ``AttestationRelay``; None fetches it directly from the enclave.
-    ``verification_check``, when set, is called with each verification that
-    passes the trust and the policy before the client uses the enclave's keys; raising
-    rejects the enclave, and the rejection is not retried. ``timeout`` is
+    ``verification_check``, when set, is called with the verified facts of
+    each verification that passes the trust and the policy before the client
+    uses the enclave's keys; raising rejects the enclave, and the rejection
+    is not retried. ``on_verification``, when set, is called with the
+    enclave's host and the outcome of every verification attempt, as
+    ``OnVerification`` describes; ``last_verification`` returns the most
+    recent one. ``timeout`` is
     the ``httpx`` timeout of ``http_client`` and of the client's own
     attestation fetches, which are bounded as a whole besides, at 30
     seconds each; it defaults to ``DEFAULT_HTTP_TIMEOUT``.
@@ -313,11 +324,12 @@ class EnclaveHTTPClient(_AttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
+        on_verification: OnVerification | None = None,
         fetch_attestation: AttestationFetcher | AttestationRelay | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
         enclave, resolved, proxy_url, self._trust = _enclave_parts(
-            host, trust, transport, policy, verification_check, fetch_attestation, asynchronous=False
+            host, trust, transport, policy, verification_check, on_verification, fetch_attestation, asynchronous=False
         )
         keyed = AttestedTransport(enclave, mode_for(resolved), timeout=timeout)
         self._attested = _Attested(keyed, proxy_url, "")
@@ -353,11 +365,12 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
+        on_verification: OnVerification | None = None,
         fetch_attestation: AsyncAttestationFetcher | AttestationRelay | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
         enclave, resolved, proxy_url, copied = _enclave_parts(
-            host, trust, transport, policy, verification_check, fetch_attestation, asynchronous=True
+            host, trust, transport, policy, verification_check, on_verification, fetch_attestation, asynchronous=True
         )
         keyed = AsyncAttestedTransport(enclave, async_mode_for(resolved), timeout=timeout)
         client = cls(_attested=_AsyncAttested(keyed, proxy_url, ""), _trust=copied)
@@ -402,6 +415,7 @@ class RouterHTTPClient(_AttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
+        on_verification: OnVerification | None = None,
         user_cache_secret: str | None = None,
         fetch_attestation: AttestationFetcher | AttestationRelay | None = None,
         fetch_router_list: RouterListFetcher | RouterListRelay | None = None,
@@ -420,6 +434,7 @@ class RouterHTTPClient(_AttestedClient):
             timeout=timeout,
             list_routers=list_routers,
             fetch_document=fetch_document,
+            on_verification=on_verification,
         )
         self._attested = _Attested(keyed, proxy_url, secret)
         # Discovery leaves its fallback unverified.
@@ -445,6 +460,7 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
+        on_verification: OnVerification | None = None,
         user_cache_secret: str | None = None,
         fetch_attestation: AsyncAttestationFetcher | AttestationRelay | None = None,
         fetch_router_list: AsyncRouterListFetcher | RouterListRelay | None = None,
@@ -463,6 +479,7 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
             timeout=timeout,
             list_routers=list_routers,
             fetch_document=fetch_document,
+            on_verification=on_verification,
         )
         client = cls(_attested=_AsyncAttested(keyed, proxy_url, secret))
         try:
@@ -502,8 +519,10 @@ class GatewayHTTPClient:
     ``policy``, a ``tinfoil.verifier.Policy``, is the verification policy for
     unpinned models, and for pinned models whose pin sets none; a pin's own
     policy replaces it entirely for that model. ``verification_check`` is called with each
-    replica's verification; a replica it rejects is skipped for the next
-    replica of the model. ``user_cache_secret`` empty selects the random
+    replica's verified facts; a replica that it rejects is skipped for the
+    next replica of the model. ``on_verification`` is called with the
+    replica's host and the outcome of every attempt to verify a replica, and
+    ``last_verification`` returns each replica's last attempt. ``user_cache_secret`` empty selects the random
     secret that is generated once per process, as on ``RouterHTTPClient``,
     whose constructor fails the same way when that secret can't be generated;
     the gateway sees a cache prefix keyed on it, never the secret. ``url``
@@ -531,6 +550,7 @@ class GatewayHTTPClient:
         pinned_models_only: bool = False,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
+        on_verification: OnVerification | None = None,
         user_cache_secret: str | None = None,
         url: str | None = None,
         catalog: Callable[[], Catalog] | None = None,
@@ -545,6 +565,7 @@ class GatewayHTTPClient:
             pinned_models_only=pinned_models_only,
             policy=policy,
             verification_check=verification_check,
+            on_verification=on_verification,
             user_cache_secret=user_cache_secret,
             timeout=timeout,
         )
@@ -581,18 +602,20 @@ class GatewayHTTPClient:
 
     def ensure_verified(
         self, model: str, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT
-    ) -> Verification:
-        """A verification that is valid now of a replica serving ``model``, verifying replicas only if needed.
+    ) -> VerificationReport:
+        """The report of a verification that is valid now of a replica serving ``model``, verifying replicas only
+        if needed.
         ``timeout`` bounds each network operation of the catalog and attestation fetches that the call makes:
         ``httpx.USE_CLIENT_DEFAULT``, the default, selects the client's own, None disables the timeout, and each
         fetch as a whole is bounded besides, at 10 seconds for the catalog and 30 for an attestation."""
         return self._transport.ensure_verified(model, timeout=timeout)
 
-    @property
-    def current(self) -> list[ReplicaVerification]:
-        """The last successful verification of each replica used so far and still listed by the catalog, without
-        checking them. They may have expired or been rejected."""
-        return self._transport.verifications()
+    def last_verification(self) -> list[ReplicaVerification]:
+        """One entry for each replica that the client has tried to verify and that the catalog still lists, failed
+        replicas included, each holding that replica's last attempt, without I/O: its report if the attempt
+        passed, and otherwise its error. A replica's earlier success is not kept once a later attempt for it
+        fails. Reports may have expired or been rejected since."""
+        return self._transport.last_verification()
 
     def close(self) -> None:
         """Releases every replica's connections and stops catalog refreshes; one in flight finishes on its own
@@ -638,6 +661,7 @@ class AsyncGatewayHTTPClient:
         pinned_models_only: bool = False,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
+        on_verification: OnVerification | None = None,
         user_cache_secret: str | None = None,
         url: str | None = None,
         catalog: Callable[[], Catalog] | None = None,
@@ -652,6 +676,7 @@ class AsyncGatewayHTTPClient:
             pinned_models_only=pinned_models_only,
             policy=policy,
             verification_check=verification_check,
+            on_verification=on_verification,
             user_cache_secret=user_cache_secret,
             timeout=timeout,
         )
@@ -678,13 +703,14 @@ class AsyncGatewayHTTPClient:
         """The catalog's models that the client's policy serves, sorted, without verifying replicas."""
         return await self._transport.models()
 
-    async def ensure_verified(self, model: str) -> Verification:
-        """A verification that is valid now of a replica serving ``model``."""
+    async def ensure_verified(self, model: str) -> VerificationReport:
+        """The report of a verification that is valid now of a replica serving ``model``."""
         return await self._transport.ensure_verified(model)
 
-    @property
-    def current(self) -> list[ReplicaVerification]:
-        return self._transport.verifications()
+    def last_verification(self) -> list[ReplicaVerification]:
+        """Each tried replica's last attempt, without I/O, as for the synchronous client. It is not a
+        coroutine."""
+        return self._transport.last_verification()
 
     async def close(self) -> None:
         """Releases every replica's connections and stops catalog refreshes; see the synchronous client for what

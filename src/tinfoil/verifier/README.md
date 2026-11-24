@@ -2,9 +2,11 @@
 
 Offline verification of Tinfoil enclave attestation documents. The verifier
 takes a document that you fetched, the nonce that you bound it to and the
-repository or registry project that you trust, and returns the facts that the document proved:
-the endorsed TLS key fingerprint and HPKE public key, the measured registers
-and the deadline after which the result must not be reused. It opens no
+repository or registry project that you trust, and returns a verification
+report: the outcome of each step and the facts that the document proved, the
+endorsed TLS key fingerprint and HPKE public key, the measured registers and
+the deadline after which the result must not be reused. A rejected document
+raises an error that carries the report of the rejection. It opens no
 connections and keeps no state.
 
 ## Install and import
@@ -30,15 +32,17 @@ project that you expect the enclave to run. The verifier does not fetch; any HTT
 ```python
 import urllib.request
 
-from tinfoil.verifier import Pin, Verification, Verifier, random_nonce
+from tinfoil.verifier import Pin, Verifier, VerifiedFacts, random_nonce
 
 
-def fetch_and_verify(host: str, pin: Pin) -> Verification:
+def fetch_and_verify(host: str, pin: Pin) -> VerifiedFacts:
     nonce = random_nonce()
     url = f"https://{host}/.well-known/tinfoil-attestation?nonce={nonce.hex()}"
     with urllib.request.urlopen(url, timeout=10) as response:
         document = response.read()
-    return Verifier().verify_v3(document, nonce, pin)
+    report = Verifier().verify_v3(document, nonce, pin)
+    assert report.verified_facts is not None  # always set on a report that verify_v3 returns
+    return report.verified_facts
 ```
 
 The pin is a `Pin`: `Pin(repo=...)` for a GitHub repository, `owner/name`,
@@ -57,8 +61,8 @@ raise for that pin whatever the document, so that a caller can refuse a pin
 before fetching anything.
 
 A successful return is not the end of the caller's job. The returned
-`Verification` proves facts about the enclave that served the document; the
-caller must bind its traffic to them:
+report's `verified_facts`, a `VerifiedFacts`, proves facts about the enclave
+that served the document; the caller must bind its traffic to them:
 
 - `verified.tls_public_key_fp`: pin every TLS connection to the enclave to
   this SPKI fingerprint (see "Pinning the TLS connection" below). A connection whose leaf
@@ -75,7 +79,7 @@ caller must bind its traffic to them:
 from datetime import UTC, datetime
 
 
-def still_usable(verified: Verification) -> bool:
+def still_usable(verified: VerifiedFacts) -> bool:
     expires = verified.freshness_expires_at
     return expires is not None and datetime.now(UTC) < expires
 ```
@@ -90,7 +94,7 @@ was received:
 from datetime import UTC, datetime
 
 received_at = datetime(2026, 8, 6, 12, 0, tzinfo=UTC)
-verified = Verifier().verify_v3_at(archived_document, archived_nonce, Pin(repo="org/repo"), received_at)
+report = Verifier().verify_v3_at(archived_document, archived_nonce, Pin(repo="org/repo"), received_at)
 ```
 
 Authenticate that instant yourself. Every time-bound check, from the
@@ -167,15 +171,76 @@ pinned = Verifier(policy=Policy(pinned_registers=parse_expected_tdx("", "", "", 
 ```
 
 To pin an enclave to exactly what it measured today, take the expectations
-from a verified record:
+from its verified facts:
 
 ```python
 locked = Verifier(policy=Policy(pinned_registers=verified.enclave_measurement.expected()))
 ```
 
-## Reading the record
+## Reading the report
 
-`Verification` is a frozen record. The measurements are a tagged union, so
+A `VerificationReport` describes one verification, step by step:
+
+- `steps`: one `Step` for each layer, in order: `envelope`, `provenance`,
+  `quote` and `policy` today. Each has a `layer`, a `status` (`STEP_PASSED`,
+  `STEP_FAILED`, `STEP_SKIPPED` or `STEP_NOT_RUN`) and a `message`: the
+  error's message for a failed step and the reason for a skipped one.
+  Provenance is skipped when the verifier embeds every reference value, so
+  that there is no endorsement to authenticate. `failed_step` is the step
+  that failed, or `None`.
+- `verified_facts`: the `VerifiedFacts` of an accepted document. It is set
+  if and only if no step failed, and it is the only part of a report that
+  carries the keys that a connection binds to.
+- `partial_facts`: what a rejected verification established before the step
+  that failed. It is set if and only if a step failed.
+- `metadata`: the verifier's identity and the appraisal instant,
+  `verified_at`, which the verifier supplies rather than the document.
+
+`verify_v3` returns a report only for a document that it accepts. A rejected
+document raises a `VerificationError` whose `report` has the failed step and
+the partial facts, so that a caller can never mistake a failed report for a
+successful one. A `UsageError` has no report, since verification never
+started.
+
+`PartialFacts` hold two groups. `expected`, an `ExpectedFacts`, is set once
+provenance passed or was skipped: the accepted `artifact`, `config` and `platform`, the
+`code_measurement` that the release fixes, in the layout of the platform that
+the document's CPU evidence names, and, once the policy step resolved it,
+`measurement`, every register that the quote must attest, even if a later
+check of that step failed. `measured`, a `MeasuredFacts`, is set once the
+envelope passed: the `cpu` evidence, whose `measurement` is every register
+that the hardware measured, set only once the quote authenticated, and the
+`tls_public_key_fp` and `hpke_public_key_fp` that the document endorses. The
+HPKE fingerprint is the lowercase-hex SHA-256 of the key's bytes
+(`hpke_public_key_fp(key)` computes it), never the key itself. In a rejected
+report the fingerprints are the document's claim, unverified: only the policy
+step binds the keys to the enclave.
+
+```python
+from tinfoil.verifier import Pin, VerificationError, Verifier
+
+
+def explain(document: bytes, nonce: bytes, pin: Pin) -> str:
+    try:
+        report = Verifier().verify_v3(document, nonce, pin)
+    except VerificationError as err:
+        rejected = err.report
+        assert rejected is not None
+        partial = rejected.partial_facts
+        expected = partial.expected if partial is not None else None
+        measured = partial.measured if partial is not None else None
+        if expected is not None and expected.measurement is not None and measured is not None and measured.cpu:
+            return f"expected {expected.measurement}, measured {measured.cpu.measurement}"
+        return f"rejected at {err.layer}: {err.message}"
+    return report.to_json(indent=2)
+```
+
+A report and its facts are frozen; `to_dict()` and `to_json()` give a plain
+copy, as for the verified facts below.
+
+## Reading the verified facts
+
+`VerifiedFacts` is a frozen record. The measurements are a tagged union, so
 `match` on the class:
 
 ```python
@@ -233,7 +298,8 @@ subclasses that call for different responses:
 - `VerificationError`: the document must not be trusted. `err.layer` names
   the layer that rejected it, one of `LAYER_ENVELOPE`, `LAYER_PROVENANCE`,
   `LAYER_QUOTE` and `LAYER_POLICY` today, and `err.message` says why;
-  `str(err)` is `"<layer>: <message>"`.
+  `str(err)` is `"<layer>: <message>"`. `err.report` is the report of the
+  rejected verification.
 
 ```python
 from tinfoil.verifier import LAYER_PROVENANCE, Pin, UsageError, VerificationError, Verifier

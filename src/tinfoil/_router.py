@@ -12,7 +12,7 @@ from tinfoil._enclave import AsyncDocumentFetch, DocumentFetch, Enclave
 from tinfoil._errors import ConfigurationError, TinfoilError, network_error
 from tinfoil._fetch import get_bounded, get_bounded_async
 from tinfoil._transport import AsyncAttestedTransport, AttestedTransport
-from tinfoil._types import DEFAULT_HTTP_TIMEOUT, TimeoutTypes, VerificationCheck
+from tinfoil._types import DEFAULT_HTTP_TIMEOUT, OnVerification, TimeoutTypes, VerificationCheck
 from tinfoil.verifier import Pin, Verifier
 
 
@@ -116,15 +116,23 @@ def discover(
     timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     list_routers: RouterList | None = None,
     fetch_document: DocumentFetch | None = None,
+    on_verification: OnVerification | None = None,
 ) -> AttestedTransport:
     """The transport ``new_transport`` makes for the first router from the router list, in random order, that
     verifies under ``verifier`` and passes ``check``, and otherwise for the fallback host, which it leaves to be
     verified on first use. None selects the default policy and accepts every router. ``list_routers`` replaces the
     fetch of Tinfoil's list, and any error from it counts as an empty list, except a ``MisusedRouterListFetcher``, which
     is raised; ``fetch_document`` obtains every
-    candidate's and the fallback's documents. It stops trying routers after ``DISCOVERY_TIMEOUT`` seconds."""
+    candidate's and the fallback's documents. It stops trying routers after ``DISCOVERY_TIMEOUT`` seconds.
+    ``on_verification`` is called for each router that discovery tries, and for the fallback and the chosen router
+    whenever they are verified, each with its own host."""
     fallback = Enclave(
-        FALLBACK_HOST, DEFAULT_ROUTER_PIN, verifier=verifier, verification_check=check, fetch_document=fetch_document
+        FALLBACK_HOST,
+        DEFAULT_ROUTER_PIN,
+        verifier=verifier,
+        verification_check=check,
+        on_verification=on_verification,
+        fetch_document=fetch_document,
     )
     deadline = time.monotonic() + DISCOVERY_TIMEOUT
     try:
@@ -141,7 +149,7 @@ def discover(
     for router in routers:
         if time.monotonic() >= deadline:
             break
-        enclave = _candidate(router, fallback, check)
+        enclave = _candidate(router, fallback, check, on_verification)
         if enclave is None:
             continue
         # The candidate keeps the verification, so the client doesn't repeat it, and a router whose keys the
@@ -168,6 +176,7 @@ async def discover_async(
     timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     list_routers: AsyncRouterList | None = None,
     fetch_document: AsyncDocumentFetch | None = None,
+    on_verification: OnVerification | None = None,
 ) -> AsyncAttestedTransport:
     """``discover`` on the event loop. The task's cancellation ends discovery with it, without a fallback, and
     closes the candidate it was probing."""
@@ -176,6 +185,7 @@ async def discover_async(
         DEFAULT_ROUTER_PIN,
         verifier=verifier,
         verification_check=check,
+        on_verification=on_verification,
         fetch_document_async=fetch_document,
     )
     deadline = time.monotonic() + DISCOVERY_TIMEOUT
@@ -192,7 +202,7 @@ async def discover_async(
     for router in routers:
         if time.monotonic() >= deadline:
             break
-        enclave = _candidate(router, fallback, check)
+        enclave = _candidate(router, fallback, check, on_verification)
         if enclave is None:
             continue
         candidate = new_transport(enclave)
@@ -208,7 +218,9 @@ async def discover_async(
     return new_transport(fallback)
 
 
-def _candidate(router: str, fallback: Enclave, check: VerificationCheck | None) -> Enclave | None:
+def _candidate(
+    router: str, fallback: Enclave, check: VerificationCheck | None, on_verification: OnVerification | None
+) -> Enclave | None:
     """``router`` as an enclave verified like the fallback, or None for an entry that is not a host: the list is
     untrusted, so a malformed entry is skipped rather than failing discovery."""
     try:
@@ -217,6 +229,7 @@ def _candidate(router: str, fallback: Enclave, check: VerificationCheck | None) 
             fallback.pin,
             verifier=fallback.verifier,
             verification_check=check,
+            on_verification=on_verification,
             fetch_document=fallback.fetch_document,
             fetch_document_async=fallback.fetch_document_async,
         )

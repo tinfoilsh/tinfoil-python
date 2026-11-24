@@ -9,8 +9,14 @@ replaying the request is up to the layer above. A re-verification that fails
 with an AttestationError discards the verification that it was replacing,
 even one that is still fresh, and retires its connections, so that the next
 request verifies again; any other failure keeps a verification that is still
-fresh. A discarded verification stays the last successful one that ``current``
-returns, but no request is sent under it.
+fresh, and no request is sent under a discarded verification again.
+
+Every attempt to verify, retried or final, becomes the transport's
+``last_verification`` once its outcome is decided, and is reported to the
+enclave's ``on_verification`` callback once the refresh that made it is
+done, outside the transport's lock and after the refresh is forgotten, so
+that a callback that calls the client starts a refresh of its own rather
+than waiting for the one that is calling it.
 """
 
 from __future__ import annotations
@@ -26,12 +32,12 @@ from httpx._client import UseClientDefault  # the sentinel's type; httpx exports
 
 from tinfoil._ehbp import NO_HPKE_KEY, AsyncSealingTransport, SealingTransport, check_ehbp, server_identity
 from tinfoil._enclave import DEADLINE_EXCEEDED, FRESHNESS_EXPIRED, Enclave, is_fresh
-from tinfoil._errors import AttestationError, ConfigurationError, NetworkError
+from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, TinfoilError
 from tinfoil._keys import PeerLacksKeyError, key_rejection
 from tinfoil._tls import NO_TLS, AsyncPinnedTransport, PinnedTransport
-from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP, TLS, TimeoutTypes, Transport
+from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP, TLS, LastVerification, TimeoutTypes, Transport
 from tinfoil._url import validate_proxy_url
-from tinfoil.verifier import Verification
+from tinfoil.verifier import VerificationReport, VerifiedFacts
 
 CLIENT_CLOSED = "client is closed"
 """The message of the ConfigurationError that a closed client raises."""
@@ -45,8 +51,11 @@ USE_CLIENT_DEFAULT = httpx.USE_CLIENT_DEFAULT
 
 _T = TypeVar("_T", "RetiringTransport", "AsyncRetiringTransport")
 
-VerifyMethod = Callable[..., Verification]
-AsyncVerifyMethod = Callable[..., Coroutine[Any, Any, Verification]]
+VerifyMethod = Callable[..., VerificationReport]
+AsyncVerifyMethod = Callable[..., Coroutine[Any, Any, VerificationReport]]
+
+NO_ATTEMPT: LastVerification = (None, None)
+"""What ``last_verification`` returns before the first attempt."""
 
 
 class Mode(Protocol):
@@ -60,7 +69,7 @@ class Mode(Protocol):
     def validate_request(self, request: httpx.Request) -> None:
         """Raises ConfigurationError for a request the mode cannot protect, before any network I/O."""
 
-    def new_transport(self, verified: Verification) -> httpx.BaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.BaseTransport:
         """A transport tied to ``verified``'s keys. It reports an error meaning the peer does not hold those keys,
         detected before the application processes the request, as a ``PeerLacksKeyError``."""
 
@@ -73,7 +82,7 @@ class AsyncMode(Protocol):
 
     def validate_request(self, request: httpx.Request) -> None: ...
 
-    def new_transport(self, verified: Verification) -> httpx.AsyncBaseTransport: ...
+    def new_transport(self, verified: VerifiedFacts) -> httpx.AsyncBaseTransport: ...
 
 
 class TLSMode:
@@ -85,7 +94,7 @@ class TLSMode:
     def validate_request(self, request: httpx.Request) -> None:
         _validate_tls(request)
 
-    def new_transport(self, verified: Verification) -> httpx.BaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.BaseTransport:
         return PinnedTransport(_tls_key(verified))
 
 
@@ -97,7 +106,7 @@ class AsyncTLSMode:
     def validate_request(self, request: httpx.Request) -> None:
         _validate_tls(request)
 
-    def new_transport(self, verified: Verification) -> httpx.AsyncBaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.AsyncBaseTransport:
         return AsyncPinnedTransport(_tls_key(verified))
 
 
@@ -109,7 +118,7 @@ class EHBPMode:
     def validate_request(self, request: httpx.Request) -> None:
         check_ehbp(request)
 
-    def new_transport(self, verified: Verification) -> httpx.BaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.BaseTransport:
         return SealingTransport(server_identity(_hpke_key(verified)))
 
 
@@ -121,7 +130,7 @@ class AsyncEHBPMode:
     def validate_request(self, request: httpx.Request) -> None:
         check_ehbp(request)
 
-    def new_transport(self, verified: Verification) -> httpx.AsyncBaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.AsyncBaseTransport:
         return AsyncSealingTransport(server_identity(_hpke_key(verified)))
 
 
@@ -168,14 +177,14 @@ def async_mode_for(transport: Transport) -> AsyncMode:
     raise ConfigurationError(f"transport must be a TLS or EHBP value, not {type(transport).__name__}")
 
 
-def _tls_key(verified: Verification) -> str:
+def _tls_key(verified: VerifiedFacts) -> str:
     key = verified.tls_public_key_fp
     if key is None:
         raise AttestationError('document endorses no "tls" key')
     return key
 
 
-def _hpke_key(verified: Verification) -> str:
+def _hpke_key(verified: VerifiedFacts) -> str:
     key = verified.hpke_public_key
     if key is None:
         raise AttestationError(NO_HPKE_KEY)
@@ -183,21 +192,31 @@ def _hpke_key(verified: Verification) -> str:
 
 
 class _State(Generic[_T]):
-    """One successful verification and the transport created for its keys. They are published together, so a
-    request never sends under keys other than those of the verification it checked. ``rejected`` marks a state
-    whose keys a request found the peer doesn't hold, and ``discarded`` one that a re-verification failing with
-    an AttestationError was replacing; either makes the state invalid while it stays the current one."""
+    """The report of one successful verification and the transport created for its verified facts' keys. They are
+    published together, so a request never sends under keys other than those of the verification it checked.
+    ``rejected`` marks a state whose keys a request found the peer doesn't hold, and ``discarded`` one that a
+    re-verification failing with an AttestationError was replacing; either makes the state invalid while it stays
+    the current one."""
 
-    __slots__ = ("discarded", "rejected", "transport", "verification")
+    __slots__ = ("discarded", "facts", "rejected", "report", "transport")
 
-    def __init__(self, verification: Verification, transport: _T) -> None:
-        self.verification = verification
+    def __init__(self, report: VerificationReport, facts: VerifiedFacts, transport: _T) -> None:
+        self.report = report
+        self.facts = facts
         self.transport: _T = transport
         self.rejected = False
         self.discarded = False
 
     def valid(self) -> bool:
-        return not self.rejected and not self.discarded and is_fresh(self.verification)
+        return not self.rejected and not self.discarded and is_fresh(self.facts)
+
+
+def _facts(report: VerificationReport) -> VerifiedFacts:
+    """The verified facts of a report that the enclave admitted, which always has them."""
+    facts = report.verified_facts
+    if facts is None:
+        raise AttestationError("verification passed without verified facts")
+    return facts
 
 
 class _Refresh:
@@ -223,6 +242,7 @@ class AttestedTransport(httpx.BaseTransport):
         self.timeout = timeout
         self._lock = threading.Lock()
         self._current: _State[RetiringTransport] | None = None
+        self._last: LastVerification = NO_ATTEMPT
         self._refresh: _Refresh | None = None
         self._closed = False
 
@@ -238,30 +258,31 @@ class AttestedTransport(httpx.BaseTransport):
             self._invalidate(state)
             raise key_rejection(err)  # noqa: B904 - the cause is set
 
-    def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
-        """A verification that is valid now, verifying first only if the current one has expired or been
-        invalidated. Returning means requests can be sent under it."""
-        return self._verified(False, Enclave.verify, self._timeout(timeout), None).verification
+    def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerificationReport:
+        """The report of a verification that is valid now, verifying first only if the current one has expired or
+        been invalidated. Returning means requests can be sent under it."""
+        return self._verified(False, Enclave.verify, self._timeout(timeout), None).report
 
-    def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
-        """Verifies again even if the current verification is still valid. An AttestationError discards the
-        current verification, so that the next request verifies again; any other failure keeps it."""
-        return self._verified(True, Enclave.verify, self._timeout(timeout), None).verification
+    def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerificationReport:
+        """Verifies again even if the current verification is still valid, and returns the new report. An
+        AttestationError discards the current verification, so that the next request verifies again; any other
+        failure keeps it."""
+        return self._verified(True, Enclave.verify, self._timeout(timeout), None).report
 
     def verify_once(
         self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, deadline: float | None = None
-    ) -> Verification:
+    ) -> VerificationReport:
         """``reverify`` without a retry of a failed attempt, so a caller trying several enclaves moves on
         quickly. ``deadline`` is a ``time.monotonic`` instant the attempt must finish by."""
-        return self._verified(True, Enclave.verify_once, self._timeout(timeout), deadline).verification
+        return self._verified(True, Enclave.verify_once, self._timeout(timeout), deadline).report
 
-    @property
-    def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None before the first. It may have expired,
-        been invalidated or been discarded by a failed re-verification; ``ensure_verified`` returns one that is
-        valid."""
+    def last_verification(self) -> LastVerification:
+        """The outcome of the most recent attempt to verify the enclave, without I/O, as ``(report, error)``: its
+        report if it passed, and otherwise no report and the error that the transport reported for it;
+        ``(None, None)`` before the first attempt. A report that it returns may have expired or been
+        invalidated since; ``ensure_verified`` returns one that is valid."""
         with self._lock:
-            return None if self._current is None else self._current.verification
+            return self._last
 
     def close(self) -> None:
         """Ends the transport: closes its connections and refuses later requests and verifications."""
@@ -293,8 +314,9 @@ class AttestedTransport(httpx.BaseTransport):
                 if refresh is None:
                     refresh = self._refresh = _Refresh()
             if owner:
+                attempts: list[LastVerification] = []
                 try:
-                    self._refresh_once(verify, timeout, deadline)
+                    self._refresh_once(verify, timeout, deadline, attempts)
                 except BaseException as err:
                     refresh.error = err
                     raise
@@ -302,6 +324,8 @@ class AttestedTransport(httpx.BaseTransport):
                     with self._lock:
                         self._refresh = None
                     refresh.done.set()
+                    for report, error in attempts:
+                        self.enclave.notify(report, error)
             else:
                 if not refresh.done.wait(_time_left(deadline)):
                     raise NetworkError(DEADLINE_EXCEEDED)
@@ -311,37 +335,64 @@ class AttestedTransport(httpx.BaseTransport):
             # check the current state again rather than trust the refresh.
             force = False
 
-    def _refresh_once(self, verify: VerifyMethod, timeout: TimeoutTypes, deadline: float | None) -> None:
+    def _refresh_once(
+        self, verify: VerifyMethod, timeout: TimeoutTypes, deadline: float | None, attempts: list[LastVerification]
+    ) -> None:
+        """Verifies once, with the enclave's retries, and publishes the result. Each attempt, retried or final,
+        becomes the last verification as soon as its outcome is decided, and is appended to ``attempts`` for the
+        caller to report. An exception other than a client error decides no outcome, so it is not an attempt."""
         with self._lock:
             replacing = self._current
+
+        def retried(err: TinfoilError) -> None:
+            self._record((None, err), attempts)
+
         try:
-            self._publish(verify, timeout, deadline)
-        except AttestationError:
+            self._publish(verify, timeout, deadline, retried, attempts)
+        except AttestationError as err:
             self._discard(replacing)
+            self._record((None, err), attempts)
+            raise
+        except TinfoilError as err:
+            self._record((None, err), attempts)
             raise
 
-    def _publish(self, verify: VerifyMethod, timeout: TimeoutTypes, deadline: float | None) -> None:
-        verified = verify(self.enclave, timeout=timeout, deadline=deadline)
-        transport = RetiringTransport(self.mode.new_transport(verified))
+    def _record(self, attempt: LastVerification, attempts: list[LastVerification]) -> None:
+        with self._lock:
+            self._last = attempt
+        attempts.append(attempt)
+
+    def _publish(
+        self,
+        verify: VerifyMethod,
+        timeout: TimeoutTypes,
+        deadline: float | None,
+        retried: Callable[[TinfoilError], None],
+        attempts: list[LastVerification],
+    ) -> None:
+        report = verify(self.enclave, timeout=timeout, deadline=deadline, retried=retried)
+        facts = _facts(report)
+        transport = RetiringTransport(self.mode.new_transport(facts))
         with self._lock:
             if self._closed:
                 transport.close()
                 raise ConfigurationError(CLIENT_CLOSED)
-            state = _State(verified, transport)
+            state = _State(report, facts, transport)
             # Creating the transport or waiting for the lock can outlast freshness.
             if not state.valid():
                 transport.close()
                 raise AttestationError(FRESHNESS_EXPIRED)
             replaced, self._current = self._current, state
+            self._last = (report, None)
+        attempts.append((report, None))
         if replaced is not None:
             # Connections of the replaced state are tied to its keys.
             replaced.transport.retire()
 
     def _discard(self, replacing: _State[RetiringTransport] | None) -> None:
         """Discards ``replacing``, the state that a re-verification was replacing when it failed with an
-        AttestationError, and retires its connections. The state stays current, so that ``current`` still returns
-        its verification, but it is no longer valid, so that the next request verifies again. A newer state that
-        was published since is kept."""
+        AttestationError, and retires its connections. The state is no longer valid, so that the next request
+        verifies again. A newer state that was published since is kept."""
         with self._lock:
             if replacing is None or self._current is not replacing:
                 return
@@ -363,6 +414,7 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
         self.mode = mode
         self.timeout = timeout
         self._current: _State[AsyncRetiringTransport] | None = None
+        self._last: LastVerification = NO_ATTEMPT
         self._refresh: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -375,30 +427,31 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
             state.rejected = True
             raise key_rejection(err)  # noqa: B904 - the cause is set
 
-    async def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
-        """A verification that is valid now, verifying first only if the current one has expired or been
-        invalidated."""
+    async def ensure_verified(
+        self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT
+    ) -> VerificationReport:
+        """The report of a verification that is valid now, verifying first only if the current one has expired or
+        been invalidated."""
         state = await self._verified(False, Enclave.verify_async, self._timeout(timeout), None)
-        return state.verification
+        return state.report
 
-    async def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> Verification:
-        """Verifies again even if the current verification is still valid. An AttestationError discards the
-        current verification, as for ``AttestedTransport.reverify``."""
+    async def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerificationReport:
+        """Verifies again even if the current verification is still valid, and returns the new report. An
+        AttestationError discards the current verification, as for ``AttestedTransport.reverify``."""
         state = await self._verified(True, Enclave.verify_async, self._timeout(timeout), None)
-        return state.verification
+        return state.report
 
     async def verify_once(
         self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT, deadline: float | None = None
-    ) -> Verification:
+    ) -> VerificationReport:
         """``reverify`` without a retry of a failed attempt."""
         state = await self._verified(True, Enclave.verify_once_async, self._timeout(timeout), deadline)
-        return state.verification
+        return state.report
 
-    @property
-    def current(self) -> Verification | None:
-        """The last successful verification without checking it, or None before the first. It may have expired,
-        been invalidated or been discarded by a failed re-verification."""
-        return None if self._current is None else self._current.verification
+    def last_verification(self) -> LastVerification:
+        """The outcome of the most recent attempt to verify the enclave, without I/O, as for
+        ``AttestedTransport.last_verification``."""
+        return self._last
 
     async def aclose(self) -> None:
         """Ends the transport: closes its connections, stops a verification in progress and refuses later
@@ -450,24 +503,60 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
             task.exception()
 
     async def _refresh_once(self, verify: AsyncVerifyMethod, timeout: TimeoutTypes, deadline: float | None) -> None:
-        replacing = self._current
+        """``AttestedTransport._refresh_once`` in the refresh's own task. The attempts are reported once the
+        outcome is decided, after the refresh is forgotten, so that a callback that starts a verification starts
+        a refresh of its own."""
+        attempts: list[LastVerification] = []
         try:
-            await self._publish(verify, timeout, deadline)
-        except AttestationError:
+            await self._attempt(verify, timeout, deadline, attempts)
+        finally:
+            if self._refresh is asyncio.current_task():
+                self._refresh = None
+            for report, error in attempts:
+                self.enclave.notify(report, error)
+
+    async def _attempt(
+        self, verify: AsyncVerifyMethod, timeout: TimeoutTypes, deadline: float | None, attempts: list[LastVerification]
+    ) -> None:
+        replacing = self._current
+
+        def retried(err: TinfoilError) -> None:
+            self._record((None, err), attempts)
+
+        try:
+            await self._publish(verify, timeout, deadline, retried, attempts)
+        except AttestationError as err:
             await self._discard(replacing)
+            self._record((None, err), attempts)
+            raise
+        except TinfoilError as err:
+            self._record((None, err), attempts)
             raise
 
-    async def _publish(self, verify: AsyncVerifyMethod, timeout: TimeoutTypes, deadline: float | None) -> None:
-        verified = await verify(self.enclave, timeout=timeout, deadline=deadline)
-        transport = AsyncRetiringTransport(self.mode.new_transport(verified))
+    def _record(self, attempt: LastVerification, attempts: list[LastVerification]) -> None:
+        self._last = attempt
+        attempts.append(attempt)
+
+    async def _publish(
+        self,
+        verify: AsyncVerifyMethod,
+        timeout: TimeoutTypes,
+        deadline: float | None,
+        retried: Callable[[TinfoilError], None],
+        attempts: list[LastVerification],
+    ) -> None:
+        report = await verify(self.enclave, timeout=timeout, deadline=deadline, retried=retried)
+        facts = _facts(report)
+        transport = AsyncRetiringTransport(self.mode.new_transport(facts))
         if self._closed:
             await transport.aclose()
             raise ConfigurationError(CLIENT_CLOSED)
-        state = _State(verified, transport)
+        state = _State(report, facts, transport)
         if not state.valid():
             await transport.aclose()
             raise AttestationError(FRESHNESS_EXPIRED)
         replaced, self._current = self._current, state
+        self._record((report, None), attempts)
         if replaced is not None:
             await replaced.transport.retire()
 

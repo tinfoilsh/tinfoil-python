@@ -13,10 +13,22 @@ from typing import Any
 import httpx
 import pytest
 
-from tests.client.helpers import HOST, fake_enclave, response, verification
+from tests.client.helpers import (
+    HOST,
+    current_facts,
+    facts_of,
+    fake_enclave,
+    last_error,
+    last_facts,
+    report_of,
+    reporting,
+    reporting_async,
+    response,
+    verification,
+)
 from tinfoil import _transport
 from tinfoil._enclave import DEADLINE_EXCEEDED, FRESHNESS_EXPIRED
-from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, network_error
+from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, TinfoilError, network_error
 from tinfoil._keys import KeyRejectedError, PeerLacksKeyError, is_key_rejection
 from tinfoil._tls import CERT_MISMATCH, NO_TLS
 from tinfoil._transport import (
@@ -35,10 +47,10 @@ from tinfoil._transport import (
     resolve_transport,
 )
 from tinfoil._types import EHBP, TLS
-from tinfoil.verifier import Verification
+from tinfoil.verifier import VerificationReport, VerifiedFacts
 
-Fetch = Callable[[], Verification]
-NewTransport = Callable[[Verification], httpx.BaseTransport]
+Fetch = Callable[[], VerifiedFacts]
+NewTransport = Callable[[VerifiedFacts], httpx.BaseTransport]
 
 
 class FakeMode:
@@ -48,18 +60,18 @@ class FakeMode:
 
     def __init__(self, build: NewTransport | None = None) -> None:
         self.build = build or (lambda _: httpx.MockTransport(lambda _: response(200, b"ok")))
-        self.built: list[Verification] = []
+        self.built: list[VerifiedFacts] = []
 
     def validate_request(self, request: httpx.Request) -> None:
         pass
 
-    def new_transport(self, verified: Verification) -> httpx.BaseTransport:
+    def new_transport(self, verified: VerifiedFacts) -> httpx.BaseTransport:
         self.built.append(verified)
         return self.build(verified)
 
 
 class AsyncFakeMode(FakeMode):
-    def new_transport(self, verified: Verification) -> httpx.AsyncBaseTransport:  # type: ignore[override]
+    def new_transport(self, verified: VerifiedFacts) -> httpx.AsyncBaseTransport:  # type: ignore[override]
         self.built.append(verified)
         return self.build(verified)  # type: ignore[return-value]
 
@@ -99,19 +111,19 @@ def get(keyed: httpx.BaseTransport, url: str = f"https://{HOST}/v1/models") -> h
 def test_ensure_verified_reuses_a_valid_verification() -> None:
     calls = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal calls
         calls += 1
         return verification("key")
 
     keyed = transport(fetch)
-    assert keyed.current is None
+    assert current_facts(keyed) is None
     for _ in range(2):
         keyed.ensure_verified()
     assert calls == 1, "a valid verification is reused"
     keyed.reverify()
     assert calls == 2, "reverify always verifies"
-    assert keyed.current is not None
+    assert current_facts(keyed) is not None
 
 
 def test_expired_keys_never_authorize_a_request() -> None:
@@ -120,7 +132,7 @@ def test_expired_keys_never_authorize_a_request() -> None:
 
     deadline = datetime.now(UTC) + timedelta(seconds=0.1)
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal calls
         calls += 1
         return verification("key", deadline=deadline)
@@ -172,7 +184,7 @@ def test_refresh_coalesces_requests_and_explicit_verify(
 
     monkeypatch.setattr(_transport, "_Refresh", ObservedRefresh)
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal attempts
         with lock:
             attempts += 1
@@ -182,7 +194,7 @@ def test_refresh_coalesces_requests_and_explicit_verify(
             raise refresh_error
         return verification("new")
 
-    def build(verified: Verification) -> httpx.BaseTransport:
+    def build(verified: VerifiedFacts) -> httpx.BaseTransport:
         def handler(_: httpx.Request) -> httpx.Response:
             nonlocal requests
             with lock:
@@ -232,7 +244,7 @@ def test_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadline() -> Non
     release = threading.Event()
     attempts = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal attempts
         attempts += 1
         started.set()
@@ -240,7 +252,7 @@ def test_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadline() -> Non
         return verification("slow")
 
     keyed = transport(fetch)
-    owner_result: list[Verification | BaseException] = []
+    owner_result: list[VerificationReport | BaseException] = []
 
     def own() -> None:
         try:
@@ -258,11 +270,11 @@ def test_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadline() -> Non
     assert not release.is_set(), "the owner's refresh is still running"
     release.set()
     owner.join(5)
-    assert isinstance(owner_result[0], Verification)
-    assert owner_result[0].code_tag == "slow"
+    assert isinstance(owner_result[0], VerificationReport)
+    assert facts_of(owner_result[0]).code_tag == "slow"
     assert attempts == 1, "the joining caller started no refresh of its own"
-    assert keyed.current is not None
-    assert keyed.ensure_verified().code_tag == "slow", "the refresh that outlasted the deadline still counts"
+    assert current_facts(keyed) is not None
+    assert facts_of(keyed.ensure_verified()).code_tag == "slow", "the refresh that outlasted the deadline still counts"
 
 
 @pytest.mark.asyncio
@@ -270,14 +282,14 @@ async def test_async_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadl
     release = asyncio.Event()
     attempts = 0
 
-    async def fetch_async() -> Verification:
+    async def fetch_async() -> VerifiedFacts:
         nonlocal attempts
         attempts += 1
         await release.wait()
         return verification("slow")
 
     enclave = fake_enclave(lambda: verification("slow"))
-    enclave._fetch_async = fetch_async
+    enclave._fetch_async = reporting_async(fetch_async)
     keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
     owner = asyncio.create_task(keyed.reverify())
     await asyncio.sleep(0.01)
@@ -288,29 +300,29 @@ async def test_async_verify_once_stops_waiting_for_a_shared_refresh_at_its_deadl
     assert time.monotonic() - begun < 2.0
     assert not owner.done(), "the owner's refresh survives the joining caller's deadline"
     release.set()
-    assert (await owner).code_tag == "slow"
+    assert facts_of(await owner).code_tag == "slow"
     assert attempts == 1
-    assert (await keyed.ensure_verified()).code_tag == "slow"
+    assert facts_of(await keyed.ensure_verified()).code_tag == "slow"
 
 
 def test_requests_use_the_explicit_verification() -> None:
     attempts = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal attempts
         attempts += 1
         return verification("old" if attempts == 1 else "new")
 
-    def build(verified: Verification) -> httpx.BaseTransport:
+    def build(verified: VerifiedFacts) -> httpx.BaseTransport:
         return httpx.MockTransport(lambda _: response(200, headers={"Key": verified.hpke_public_key or ""}))
 
     keyed = transport(fetch, FakeMode(build))
     keyed.ensure_verified()
     verified = keyed.reverify()
-    assert verified.code_tag == "new"
+    assert facts_of(verified).code_tag == "new"
     assert get(keyed).headers["Key"] == "01" * 32
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "new"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "new"
     assert attempts == 2
 
 
@@ -327,7 +339,7 @@ def test_key_rejection_invalidates_without_replay(name: str, err: BaseException,
     refreshes = 0
     failing: NetworkError | None = None
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal refreshes
         if failing is not None:
             raise failing
@@ -340,7 +352,8 @@ def test_key_rejection_invalidates_without_replay(name: str, err: BaseException,
         raise err
 
     keyed = AttestedTransport(fake_enclave(fetch), FakeMode(lambda _: httpx.MockTransport(handler)))
-    keyed._refresh_once(lambda enclave, **_: verification("old"), None, None)  # the initial state, as a test seam
+    # The initial state, as a test seam.
+    keyed._refresh_once(lambda enclave, **_: report_of(verification("old")), None, None, [])
     with pytest.raises(type(err) if not lacks_key else AttestationError) as raised:
         get(keyed)
     assert is_key_rejection(raised.value) == lacks_key, name
@@ -353,8 +366,8 @@ def test_key_rejection_invalidates_without_replay(name: str, err: BaseException,
     state = keyed._current
     assert state is not None
     assert state.rejected == lacks_key
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "old"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "old"
     assert sends == 1
     assert refreshes == 0
     if not lacks_key:
@@ -362,7 +375,7 @@ def test_key_rejection_invalidates_without_replay(name: str, err: BaseException,
     failing = network_error("refresh failed")
     with pytest.raises(NetworkError, match="refresh failed"):
         get(keyed)
-    assert keyed.current.code_tag == "old"
+    assert tag(current_facts(keyed)) == "old"
     assert sends == 1, "a failed refresh must not authorize the rejected state"
     failing = None
     with pytest.raises(AttestationError):
@@ -391,7 +404,7 @@ def test_expiration_does_not_interrupt_a_stream() -> None:
 
 
 def test_plaintext_request_does_not_refresh() -> None:
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         pytest.fail("re-verification cannot make a plaintext URL acceptable")
 
     keyed = transport(fetch, TLSMode())
@@ -406,12 +419,12 @@ def test_plaintext_request_does_not_refresh() -> None:
 def test_transport_failure_fails_verification() -> None:
     calls = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal calls
         calls += 1
         return verification("key")
 
-    def build(_: Verification) -> httpx.BaseTransport:
+    def build(_: VerifiedFacts) -> httpx.BaseTransport:
         raise AttestationError("the verification endorses no key for this transport")
 
     keyed = transport(fetch, FakeMode(build))
@@ -419,7 +432,7 @@ def test_transport_failure_fails_verification() -> None:
         keyed.ensure_verified()
     with pytest.raises(AttestationError, match="endorses no key"):
         get(keyed)
-    assert keyed.current is None, "a verification the mode can't use is never kept"
+    assert current_facts(keyed) is None, "a verification the mode can't use is never kept"
     assert calls == 2, "each attempt verifies once, without a retry"
 
 
@@ -463,7 +476,7 @@ def test_resolve_transport() -> None:
 def test_refresh_rejects_an_expired_verification() -> None:
     attempts = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -477,14 +490,14 @@ def test_refresh_rejects_an_expired_verification() -> None:
     state = keyed._current
     assert state is not None
     assert state.discarded, "an expired replacement is an attestation failure, which discards the old one"
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "old", "current keeps the last successful verification"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "old", "current keeps the last successful verification"
 
 
 def test_refresh_rejects_a_verification_that_expires_during_creation() -> None:
     sent = 0
 
-    def build(_: Verification) -> httpx.BaseTransport:
+    def build(_: VerifiedFacts) -> httpx.BaseTransport:
         time.sleep(0.15)  # the verification expires while its transport is created
 
         def handler(_: httpx.Request) -> httpx.Response:
@@ -498,7 +511,7 @@ def test_refresh_rejects_a_verification_that_expires_during_creation() -> None:
     with pytest.raises(AttestationError, match=FRESHNESS_EXPIRED):
         get(keyed)
     assert sent == 0, "a verification that expired before publication never authorizes a request"
-    assert keyed.current is None
+    assert current_facts(keyed) is None
 
 
 def test_late_rejection_does_not_invalidate_the_replacement() -> None:
@@ -506,12 +519,12 @@ def test_late_rejection_does_not_invalidate_the_replacement() -> None:
     release = threading.Event()
     verifications = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal verifications
         verifications += 1
         return verification("new")
 
-    def build(verified: Verification) -> httpx.BaseTransport:
+    def build(verified: VerifiedFacts) -> httpx.BaseTransport:
         def handler(_: httpx.Request) -> httpx.Response:
             if verified.code_tag == "old":
                 sent_under_old.set()
@@ -522,7 +535,7 @@ def test_late_rejection_does_not_invalidate_the_replacement() -> None:
         return httpx.MockTransport(handler)
 
     keyed = transport(fetch, FakeMode(build))
-    keyed._refresh_once(lambda enclave, **_: verification("old"), None, None)
+    keyed._refresh_once(lambda enclave, **_: report_of(verification("old")), None, None, [])
     finished: list[BaseException] = []
 
     def send() -> None:
@@ -542,15 +555,15 @@ def test_late_rejection_does_not_invalidate_the_replacement() -> None:
     state = keyed._current
     assert state is not None
     assert state.valid(), "the replacement stays valid"
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "new"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "new"
     assert verifications == 1
 
 
 def test_refresh_retires_replaced_connections() -> None:
     created: list[Closing] = []
 
-    def build(_: Verification) -> httpx.BaseTransport:
+    def build(_: VerifiedFacts) -> httpx.BaseTransport:
         closing = Closing()
         created.append(closing)
         if len(created) == 3:
@@ -566,7 +579,7 @@ def test_refresh_retires_replaced_connections() -> None:
     with pytest.raises(AttestationError, match="endorses no key"):
         keyed.reverify()
     assert second.closes == 1, "a refresh that fails with an attestation failure discards the current transport"
-    assert keyed.current is not None
+    assert current_facts(keyed) is not None
 
 
 def test_retiring_waits_for_responses_in_flight() -> None:
@@ -604,7 +617,7 @@ async def test_async_retiring_names_the_reason() -> None:
 def test_closed_transport_refuses_everything() -> None:
     created: list[Closing] = []
 
-    def build(_: Verification) -> httpx.BaseTransport:
+    def build(_: VerifiedFacts) -> httpx.BaseTransport:
         created.append(Closing())
         return created[-1]
 
@@ -612,7 +625,7 @@ def test_closed_transport_refuses_everything() -> None:
     keyed.ensure_verified()
     keyed.close()
     assert created[0].closes == 1
-    assert keyed.current is None
+    assert current_facts(keyed) is None
     for call in (keyed.ensure_verified, keyed.reverify, lambda: get(keyed)):
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
             call()
@@ -623,17 +636,17 @@ async def test_async_refresh_coalesces_and_survives_cancellation() -> None:
     release = asyncio.Event()
     attempts = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal attempts
         attempts += 1
         return verification("new")
 
-    async def fetch_async() -> Verification:
+    async def fetch_async() -> VerifiedFacts:
         await release.wait()
         return fetch()
 
     enclave = fake_enclave(fetch)
-    enclave._fetch_async = fetch_async
+    enclave._fetch_async = reporting_async(fetch_async)
     keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
     waiters = [asyncio.create_task(keyed.ensure_verified()) for _ in range(8)]
     canceled = asyncio.create_task(keyed.reverify())
@@ -644,9 +657,9 @@ async def test_async_refresh_coalesces_and_survives_cancellation() -> None:
     assert attempts == 0, "the shared verification survives a waiter's cancellation"
     release.set()
     for waiter in waiters:
-        assert (await waiter).code_tag == "new"
+        assert facts_of(await waiter).code_tag == "new"
     assert attempts == 1
-    assert keyed.current is not None
+    assert current_facts(keyed) is not None
 
 
 @pytest.mark.asyncio
@@ -657,18 +670,18 @@ async def test_async_close_during_a_refresh_refuses_its_waiters() -> None:
     release = asyncio.Event()
     attempts = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal attempts
         attempts += 1
         return verification("new")
 
-    async def fetch_async() -> Verification:
+    async def fetch_async() -> VerifiedFacts:
         started.set()
         await release.wait()
         return fetch()
 
     enclave = fake_enclave(fetch)
-    enclave._fetch_async = fetch_async
+    enclave._fetch_async = reporting_async(fetch_async)
     keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
     waiters = [asyncio.create_task(keyed.ensure_verified()) for _ in range(2)]
     await started.wait()
@@ -683,7 +696,7 @@ async def test_async_close_during_a_refresh_refuses_its_waiters() -> None:
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
             await waiter
     assert attempts == 0, "the cancelled verification never completed"
-    assert keyed.current is None
+    assert current_facts(keyed) is None
     release.set()
     with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
         await keyed.ensure_verified()
@@ -694,12 +707,12 @@ async def test_async_key_rejection_and_close() -> None:
     sent_under: list[str] = []
     fetches = 0
 
-    def fetch() -> Verification:
+    def fetch() -> VerifiedFacts:
         nonlocal fetches
         fetches += 1
         return verification("key", tag=f"verification {fetches}")
 
-    def build(verified: Verification) -> httpx.BaseTransport:
+    def build(verified: VerifiedFacts) -> httpx.BaseTransport:
         def handler(_: httpx.Request) -> httpx.Response:
             sent_under.append(verified.code_tag)
             raise PeerLacksKeyError(AttestationError(CERT_MISMATCH))
@@ -740,13 +753,13 @@ class ScriptedEnclave:
         self.sent_under: list[str] = []
         self.transports: dict[str, AsyncClosing] = {}
 
-    def fetch(self) -> Verification:
+    def fetch(self) -> VerifiedFacts:
         if self.failure is not None:
             raise self.failure
         self.verifications += 1
         return verification("key", tag=f"v{self.verifications}")
 
-    def build(self, verified: Verification) -> AsyncClosing:
+    def build(self, verified: VerifiedFacts) -> AsyncClosing:
         def handler(_: httpx.Request) -> httpx.Response:
             self.sent_under.append(verified.code_tag)
             # A streamed body, which a response built with content is not, stays in flight until it is closed.
@@ -783,7 +796,7 @@ def async_get(keyed: AsyncAttestedTransport) -> Coroutine[Any, Any, httpx.Respon
     return keyed.handle_async_request(httpx.Request("GET", f"https://{HOST}/v1/models"))
 
 
-def tag(current: Verification | None) -> str | None:
+def tag(current: VerifiedFacts | None) -> str | None:
     """The code tag of ``current``, a transport's last successful verification, or None for none."""
     return None if current is None else current.code_tag
 
@@ -795,18 +808,21 @@ def test_failed_reverify_discards_a_fresh_verification(recovers: bool) -> None:
     enclave.failure = AttestationError("nonce mismatch")
     with pytest.raises(AttestationError, match="nonce mismatch"):
         keyed.reverify()
-    assert tag(keyed.current) == "v1", "current is still the last successful verification"
+    assert tag(current_facts(keyed)) == "v1", "the discarded state stays current, but no request is sent under it"
+    assert last_facts(keyed) is None, "the last verification is the failure, not the earlier success"
+    assert isinstance(last_error(keyed), AttestationError)
     assert enclave.transports["v1"].closes == 1, "the connections made under the discarded one were closed"
     if recovers:
         enclave.failure = None
         sent(get(keyed))
         assert enclave.sent_under == ["v1", "v2"], "the next request went out under a new verification"
-        assert tag(keyed.current) == "v2"
+        assert tag(current_facts(keyed)) == "v2"
     else:
         with pytest.raises(AttestationError, match="nonce mismatch"):
             get(keyed)
         assert enclave.sent_under == ["v1"], "nothing was sent"
-        assert tag(keyed.current) == "v1", "a failed attempt doesn't change current"
+        assert tag(current_facts(keyed)) == "v1", "a failed attempt doesn't replace the discarded state"
+        assert last_facts(keyed) is None
 
 
 @pytest.mark.parametrize(
@@ -840,7 +856,7 @@ def test_failed_refresh_after_a_key_rejection_discards_the_verification() -> Non
     enclave, keyed = scripted()
     rejecting = True
 
-    def build(verified: Verification) -> httpx.BaseTransport:
+    def build(verified: VerifiedFacts) -> httpx.BaseTransport:
         closing = enclave.build(verified)
         handler = closing.handler
 
@@ -859,7 +875,8 @@ def test_failed_refresh_after_a_key_rejection_discards_the_verification() -> Non
     enclave.failure = AttestationError("the rotated key isn't attested")
     with pytest.raises(AttestationError, match="isn't attested"):
         get(keyed)
-    assert tag(keyed.current) == "v1", "current keeps the rejected verification that the failure discarded"
+    assert tag(current_facts(keyed)) == "v1", "the failure discarded the rejected state, which stays current"
+    assert isinstance(last_error(keyed), AttestationError), "the failed refresh is the last verification"
     assert enclave.transports["v1"].closes == 1
     enclave.failure = None
     rejecting = False
@@ -870,7 +887,10 @@ def test_failed_refresh_after_a_key_rejection_discards_the_verification() -> Non
 def test_failed_refresh_at_expiry_discards_the_verification() -> None:
     enclave, keyed = scripted()
     keyed._refresh_once(
-        lambda enclave, **_: verification("old", deadline=datetime.now(UTC) + timedelta(seconds=0.1)), None, None
+        lambda enclave, **_: report_of(verification("old", deadline=datetime.now(UTC) + timedelta(seconds=0.1))),
+        None,
+        None,
+        [],
     )
     old = keyed._current
     assert old is not None
@@ -878,7 +898,7 @@ def test_failed_refresh_at_expiry_discards_the_verification() -> None:
     enclave.failure = AttestationError("bad document")
     with pytest.raises(AttestationError, match="bad document"):
         get(keyed)
-    assert keyed.current is old.verification
+    assert current_facts(keyed) is old.facts
     assert old.discarded
     assert old.transport._closed, "the expired verification's connections were closed"
     assert enclave.sent_under == []
@@ -888,16 +908,16 @@ def test_failed_reverify_keeps_a_newer_verification() -> None:
     enclave, keyed = scripted()
     keyed.ensure_verified()
 
-    def publish_then_fail() -> Verification:
+    def publish_then_fail() -> VerifiedFacts:
         # Another publisher's verification lands while this re-verification is in flight.
-        keyed._refresh_once(lambda enclave, **_: verification("newer"), None, None)
+        keyed._refresh_once(lambda enclave, **_: report_of(verification("newer")), None, None, [])
         raise AttestationError("nonce mismatch")
 
-    keyed.enclave._fetch = publish_then_fail
+    keyed.enclave._fetch = reporting(publish_then_fail)
     with pytest.raises(AttestationError, match="nonce mismatch"):
         keyed.reverify()
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "newer", "the failure discards only the verification that it was replacing"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "newer", "the failure discards only the verification that it was replacing"
     sent(get(keyed))
     assert enclave.sent_under == ["newer"]
 
@@ -910,18 +930,18 @@ async def test_async_failed_reverify_discards_a_fresh_verification(recovers: boo
     enclave.failure = AttestationError("nonce mismatch")
     with pytest.raises(AttestationError, match="nonce mismatch"):
         await keyed.reverify()
-    assert tag(keyed.current) == "v1"
+    assert tag(current_facts(keyed)) == "v1"
     assert enclave.transports["v1"].closes == 1
     if recovers:
         enclave.failure = None
         await async_sent(keyed)
         assert enclave.sent_under == ["v1", "v2"]
-        assert tag(keyed.current) == "v2"
+        assert tag(current_facts(keyed)) == "v2"
     else:
         with pytest.raises(AttestationError, match="nonce mismatch"):
             await async_get(keyed)
         assert enclave.sent_under == ["v1"]
-        assert tag(keyed.current) == "v1"
+        assert tag(current_facts(keyed)) == "v1"
     await keyed.aclose()
 
 
@@ -949,12 +969,12 @@ async def test_async_cancelled_reverify_keeps_a_fresh_verification() -> None:
     await async_sent(keyed)
     started = asyncio.Event()
 
-    async def blocked() -> Verification:
+    async def blocked() -> VerifiedFacts:
         started.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
-    keyed.enclave._fetch_async = blocked
+    keyed.enclave._fetch_async = reporting_async(blocked)
     reverify = asyncio.create_task(keyed.reverify())
     await started.wait()
     reverify.cancel()
@@ -970,16 +990,163 @@ async def test_async_failed_reverify_keeps_a_newer_verification() -> None:
     _, keyed = scripted_async()
     await keyed.ensure_verified()
 
-    async def publish_then_fail() -> Verification:
-        async def newer(_: object, **__: object) -> Verification:
-            return verification("newer")
+    async def publish_then_fail() -> VerifiedFacts:
+        async def newer(_: object, **__: object) -> VerificationReport:
+            return report_of(verification("newer"))
 
         await keyed._refresh_once(newer, None, None)
         raise AttestationError("nonce mismatch")
 
-    keyed.enclave._fetch_async = publish_then_fail
+    keyed.enclave._fetch_async = reporting_async(publish_then_fail)
     with pytest.raises(AttestationError, match="nonce mismatch"):
         await keyed.reverify()
-    assert keyed.current is not None
-    assert keyed.current.code_tag == "newer"
+    assert current_facts(keyed) is not None
+    assert tag(current_facts(keyed)) == "newer"
     await keyed.aclose()
+
+
+def waiting_on_refresh(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """An event that is set once a caller waits on a refresh that another caller runs."""
+    waiting = threading.Event()
+
+    class ObservedDone(threading.Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            waiting.set()
+            return super().wait(timeout)
+
+    class ObservedRefresh(_transport._Refresh):
+        def __init__(self) -> None:
+            super().__init__()
+            self.done = ObservedDone()
+
+    monkeypatch.setattr(_transport, "_Refresh", ObservedRefresh)
+    return waiting
+
+
+class Raising:
+    """An ``on_verification`` callback that records each call and then raises."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, VerificationReport | None, TinfoilError | None]] = []
+
+    def __call__(self, host: str, report: VerificationReport | None, error: TinfoilError | None) -> None:
+        self.calls.append((host, report, error))
+        raise RuntimeError("the callback failed")
+
+
+def test_a_raising_callback_leaves_the_outcome_to_every_waiting_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The callback raising changes neither the outcome nor what a second caller waiting on the same verification
+    gets, and later attempts are still reported."""
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def fetch() -> VerifiedFacts:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            release.wait(5)
+        return verification(f"v{calls}")
+
+    callback = Raising()
+    keyed = AttestedTransport(fake_enclave(fetch, on_verification=callback), FakeMode())
+    results: list[VerificationReport | BaseException] = []
+
+    def call() -> None:
+        try:
+            results.append(keyed.ensure_verified())
+        except BaseException as err:
+            results.append(err)
+
+    waiting = waiting_on_refresh(monkeypatch)
+    owner = threading.Thread(target=call)
+    owner.start()
+    assert started.wait(5)
+    waiter = threading.Thread(target=call)
+    waiter.start()
+    assert waiting.wait(5), "the second caller waits on the owner's verification"
+    release.set()
+    owner.join(5)
+    waiter.join(5)
+    assert len(results) == 2
+    assert all(isinstance(result, VerificationReport) for result in results), results
+    assert results[0] is results[1], "the waiting caller got the same outcome"
+    assert calls == 1
+    assert keyed.last_verification() == (results[0], None)
+    assert len(callback.calls) == 1
+    later = keyed.reverify()
+    assert facts_of(later).code_tag == "v2"
+    assert callback.calls[-1] == (HOST, later, None), "a later attempt is still reported"
+
+
+@pytest.mark.asyncio
+async def test_async_a_raising_callback_leaves_the_outcome_to_every_waiting_caller() -> None:
+    release = asyncio.Event()
+    calls = 0
+
+    async def fetch_async() -> VerifiedFacts:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await release.wait()
+        return verification(f"v{calls}")
+
+    callback = Raising()
+    enclave = fake_enclave(lambda: verification("unused"), on_verification=callback)
+    enclave._fetch_async = reporting_async(fetch_async)
+    keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
+    owner = asyncio.create_task(keyed.ensure_verified())
+    await asyncio.sleep(0.01)
+    waiter = asyncio.create_task(keyed.ensure_verified())
+    await asyncio.sleep(0.01)
+    release.set()
+    first, second = await asyncio.gather(owner, waiter)
+    assert first is second, "the waiting caller got the same outcome"
+    assert calls == 1
+    assert keyed.last_verification() == (first, None)
+    assert len(callback.calls) == 1
+    later = await keyed.reverify()
+    assert facts_of(later).code_tag == "v2"
+    assert callback.calls[-1] == (HOST, later, None), "a later attempt is still reported"
+    await keyed.aclose()
+
+
+def test_a_raising_callback_leaves_a_failure_to_every_waiting_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    fetches = 0
+
+    def fetch() -> VerifiedFacts:
+        nonlocal fetches
+        fetches += 1
+        started.set()
+        release.wait(5)
+        raise AttestationError("rejected")
+
+    callback = Raising()
+    keyed = AttestedTransport(fake_enclave(fetch, on_verification=callback), FakeMode())
+    results: list[BaseException | VerificationReport] = []
+
+    def call() -> None:
+        try:
+            results.append(keyed.ensure_verified())
+        except BaseException as err:
+            results.append(err)
+
+    waiting = waiting_on_refresh(monkeypatch)
+    owner = threading.Thread(target=call)
+    owner.start()
+    assert started.wait(5)
+    waiter = threading.Thread(target=call)
+    waiter.start()
+    assert waiting.wait(5), "the second caller waits on the owner's verification"
+    release.set()
+    owner.join(5)
+    waiter.join(5)
+    assert len(results) == 2
+    assert all(isinstance(result, AttestationError) for result in results), results
+    assert results[0] is results[1], "the waiting caller got the same failure, not the callback's exception"
+    assert fetches == 2, "one verification, with its retry, that both callers shared"
+    assert keyed.last_verification() == (None, results[0])
+    assert callback.calls[-1] == (HOST, None, results[0])

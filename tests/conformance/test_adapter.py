@@ -49,6 +49,7 @@ def test_capabilities_shape() -> None:
     assert set(v3["stages_supported"]) <= set(adapter.ALL_STAGES)
     assert set(v3["synthetic_roots"]) == {"amd", "intel", "sigstore"}
     assert v3["channel_binding"] in {"tls-spki", "hpke", "none"}
+    assert v3["verification_report"] is True
 
 
 @pytest.mark.parametrize(
@@ -108,7 +109,20 @@ def test_verify_stage_reports_usage_errors_as_malformed_and_rejections_by_layer(
     assert result.exit_code == adapter.EXIT_MALFORMED
     result = adapter.run(stage, _WELL_FORMED)
     assert result.exit_code == adapter.EXIT_REJECTED
-    assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": "ENVELOPE_REJECTED"}}
+    assert result.output == {
+        "stage": stage,
+        "accepted": False,
+        "rejection": {"code": "ENVELOPE_REJECTED"},
+        "report": {
+            "steps": [
+                {"layer": "envelope", "status": "failed"},
+                {"layer": "provenance", "status": "not_run"},
+                {"layer": "quote", "status": "not_run"},
+                {"layer": "policy", "status": "not_run"},
+            ],
+            "partial_facts": {},
+        },
+    }
     result = adapter.run(stage, {**_WELL_FORMED, "document_b64": ""})
     assert result.output["rejection"] == {"code": "ENVELOPE_REJECTED"}
     from tests import document_builder
@@ -118,6 +132,12 @@ def test_verify_stage_reports_usage_errors_as_malformed_and_rejections_by_layer(
     result = adapter.run(stage, bound)
     assert result.exit_code == adapter.EXIT_REJECTED
     assert result.output["rejection"] == {"code": "PROVENANCE_REJECTED"}
+    assert result.output["report"]["partial_facts"] == {
+        "measured": {
+            "tls_public_key_fp": document_builder.TLS_KEY.hex(),
+            "hpke_public_key_fp": hashlib.sha256(document_builder.HPKE_KEY).hexdigest(),
+        }
+    }
     code = {
         "id": "code",
         "role": "reference-values",
@@ -197,8 +217,54 @@ def test_absent_members_select_defaults() -> None:
     assert decoded.artifact_digest == ""
 
 
+_LAYERS = ("envelope", "provenance", "quote", "policy")
+_REJECTION_LAYERS = {
+    "ENVELOPE_REJECTED": "envelope",
+    "PROVENANCE_REJECTED": "provenance",
+    "QUOTE_REJECTED": "quote",
+    "POLICY_REJECTED": "policy",
+}
+
+
+def check_report(output: dict[str, Any]) -> None:
+    """A full-verify output's report agrees with its verdict and keeps the report's rules: the four layers in
+    order; on an accept, every step passed or was skipped and there are no partial facts; on a rejection, the
+    failed step is the rejection code's layer, no step after it ran, and each partial fact is present only once
+    the step that establishes it passed. A step before the failed one may be not_run, since checks don't always
+    run in layer order. Other stages carry no report."""
+    report = output.get("report")
+    if output["stage"] != adapter.STAGE_VERIFY:
+        assert report is None
+        return
+    if report is None:
+        # A malformed input never ran, and the adapter's own channel-key rule rejects a document that the
+        # verifier accepted.
+        assert output.get("rejection", {}).get("code") in ("ENVELOPE_REJECTED", "MALFORMED_INPUT"), output
+        return
+    steps = report["steps"]
+    assert [step["layer"] for step in steps] == list(_LAYERS)
+    assert all(step["status"] in ("passed", "failed", "skipped", "not_run") for step in steps), steps
+    if output["accepted"]:
+        assert all(step["status"] in ("passed", "skipped") for step in steps), steps
+        assert "partial_facts" not in report
+        return
+    failed = [index for index, step in enumerate(steps) if step["status"] == "failed"]
+    assert len(failed) == 1, steps
+    assert _LAYERS[failed[0]] == _REJECTION_LAYERS[output["rejection"]["code"]]
+    assert all(step["status"] == "not_run" for step in steps[failed[0] + 1 :]), steps
+    ran = {step["layer"] for step in steps if step["status"] in ("passed", "skipped")}
+    partial = report["partial_facts"]
+    assert ("measured" in partial) == ("envelope" in ran)
+    assert ("expected" in partial) == ("provenance" in ran)
+    if "measured" in partial:
+        assert ("cpu_measurement" in partial["measured"]) == ("quote" in ran)
+    if "measurement" in partial.get("expected", {}):
+        assert _LAYERS[failed[0]] == "policy"
+
+
 def test_vector(fixture: dict[str, Any]) -> None:
-    """Each vector: the fixture's verdict and facts, or a clean unsupported."""
+    """Each vector: the fixture's verdict and facts, or a clean unsupported, and a report that agrees with the
+    verdict."""
     stage = fixture["stage"]
     expected = fixture["expected"]
     result = adapter.run(stage, fixture["input"])
@@ -218,6 +284,13 @@ def test_vector(fixture: dict[str, Any]) -> None:
         assert result.output == {"stage": stage, "accepted": False}
         return
     assert result.output["stage"] == stage
+    check_report(result.output)
+    if expected.get("failed_step"):
+        failed = [step["layer"] for step in result.output["report"]["steps"] if step["status"] == "failed"]
+        assert failed == [expected["failed_step"]]
+    if expected.get("report"):
+        assert result.output["report"]["steps"] == expected["report"]["steps"]
+        assert result.output["report"].get("partial_facts") == expected["report"].get("partial_facts")
     if expected["accepted"]:
         assert result.exit_code == adapter.EXIT_ACCEPTED, result.output
         assert result.output["accepted"] is True

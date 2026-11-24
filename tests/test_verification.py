@@ -1,4 +1,4 @@
-"""The verification record: key lookups, immutability and the JSON form."""
+"""The verified facts: key lookups, immutability and the JSON form."""
 
 from __future__ import annotations
 
@@ -16,9 +16,7 @@ from tinfoil.verifier._verification import (
     SOURCE_POLICY,
     ArtifactVerification,
     ConfigVerification,
-    SoftwareIdentity,
-    Verification,
-    VerificationMetadata,
+    VerifiedFacts,
     crypto_material_data,
 )
 
@@ -27,7 +25,7 @@ AT = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
 FUTURE_FORMAT = "https://example.com/key/future/v1"
 
 
-def record(**overrides: object) -> Verification:
+def record(**overrides: object) -> VerifiedFacts:
     fields: dict[str, object] = {
         "code_digest": "ab" * 32,
         "code_tag": "v1.0.0",
@@ -38,10 +36,9 @@ def record(**overrides: object) -> Verification:
             CryptoMaterialItem(id="tls", format=KEY_SPKI_FP_SHA256_V1_FORMAT, data="aabb"),
             CryptoMaterialItem(id="workload", format=FUTURE_FORMAT, data="010203"),
         ),
-        "metadata": VerificationMetadata(verifier=SoftwareIdentity(name="tinfoil-python", version="1"), verified_at=AT),
     }
     fields.update(overrides)
-    return Verification(**fields)  # type: ignore[arg-type]
+    return VerifiedFacts(**fields)  # type: ignore[arg-type]
 
 
 def test_crypto_material_data() -> None:
@@ -68,8 +65,10 @@ def test_record_is_frozen() -> None:
     v = record()
     with pytest.raises(dataclasses.FrozenInstanceError):
         v.code_digest = "changed"  # type: ignore[misc]
+    nested = record(config=ConfigVerification(source=SOURCE_POLICY, digest="cd" * 32))
+    assert nested.config is not None
     with pytest.raises(dataclasses.FrozenInstanceError):
-        v.metadata.verified_at = AT  # type: ignore[misc]
+        nested.config.digest = "changed"  # type: ignore[misc]
 
 
 def test_to_dict_lays_out_registers_as_hex_and_times_in_utc() -> None:
@@ -136,7 +135,6 @@ def test_to_dict_lays_out_registers_as_hex_and_times_in_utc() -> None:
             "approval_time": "2026-08-06T12:00:00Z",
         },
         "freshness_expires_at": "2026-08-13T12:00:00Z",
-        "metadata": {"verifier": {"name": "tinfoil-python", "version": "1"}, "verified_at": "2026-08-06T12:00:00Z"},
     }
     assert json.loads(v.to_json()) == got
     assert v.to_json() == json.dumps(got, separators=(",", ":")), "compact by default"
@@ -158,7 +156,6 @@ def test_to_dict_leaves_out_what_was_not_established() -> None:
         "code_measurement",
         "enclave_measurement",
         "crypto_material",
-        "metadata",
     }
     # A caller-authorized config and an embedded runtime establish only a source and whatever the caller supplied:
     # the placeholders for the facts that an endorsement would have established are not emitted.

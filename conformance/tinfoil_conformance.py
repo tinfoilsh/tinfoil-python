@@ -15,7 +15,9 @@ Every v3 stage decodes its Input first, so malformed input is reported as such
 (exit 30) before anything else. The full-verify stage is one ``verify_v3_at``
 call on the public ``Verifier``, or on one built with the injected roots when
 the Input supplies any, so the shared fixtures appraise exactly the code that
-production runs; the layer on its ``VerificationError`` names the rejection.
+production runs; the layer on its ``VerificationError`` names the rejection,
+and the output carries the verifier's report in the wire form that
+``report_of`` describes.
 The block stages isolate a single layer by calling into the document,
 endorsement and quote modules that the verifier uses. A stage that this
 adapter does not implement exits 20 (unsupported), never with a verdict.
@@ -56,12 +58,13 @@ from tinfoil.verifier import (
     Pin,
     UsageError,
     VerificationError,
+    VerificationReport,
+    VerifiedFacts,
     Verifier,
     _measurement,
     _verifier,
     random_nonce,
 )
-from tinfoil.verifier import Verification as PublicVerification
 from tinfoil.verifier._document import document
 from tinfoil.verifier._document.collateral.collateral import NotFoundError
 from tinfoil.verifier._endorsement import approval, provenance, reference
@@ -305,6 +308,7 @@ def capabilities() -> dict[str, Any]:
             "freshness_enforced": True,
             "live_verify": True,
             "channel_binding": "tls-spki",
+            "verification_report": True,
         },
     }
 
@@ -374,7 +378,9 @@ def _verify(decoded: Input) -> Result:
     the call itself (an absent nonce). The layer of a VerificationError
     names the rejection code. A document that verifies but endorses no
     usable channel keys is useless to every real client, so the stage
-    requires both the TLS fingerprint and the HPKE key.
+    requires both the TLS fingerprint and the HPKE key; that rejection is the
+    adapter's own, so it carries no report. Every verdict of the verifier
+    carries its report.
     """
     stage = STAGE_VERIFY
     try:
@@ -383,17 +389,56 @@ def _verify(decoded: Input) -> Result:
         return _malformed(stage)
     appraisal = decoded.verification_time or datetime.now(UTC)
     try:
-        verified = verifier.verify_v3_at(
+        report = verifier.verify_v3_at(
             decoded.document or b"", decoded.nonce or b"", Pin(repo=decoded.repo, project=decoded.project), appraisal
         )
     except UsageError:
         return _malformed(stage)
     except VerificationError as err:
-        return _verification_rejected(stage, err)
-    outputs = _accept_outputs(verified)
+        result = _verification_rejected(stage, err)
+        if err.report is not None and result.exit_code == EXIT_REJECTED:
+            result.output["report"] = report_of(err.report)
+        return result
+    outputs = _accept_outputs(report.verified_facts)
     if outputs is None:
         return _rejected(stage, ENVELOPE_REJECTED, "document endorses no TLS fingerprint or no HPKE key")
-    return Result({"stage": stage, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
+    return Result({"stage": stage, "accepted": True, "outputs": outputs, "report": report_of(report)}, EXIT_ACCEPTED)
+
+
+def report_of(report: VerificationReport) -> dict[str, Any]:
+    """``report`` in the wire contract that every SDK's adapter shares: the layer and status of each step, and on
+    a rejection the partial facts. Step messages are each SDK's own error text, so the wire carries none.
+
+    The expected facts are the code digest, the code measurement for the platform that the document's evidence
+    names, and the full expected ``measurement`` once the policy step resolved it; the measured facts are the CPU
+    measurement once the quote step passed and the key fingerprints, the HPKE one being the lowercase-hex SHA-256
+    of the key's bytes. A fact that the report does not hold is left out.
+    """
+    out: dict[str, Any] = {"steps": [{"layer": step.layer, "status": step.status} for step in report.steps]}
+    partial = report.partial_facts
+    if partial is None:
+        return out
+    wire: dict[str, Any] = {}
+    if partial.expected is not None:
+        expected: dict[str, Any] = {}
+        if partial.expected.artifact.digest:
+            expected["code_digest"] = partial.expected.artifact.digest
+        if partial.expected.code_measurement is not None:
+            expected["code_measurement"] = _expected_of(partial.expected.code_measurement)
+        if partial.expected.measurement is not None:
+            expected["measurement"] = _measurement_of(partial.expected.measurement)
+        wire["expected"] = expected
+    if partial.measured is not None:
+        measured: dict[str, Any] = {}
+        if partial.measured.cpu is not None:
+            measured["cpu_measurement"] = _measurement_of(partial.measured.cpu.measurement)
+        if partial.measured.tls_public_key_fp:
+            measured["tls_public_key_fp"] = partial.measured.tls_public_key_fp
+        if partial.measured.hpke_public_key_fp:
+            measured["hpke_public_key_fp"] = partial.measured.hpke_public_key_fp
+        wire["measured"] = measured
+    out["partial_facts"] = wire
+    return out
 
 
 def _verifier_for(decoded: Input) -> Verifier:
@@ -416,8 +461,11 @@ def _verification_rejected(stage: str, err: VerificationError) -> Result:
     return _rejected(stage, code, str(err))
 
 
-def _accept_outputs(verified: PublicVerification) -> dict[str, Any] | None:
-    """The accept facts of a verification, or None when it endorses no TLS fingerprint or no HPKE key."""
+def _accept_outputs(verified: VerifiedFacts | None) -> dict[str, Any] | None:
+    """The accept facts of a verification, or None when it has no verified facts or endorses no TLS fingerprint or
+    no HPKE key."""
+    if verified is None:
+        return None
     tls_fp = verified.tls_public_key_fp
     hpke_key = verified.hpke_public_key
     if tls_fp is None or hpke_key is None:
@@ -673,12 +721,12 @@ def _live_verify(raw: Any) -> Result:
     except (FetchError, httpx.HTTPError, OSError, ValueError) as err:
         return _internal(stage, f"fetching attestation from {host}: {err}")
     try:
-        verified = verifier.verify_v3(document_bytes, nonce, Pin(repo=repo, project=project))
+        report = verifier.verify_v3(document_bytes, nonce, Pin(repo=repo, project=project))
     except UsageError as err:
         return _malformed(stage, str(err))
     except VerificationError as err:
         return _verification_rejected(stage, err)
-    outputs = _accept_outputs(verified)
+    outputs = _accept_outputs(report.verified_facts)
     if outputs is None:
         return _rejected(stage, ENVELOPE_REJECTED, "document endorses no TLS fingerprint or no HPKE key")
     # Channel binding: the endorsed TLS key must be the key the live enclave presents on the wire.

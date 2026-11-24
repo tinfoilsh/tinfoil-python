@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from tests import document_builder
-from tests.client.helpers import Recorder, response, verification
+from tests.client.helpers import Recorder, facts_of, report_of, response, verification
 from tinfoil import _enclave, _fetch, _router
 from tinfoil._clients import AsyncEnclaveHTTPClient, AsyncRouterHTTPClient, EnclaveHTTPClient, RouterHTTPClient
 from tinfoil._errors import AttestationError, ConfigurationError, NetworkError
@@ -22,7 +22,7 @@ from tinfoil._fetchers import AttestationRelay, RouterListRelay
 from tinfoil._router import FALLBACK_HOST, relay_list_url, shuffled
 from tinfoil._trust import RepoPin
 from tinfoil._types import EHBP
-from tinfoil.verifier import Pin, Verification, Verifier
+from tinfoil.verifier import Pin, VerificationReport, Verifier
 
 NONCE = bytes(range(32))
 ROUTERS = b'["router.example"]'
@@ -54,9 +54,9 @@ def direct(monkeypatch: pytest.MonkeyPatch) -> Recorder:
     monkeypatch.setattr(_enclave, "VERIFICATION_RETRY_DELAY", 0.0)
     monkeypatch.setattr(_router, "_shuffle", lambda routers: None)
 
-    def verify(self: Verifier, doc: bytes, nonce: bytes, pin: Pin) -> Verification:
+    def verify(self: Verifier, doc: bytes, nonce: bytes, pin: Pin) -> VerificationReport:
         assert len(nonce) == 32
-        return verification("ab" * 32, tag=doc.decode())
+        return report_of(verification("ab" * 32, tag=doc.decode()))
 
     monkeypatch.setattr(Verifier, "verify_v3", verify)
     return recorder
@@ -157,8 +157,7 @@ class TestCustomFetchers:
     def test_the_fetcher_serves_every_verification_of_an_enclave_client(self, direct: Recorder) -> None:
         calls = Calls()
         client = EnclaveHTTPClient("enclave.example", RepoPin("o/r"), transport=EHBP(), fetch_attestation=calls.fetch)
-        assert client.current is not None
-        assert client.current.code_tag == "doc:enclave.example"
+        assert facts_of(client.last_verification()[0]).code_tag == "doc:enclave.example"
         client.reverify()
         assert calls.hosts == ["enclave.example", "enclave.example"]
         assert len(set(calls.nonces)) == 2, "each verification has a fresh nonce"

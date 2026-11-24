@@ -81,7 +81,16 @@ if TYPE_CHECKING:
         create_client,
     )
     from tinfoil._trust import AuthorizedBy, EitherPin, EmbeddedConfig, ProjectPin, RepoPin, SignedBy, Trust
-    from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP, TLS, TimeoutTypes, Transport, VerificationCheck
+    from tinfoil._types import (
+        DEFAULT_HTTP_TIMEOUT,
+        EHBP,
+        TLS,
+        LastVerification,
+        OnVerification,
+        TimeoutTypes,
+        Transport,
+        VerificationCheck,
+    )
 
 _OPENAI_EXTRA = "install it with `pip install 'tinfoil[openai]'`"
 """How to install the optional ``openai`` dependency, which the OpenAI clients and the re-exported ``openai`` errors
@@ -127,9 +136,11 @@ __all__ = [
     "EnclaveHTTPClient",
     "GatewayHTTPClient",
     "InternalServerError",
+    "LastVerification",
     "ModelPin",
     "NetworkError",
     "NotFoundError",
+    "OnVerification",
     "OpenAIClient",
     "OpenAICopyOptions",
     "OpenAIError",
@@ -236,7 +247,16 @@ _MODULE_OF: dict[str, str] = {
         ),
         (
             "tinfoil._types",
-            ("DEFAULT_HTTP_TIMEOUT", "EHBP", "TLS", "TimeoutTypes", "Transport", "VerificationCheck"),
+            (
+                "DEFAULT_HTTP_TIMEOUT",
+                "EHBP",
+                "TLS",
+                "LastVerification",
+                "OnVerification",
+                "TimeoutTypes",
+                "Transport",
+                "VerificationCheck",
+            ),
         ),
         (
             "tinfoil._trust",

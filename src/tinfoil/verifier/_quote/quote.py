@@ -18,7 +18,7 @@ from typing import TypeAlias
 
 from tinfoil.verifier._document.collateral.collateral import CPUEndorsements
 from tinfoil.verifier._document.document import SEVSNP_REPORT_V1_FORMAT, TDX_QUOTE_V1_FORMAT, CpuEvidence, Document
-from tinfoil.verifier._measurement import SEVSNP, TDX, Expected, ExpectedSEVSNP, ExpectedTDX
+from tinfoil.verifier._measurement import SEVSNP, TDX, Expected, ExpectedSEVSNP, ExpectedTDX, parse_register
 from tinfoil.verifier._policy import PLATFORM_SEV_SNP, PLATFORM_TDX
 from tinfoil.verifier._quote import sev, tdx
 from tinfoil.verifier._quote.config import ConfigReferenceValues, resolve_config
@@ -52,6 +52,7 @@ __all__ = [
     "assemble",
     "assemble_with",
     "authenticate",
+    "code_measurement",
 ]
 
 ReferenceValues: TypeAlias = LegacyReferenceValues | ConfigReferenceValues
@@ -126,6 +127,8 @@ class AssembledSEVSNP:
 
     code_measurement: ExpectedSEVSNP
     """The registers the release fixes."""
+    expected: SEVSNP
+    """Every register that the quote must attest: the code measurement and the caller's pins."""
     policy_name: str
     """The matched policy name."""
     quote: AuthenticatedSEVSNP
@@ -149,6 +152,9 @@ class AssembledTDX:
 
     code_measurement: ExpectedTDX
     """The registers the release fixes."""
+    expected: TDX
+    """Every register that the quote must attest: the code measurement, the caller's pins and, under the legacy
+    contract, the platform registers that the platform endorsements resolve."""
     policy_name: str
     """The matched policy name."""
     platform_measurement_name: str | None
@@ -254,17 +260,46 @@ def assemble_with(
     the quote's platform; pins fill unset registers or must agree with the
     resolved value; every register must end up fixed; then the platform's
     ``assemble`` translates the policy into its expectations. Every failure
-    is an AssemblyError.
+    is an AssemblyError, and one after every expected register was resolved
+    carries them as its ``expected``.
     """
     resolved = _resolve(refs, quote, pins)
     expected = complete(resolved.expected)
-    if isinstance(expected, SEVSNP):
-        if not isinstance(quote, AuthenticatedSEVSNP):
-            raise AssemblyError(f"expected an SEV-SNP measurement for a {quote.platform} quote")
-        return _assemble_sev(resolved, quote, expected, report_data)
-    if not isinstance(quote, AuthenticatedTDX):
-        raise AssemblyError(f"expected a TDX measurement for a {quote.platform} quote")
-    return _assemble_tdx(resolved, quote, expected, report_data)
+    try:
+        if isinstance(expected, SEVSNP):
+            if not isinstance(quote, AuthenticatedSEVSNP):
+                raise AssemblyError(f"expected an SEV-SNP measurement for a {quote.platform} quote")
+            return _assemble_sev(resolved, quote, expected, report_data)
+        if not isinstance(quote, AuthenticatedTDX):
+            raise AssemblyError(f"expected a TDX measurement for a {quote.platform} quote")
+        return _assemble_tdx(resolved, quote, expected, report_data)
+    except AssemblyError as err:
+        err.expected = expected
+        raise
+
+
+def code_measurement(refs: ReferenceValues, evidence_format: str) -> Expected | None:
+    """The registers that ``refs`` fix on the platform that ``evidence_format`` names, or None if the format names
+    no platform or ``refs`` fix nothing usable on it. It reads only ``refs``, which provenance authenticated, so it
+    is known before the quote is authenticated; the format, which the quote has not yet proven, only selects the
+    platform."""
+    if evidence_format == SEVSNP_REPORT_V1_FORMAT:
+        platform = PLATFORM_SEV_SNP
+    elif evidence_format == TDX_QUOTE_V1_FORMAT:
+        platform = PLATFORM_TDX
+    else:
+        return None
+    if isinstance(refs, LegacyReferenceValues):
+        return refs.sevsnp if platform == PLATFORM_SEV_SNP else refs.tdx
+    if not isinstance(refs, ConfigReferenceValues) or refs.runtime is None:
+        return None
+    try:
+        if platform == PLATFORM_SEV_SNP:
+            return ExpectedSEVSNP(launch=parse_register(refs.runtime.snp_launch.measurement))
+        mrtd, rtmr0, rtmr1, rtmr2, rtmr3 = (parse_register(value) for value in refs.runtime.tdx_launch.registers())
+    except ValueError:
+        return None
+    return ExpectedTDX(mrtd=mrtd, rtmr0=rtmr0, rtmr1=rtmr1, rtmr2=rtmr2, rtmr3=rtmr3)
 
 
 def _resolve(refs: ReferenceValues, quote: Authenticated, pins: Expected | None) -> ResolvedValues:
@@ -289,7 +324,11 @@ def _assemble_sev(
     except SevPolicyError as err:
         raise AssemblyError(str(err)) from err
     return AssembledSEVSNP(
-        code_measurement=resolved.code, policy_name=resolved.policy_name, quote=quote, expectations=expectations
+        code_measurement=resolved.code,
+        expected=expected,
+        policy_name=resolved.policy_name,
+        quote=quote,
+        expectations=expectations,
     )
 
 
@@ -303,6 +342,7 @@ def _assemble_tdx(resolved: ResolvedValues, quote: AuthenticatedTDX, expected: T
         raise AssemblyError(str(err)) from err
     return AssembledTDX(
         code_measurement=resolved.code,
+        expected=expected,
         policy_name=resolved.policy_name,
         platform_measurement_name=resolved.platform_measurement_name,
         quote=quote,
