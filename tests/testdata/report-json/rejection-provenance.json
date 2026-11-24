@@ -1,0 +1,35 @@
+{
+  "description": "A rejection at the provenance step: measured with the key fingerprints, and no expected.",
+  "report": {
+    "schema_version": 1,
+    "steps": [
+      {
+        "layer": "envelope",
+        "status": "passed"
+      },
+      {
+        "layer": "provenance",
+        "status": "failed",
+        "message": "verifying code freshness: freshness witness is stale"
+      },
+      {
+        "layer": "quote",
+        "status": "not_run"
+      },
+      {
+        "layer": "policy",
+        "status": "not_run"
+      }
+    ],
+    "partial_facts": {
+      "measured": {
+        "tls_public_key_fp": "d1a3788930750184f2fe268a222b5c65bab974069573c4afbf656454f066b6e3",
+        "hpke_public_key_fp": "0ad65990ea9e81ed17576feb434b30f7f5e5eff386f3128be695d92577f9dd36"
+      }
+    },
+    "metadata": {
+      "verified_at": "2025-01-09T00:00:01Z"
+    }
+  },
+  "vector": "v3/freshness/fr2-stale.json"
+}

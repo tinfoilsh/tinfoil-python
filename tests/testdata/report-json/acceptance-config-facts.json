@@ -1,0 +1,76 @@
+{
+  "description": "Built, not verified: verified facts of a config-based verification on SEV-SNP with every config and artifact record member, and times given in UTC-5 that the form writes in UTC. Its input is goldenConfigFacts in verify/report_json_test.go.",
+  "report": {
+    "schema_version": 1,
+    "steps": [
+      {
+        "layer": "envelope",
+        "status": "passed"
+      },
+      {
+        "layer": "provenance",
+        "status": "passed"
+      },
+      {
+        "layer": "quote",
+        "status": "passed"
+      },
+      {
+        "layer": "policy",
+        "status": "passed"
+      }
+    ],
+    "verified_facts": {
+      "config_repo": "tinfoilsh/cvmimage",
+      "code_digest": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "code_tag": "v0.15.0",
+      "code_measurement": {
+        "platform": "sev-snp",
+        "launch": "abcd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "enclave_measurement": {
+        "platform": "sev-snp",
+        "launch": "abcd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "config": {
+        "source": "endorsement",
+        "name": "/org/project/v1",
+        "digest": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+        "reference": "org/project@v1",
+        "signing_key_hint": "hint",
+        "approval_time": "2026-09-20T08:00:00.0000005Z",
+        "registry_id": "registry",
+        "signature_time": "2026-09-20T08:01:00.0000005Z"
+      },
+      "runtime": {
+        "source": "endorsement",
+        "repo": "tinfoilsh/cvmimage",
+        "tag": "v0.15.0",
+        "digest": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "name": "runtime",
+        "commit": "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+        "approval_time": "2026-09-20T08:00:00.0000005Z"
+      },
+      "platform": {
+        "source": "embedded",
+        "digest": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+      },
+      "crypto_material": [
+        {
+          "id": "tls",
+          "format": "https://tinfoil.sh/key/spki-fp-sha256/v1",
+          "data": "abababababababababababababababababababababababababababababababab"
+        },
+        {
+          "id": "hpke",
+          "format": "https://tinfoil.sh/key/x25519-hpke/v1",
+          "data": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ],
+      "freshness_expires_at": "2026-10-03T12:00:00Z"
+    },
+    "metadata": {
+      "verified_at": "2026-01-02T02:04:05Z"
+    }
+  }
+}
