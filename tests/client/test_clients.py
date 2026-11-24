@@ -47,6 +47,8 @@ from tinfoil.verifier import (
 
 Handler = Callable[[httpx.Request], httpx.Response]
 ATTESTATION_PATH = "/.well-known/tinfoil-attestation"
+PINS = {"m": ModelPin("tinfoilsh/m")}
+"""Pins the model that the gateway tests' catalogs list."""
 
 
 class Network:
@@ -479,39 +481,47 @@ class TestGatewayClient:
             {"url": "https://gateway.example/v1/?x=1"},
             {"url": "https://gateway.example/v1/#f"},
             {"url": "/v1/"},
-            {"pinned_models_only": True},
+            {"model_pins": None},
+            {"model_pins": {}},
             {"model_pins": {"m": ModelPin("acme/m")}},
             {"model_pins": {"m": ModelPin("tinfoilsh/m@")}},
             {"policy": bad_policy()},
             {"policy": "strict"},
             {"model_pins": {"m": ModelPin("tinfoilsh/m", bad_policy())}},
             {"model_pins": {"m": "tinfoilsh/m"}},
+            {"model_pins": {"m": ModelPin("tinfoilsh/m", Policy())}, "policy": bad_policy()},
         ],
     )
     def test_rejects_invalid_options(self, network: Network, options: dict[str, object]) -> None:
         with pytest.raises(ConfigurationError) as err:
-            GatewayHTTPClient(catalog=dict, **options)  # type: ignore[arg-type]
+            GatewayHTTPClient(**{"catalog": dict, "model_pins": PINS, **options})  # type: ignore[arg-type]
         assert network.requests == []
         assert "hunter2" not in str(err.value), "a refused gateway URL is never echoed"
 
+    @pytest.mark.parametrize("model_pins", [None, {}])
+    def test_requires_a_model_pin(self, network: Network, model_pins: dict[str, ModelPin] | None) -> None:
+        with pytest.raises(ConfigurationError, match="at least one model pin"):
+            GatewayHTTPClient(url="https://gateway.example/v1/", model_pins=model_pins)
+        assert network.requests == [], "a client without pins is refused before the catalog is fetched"
+
     def test_refused_gateway_url_is_not_echoed(self, network: Network) -> None:
         with pytest.raises(ConfigurationError) as err:
-            GatewayHTTPClient(url="https://u:hunter2@gateway.example/v1/", catalog=dict)
+            GatewayHTTPClient(model_pins=PINS, url="https://u:hunter2@gateway.example/v1/", catalog=dict)
         assert str(err.value) == GATEWAY_URL_INVALID
 
     @pytest.mark.parametrize("url", ["https://gateway.example/v1/?", "https://gateway.example/v1/#"])
     def test_refuses_a_bare_query_or_fragment_delimiter(self, network: Network, url: str) -> None:
         with pytest.raises(ConfigurationError) as err:
-            GatewayHTTPClient(url=url, catalog=dict)
+            GatewayHTTPClient(model_pins=PINS, url=url, catalog=dict)
         assert str(err.value) == GATEWAY_URL_INVALID
         assert network.requests == []
 
     def test_fetches_the_catalog_before_returning(self, network: Network) -> None:
         with pytest.raises(NetworkError):
-            GatewayHTTPClient(url="https://gateway.example/v1/")
+            GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/v1/")
         assert network.hosts() == ["gateway.example"]
         network.handler = lambda _: response(200, b'{"m": {"repo": "tinfoilsh/m", "hosts": ["a.example"]}}')
-        client = GatewayHTTPClient(url="https://gateway.example/v1")
+        client = GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/v1")
         assert client.base_url == "https://gateway.example/v1/"
         assert client.models() == ["m"]
         assert client.last_verification() == []
@@ -525,13 +535,17 @@ class TestGatewayClient:
         client = GatewayHTTPClient(
             catalog=lambda: entries,
             model_pins={"pinned": ModelPin("tinfoilsh/pinned@v1"), "absent": ModelPin("tinfoilsh/absent")},
-            pinned_models_only=True,
             user_cache_secret="test-secret",
         )
         assert client.base_url == "https://inference-gateway.tinfoil.sh/v1/"
         assert client.models() == ["pinned"], "pins may name models the catalog doesn't list"
         assert client.last_verification() == [], "a model's replicas are verified on its first request"
-        assert network.requests == []
+        with pytest.raises(ConfigurationError, match='model "unpinned" is not pinned'):
+            client.ensure_verified("unpinned")
+        with pytest.raises(ConfigurationError, match='model "unpinned" is not pinned'):
+            client.http_client.post(client.base_url + "chat/completions", json={"model": "unpinned"})
+        assert client.last_verification() == [], "no replica is verified for an unpinned model"
+        assert network.requests == [], "no replica is contacted for an unpinned model"
         with pytest.raises(ConfigurationError, match="refusing to send request"):
             client.http_client.get("https://elsewhere.example/v1/models")
         client.close()
@@ -539,7 +553,9 @@ class TestGatewayClient:
     def test_verifies_a_replica_through_the_gateway(self, network: Network) -> None:
         entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("replica.example",))}
         network.serve("replica.example")
-        client = GatewayHTTPClient(url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s")
+        client = GatewayHTTPClient(
+            model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s"
+        )
         verified = facts_of(client.ensure_verified("m"))
         assert verified.code_tag == "replica.example"
         assert network.pins == [Pin(repo="tinfoilsh/m", project="tinfoilsh/m")], (
@@ -556,7 +572,9 @@ class TestGatewayClient:
     def test_failed_refresh_discards_the_replicas_verification(self, network: Network) -> None:
         entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("replica.example",))}
         first = network.serve("replica.example", deadline=datetime.now(UTC) + timedelta(seconds=0.2))
-        client = GatewayHTTPClient(url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s")
+        client = GatewayHTTPClient(
+            model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s"
+        )
         client.ensure_verified("m")
         [entry] = client.last_verification()
         assert entry.host == "replica.example"
@@ -623,10 +641,21 @@ async def test_async_clients(network: Network) -> None:
 
     entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("replica.example",))}
     network.serve("replica.example")
+    no_pins_cases: tuple[dict[str, ModelPin] | None, ...] = (None, {})
+    for no_pins in no_pins_cases:
+        with pytest.raises(ConfigurationError, match="at least one model pin"):
+            await AsyncGatewayHTTPClient.create(url="https://gateway.example/v1/", model_pins=no_pins)
+    entries = {**entries, "unpinned": CatalogEntry("tinfoilsh/unpinned", ("unpinned.example",))}
+    requests = len(network.requests)
     gateway = await AsyncGatewayHTTPClient.create(
-        url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s"
+        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s"
     )
     assert await gateway.models() == ["m"]
+    with pytest.raises(ConfigurationError, match='model "unpinned" is not pinned'):
+        await gateway.ensure_verified("unpinned")
+    with pytest.raises(ConfigurationError, match='model "unpinned" is not pinned'):
+        await gateway.http_client.post(gateway.base_url + "chat/completions", json={"model": "unpinned"})
+    assert len(network.requests) == requests, "no pins, and an unpinned model, contact nothing"
     assert facts_of(await gateway.ensure_verified("m")).code_tag == "replica.example"
     assert [v.host for v in gateway.last_verification()] == ["replica.example"]
     await gateway.close()
@@ -822,7 +851,11 @@ class TestVerificationReports:
         network.documents["b.example"] = NetworkError("b.example is down")
         attempts = Attempts()
         client = GatewayHTTPClient(
-            url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s", on_verification=attempts
+            model_pins=PINS,
+            url="https://gateway.example/v1/",
+            catalog=lambda: entries,
+            user_cache_secret="s",
+            on_verification=attempts,
         )
         order = list(rank(("a.example", "b.example"), "m", ""))
         good = network.serve(order[1])
@@ -952,7 +985,11 @@ async def test_async_clients_report_every_attempt(network: Network, monkeypatch:
     network.serve("replica.example")
     replicas = Attempts()
     gateway = await AsyncGatewayHTTPClient.create(
-        url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s", on_verification=replicas
+        model_pins=PINS,
+        url="https://gateway.example/v1/",
+        catalog=lambda: entries,
+        user_cache_secret="s",
+        on_verification=replicas,
     )
     verified = await gateway.ensure_verified("m")
     assert replicas.calls == [("replica.example", verified, None)]

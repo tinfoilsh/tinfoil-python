@@ -514,11 +514,13 @@ class GatewayHTTPClient:
     replica of the model that it names, as with the ``EHBP`` transport: the gateway sees the method, URL and
     headers, and WebSocket upgrades are refused.
 
-    ``model_pins`` pins models to repositories; with ``pinned_models_only``,
-    only pinned models are served, which requires at least one pin.
-    ``policy``, a ``tinfoil.verifier.Policy``, is the verification policy for
-    unpinned models, and for pinned models whose pin sets none; a pin's own
-    policy replaces it entirely for that model. ``verification_check`` is called with each
+    ``model_pins`` pins models to repositories. The client serves only the
+    models that it has pins for, so at least one pin is required, and a
+    request for any other model fails with ``ConfigurationError`` without
+    contacting a replica. ``policy``, a ``tinfoil.verifier.Policy``, is the
+    verification policy for pins that set none, and is checked even when
+    every pin sets its own; a pin's own policy replaces it entirely for that
+    model. ``verification_check`` is called with each
     replica's verified facts; a replica that it rejects is skipped for the
     next replica of the model. ``on_verification`` is called with the
     replica's host and the outcome of every attempt to verify a replica, and
@@ -547,7 +549,6 @@ class GatewayHTTPClient:
         self,
         *,
         model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         on_verification: OnVerification | None = None,
@@ -562,7 +563,6 @@ class GatewayHTTPClient:
             relay=relay,
             catalog=catalog,
             model_pins=model_pins,
-            pinned_models_only=pinned_models_only,
             policy=policy,
             verification_check=verification_check,
             on_verification=on_verification,
@@ -658,7 +658,6 @@ class AsyncGatewayHTTPClient:
         cls,
         *,
         model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         on_verification: OnVerification | None = None,
@@ -673,7 +672,6 @@ class AsyncGatewayHTTPClient:
             relay=relay,
             catalog=catalog,
             model_pins=model_pins,
-            pinned_models_only=pinned_models_only,
             policy=policy,
             verification_check=verification_check,
             on_verification=on_verification,

@@ -130,7 +130,7 @@ class ReplicaVerification:
     reference: str
     """The repository reference that the replica was verified against."""
     pinned_model: str
-    """The pinned model that the verification serves, or empty when the model was not pinned."""
+    """The pinned model that the verification serves."""
     report: VerificationReport | None
     """The report, if the last attempt passed. It may have expired or been invalidated since."""
     error: TinfoilError | None
@@ -190,12 +190,12 @@ def parse_catalog(body: bytes) -> Catalog:
 
 @dataclass(frozen=True, slots=True)
 class _Replica:
-    """What a verified replica transport is keyed by: the host, the reference it is verified against and the pinned
-    model it serves, empty when unpinned."""
+    """What a verified replica transport is keyed by: the host, the pinned reference that it is verified against and
+    the pinned model that it serves, so that two pins that share a host and a reference are verified independently."""
 
     host: str
     ref: str
-    model: str = ""
+    model: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,17 +207,16 @@ class _PinnedModel:
 
 
 class _Policy:
-    """The gateway's verification policy: the pins, whether only pinned models are served, and the verifier for
-    unpinned models. It builds a verifier from the gateway's policy and from each pin's, which copies them."""
+    """The gateway's verification policy: the pins, which name the only models that it serves. It builds a verifier
+    from the gateway's policy, which applies to the pins that set none, and from each pin's, which copies them."""
 
-    def __init__(self, model_pins: Mapping[str, ModelPin] | None, pinned_only: bool, policy: Policy | None):
-        if pinned_only and not model_pins:
-            raise ConfigurationError("pinned-only mode requires at least one model pin")
+    def __init__(self, model_pins: Mapping[str, ModelPin] | None, policy: Policy | None):
+        if not model_pins:
+            raise ConfigurationError("a gateway client requires at least one model pin")
+        # The gateway's policy is validated even when every pin sets its own.
         verifier = new_verifier(None, policy)
         self.pins: dict[str, _PinnedModel] = {}
-        self.pinned_only = pinned_only
-        self.verifier = verifier
-        for model, pin in (model_pins or {}).items():
+        for model, pin in model_pins.items():
             if not isinstance(pin, ModelPin):
                 raise ConfigurationError(f'model pin "{model}" must be a ModelPin value, not {type(pin).__name__}')
             if not model.strip() or not pin.repo.startswith(TRUSTED_REPO_OWNER):
@@ -232,9 +231,10 @@ class _Policy:
             self.pins[model] = _PinnedModel(repo=pin.repo, verifier=pinned)
 
     def resolve(self, model: str, catalog: Catalog) -> tuple[tuple[str, ...], _Replica]:
-        """The hosts serving ``model`` and the replica key its requests are verified under."""
+        """The hosts that serve ``model`` and the replica key that its requests are verified under. A model that has
+        no pin is refused before its catalog entry is read."""
         pin = self.pins.get(model)
-        if self.pinned_only and pin is None:
+        if pin is None:
             raise ConfigurationError(f'model "{model}" is not pinned')
         entry = catalog.get(model)
         if entry is None or not entry.trusted():
@@ -242,18 +242,14 @@ class _Policy:
                 f'model "{model}" has no valid bare {TRUSTED_REPO_OWNER} repository with replicas '
                 "in the gateway catalog"
             )
-        if pin is not None:
-            repo = pin.repo.split("@", 1)[0]
-            if entry.repo != repo:
-                raise AttestationError(f'model "{model}": expected repository "{repo}", gateway offered "{entry.repo}"')
-            return entry.hosts, _Replica(host="", ref=pin.repo, model=model)
-        return entry.hosts, _Replica(host="", ref=entry.repo)
+        repo = pin.repo.split("@", 1)[0]
+        if entry.repo != repo:
+            raise AttestationError(f'model "{model}": expected repository "{repo}", gateway offered "{entry.repo}"')
+        return entry.hosts, _Replica(host="", ref=pin.repo, model=model)
 
     def verifier_for(self, replica: _Replica) -> Verifier:
-        pin = self.pins.get(replica.model) if replica.model else None
-        if pin is not None:
-            return pin.verifier
-        return self.verifier
+        """The verifier that a replica of ``replica`` is verified under: that of its pin."""
+        return self.pins[replica.model].verifier
 
 
 def rank(hosts: tuple[str, ...] | list[str], prefix: str, first: str) -> list[str]:
@@ -526,14 +522,13 @@ class _Shared(Generic[_T]):
         base_url: str,
         relay: str,
         model_pins: Mapping[str, ModelPin] | None,
-        pinned_models_only: bool,
         policy: Policy | None,
         verification_check: VerificationCheck | None,
         on_verification: OnVerification | None,
         user_cache_secret: str | None,
         timeout: TimeoutTypes,
     ) -> None:
-        self.policy = _Policy(model_pins, pinned_models_only, policy)
+        self.policy = _Policy(model_pins, policy)
         self.base_url = base_url
         self.relay = relay
         self.check = verification_check
@@ -736,7 +731,6 @@ class GatewayTransport(httpx.BaseTransport):
         relay: str,
         catalog: Callable[[], Catalog] | None = None,
         model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         on_verification: OnVerification | None = None,
@@ -749,7 +743,6 @@ class GatewayTransport(httpx.BaseTransport):
             base_url=base_url,
             relay=relay,
             model_pins=model_pins,
-            pinned_models_only=pinned_models_only,
             policy=policy,
             verification_check=verification_check,
             on_verification=on_verification,
@@ -969,7 +962,6 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         relay: str,
         catalog: Callable[[], Catalog] | None = None,
         model_pins: Mapping[str, ModelPin] | None = None,
-        pinned_models_only: bool = False,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
         on_verification: OnVerification | None = None,
@@ -982,7 +974,6 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
             base_url=base_url,
             relay=relay,
             model_pins=model_pins,
-            pinned_models_only=pinned_models_only,
             policy=policy,
             verification_check=verification_check,
             on_verification=on_verification,
