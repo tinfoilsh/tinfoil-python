@@ -34,7 +34,7 @@ from tinfoil._clients import (
     RouterHTTPClient,
 )
 from tinfoil._errors import AttestationError, ConfigurationError, TinfoilError, tinfoil_error
-from tinfoil._gateway import CatalogEntry
+from tinfoil._gateway import CatalogEntry, ModelPin
 from tinfoil._openai import (
     _FORBIDDEN_TRANSPORT_OPTIONS,
     DROP_IN_OPTIONS,
@@ -57,6 +57,7 @@ from tinfoil.verifier import Policy, Verifier
 
 MODELS = b'{"object":"list","data":[]}'
 ENTRIES = {"m": CatalogEntry("tinfoilsh/m", ("a.example",))}
+PINS = {"m": ModelPin("tinfoilsh/m")}
 
 
 def foreign(**options: Any) -> dict[str, Any]:
@@ -83,7 +84,7 @@ def enclave(**options: Any) -> EnclaveHTTPClient:
 
 
 def gateway() -> GatewayHTTPClient:
-    return GatewayHTTPClient(url="https://gateway.example/v1/", catalog=lambda: ENTRIES)
+    return GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: ENTRIES)
 
 
 def models_response(_: httpx.Request) -> httpx.Response:
@@ -573,7 +574,9 @@ async def test_async_client(offline: Recorder) -> None:
     await client.models.list()
     assert [str(r.url) for r in recorder.requests] == ["https://enclave.example/v1/models"]
     await client.close()
-    gateway_client = await AsyncGatewayHTTPClient.create(url="https://gateway.example/v1/", catalog=lambda: ENTRIES)
+    gateway_client = await AsyncGatewayHTTPClient.create(
+        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: ENTRIES
+    )
     with pytest.raises(ConfigurationError, match="gateway client's URL already carries the API path"):
         AsyncOpenAIClient(gateway_client, api_path="/v1/", api_key="k")
     async_gateway = AsyncOpenAIClient(gateway_client, api_key="k", **foreign(base_url="https://other.example/v1/"))
@@ -676,7 +679,9 @@ async def _async_router() -> AsyncRouterHTTPClient:
 
 
 async def _async_gateway() -> AsyncGatewayHTTPClient:
-    return await AsyncGatewayHTTPClient.create(url="https://gateway.example/v1/", catalog=lambda: ENTRIES)
+    return await AsyncGatewayHTTPClient.create(
+        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: ENTRIES
+    )
 
 
 ASYNC_HTTP_CLIENTS: dict[str, Callable[[], Awaitable[Any]]] = {

@@ -18,6 +18,7 @@ The pre-releases configured clients with options that were checked against each 
 | `client.pin` | `client.trust` on the enclave clients, which returns the trust argument. The router clients have neither: the router's trust is fixed |
 | `verifier=Verifier(...)` on a client | `policy=Policy(...)`, a `tinfoil.verifier.Policy`; the client builds the verifier, and an invalid policy is a `ConfigurationError` |
 | `ModelPin(repo, verifier)` | `ModelPin(repo, policy)`; `None` inherits the gateway's policy |
+| `pinned_models_only=True` on a gateway client | Removed; a gateway client always serves only the models that it has pins for. `model_pins` is required and must be non-empty, and a request for an unpinned model is a `ConfigurationError`. The gateway's `policy` applies to the pins that set none |
 | `transport_mode="tls"` | `transport=TLS()`, or nothing: it is the default |
 | `transport_mode="ehbp"` | `transport=EHBP()` |
 | `transport_mode="ehbp", base_url=proxy` | `transport=EHBP(proxy_url=mount)`, where `mount` is where the proxy is mounted, without the API path: `base_url="https://proxy.example/v1/"` becomes `proxy_url="https://proxy.example/"`, and the OpenAI client adds `/v1/` |

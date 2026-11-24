@@ -170,6 +170,7 @@ from tinfoil import (
     EitherPin,
     EnclaveHTTPClient,
     GatewayHTTPClient,
+    ModelPin,
     OpenAIClient,
     OpenAICopyOptions,
     OpenAIOptions,
@@ -202,7 +203,8 @@ async def consume() -> None:
     http_client: AttestedHTTPClient = EnclaveHTTPClient("enclave.example", trust, transport=EHBP(), timeout=5.0)
     enclave = OpenAIClient(http_client, api_path="/openai/v1", **options)
     router = OpenAIClient(RouterHTTPClient(user_cache_secret="s"), api_key="k", organization="o", project="p")
-    gateway = OpenAIClient(GatewayHTTPClient(url="https://gateway.example/v1/"), api_key="k", max_retries=1)
+    gateway_http = GatewayHTTPClient(model_pins={{"m": ModelPin("tinfoilsh/m")}}, url="https://gateway.example/v1/")
+    gateway = OpenAIClient(gateway_http, api_key="k", max_retries=1)
     drop_in: Client = create_client(**options)
     again: Client = drop_in.with_options(**overrides).copy(max_retries=2, set_default_query={{"v": 1}})
     async_router = AsyncOpenAIClient(await AsyncRouterHTTPClient.create(), **async_options)

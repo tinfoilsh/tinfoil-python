@@ -177,7 +177,7 @@ The attestation relay serves `GET {url}/.well-known/tinfoil-attestation?nonce=..
 
 ## The gateway
 
-Tinfoil's gateway serves many models behind one URL; a gateway client seals each request to a verified replica of the model that the request names. `model_pins` pins a model to the repository that its replicas must run, and `pinned_models_only=True` refuses models that are not pinned. The gateway clients are experimental and may change in a later release.
+Tinfoil's gateway serves many models behind one URL; a gateway client seals each request to a verified replica of the model that the request names. `model_pins` pins a model to the repository that its replicas must run. A gateway client serves only the models that it has pins for, so it requires at least one pin, and a request for any other model fails with a `ConfigurationError` without contacting a replica. `policy` applies to the pins that set none; a pin's own `policy` replaces it. The gateway clients are experimental and may change in a later release.
 
 ```python
 import os
@@ -186,7 +186,6 @@ from tinfoil import GatewayHTTPClient, ModelPin, OpenAIClient
 
 http_client = GatewayHTTPClient(
     model_pins={"glm-5-3": ModelPin("tinfoilsh/confidential-glm5-3-nvfp4")},
-    pinned_models_only=True,
 )
 client = OpenAIClient(http_client, api_key=os.environ["TINFOIL_API_KEY"])
 ```
