@@ -168,3 +168,10 @@ def test_to_dict_leaves_out_what_was_not_established() -> None:
     assert json.loads(record(runtime=ArtifactVerification(source=SOURCE_EMBEDDED)).to_json())["runtime"] == {
         "source": "embedded"
     }
+    # An artifact without a tag has no code_tag, and a release that fixes no register on the enclave's platform has no
+    # code_measurement: neither is written as "" or as a measurement without registers.
+    got = record(code_tag="", code_measurement=ExpectedTDX()).to_dict()
+    assert "code_tag" not in got
+    assert "code_measurement" not in got
+    assert got["enclave_measurement"]["platform"] == "tdx"
+    assert "code_measurement" not in record(code_measurement=ExpectedSEVSNP()).to_dict()

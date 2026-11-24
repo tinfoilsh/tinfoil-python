@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, replace
 from typing import Any, Final, Literal, TypeAlias
 
+from tinfoil._sdkinfo import UNKNOWN_VERSION
 from tinfoil.verifier._document.document import (
     CRYPTO_MATERIAL_ID_HPKE,
     CRYPTO_MATERIAL_ID_TLS,
@@ -22,11 +22,17 @@ from tinfoil.verifier._verification import (
     VerificationMetadata,
     VerifiedFacts,
     artifact_dict,
+    code_measurement_dict,
     config_dict,
     crypto_material_data,
+    json_text,
     measurement_dict,
     time_str,
 )
+
+REPORT_SCHEMA_VERSION: Final = 1
+"""The ``schema_version`` that the JSON form of a ``VerificationReport`` carries. Adding a member keeps the version;
+removing or renaming one, or changing what one means, bumps it. A consumer ignores members that it does not know."""
 
 StepStatus: TypeAlias = Literal["passed", "failed", "skipped", "not_run"]
 """The outcome of a ``Step``; the ``STEP_*`` constants are its values."""
@@ -150,26 +156,53 @@ class VerificationReport:
         return None
 
     def to_dict(self) -> dict[str, Any]:
-        """A plain, JSON-ready copy: the steps, the facts as ``VerifiedFacts.to_dict`` lays them out, and the
-        metadata. A field that is None is left out."""
+        """The report in the JSON form that every Tinfoil SDK writes, as a ``dict`` of JSON values, so that a report
+        can be shown or passed on, for example to a browser or another process:
+
+        .. code-block:: text
+
+            {
+              "schema_version": 1,
+              "steps": [
+                {"layer": "envelope", "status": "passed"},
+                {"layer": "provenance", "status": "passed"},
+                {"layer": "quote", "status": "failed", "message": "<detail>"},
+                {"layer": "policy", "status": "not_run"}
+              ],
+              "verified_facts": { ...on success only, as VerifiedFacts.to_dict writes them... },
+              "partial_facts": {
+                "expected": {"config_repo", "artifact", "config", "platform", "code_measurement", "measurement"},
+                "measured": {"cpu_measurement", "tls_public_key_fp", "hpke_public_key_fp"}
+              },
+              "metadata": {
+                "verified_at": "<RFC 3339, UTC>",
+                "verifier": {"name": "tinfoil-python", "version": "<version>"}
+              }
+            }
+
+        Keys are snake_case, hex is lowercase and times are RFC 3339 in UTC, written with ``Z``. A fact that was not
+        established is left out, but an established fact that is empty is kept, as in ``"measured": {}``; no member
+        is None or ``""``. Exactly one of ``verified_facts`` and ``partial_facts`` is present, and ``partial_facts``
+        is present only on a rejection. A step's message is present only for a failed or skipped step.
+        ``metadata.verifier`` is present only when the installed package names its version.
+
+        The JSON is for display and transport only, and it authorizes nothing: nothing in this SDK parses it back
+        into a report or into verified facts, and a holder of the JSON cannot tell whether a verifier produced it, so
+        a channel binds only to the ``VerifiedFacts`` that a verification returned in process."""
         out: dict[str, Any] = {
+            "schema_version": REPORT_SCHEMA_VERSION,
             "steps": [_step_dict(step) for step in self.steps],
         }
         if self.verified_facts is not None:
             out["verified_facts"] = self.verified_facts.to_dict()
         if self.partial_facts is not None:
             out["partial_facts"] = _partial_dict(self.partial_facts)
-        out["metadata"] = {
-            "verifier": {"name": self.metadata.verifier.name, "version": self.metadata.verifier.version},
-            "verified_at": time_str(self.metadata.verified_at),
-        }
+        out["metadata"] = _metadata_dict(self.metadata)
         return out
 
     def to_json(self, *, indent: int | None = None) -> str:
         """``to_dict`` serialized as JSON: compact by default, or pretty-printed with ``indent`` spaces per level."""
-        if indent is None:
-            return json.dumps(self.to_dict(), separators=(",", ":"))
-        return json.dumps(self.to_dict(), indent=indent)
+        return json_text(self.to_dict(), indent)
 
 
 def hpke_public_key_fp(key: str) -> str | None:
@@ -237,20 +270,28 @@ def _step_dict(step: Step) -> dict[str, Any]:
     return out
 
 
+def _metadata_dict(metadata: VerificationMetadata) -> dict[str, Any]:
+    """``metadata`` as ``{"verified_at", "verifier"}``, with the verifier only when its name and version are known."""
+    out: dict[str, Any] = {"verified_at": time_str(metadata.verified_at)}
+    verifier = metadata.verifier
+    if verifier.name and verifier.version and verifier.version != UNKNOWN_VERSION:
+        out["verifier"] = {"name": verifier.name, "version": verifier.version}
+    return out
+
+
 def _partial_dict(partial: PartialFacts) -> dict[str, Any]:
     out: dict[str, Any] = {}
     expected = partial.expected
     if expected is not None:
-        expected_out: dict[str, Any] = {
-            "config_repo": expected.config_repo,
-            "artifact": artifact_dict(expected.artifact),
-        }
+        expected_out: dict[str, Any] = {"config_repo": expected.config_repo} if expected.config_repo else {}
+        expected_out["artifact"] = artifact_dict(expected.artifact)
         if expected.config is not None:
             expected_out["config"] = config_dict(expected.config)
         if expected.platform is not None:
             expected_out["platform"] = artifact_dict(expected.platform)
-        if expected.code_measurement is not None:
-            expected_out["code_measurement"] = measurement_dict(expected.code_measurement)
+        code = code_measurement_dict(expected.code_measurement)
+        if code is not None:
+            expected_out["code_measurement"] = code
         if expected.measurement is not None:
             expected_out["measurement"] = measurement_dict(expected.measurement)
         out["expected"] = expected_out
@@ -258,10 +299,10 @@ def _partial_dict(partial: PartialFacts) -> dict[str, Any]:
     if measured is not None:
         measured_out: dict[str, Any] = {}
         if measured.cpu is not None:
-            measured_out["cpu"] = {"measurement": measurement_dict(measured.cpu.measurement)}
-        if measured.tls_public_key_fp is not None:
+            measured_out["cpu_measurement"] = measurement_dict(measured.cpu.measurement)
+        if measured.tls_public_key_fp:
             measured_out["tls_public_key_fp"] = measured.tls_public_key_fp
-        if measured.hpke_public_key_fp is not None:
+        if measured.hpke_public_key_fp:
             measured_out["hpke_public_key_fp"] = measured.hpke_public_key_fp
         out["measured"] = measured_out
     return out
@@ -269,6 +310,7 @@ def _partial_dict(partial: PartialFacts) -> dict[str, Any]:
 
 __all__ = [
     "LAYERS",
+    "REPORT_SCHEMA_VERSION",
     "STEP_FAILED",
     "STEP_NOT_RUN",
     "STEP_PASSED",

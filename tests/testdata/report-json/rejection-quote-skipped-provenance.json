@@ -1,0 +1,54 @@
+{
+  "description": "A verifier that embeds every reference value, so provenance is skipped with its reason, and a quote that isn't authentic: expected without measurement, and measured without cpu_measurement. Its input is TestReportJSONGoldenQuoteRejectionAfterSkippedProvenance in verify/report_json_test.go.",
+  "report": {
+    "schema_version": 1,
+    "steps": [
+      {
+        "layer": "envelope",
+        "status": "passed"
+      },
+      {
+        "layer": "provenance",
+        "status": "skipped",
+        "message": "the verifier embeds every reference value, so there is no endorsement to authenticate"
+      },
+      {
+        "layer": "quote",
+        "status": "failed",
+        "message": "no amd-vcek endorsement collateral for the cpu"
+      },
+      {
+        "layer": "policy",
+        "status": "not_run"
+      }
+    ],
+    "partial_facts": {
+      "expected": {
+        "config_repo": "tinfoilsh/cvmimage",
+        "artifact": {
+          "source": "embedded",
+          "repo": "tinfoilsh/cvmimage",
+          "tag": "v0.15.0",
+          "digest": "1d386a55a508cd40a46ee280ae9a218042f5fdb5bb8d294325bf261543f1f20d"
+        },
+        "config": {
+          "source": "embedded",
+          "name": "/org/project/v1",
+          "digest": "5e94e4abf0cfe92821a95eca84e554953d3c64a5496390615fabd5c9ca848aaf"
+        },
+        "platform": {
+          "source": "embedded",
+          "digest": "8bb5dc4376dedb478520fbc3bebe25b70140cb195e07b33c16ccd8d14d13981a"
+        },
+        "code_measurement": {
+          "platform": "sev-snp",
+          "launch": "abababababababababababababababababababababababababababababababababababababababababababababababab"
+        }
+      },
+      "measured": {}
+    },
+    "metadata": {
+      "verified_at": "2026-01-02T02:04:05Z"
+    }
+  }
+}

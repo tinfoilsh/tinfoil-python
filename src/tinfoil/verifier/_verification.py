@@ -144,32 +144,64 @@ class VerifiedFacts:
         return crypto_material_data(self.crypto_material, item_id, item_format)
 
     def to_dict(self) -> dict[str, Any]:
-        """A plain, JSON-ready copy: registers as lowercase hex, times as ISO 8601 in UTC, facts that were not
-        established (None times and empty strings) left out of the config, runtime and platform records."""
-        out: dict[str, Any] = {
-            "code_digest": self.code_digest,
-            "code_tag": self.code_tag,
-            "config_repo": self.config_repo,
-            "code_measurement": measurement_dict(self.code_measurement),
-            "enclave_measurement": measurement_dict(self.enclave_measurement),
-            "crypto_material": [
-                {"id": item.id, "format": item.format, "data": item.data} for item in self.crypto_material
-            ],
-        }
+        """The ``verified_facts`` object of the report's JSON form, as a ``dict`` of JSON values:
+
+        .. code-block:: text
+
+            {
+              "config_repo": "<owner/name>",
+              "code_digest": "<hex>",
+              "code_tag": "<tag>",
+              "code_measurement": {"platform": "tdx", "rtmr1": "<hex>", "rtmr2": "<hex>"},
+              "enclave_measurement": {"platform": "tdx", "mrtd": "<hex>", "rtmr0": "<hex>", ...},
+              "config": {"source", "name", "digest", "reference", "signing_key_hint", "approval_time",
+                         "registry_id", "signature_time"},
+              "runtime": {"source", "repo", "tag", "digest", "name", "commit", "approval_time"},
+              "platform": {"source", "repo", "tag", "digest", "name", "commit", "approval_time"},
+              "crypto_material": [{"id": "tls", "format": "<format>", "data": "<hex>"}],
+              "freshness_expires_at": "<RFC 3339, UTC>"
+            }
+
+        Registers are lowercase hex and times are RFC 3339 in UTC, written with ``Z``. A measurement names its
+        platform, ``"sev-snp"`` with ``launch`` or ``"tdx"`` with ``mrtd`` and ``rtmr0`` to ``rtmr3``, and leaves
+        out a register that the release leaves to the platform; a code measurement that would hold no register is
+        left out. A fact that was not established is left out, never written as None or ``""``: ``config``,
+        ``runtime`` and ``platform`` are present only for a config-based verification. The channel keys appear only
+        in ``crypto_material``.
+
+        The JSON is for display and transport only, and it authorizes nothing: nothing in this SDK parses it back
+        into verified facts, and a holder of the JSON cannot tell whether a verifier produced it, so a channel
+        binds only to the ``VerifiedFacts`` that a verification returned in process."""
+        out: dict[str, Any] = _established({"config_repo": self.config_repo, "code_digest": self.code_digest})
+        if self.code_tag:
+            out["code_tag"] = self.code_tag
+        code = code_measurement_dict(self.code_measurement)
+        if code is not None:
+            out["code_measurement"] = code
+        out["enclave_measurement"] = measurement_dict(self.enclave_measurement)
         if self.config is not None:
             out["config"] = config_dict(self.config)
         for name, artifact in (("runtime", self.runtime), ("platform", self.platform)):
             if artifact is not None:
                 out[name] = artifact_dict(artifact)
+        out["crypto_material"] = [
+            {"id": item.id, "format": item.format, "data": item.data} for item in self.crypto_material
+        ]
         if self.freshness_expires_at is not None:
             out["freshness_expires_at"] = time_str(self.freshness_expires_at)
         return out
 
     def to_json(self, *, indent: int | None = None) -> str:
         """``to_dict`` serialized as JSON: compact by default, or pretty-printed with ``indent`` spaces per level."""
-        if indent is None:
-            return json.dumps(self.to_dict(), separators=(",", ":"))
-        return json.dumps(self.to_dict(), indent=indent)
+        return json_text(self.to_dict(), indent)
+
+
+def json_text(value: dict[str, Any], indent: int | None) -> str:
+    """``value`` as JSON text: compact when ``indent`` is None, and pretty-printed with ``indent`` spaces per level
+    otherwise."""
+    if indent is None:
+        return json.dumps(value, separators=(",", ":"))
+    return json.dumps(value, indent=indent)
 
 
 def crypto_material_data(items: tuple[CryptoMaterialItem, ...], item_id: str, item_format: str) -> str | None:
@@ -182,7 +214,7 @@ def crypto_material_data(items: tuple[CryptoMaterialItem, ...], item_id: str, it
 
 
 def config_dict(config: ConfigVerification) -> dict[str, Any]:
-    """``config`` as ``to_dict`` lays it out, without the facts that were not established."""
+    """``config`` as the report's JSON form lays it out, without the facts that were not established."""
     return _established(
         {
             "source": config.source,
@@ -198,7 +230,7 @@ def config_dict(config: ConfigVerification) -> dict[str, Any]:
 
 
 def artifact_dict(artifact: ArtifactVerification) -> dict[str, Any]:
-    """``artifact`` as ``to_dict`` lays it out, without the facts that were not established."""
+    """``artifact`` as the report's JSON form lays it out, without the facts that were not established."""
     return _established(
         {
             "source": artifact.source,
@@ -213,7 +245,8 @@ def artifact_dict(artifact: ArtifactVerification) -> dict[str, Any]:
 
 
 def measurement_dict(measurement: Measurement | Expected) -> dict[str, Any]:
-    """A measurement as its platform and the registers that are set, each as lowercase hex."""
+    """A measurement as the report's JSON form writes it: its platform and the registers that are set, each as
+    lowercase hex."""
     if isinstance(measurement, SEVSNP | ExpectedSEVSNP):
         out: dict[str, Any] = {"platform": PLATFORM_SEV_SNP}
         if measurement.launch is not None:
@@ -228,7 +261,17 @@ def measurement_dict(measurement: Measurement | Expected) -> dict[str, Any]:
     return out
 
 
+def code_measurement_dict(measurement: Expected | None) -> dict[str, Any] | None:
+    """The registers that a release fixes, as ``measurement_dict`` writes them, or None when it fixes none, so that a
+    code measurement without a register is left out."""
+    if measurement is None:
+        return None
+    out = measurement_dict(measurement)
+    return out if len(out) > 1 else None
+
+
 def time_str(at: datetime | None) -> str | None:
+    """``at`` as RFC 3339 in UTC, written with ``Z``, or None for a time that was not established."""
     if at is None:
         return None
     return at.astimezone(UTC).isoformat().replace("+00:00", "Z")
