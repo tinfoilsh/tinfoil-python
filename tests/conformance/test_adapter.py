@@ -30,6 +30,7 @@ _FACTS = (
     "hpke_public_key",
     "signing_key_hint",
     "timestamp",
+    "runtime",
 )
 
 _WELL_FORMED: dict[str, Any] = {
@@ -90,7 +91,13 @@ def test_malformed_input_is_reported_first(raw: Any) -> None:
 
 
 @pytest.mark.parametrize(
-    "stage", [adapter.STAGE_VERIFY, adapter.STAGE_CHECK_ENVELOPE, adapter.STAGE_AUTHENTICATE_QUOTE]
+    "stage",
+    [
+        adapter.STAGE_VERIFY,
+        adapter.STAGE_CHECK_ENVELOPE,
+        adapter.STAGE_AUTHENTICATE_QUOTE,
+        adapter.STAGE_READ_CONFIG_RUNTIME,
+    ],
 )
 def test_document_stages_treat_an_unparseable_sigstore_root_as_malformed(stage: str) -> None:
     # "e30=" is "{}": well-formed base64 and JSON that is not a trusted-root document.
@@ -359,10 +366,12 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
-def _document_with(entries: list[dict[str, Any]]) -> str:
+def _document_with(entries: list[dict[str, Any]], collateral_format: str | None = None) -> str:
     from tests import document_builder
 
-    _, raw = document_builder.build(document_builder.test_nonce(), collateral_entries=entries)
+    _, raw = document_builder.build(
+        document_builder.test_nonce(), collateral_entries=entries, collateral_format=collateral_format
+    )
     return _b64(raw)
 
 
@@ -619,3 +628,53 @@ def test_verify_timestamp_stage_uses_the_approval_window() -> None:
         adapter.run(adapter.STAGE_VERIFY_TIMESTAMP, {**raw(world.now), "verification_time_unix": 0}).exit_code
         == adapter.EXIT_MALFORMED
     )
+
+
+def test_read_config_runtime_stage() -> None:
+    """The runtime stage reads the pin from the config that a document carries: JSON from the first JSON version on,
+    YAML before it."""
+    stage = adapter.STAGE_READ_CONFIG_RUNTIME
+    digest = "ab" * 32
+
+    def raw(*entries: dict[str, Any]) -> dict[str, Any]:
+        document = _document_with(list(entries), "https://tinfoil.sh/predicate/attestation-collaterals/v3")
+        return {"schema_version": "1", "document_b64": document}
+
+    def entry(format_: str, data: dict[str, Any]) -> dict[str, Any]:
+        return {"id": "tinfoil-config", "role": "reference-values", "format": format_, "subjects": [], "data": data}
+
+    def plain(config: str) -> dict[str, Any]:
+        return entry("https://tinfoil.sh/collateral/config/v1", {"config_base64": _b64(config.encode())})
+
+    json_config = f'{{"cvm-version":"0.15.5-rc.1@sha256:{digest}"}}'
+    yaml_config = f"cvm-version: 0.15.4@sha256:{digest}\n"
+
+    for name, config, tag in [
+        ("JSON config", json_config, "v0.15.5-rc.1"),
+        ("YAML config", yaml_config, "v0.15.4"),
+    ]:
+        result = adapter.run(stage, raw(plain(config)))
+        assert result.exit_code == adapter.EXIT_ACCEPTED, (name, result.output)
+        assert result.output == {
+            "stage": stage,
+            "accepted": True,
+            "outputs": {"runtime": {"repo": "tinfoilsh/cvmimage", "tag": tag, "digest": digest}},
+        }
+    reference_only = entry(
+        "https://tinfoil.sh/collateral/config-endorsement/v2",
+        {"endorsement_ref": "sha256:" + digest, "sigstore_bundle": {}},
+    )
+    for name, document_input, want in [
+        ("YAML for a JSON version", raw(plain(yaml_config.replace("0.15.4", "0.15.5-rc.1"))), adapter.EXIT_REJECTED),
+        ("JSON not in its one form", raw(plain(json_config.replace('":"', '": "', 1))), adapter.EXIT_REJECTED),
+        ("no pin", raw(plain("cpus: 2\n")), adapter.EXIT_REJECTED),
+        ("no config", raw(), adapter.EXIT_REJECTED),
+        ("reference without config bytes", raw(reference_only), adapter.EXIT_REJECTED),
+        ("no document", {"schema_version": "1"}, adapter.EXIT_MALFORMED),
+        ("undecodable document", {"schema_version": "1", "document_b64": _b64(b"{")}, adapter.EXIT_MALFORMED),
+    ]:
+        result = adapter.run(stage, document_input)
+        assert result.exit_code == want, (name, result.output)
+        code = "MALFORMED_INPUT" if want == adapter.EXIT_MALFORMED else "PROVENANCE_REJECTED"
+        assert result.output == {"stage": stage, "accepted": False, "rejection": {"code": code}}, name
+    assert stage in adapter.capabilities()["v3"]["stages_supported"]
