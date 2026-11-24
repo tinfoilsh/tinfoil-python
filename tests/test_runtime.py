@@ -13,7 +13,6 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-import yaml
 
 from tinfoil.verifier._document.collateral.runtime import RUNTIME_REPO, RuntimeReference
 from tinfoil.verifier._runtime import (
@@ -278,7 +277,7 @@ def test_decode_manifest_framing() -> None:
 # --- runtime_from_config -----------------------------------------------------
 
 DIGEST = "ab" * 32
-GOOD = f"cvm-version: 0.15.0@sha256:{DIGEST}\n"
+GOOD = f'{{"cvm-version":"0.15.0@sha256:{DIGEST}"}}'
 WANT = RuntimeReference(repo=RUNTIME_REPO, tag="v0.15.0", digest=DIGEST)
 
 
@@ -297,16 +296,17 @@ WANT = RuntimeReference(repo=RUNTIME_REPO, tag="v0.15.0", digest=DIGEST)
     ],
 )
 def test_config_runtime_pin_accepts(version: str, tag: str) -> None:
-    config = f"cvm-version: {version}@sha256:{DIGEST}\ncontainers: []\n".encode()
+    config = f'{{"containers":[],"cvm-version":"{version}@sha256:{DIGEST}"}}'.encode()
     assert runtime_from_config(config) == RuntimeReference(repo=RUNTIME_REPO, tag=tag, digest=DIGEST)
 
 
 @pytest.mark.parametrize(
     ("name", "config"),
     [
-        ("unpinned", "cvm-version: 0.15.0\n"),
-        ("duplicate", GOOD + GOOD),
-        ("two documents", GOOD + "---\n" + GOOD),
+        ("unpinned", '{"cvm-version":"0.15.0"}'),
+        ("duplicate", GOOD[:-1] + "," + GOOD[1:]),
+        ("two documents", GOOD + GOOD),
+        ("not JSON", f"cvm-version: 0.15.0@sha256:{DIGEST}\n"),
         ("bad digest", GOOD.replace(DIGEST, DIGEST.upper())),
         ("path metadata", GOOD.replace("0.15.0", "0.15.0+mini/other")),
         ("partial version", GOOD.replace("0.15.0", "0.15+gpu")),
@@ -314,7 +314,7 @@ def test_config_runtime_pin_accepts(version: str, tag: str) -> None:
         ("double metadata", GOOD.replace("0.15.0", "0.15.0+gpu+gpu")),
         ("short digest", GOOD.replace(DIGEST, DIGEST[:-2])),
         ("extra digest", GOOD.replace(DIGEST, DIGEST + "@sha256:" + DIGEST)),
-        ("missing version", "containers: []\n"),
+        ("missing version", '{"containers":[]}'),
     ],
     ids=lambda value: value if " " in value or value in ("unpinned", "duplicate") else None,
 )
@@ -329,72 +329,36 @@ def raises_config(config: bytes, match: str) -> None:
 
 
 def test_config_decode_rejects() -> None:
-    raises_config((GOOD + GOOD).encode(), r"^parsing config runtime pin: mapping key 'cvm-version' already defined")
+    raises_config((GOOD[:-1] + "," + GOOD[1:]).encode(), r"^parsing config runtime pin: duplicate object member name")
     # A top-level key repeats even when it is not one being read.
-    raises_config(("containers: []\ncontainers: []\n" + GOOD).encode(), r"mapping key 'containers' already defined")
-    # Every top-level key must be a plain string; a quoted scalar is one, a bare number, boolean or null is not.
-    for config in (b"5: x\n", b"1.0: x\n", b"true: x\n", b"~: x\n", b"null: x\n"):
-        raises_config(config + GOOD.encode(), r"^parsing config runtime pin: config keys must be plain strings")
-    assert runtime_from_config(('"5": x\n' + GOOD).encode()) == WANT
-    assert runtime_from_config(("'true': x\n" + GOOD).encode()) == WANT
-    # Duplicates nested under a member that is not read pass.
-    assert runtime_from_config(("other:\n  a: 1\n  a: 2\n" + GOOD).encode()) == WANT
-    raises_config((GOOD + "---\n" + GOOD).encode(), r"^config must contain exactly one YAML document")
-    # An empty second document still counts as a second document.
-    raises_config((GOOD + "---\n").encode(), r"^config must contain exactly one YAML document")
-    raises_config(("- " + GOOD).encode(), r"^parsing config runtime pin: config is not a mapping")
-    raises_config(b"just a string\n", r"^parsing config runtime pin: config is not a mapping")
-    raises_config(b"", r"^parsing config runtime pin: EOF")
-    raises_config(b"# just a comment\n", r"^parsing config runtime pin: EOF")
+    raises_config(('{"containers":[],"containers":[],' + GOOD[1:]).encode(), r'member name "containers"')
+    # Duplicates nested under a member that is not read are rejected too.
+    raises_config(('{"other":{"a":1,"a":2},' + GOOD[1:]).encode(), r'member name "a"')
+    raises_config((GOOD + GOOD).encode(), r"^parsing config runtime pin: invalid JSON: ")
+    raises_config(("[" + GOOD + "]").encode(), r"^parsing config runtime pin: cannot unmarshal JSON array into config")
+    raises_config(b'"just a string"', r"^parsing config runtime pin: cannot unmarshal JSON string into config")
+    raises_config(b"", r"^parsing config runtime pin: invalid JSON: ")
     # A null value reads as text that carries no pin.
-    for config in (b"cvm-version:\n", b"cvm-version: null\n", b"cvm-version: ~\n"):
-        raises_config(config, r"^cvm-version must pin a runtime manifest SHA-256 digest")
-    # Any scalar reads as its text, and that text carries no pin.
-    for config in (b"cvm-version: 0.15\n", b"cvm-version: 1\n", b"cvm-version: true\n"):
-        raises_config(config, r"^cvm-version must pin a runtime manifest SHA-256 digest")
-    for config in (b"cvm-version: [a]\n", b"cvm-version: {a: b}\n"):
-        raises_config(config, r"^parsing config runtime pin: cvm-version must be a scalar")
-    raises_config(
-        f"cvm-version: !!binary {DIGEST}\n".encode(), r"^parsing config runtime pin: cvm-version must not be binary"
-    )
-    raises_config(
-        f"base: &b\n  cvm-version: 0.15.0@sha256:{DIGEST}\n<<: *b\n".encode(), r"merge keys are not supported"
-    )
-    raises_config(f"? [a]\n: b\n{GOOD}".encode(), r"^parsing config runtime pin: mapping keys must be scalars")
+    raises_config(b'{"cvm-version":null}', r"^cvm-version must pin a runtime manifest SHA-256 digest")
+    for value in (b"0.15", b"1", b"true", b'["a"]', b'{"a":"b"}'):
+        raises_config(b'{"cvm-version":' + value + b"}", r"^parsing config runtime pin: cannot unmarshal JSON")
     # The text "15" becomes tag "v15", which is not a full semantic version.
-    raises_config(f"cvm-version: 15@sha256:{DIGEST}\n".encode(), r"^runtime tag must be a full semantic version")
+    raises_config(f'{{"cvm-version":"15@sha256:{DIGEST}"}}'.encode(), r"^runtime tag must be a full semantic version")
     # Only the top-level key is read.
-    raises_config(f"a:\n  cvm-version: 0.15.0@sha256:{DIGEST}\n".encode(), r"^cvm-version must pin")
-    raises_config(b"cvm-version: [\n", r"^parsing config runtime pin: ")
-    raises_config(b"\tcvm-version: x\n", r"^parsing config runtime pin: ")
-    # Nesting deeper than the interpreter's recursion allows is an error, not a crash.
-    for depth in (3_000, 20_000):
-        raises_config(b"a: " + b"[" * depth + b"]" * depth + b"\n" + GOOD.encode(), r"nested too deeply")
-        raises_config(b"a: " + b"{b: " * depth + b"1" + b"}" * depth + b"\n" + GOOD.encode(), r"nested too deeply")
-    raises_config(b"cvm-version: \xff\n", r"^parsing config runtime pin: ")
-    # A quoted escape beyond the Unicode range is a ValueError from the scanner, not a YAML error.
-    with pytest.raises(ValueError, match="not in range") as info:
-        yaml.compose(b'cvm-version: "\\U00110000"\n', Loader=yaml.SafeLoader)
-    assert not isinstance(info.value, yaml.YAMLError)
-    raises_config(b'cvm-version: "\\U00110000"\n', r"^parsing config runtime pin: .*not in range")
-    raises_config(b'"\\U00110000": 1\n' + GOOD.encode(), r"^parsing config runtime pin: .*not in range")
+    raises_config(f'{{"a":{GOOD}}}'.encode(), r"^cvm-version must pin")
+    raises_config(b'{"cvm-version":[', r"^parsing config runtime pin: ")
+    # Nesting deeper than the parser allows is an error, not a crash.
+    depth = 20_000
+    raises_config(b'{"a":' + b"[" * depth + b"]" * depth + b"," + GOOD.encode()[1:], r"exceeded max depth")
+    raises_config(b'{"a":' + b'{"b":' * depth + b"1" + b"}" * depth + b"," + GOOD.encode()[1:], r"exceeded max depth")
+    raises_config(b'{"cvm-version":"\xff"}', r"^parsing config runtime pin: ")
 
 
 @pytest.mark.parametrize(
     ("name", "config"),
     [
-        ("double-quoted", f'cvm-version: "0.15.0@sha256:{DIGEST}"\n'),
-        ("single-quoted", f"cvm-version: '0.15.0@sha256:{DIGEST}'\n"),
-        ("folded block scalar", f"cvm-version: >-\n  0.15.0@sha256:{DIGEST}\n"),
-        ("explicit document start", "---\n" + GOOD),
-        ("explicit document end", GOOD + "...\n"),
-        ("document start and end", "---\n" + GOOD + "...\n"),
-        ("leading comment", "# c\n" + GOOD),
-        ("key with trailing space", f"cvm-version : 0.15.0@sha256:{DIGEST}\n"),
-        ("CRLF line endings", GOOD.replace("\n", "\r\n")),
-        ("byte-order mark", "\ufeff" + GOOD),
-        ("alias to an anchored scalar", f"a: &x 0.15.0@sha256:{DIGEST}\ncvm-version: *x\n"),
-        ("quoted merge-looking key", f'"<<": 1\n{GOOD}'),
+        ("key with trailing space", GOOD.replace(":", " :", 1)),
+        ("CRLF line endings", GOOD.replace("{", "{\r\n").replace("}", "\r\n}\r\n")),
     ],
     ids=lambda value: value if " " in value or value.endswith("quoted") else None,
 )

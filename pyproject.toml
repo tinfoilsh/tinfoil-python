@@ -16,7 +16,6 @@ dependencies = [
     "httpx>=0.28",
     "tinfoil-ehbp>=0.6.0",
     "cryptography>=42.0.0",
-    "pyyaml>=6.0.3",
     "sigstore-models>=0.0.6",
     "rfc3161-client>=1.0.7",
 ]
@@ -33,7 +32,6 @@ dev = [
     "pytest",
     "pytest-asyncio>=0.26.0",
     "ruff>=0.17.4",
-    "types-pyyaml>=6.0.12.20261103",
 ]
 
 [tool.pytest.ini_options]

@@ -119,7 +119,7 @@ plain frozen dataclasses:
   | `Registries(ids)` | Configs that exactly these registries endorse, in place of the public registry alone. List `PUBLIC_REGISTRY_ID` to keep the public registry. |
   | `ConfigSigningKeys(keys)` | Configs whose endorsements these ECDSA P-256 keys sign, in place of Tinfoil's registry root. |
   | `ConfigAuthorizer(authorize)` | Caller policy that replaces config endorsement verification. |
-  | `EmbeddedConfig(data, name)` | Exact config bytes that the caller trusts outright. |
+  | `EmbeddedConfig(data, name)` | Exact JSON config bytes that the caller trusts outright. |
   | `EmbeddedConfigReference(digest, runtime, name)` | An exact config, by digest, and the runtime that it pins. |
 
 - `policy`, a `Policy`, holds the checks that apply on top of the config
