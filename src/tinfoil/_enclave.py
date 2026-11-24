@@ -90,16 +90,15 @@ class VerificationRejected(Exception):
 class Enclave:
     """One enclave and the policy its attestation is verified against.
 
-    ``host`` is the enclave, a host with an optional port. ``relay``, when
-    set, is a host that fetches attestation from the enclave on the
-    client's behalf. ``pin`` is the ``Pin`` it is verified against. ``verifier``
+    ``host`` is the enclave, a host with an optional port. ``pin`` is the
+    ``Pin`` it is verified against. ``verifier``
     is the policy, which several enclaves can share; None selects the defaults.
     ``verification_check``, when set, is called with the verified facts of
     each verification that passes the verifier; raising rejects it without
     a retry. ``on_verification_attempt``, when set, is what ``notify``
     reports each attempt to.
     ``fetch_document`` and ``fetch_document_async``, when set, obtain the
-    raw document in place of a direct fetch from ``host`` or ``relay``.
+    raw document in place of a direct fetch from ``host``.
 
     Construction checks ``pin`` against the verifier's rules and does no
     network I/O.
@@ -114,7 +113,6 @@ class Enclave:
         "fetch_document_async",
         "host",
         "pin",
-        "relay",
         "verifier",
     )
 
@@ -123,7 +121,6 @@ class Enclave:
         host: str,
         pin: Pin,
         *,
-        relay: str = "",
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
         on_verification_attempt: OnVerificationAttempt | None = None,
@@ -134,11 +131,8 @@ class Enclave:
     ) -> None:
         if not host:
             raise ConfigurationError("enclave host is required")
-        if relay and (fetch_document is not None or fetch_document_async is not None):
-            raise ConfigurationError("an enclave fetches through a relay host or a document fetcher, not both")
-        for authority in (host, relay):
-            if authority and not is_authority(authority):
-                raise ConfigurationError(f"invalid host {authority!r}: want a host with an optional port")
+        if not is_authority(host):
+            raise ConfigurationError(f"invalid host {host!r}: want a host with an optional port")
         if verifier is None:
             verifier = Verifier()
         try:
@@ -146,7 +140,6 @@ class Enclave:
         except VerifyError as err:
             raise from_verify(err) from err
         self.host = host
-        self.relay = relay
         self.pin = pin
         self.verifier = verifier
         self._check = verification_check
@@ -306,7 +299,7 @@ class Enclave:
         elif self.fetch_document_async is not None:
             raise ConfigurationError("the enclave's document fetcher is asynchronous; verify it on the event loop")
         else:
-            doc = fetch_document(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
+            doc = fetch_document(self.host, "", nonce, timeout=timeout, deadline=deadline)
         return self._verify_document(doc, nonce)
 
     async def _fetch_verification_async(self, timeout: TimeoutTypes, deadline: float | None) -> VerificationReport:
@@ -316,7 +309,7 @@ class Enclave:
         elif self.fetch_document is not None:
             raise ConfigurationError("the enclave's document fetcher is synchronous; verify it with verify")
         else:
-            doc = await fetch_document_async(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
+            doc = await fetch_document_async(self.host, "", nonce, timeout=timeout, deadline=deadline)
         # VerifiedFacts is CPU-bound, so it runs off the event loop.
         return await asyncio.to_thread(self._verify_document, doc, nonce)
 

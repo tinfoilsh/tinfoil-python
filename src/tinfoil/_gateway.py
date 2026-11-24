@@ -47,7 +47,13 @@ from tinfoil._errors import (
     TinfoilError,
     network_error,
 )
-from tinfoil._fetch import get_bounded, get_bounded_async
+from tinfoil._fetch import (
+    fetch_document_at,
+    fetch_document_at_async,
+    get_bounded,
+    get_bounded_async,
+    relay_document_url,
+)
 from tinfoil._transport import (
     CLIENT_CLOSED,
     NO_ATTEMPT,
@@ -70,8 +76,8 @@ from tinfoil._types import (
 )
 from tinfoil.verifier import Pin, Policy, VerificationReport, Verifier, parse_reference
 
-DEFAULT_GATEWAY_URL = "https://inference-gateway.tinfoil.sh/v1/"
-"""Tinfoil's gateway, the base URL a gateway client uses when none is given."""
+DEFAULT_GATEWAY_URL = "https://inference-gateway.tinfoil.sh/"
+"""Tinfoil's gateway, the URL that a gateway client uses when none is given: its origin, not the API path."""
 CATALOG_PATH = "/catalog"
 CATALOG_FETCH_TIMEOUT = 10.0
 CATALOG_REFRESH_INTERVAL = 10.0
@@ -149,11 +155,29 @@ class ReplicaVerification:
     AttestationError leaves it valid."""
 
 
+def catalog_url(gateway_url: str) -> str:
+    """Where the gateway at ``gateway_url``, a checked URL, serves its catalog: ``/catalog`` joined under the URL's
+    path, whether or not it ends with a slash."""
+    return gateway_url.removesuffix("/") + CATALOG_PATH
+
+
 def fetch_catalog(host: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
-    """The catalog of the gateway at ``host``, keeping only models with replicas of a bare ``tinfoilsh/``
-    repository, without a tag or digest. Raises NetworkError when it cannot be fetched or decoded."""
+    """The catalog of the gateway at the root of ``host``, from ``https://{host}/catalog``, keeping only models with
+    replicas of a bare ``tinfoilsh/`` repository, without a tag or digest. Raises NetworkError when it cannot be
+    fetched or decoded."""
+    return fetch_catalog_at(f"https://{host}/", timeout=timeout)
+
+
+async def fetch_catalog_async(host: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
+    """``fetch_catalog`` on the event loop."""
+    return await fetch_catalog_at_async(f"https://{host}/", timeout=timeout)
+
+
+def fetch_catalog_at(gateway_url: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
+    """``fetch_catalog`` for the gateway at ``gateway_url``, a checked URL whose path, if any, is where the gateway
+    is mounted: the catalog joins under it."""
     body = get_bounded(
-        f"https://{host}{CATALOG_PATH}",
+        catalog_url(gateway_url),
         timeout=timeout,
         deadline=None,
         overall=CATALOG_FETCH_TIMEOUT,
@@ -163,10 +187,10 @@ def fetch_catalog(host: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) ->
     return parse_catalog(body)
 
 
-async def fetch_catalog_async(host: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
-    """``fetch_catalog`` on the event loop."""
+async def fetch_catalog_at_async(gateway_url: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
+    """``fetch_catalog_at`` on the event loop."""
     body = await get_bounded_async(
-        f"https://{host}{CATALOG_PATH}",
+        catalog_url(gateway_url),
         timeout=timeout,
         deadline=None,
         overall=CATALOG_FETCH_TIMEOUT,
@@ -540,7 +564,6 @@ class _Shared(Generic[_T]):
         self,
         *,
         base_url: str,
-        relay: str,
         model_pins: Mapping[str, ModelPin] | None,
         policy: Policy | None,
         verification_check: VerificationCheck | None,
@@ -550,7 +573,6 @@ class _Shared(Generic[_T]):
     ) -> None:
         self.policy = _Policy(model_pins, policy)
         self.base_url = base_url
-        self.relay = relay
         self.check = verification_check
         self.on_verification_attempt = on_verification_attempt
         self.secret = _cachesecret.resolve(user_cache_secret)
@@ -571,15 +593,26 @@ class _Shared(Generic[_T]):
             evicted = [replica for replica in self.enclaves if replica.host not in listed]
             return [self.enclaves.pop(replica) for replica in evicted]
 
-    def enclave_for(self, replica: _Replica) -> Enclave:
+    def enclave_for(self, replica: _Replica, *, asynchronous: bool) -> Enclave:
+        """The enclave of ``replica``, whose attestation the gateway relays under its own URL."""
+        base_url = self.base_url
+
+        def relayed(host: str, nonce: bytes, timeout: TimeoutTypes, deadline: float | None) -> bytes:
+            return fetch_document_at(relay_document_url(base_url, host, nonce), timeout=timeout, deadline=deadline)
+
+        async def relayed_async(host: str, nonce: bytes, timeout: TimeoutTypes, deadline: float | None) -> bytes:
+            url = relay_document_url(base_url, host, nonce)
+            return await fetch_document_at_async(url, timeout=timeout, deadline=deadline)
+
         # Tinfoil owns model names in both namespaces.
         return Enclave(
             replica.host,
             Pin(repo=replica.ref, project=replica.ref),
-            relay=self.relay,
             verifier=self.policy.verifier_for(replica),
             verification_check=self.check,
             on_verification_attempt=self.on_verification_attempt,
+            fetch_document=None if asynchronous else relayed,
+            fetch_document_async=relayed_async if asynchronous else None,
         )
 
     def rerouted_host(self, prefix: str) -> str:
@@ -752,7 +785,6 @@ class GatewayTransport(httpx.BaseTransport):
         self,
         *,
         base_url: str,
-        relay: str,
         catalog: Callable[[], Catalog] | None = None,
         model_pins: Mapping[str, ModelPin] | None = None,
         policy: Policy | None = None,
@@ -765,7 +797,6 @@ class GatewayTransport(httpx.BaseTransport):
         self._build = _build
         self._shared: _Shared[ReplicaTransport] = _Shared(
             base_url=base_url,
-            relay=relay,
             model_pins=model_pins,
             policy=policy,
             verification_check=verification_check,
@@ -774,7 +805,7 @@ class GatewayTransport(httpx.BaseTransport):
             timeout=timeout,
         )
         self._supplied = catalog
-        self._cache = _CatalogCache(lambda timeout: fetch_catalog(relay, timeout=timeout))
+        self._cache = _CatalogCache(lambda timeout: fetch_catalog_at(base_url, timeout=timeout))
         self._closed = False
 
     @property
@@ -910,7 +941,8 @@ class GatewayTransport(httpx.BaseTransport):
             return transport
 
     def _new_transport(self, replica: _Replica) -> ReplicaTransport:
-        keyed = AttestedTransport(self._shared.enclave_for(replica), EHBPMode(), timeout=self._shared.timeout)
+        enclave = self._shared.enclave_for(replica, asynchronous=False)
+        keyed = AttestedTransport(enclave, EHBPMode(), timeout=self._shared.timeout)
         return ReplicaTransport(keyed, replica_chain(keyed, replica.host, self._shared.base_url))
 
     def _verified(
@@ -1003,7 +1035,6 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         self,
         *,
         base_url: str,
-        relay: str,
         catalog: Callable[[], Catalog] | None = None,
         model_pins: Mapping[str, ModelPin] | None = None,
         policy: Policy | None = None,
@@ -1016,7 +1047,6 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         self._build = _build
         self._shared: _Shared[AsyncReplicaTransport] = _Shared(
             base_url=base_url,
-            relay=relay,
             model_pins=model_pins,
             policy=policy,
             verification_check=verification_check,
@@ -1025,7 +1055,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
             timeout=timeout,
         )
         self._supplied = catalog
-        self._cache = _AsyncCatalogCache(lambda timeout: fetch_catalog_async(relay, timeout=timeout))
+        self._cache = _AsyncCatalogCache(lambda timeout: fetch_catalog_at_async(base_url, timeout=timeout))
         self._closed = False
 
     @property
@@ -1144,7 +1174,8 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         return transport
 
     def _new_transport(self, replica: _Replica) -> AsyncReplicaTransport:
-        keyed = AsyncAttestedTransport(self._shared.enclave_for(replica), AsyncEHBPMode(), timeout=self._shared.timeout)
+        enclave = self._shared.enclave_for(replica, asynchronous=True)
+        keyed = AsyncAttestedTransport(enclave, AsyncEHBPMode(), timeout=self._shared.timeout)
         return AsyncReplicaTransport(keyed, replica_chain_async(keyed, replica.host, self._shared.base_url))
 
     async def _verified(self, replica: _Replica) -> tuple[AsyncReplicaTransport, VerificationReport]:

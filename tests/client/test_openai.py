@@ -38,7 +38,6 @@ from tinfoil._gateway import CatalogEntry, ModelPin
 from tinfoil._openai import (
     _FORBIDDEN_TRANSPORT_OPTIONS,
     DROP_IN_OPTIONS,
-    GATEWAY_API_PATH,
     REALTIME_UNAVAILABLE,
     ROUTE_OPTIONS,
     TRANSPORT_OPTION_UNSUPPORTED,
@@ -84,7 +83,7 @@ def enclave(**options: Any) -> EnclaveHTTPClient:
 
 
 def gateway() -> GatewayHTTPClient:
-    return GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: ENTRIES)
+    return GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/", catalog=lambda: ENTRIES)
 
 
 def models_response(_: httpx.Request) -> httpx.Response:
@@ -264,12 +263,24 @@ class TestConstruction:
             OpenAIClient(http_client, api_path=b"/v1/", api_key="k")  # type: ignore[arg-type]
         http_client.close()
 
-    def test_gateway_client_refuses_an_api_path(self, offline: Recorder) -> None:
-        http_client = gateway()
-        with pytest.raises(ConfigurationError) as err:
-            OpenAIClient(http_client, api_path="/v1/", api_key="k")
-        assert str(err.value) == GATEWAY_API_PATH
-        assert OpenAIClient(http_client, api_path="", api_key="k").base_url == "https://gateway.example/v1/"
+    @pytest.mark.parametrize(
+        ("url", "api_path", "want"),
+        [
+            ("https://gateway.example", None, "https://gateway.example/v1/"),
+            ("https://gateway.example/", "/v2", "https://gateway.example/v2/"),
+            ("https://gateway.example/mount", None, "https://gateway.example/mount/v1/"),
+            ("https://gateway.example/mount/", "/openai/v1/", "https://gateway.example/mount/openai/v1/"),
+        ],
+    )
+    def test_gateway_client_joins_its_api_path_under_its_url(
+        self, offline: Recorder, url: str, api_path: str | None, want: str
+    ) -> None:
+        """A gateway's URL is its origin or the URL that it is mounted under, never the API path, so the API path
+        joins under it as under an ``EHBP`` proxy URL."""
+        http_client = GatewayHTTPClient(model_pins=PINS, url=url, catalog=lambda: ENTRIES)
+        assert OpenAIClient(http_client, api_path=api_path, api_key="k").base_url == want
+        with pytest.raises(ConfigurationError, match="invalid API path"):
+            OpenAIClient(http_client, api_path="v1", api_key="k")
         http_client.close()
 
     def test_the_sdk_sets_the_base_url_after_the_callers_options(
@@ -575,10 +586,9 @@ async def test_async_client(offline: Recorder) -> None:
     assert [str(r.url) for r in recorder.requests] == ["https://enclave.example/v1/models"]
     await client.close()
     gateway_client = await AsyncGatewayHTTPClient.create(
-        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: ENTRIES
+        model_pins=PINS, url="https://gateway.example/", catalog=lambda: ENTRIES
     )
-    with pytest.raises(ConfigurationError, match="gateway client's URL already carries the API path"):
-        AsyncOpenAIClient(gateway_client, api_path="/v1/", api_key="k")
+    assert AsyncOpenAIClient(gateway_client, api_path="/v2/", api_key="k").base_url == "https://gateway.example/v2/"
     async_gateway = AsyncOpenAIClient(gateway_client, api_key="k", **foreign(base_url="https://other.example/v1/"))
     assert async_gateway.base_url == "https://gateway.example/v1/"
     assert async_gateway.with_options(**foreign(base_url="https://other.example/")).base_url == async_gateway.base_url
@@ -679,9 +689,7 @@ async def _async_router() -> AsyncRouterHTTPClient:
 
 
 async def _async_gateway() -> AsyncGatewayHTTPClient:
-    return await AsyncGatewayHTTPClient.create(
-        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: ENTRIES
-    )
+    return await AsyncGatewayHTTPClient.create(model_pins=PINS, url="https://gateway.example/", catalog=lambda: ENTRIES)
 
 
 ASYNC_HTTP_CLIENTS: dict[str, Callable[[], Awaitable[Any]]] = {

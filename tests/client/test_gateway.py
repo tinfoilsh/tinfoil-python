@@ -120,8 +120,7 @@ def seal_transport(
 
     entries = catalog() if catalog_entries is None else catalog_entries
     return GatewayTransport(
-        base_url="https://gateway.example/v1/",
-        relay="gateway.example",
+        base_url="https://gateway.example/",
         catalog=lambda: entries,
         model_pins=PINS,
         user_cache_secret=secret,
@@ -500,8 +499,7 @@ class TestMultipart:
     ) -> None:
         monkeypatch.setattr(_gateway, "MAX_MULTIPART_BODY_SIZE", 64)
         seal = AsyncGatewayTransport(
-            base_url="https://gateway.example/v1/",
-            relay="gateway.example",
+            base_url="https://gateway.example/",
             catalog=catalog,
             model_pins=PINS,
             user_cache_secret="",
@@ -870,8 +868,7 @@ class TestVerifications:
             return ReplicaTransport(keyed, FakeChain(keyed))
 
         seal = GatewayTransport(
-            base_url="https://gateway.example/v1/",
-            relay="gateway.example",
+            base_url="https://gateway.example/",
             catalog=catalog,
             model_pins=PINS,
             _build=build,
@@ -1143,7 +1140,7 @@ class TestCatalogCache:
             cache.get(5.0)
         assert fetches == 0
         monkeypatch.setattr(_gateway, "fetch_catalog", lambda *_, **__: pytest.fail("a closed transport fetched"))
-        seal = GatewayTransport(model_pins=PINS, base_url="https://gateway.example/v1/", relay="gateway.example")
+        seal = GatewayTransport(model_pins=PINS, base_url="https://gateway.example/")
         seal.close()
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
             seal.catalog()
@@ -1168,7 +1165,7 @@ class TestCatalogCache:
             pytest.fail("a closed transport fetched")
 
         monkeypatch.setattr(_gateway, "fetch_catalog_async", fetch_catalog_async)
-        seal = AsyncGatewayTransport(model_pins=PINS, base_url="https://gateway.example/v1/", relay="gateway.example")
+        seal = AsyncGatewayTransport(model_pins=PINS, base_url="https://gateway.example/")
         await seal.aclose()
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
             await seal.catalog()
@@ -1180,8 +1177,7 @@ def test_models_and_current_without_network(monkeypatch: pytest.MonkeyPatch) -> 
         "unpinned": CatalogEntry("tinfoilsh/unpinned", ("b.example",)),
     }
     seal = GatewayTransport(
-        base_url="https://gateway.example/v1/",
-        relay="gateway.example",
+        base_url="https://gateway.example/",
         catalog=lambda: entries,
         model_pins={"pinned": ModelPin("tinfoilsh/pinned@v1")},
         user_cache_secret="test-secret",
@@ -1196,10 +1192,9 @@ def test_a_model_that_a_refresh_adds_is_refused(monkeypatch: pytest.MonkeyPatch)
     """A model that a refreshed catalog adds is not served unless it is pinned, and no replica is contacted."""
     monkeypatch.setattr(_gateway, "CATALOG_REFRESH_INTERVAL", 0)
     served: list[Catalog] = [{"pinned": CatalogEntry("tinfoilsh/pinned", ("a.example",))}]
-    monkeypatch.setattr(_gateway, "fetch_catalog", lambda *_, **__: served[0])
+    monkeypatch.setattr(_gateway, "fetch_catalog_at", lambda *_, **__: served[0])
     seal = GatewayTransport(
-        base_url="https://gateway.example/v1/",
-        relay="gateway.example",
+        base_url="https://gateway.example/",
         model_pins={"pinned": ModelPin("tinfoilsh/pinned")},
         user_cache_secret="",
         _build=lambda _: pytest.fail("no replica is contacted for an unpinned model"),
@@ -1260,8 +1255,7 @@ async def test_async_gateway_transport() -> None:
         return AsyncReplicaTransport(AsyncFakeKeyed(replica.host), AsyncFakeChain(replica.host))
 
     seal = AsyncGatewayTransport(
-        base_url="https://gateway.example/v1/",
-        relay="gateway.example",
+        base_url="https://gateway.example/",
         catalog=catalog,
         model_pins=PINS,
         user_cache_secret="test-secret",

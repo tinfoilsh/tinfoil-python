@@ -502,7 +502,7 @@ class TestGatewayClient:
     @pytest.mark.parametrize("model_pins", [None, {}])
     def test_requires_a_model_pin(self, network: Network, model_pins: dict[str, ModelPin] | None) -> None:
         with pytest.raises(ConfigurationError, match="at least one model pin"):
-            GatewayHTTPClient(url="https://gateway.example/v1/", model_pins=model_pins)
+            GatewayHTTPClient(url="https://gateway.example/", model_pins=model_pins)
         assert network.requests == [], "a client without pins is refused before the catalog is fetched"
 
     def test_refused_gateway_url_is_not_echoed(self, network: Network) -> None:
@@ -519,14 +519,63 @@ class TestGatewayClient:
 
     def test_fetches_the_catalog_before_returning(self, network: Network) -> None:
         with pytest.raises(NetworkError):
-            GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/v1/")
+            GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/")
         assert network.hosts() == ["gateway.example"]
         network.handler = lambda _: response(200, b'{"m": {"repo": "tinfoilsh/m", "hosts": ["a.example"]}}')
-        client = GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/v1")
-        assert client.base_url == "https://gateway.example/v1/"
+        client = GatewayHTTPClient(model_pins=PINS, url="https://gateway.example")
+        assert client.base_url == "https://gateway.example/"
         assert client.models() == ["m"]
         assert client.replicas() == []
         client.close()
+
+    @pytest.mark.parametrize(
+        ("url", "root"),
+        [
+            (None, "https://inference-gateway.tinfoil.sh/"),
+            ("https://gateway.example", "https://gateway.example/"),
+            ("https://gateway.example/", "https://gateway.example/"),
+            ("https://gateway.example/mount", "https://gateway.example/mount/"),
+            ("https://gateway.example/mount/", "https://gateway.example/mount/"),
+            ("https://gateway.example:8443/a/b", "https://gateway.example:8443/a/b/"),
+        ],
+    )
+    def test_joins_its_endpoints_under_its_url(
+        self, network: Network, monkeypatch: pytest.MonkeyPatch, url: str | None, root: str
+    ) -> None:
+        """The gateway's URL is its origin or the URL that it is mounted under: the catalog fetch, the attestation
+        relay and an OpenAI client's requests all join under it, as under an ``EHBP`` proxy URL, whether or not it
+        has a path and ends with a slash."""
+        from tinfoil import OpenAIClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == root + "catalog":
+                return response(200, b'{"m": {"repo": "tinfoilsh/m", "hosts": ["replica.example"]}}')
+            raise NetworkError("no replica in this test")
+
+        network.handler = handler
+        client = GatewayHTTPClient(model_pins=PINS, url=url, user_cache_secret="s")
+        assert [str(r.url) for r in network.requests] == [root + "catalog"], "the catalog joins under the URL"
+        assert client.base_url == root
+        network.requests = []
+        sent: list[str] = []
+        handle = client._transport.handle_request
+
+        def record(request: httpx.Request) -> httpx.Response:
+            sent.append(str(request.url))
+            return handle(request)
+
+        monkeypatch.setattr(client._transport, "handle_request", record)
+        openai_client = OpenAIClient(client, api_key="k", max_retries=0)
+        assert openai_client.base_url == root + "v1/"
+        with pytest.raises(NetworkError):
+            openai_client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hello"}])
+        assert sent == [root + "v1/chat/completions"], "the request joins the API path under the gateway's URL"
+        relayed = [str(r.url) for r in network.requests]
+        assert relayed, "the replica's attestation was fetched"
+        for fetched in relayed:
+            assert fetched.startswith(root + ".well-known/tinfoil-attestation?"), fetched
+            assert "&enclave=replica.example" in fetched
+        openai_client.close()
 
     def test_serves_pinned_models_without_network(self, network: Network) -> None:
         entries: Catalog = {
@@ -538,7 +587,7 @@ class TestGatewayClient:
             model_pins={"pinned": ModelPin("tinfoilsh/pinned@v1"), "absent": ModelPin("tinfoilsh/absent")},
             user_cache_secret="test-secret",
         )
-        assert client.base_url == "https://inference-gateway.tinfoil.sh/v1/"
+        assert client.base_url == "https://inference-gateway.tinfoil.sh/"
         assert client.models() == ["pinned"], "pins may name models the catalog doesn't list"
         assert client.replicas() == [], "a model's replicas are verified on its first request"
         with pytest.raises(ConfigurationError, match='model "unpinned" is not pinned'):
@@ -555,7 +604,7 @@ class TestGatewayClient:
         entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("replica.example",))}
         network.serve("replica.example")
         client = GatewayHTTPClient(
-            model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s"
+            model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
         )
         verified = facts_of(client.ensure_verified("m"))
         assert verified.code_tag == "replica.example"
@@ -574,7 +623,7 @@ class TestGatewayClient:
         entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("replica.example",))}
         first = network.serve("replica.example", deadline=datetime.now(UTC) + timedelta(seconds=0.2))
         client = GatewayHTTPClient(
-            model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s"
+            model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
         )
         client.ensure_verified("m")
         [entry] = client.replicas()
@@ -651,11 +700,11 @@ async def test_async_clients(network: Network) -> None:
     no_pins_cases: tuple[dict[str, ModelPin] | None, ...] = (None, {})
     for no_pins in no_pins_cases:
         with pytest.raises(ConfigurationError, match="at least one model pin"):
-            await AsyncGatewayHTTPClient.create(url="https://gateway.example/v1/", model_pins=no_pins)
+            await AsyncGatewayHTTPClient.create(url="https://gateway.example/", model_pins=no_pins)
     entries = {**entries, "unpinned": CatalogEntry("tinfoilsh/unpinned", ("unpinned.example",))}
     requests = len(network.requests)
     gateway = await AsyncGatewayHTTPClient.create(
-        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s"
+        model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
     )
     assert await gateway.models() == ["m"]
     with pytest.raises(ConfigurationError, match='model "unpinned" is not pinned'):
@@ -875,7 +924,7 @@ class TestVerificationReports:
         attempts = Attempts()
         client = GatewayHTTPClient(
             model_pins=PINS,
-            url="https://gateway.example/v1/",
+            url="https://gateway.example/",
             catalog=lambda: entries,
             user_cache_secret="s",
             on_verification_attempt=attempts,
@@ -1015,7 +1064,7 @@ async def test_async_clients_report_every_attempt(network: Network, monkeypatch:
     replicas = Attempts()
     gateway = await AsyncGatewayHTTPClient.create(
         model_pins=PINS,
-        url="https://gateway.example/v1/",
+        url="https://gateway.example/",
         catalog=lambda: entries,
         user_cache_secret="s",
         on_verification_attempt=replicas,
@@ -1283,3 +1332,28 @@ async def test_async_clients_name_the_host(network: Network, monkeypatch: pytest
     assert_names_host(rejected_report(raised.value), "enclave.example")
     assert_names_host(rejected_report(client.last_verification_attempt()[1]), "enclave.example")
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_gateway_joins_its_endpoints_under_its_url(network: Network) -> None:
+    from tinfoil import AsyncOpenAIClient
+
+    root = "https://gateway.example/mount/"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == root + "catalog":
+            return response(200, b'{"m": {"repo": "tinfoilsh/m", "hosts": ["replica.example"]}}')
+        raise NetworkError("no replica in this test")
+
+    network.handler = handler
+    gateway = await AsyncGatewayHTTPClient.create(model_pins=PINS, url="https://gateway.example/mount")
+    assert [str(r.url) for r in network.requests] == [root + "catalog"]
+    assert gateway.base_url == root
+    network.requests = []
+    with pytest.raises(NetworkError):
+        await gateway.ensure_verified("m")
+    relayed = [str(r.url) for r in network.requests]
+    assert relayed
+    assert all(url.startswith(root + ".well-known/tinfoil-attestation?") for url in relayed), relayed
+    assert AsyncOpenAIClient(gateway, api_key="k").base_url == root + "v1/"
+    await gateway.close()

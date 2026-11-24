@@ -67,12 +67,9 @@ def test_construction_checks_config() -> None:
         Enclave("", Pin(repo="org/repo"))
     with pytest.raises(ConfigurationError, match="invalid host"):
         Enclave("https://enclave.example", Pin(repo="org/repo"))
-    with pytest.raises(ConfigurationError, match="invalid host"):
-        Enclave("enclave.example", Pin(repo="org/repo"), relay="relay.example/path")
     shared = Verifier(policy=Policy(freshness_max_age=timedelta(hours=1)))
-    enclave = Enclave("enclave.example", Pin(repo="org/repo"), relay="relay.example", verifier=shared)
+    enclave = Enclave("enclave.example", Pin(repo="org/repo"), verifier=shared)
     assert enclave.verifier is shared, "enclaves share the caller's verifier"
-    assert enclave.relay == "relay.example"
     unpinned = Enclave("enclave.example", Pin(), verifier=authorizer())
     assert unpinned.pin == Pin()
     both = Enclave("enclave.example", Pin(repo="org/repo", project="org/project@v1"))

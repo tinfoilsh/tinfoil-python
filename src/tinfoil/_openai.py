@@ -38,9 +38,6 @@ from tinfoil._errors import ConfigurationError
 HTTP_CLIENT_FIXED = "http_client is the attested HTTP client's and cannot be replaced"
 DROP_IN_OPTIONS = "{name} takes only the openai package's options; for {keys}, pass a {route} to {openai}"
 NOT_AN_ATTESTED_CLIENT = "the HTTP client must be {expected} that its constructor returned, not {actual}"
-GATEWAY_API_PATH = (
-    "invalid API path: a gateway client's URL already carries the API path; set the gateway client's url instead"
-)
 DEFAULT_API_PATH = "/v1/"
 """The API path of an OpenAI client without one."""
 WEBSOCKET_UNAVAILABLE = "{name} is not available over an attested client"
@@ -349,12 +346,11 @@ class OpenAIClient(_AttestedOpenAI):
     and verifies again by itself.
 
     Requests go to ``api_path`` under the client's ``base_url``: under the
-    ``EHBP`` proxy URL when one is set, and under the enclave's own origin
-    otherwise. ``api_path`` defaults to ``/v1/``; it must be an absolute
-    path, without a query, a fragment, an encoded slash, or a ``.`` or
-    ``..`` segment, percent-encoded or not. A gateway client's URL already
-    carries the API path, so an ``api_path`` with a gateway client is a
-    ConfigurationError.
+    ``EHBP`` proxy URL when one is set, under the enclave's own origin
+    otherwise, and under the gateway's URL for a gateway client.
+    ``api_path`` defaults to ``/v1/``; it must be an absolute path, without
+    a query, a fragment, an encoded slash, or a ``.`` or ``..`` segment,
+    percent-encoded or not.
 
     The remaining keyword arguments are ``OpenAIOptions``, the ``openai``
     package's. The SDK sets ``http_client`` and the base URL itself, after
@@ -506,7 +502,7 @@ def _sync_attachment(client: object, api_path: str | None) -> tuple[httpx.Client
         if attested is not None:
             return attested.secure, join_api_path(attested.base_url, api_path)
     elif isinstance(client, GatewayHTTPClient) and getattr(client, "_secure", None) is not None:
-        return client._secure, _gateway_base_url(client.base_url, api_path)
+        return client._secure, join_api_path(client.base_url, api_path)
     raise ConfigurationError(
         NOT_AN_ATTESTED_CLIENT.format(
             expected="an EnclaveHTTPClient, RouterHTTPClient or GatewayHTTPClient", actual=type(client).__name__
@@ -521,20 +517,13 @@ def _async_attachment(client: object, api_path: str | None) -> tuple[httpx.Async
         if attested is not None:
             return attested.secure, join_api_path(attested.base_url, api_path)
     elif isinstance(client, AsyncGatewayHTTPClient) and getattr(client, "_secure", None) is not None:
-        return client._secure, _gateway_base_url(client.base_url, api_path)
+        return client._secure, join_api_path(client.base_url, api_path)
     raise ConfigurationError(
         NOT_AN_ATTESTED_CLIENT.format(
             expected="an AsyncEnclaveHTTPClient, AsyncRouterHTTPClient or AsyncGatewayHTTPClient",
             actual=type(client).__name__,
         )
     )
-
-
-def _gateway_base_url(base_url: str, api_path: str | None) -> str:
-    """A gateway client's base URL, which already carries the API path, so that an API path is refused."""
-    if api_path is not None and api_path != "":
-        raise ConfigurationError(GATEWAY_API_PATH)
-    return base_url
 
 
 _PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")

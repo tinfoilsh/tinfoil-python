@@ -14,7 +14,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from types import TracebackType
 from typing import Self, TypeAlias
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -529,8 +528,9 @@ GATEWAY_URL_INVALID = (
 credentials."""
 
 
-def _gateway_url(url: str | None) -> tuple[str, str]:
-    """The gateway base URL, with a trailing slash, and its host, which attestation is fetched through."""
+def _gateway_url(url: str | None) -> str:
+    """The gateway's URL, with a trailing slash, which requests are sent to and which the catalog and the
+    attestation relay join under."""
     base_url = url or DEFAULT_GATEWAY_URL
     try:
         origin = origin_of(base_url)
@@ -538,7 +538,7 @@ def _gateway_url(url: str | None) -> tuple[str, str]:
         raise ConfigurationError(GATEWAY_URL_INVALID) from None
     if not origin.startswith("https://") or has_query_or_fragment(base_url):
         raise ConfigurationError(GATEWAY_URL_INVALID)
-    return with_trailing_slash(base_url), urlsplit(base_url).netloc
+    return with_trailing_slash(base_url)
 
 
 class GatewayHTTPClient:
@@ -561,8 +561,16 @@ class GatewayHTTPClient:
     secret that is generated once per process, as on ``RouterHTTPClient``,
     whose constructor fails the same way when that secret can't be generated;
     the gateway sees a cache prefix keyed on it, never the secret. ``url``
-    is the gateway's base URL, exposed as ``base_url`` with a trailing
-    slash; None selects Tinfoil's gateway. ``catalog`` is read on every request and
+    is the gateway's URL: its origin, or the URL that it is mounted under,
+    exposed as ``base_url`` with a trailing slash; None selects Tinfoil's
+    gateway, ``https://inference-gateway.tinfoil.sh/``. Its path, if any, is
+    where the gateway is mounted, not the API path, as for an ``EHBP``
+    proxy URL: the catalog, the attestation relay and an ``OpenAIClient``'s
+    ``api_path``, ``/v1/`` by default, all join under it, so that
+    ``https://gateway.example/tinfoil`` sends chat completions to
+    ``https://gateway.example/tinfoil/v1/chat/completions``. It must use
+    HTTPS, and a URL with user information, a query or a fragment is a
+    ConfigurationError. ``catalog`` is read on every request and
     must return an immutable mapping; None fetches the gateway's catalog
     when the client is created and refreshes it every 10 seconds while the
     client is used, keeping the last catalog when a refresh fails.
@@ -590,10 +598,9 @@ class GatewayHTTPClient:
         catalog: Callable[[], Catalog] | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
-        base_url, relay = _gateway_url(url)
+        base_url = _gateway_url(url)
         self._transport = GatewayTransport(
             base_url=base_url,
-            relay=relay,
             catalog=catalog,
             model_pins=model_pins,
             policy=policy,
@@ -623,7 +630,8 @@ class GatewayHTTPClient:
 
     @property
     def base_url(self) -> str:
-        """The gateway's base URL, which requests are sent to."""
+        """The gateway's URL, which requests are sent to and which an ``OpenAIClient`` joins its API path under: the
+        ``url`` option with a trailing slash, as ``EnclaveHTTPClient.base_url`` returns an ``EHBP`` proxy URL."""
         return self._base_url
 
     def models(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> list[str]:
@@ -716,10 +724,9 @@ class AsyncGatewayHTTPClient:
         catalog: Callable[[], Catalog] | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
-        base_url, relay = _gateway_url(url)
+        base_url = _gateway_url(url)
         transport = AsyncGatewayTransport(
             base_url=base_url,
-            relay=relay,
             catalog=catalog,
             model_pins=model_pins,
             policy=policy,
@@ -744,7 +751,7 @@ class AsyncGatewayHTTPClient:
 
     @property
     def base_url(self) -> str:
-        """The gateway's base URL, which requests are sent to: the ``url`` option with a trailing slash."""
+        """The gateway's URL, which requests are sent to: the ``url`` option with a trailing slash."""
         return self._base_url
 
     async def models(self) -> list[str]:

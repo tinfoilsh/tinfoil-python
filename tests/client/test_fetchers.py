@@ -302,8 +302,6 @@ class TestAsync:
             _enclave.Enclave("enclave.example", Pin(repo="o/r"), fetch_document_async=fetch_async).verify()
         with pytest.raises(ConfigurationError, match="synchronous"):
             asyncio.run(_enclave.Enclave("enclave.example", Pin(repo="o/r"), fetch_document=fetch).verify_async())
-        with pytest.raises(ConfigurationError, match="not both"):
-            _enclave.Enclave("enclave.example", Pin(repo="o/r"), relay="relay.example", fetch_document=fetch)
         assert direct.requests == []
 
     @pytest.mark.asyncio

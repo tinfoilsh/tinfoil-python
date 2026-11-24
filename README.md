@@ -137,7 +137,7 @@ response = http_client.http_client.get(http_client.base_url + "v1/models", timeo
 print(response.status_code, response.text)
 ```
 
-The OpenAI client sends to `/v1/` under the HTTP client's `base_url`: the enclave's origin on a direct connection, or the proxy URL with EHBP (see below). Pass `api_path="/openai/v1"` to `OpenAIClient` for an API mounted elsewhere. It must be an absolute path without a query, a fragment, an encoded slash or a `.` or `..` segment. `client.http_client` is the HTTP client that an OpenAI client sends through, and `http_client.trust` is the trust that the enclave is verified under. `RouterHTTPClient()` takes no trust: the router is always verified against its own repository.
+The OpenAI client sends to `/v1/` under the HTTP client's `base_url`: the enclave's origin on a direct connection, the proxy URL with EHBP (see below), or the gateway's URL. Pass `api_path="/openai/v1"` to `OpenAIClient` for an API mounted elsewhere. It must be an absolute path without a query, a fragment, an encoded slash or a `.` or `..` segment. `client.http_client` is the HTTP client that an OpenAI client sends through, and `http_client.trust` is the trust that the enclave is verified under. `RouterHTTPClient()` takes no trust: the router is always verified against its own repository.
 
 ## Sending through a proxy
 
@@ -190,7 +190,7 @@ http_client = GatewayHTTPClient(
 client = OpenAIClient(http_client, api_key=os.environ["TINFOIL_API_KEY"])
 ```
 
-The gateway's `url` already carries the API path, so `OpenAIClient` takes no `api_path` with a gateway client. `GatewayHTTPClient` also has `models()` for the catalog's model names and `ensure_verified(model)` for the report of a model's verification.
+The gateway's `url` is its origin, `https://inference-gateway.tinfoil.sh/` by default, or the URL that it is mounted under, never the API path: as under an EHBP proxy URL, `OpenAIClient` joins its `api_path`, `/v1/` by default, under it, and the client fetches the catalog and relays attestation under it too, so that `url="https://gateway.example.com/tinfoil"` sends chat completions to `https://gateway.example.com/tinfoil/v1/chat/completions`. `GatewayHTTPClient` also has `models()` for the catalog's model names and `ensure_verified(model)` for the report of a model's verification.
 
 ## Reading the verification
 
