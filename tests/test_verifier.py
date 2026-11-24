@@ -589,7 +589,7 @@ def test_config_authorizer_configs_must_be_json() -> None:
     authorizer accepts is still rejected."""
     inputs = vf.embedded_inputs()
     assert inputs.runtime is not None
-    config = f"cvm-version: 0.15.5@sha256:{hashlib.sha256(inputs.runtime).hexdigest()}\n".encode()
+    config = f"cvm-version: 0.15.0@sha256:{hashlib.sha256(inputs.runtime).hexdigest()}\n".encode()
     entry = vf.reference_entry(CONFIG_ID, CONFIG_V1_FORMAT, {"config_base64": b64(config)})
     raw, nonce, _ = vf.embedded_document(FORMAT_V3, entry)
     v = vf.embedded_verifier(dataclasses.replace(inputs, config=ConfigAuthorizer(authorize_all)))
@@ -630,11 +630,11 @@ def test_config_pins_one_runtime_manifest() -> None:
     _, _, doc = vf.embedded_document(FORMAT_V3)
     for suffix in ("", "+gpu", "+mini", "+containers.initrd-1"):
         if suffix:
-            manifest = vf.manifest_bytes("v0.15.5" + suffix, snp_launch="ef" * 48, mrtd="12" * 48)
+            manifest = vf.manifest_bytes("v0.15.0" + suffix, snp_launch="ef" * 48, mrtd="12" * 48)
         else:
             manifest = vf.manifest_bytes()
         inputs = vf.EmbeddedInputs(
-            config=EmbeddedConfig(data=vf.config_bytes(manifest, "0.15.5" + suffix), name=vf.EMBEDDED_CONFIG_NAME),
+            config=EmbeddedConfig(data=vf.config_bytes(manifest, "0.15.0" + suffix), name=vf.EMBEDDED_CONFIG_NAME),
             runtime=manifest,
             platform=vf.platform_bytes(),
         )
@@ -644,7 +644,7 @@ def test_config_pins_one_runtime_manifest() -> None:
         assert isinstance(inputs.config, EmbeddedConfig)
         assert refs.quote.hash == hashlib.sha256(inputs.config.data).digest()
         assert refs.quote.runtime == decode_manifest(manifest).measurements
-        assert refs.artifact.tag == "v0.15.5"
+        assert refs.artifact.tag == "v0.15.0"
         assert refs.artifact.source == SOURCE_EMBEDDED
         if suffix:
             with pytest.raises(UsageError, match="digest pin"):
@@ -1123,14 +1123,14 @@ def test_configured_keys_preserve_proof_verification() -> None:
     world = World()
     other = World()
     trusted_root = world.trusted_root_json(fulcio=False, ctlogs=False)
-    config = b'{"cvm-version":"0.15.5@sha256:' + b"ab" * 32 + b'"}'
+    config = b'{"cvm-version":"0.15.0@sha256:' + b"ab" * 32 + b'"}'
     payload = config_payload(world, world.now, config, vf.EMBEDDED_CONFIG_NAME)
     config_data = {
         "endorsement_ref": endorsement_reference(payload),
         "config_base64": b64(config),
         "sigstore_bundle": world.keyed_bundle(payload),
     }
-    artifact = FreshnessArtifact(KIND_RUNTIME, RUNTIME_REPO, "v0.15.5", runtime_name("v0.15.5"), "ab" * 32)
+    artifact = FreshnessArtifact(KIND_RUNTIME, RUNTIME_REPO, "v0.15.0", runtime_name("v0.15.0"), "ab" * 32)
     approval = freshness_payload(world, artifact, world.now)
     freshness_data = {"sigstore_bundle": world.keyed_bundle(approval, key=other.key)}
     _, _, doc = vf.embedded_document(

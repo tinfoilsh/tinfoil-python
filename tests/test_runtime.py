@@ -277,8 +277,9 @@ def test_decode_manifest_framing() -> None:
 # --- runtime_from_config -----------------------------------------------------
 
 DIGEST = "ab" * 32
-GOOD = f'{{"cvm-version":"0.15.5@sha256:{DIGEST}"}}'
-NOT_A_JSON_CONFIG = "^parsing config runtime pin: not a JSON config that states cvm-version; the YAML configs"
+GOOD = f'{{"cvm-version":"0.15.0@sha256:{DIGEST}"}}'
+WANT = RuntimeReference(repo=RUNTIME_REPO, tag="v0.15.0", digest=DIGEST)
+NOT_A_JSON_CONFIG = "^parsing config runtime pin: not a JSON config that states cvm-version; YAML configs are not read$"
 NOT_A_FULL_VERSION = "^runtime tag must be a full semantic version"
 NOT_LOWERCASE_HEX = "^runtime digest is not lowercase hex"
 
@@ -286,15 +287,18 @@ NOT_LOWERCASE_HEX = "^runtime digest is not lowercase hex"
 @pytest.mark.parametrize(
     ("version", "tag"),
     [
-        ("0.15.5", "v0.15.5"),
-        ("v0.15.5", "v0.15.5"),
+        ("0.15.0", "v0.15.0"),
+        ("v0.15.0", "v0.15.0"),
+        ("0.15.0-rc.1", "v0.15.0-rc.1"),
+        ("0.15.0+gpu", "v0.15.0+gpu"),
+        ("v0.15.0+gpu", "v0.15.0+gpu"),
+        ("0.15.0-rc.1+gpu", "v0.15.0-rc.1+gpu"),
+        ("0.15.0+mini", "v0.15.0+mini"),
+        ("0.15.0+containers.initrd-1", "v0.15.0+containers.initrd-1"),
+        ("0.15.0+GPU", "v0.15.0+GPU"),
+        # 0.15.5-rc.1 is the first version whose guest takes a JSON config; the pin is read on either side of it.
+        ("0.15.4", "v0.15.4"),
         ("0.15.5-rc.1", "v0.15.5-rc.1"),
-        ("0.15.5+gpu", "v0.15.5+gpu"),
-        ("v0.15.5+gpu", "v0.15.5+gpu"),
-        ("0.15.5-rc.1+gpu", "v0.15.5-rc.1+gpu"),
-        ("0.15.5+mini", "v0.15.5+mini"),
-        ("0.15.5+containers.initrd-1", "v0.15.5+containers.initrd-1"),
-        ("0.15.5+GPU", "v0.15.5+GPU"),
     ],
 )
 def test_config_runtime_pin_accepts(version: str, tag: str) -> None:
@@ -305,13 +309,13 @@ def test_config_runtime_pin_accepts(version: str, tag: str) -> None:
 @pytest.mark.parametrize(
     ("config", "match"),
     [
-        pytest.param('{"cvm-version":"0.15.5"}', "^cvm-version must pin", id="unpinned"),
+        pytest.param('{"cvm-version":"0.15.0"}', "^cvm-version must pin", id="unpinned"),
         pytest.param(GOOD[:-1] + "," + GOOD[1:], NOT_A_JSON_CONFIG, id="duplicate"),
         pytest.param(GOOD.replace(DIGEST, DIGEST.upper()), NOT_LOWERCASE_HEX, id="bad digest"),
-        pytest.param(GOOD.replace("0.15.5", "0.15.5+mini/other"), NOT_A_FULL_VERSION, id="path metadata"),
-        pytest.param(GOOD.replace("0.15.5", "0.15+gpu"), NOT_A_FULL_VERSION, id="partial version"),
-        pytest.param(GOOD.replace("0.15.5", "0.15.5+"), NOT_A_FULL_VERSION, id="empty metadata"),
-        pytest.param(GOOD.replace("0.15.5", "0.15.5+gpu+gpu"), NOT_A_FULL_VERSION, id="double metadata"),
+        pytest.param(GOOD.replace("0.15.0", "0.15.0+mini/other"), NOT_A_FULL_VERSION, id="path metadata"),
+        pytest.param(GOOD.replace("0.15.0", "0.15+gpu"), NOT_A_FULL_VERSION, id="partial version"),
+        pytest.param(GOOD.replace("0.15.0", "0.15.0+"), NOT_A_FULL_VERSION, id="empty metadata"),
+        pytest.param(GOOD.replace("0.15.0", "0.15.0+gpu+gpu"), NOT_A_FULL_VERSION, id="double metadata"),
         pytest.param(GOOD.replace(DIGEST, DIGEST[:-2]), "^runtime digest must be 32 bytes", id="short digest"),
         pytest.param(GOOD.replace(DIGEST, DIGEST + "@sha256:" + DIGEST), NOT_LOWERCASE_HEX, id="extra digest"),
         pytest.param('{"containers":[]}', NOT_A_JSON_CONFIG, id="missing version"),
@@ -331,6 +335,10 @@ def test_config_decode_rejects() -> None:
     raises_config(("[" + GOOD + "]").encode(), NOT_A_JSON_CONFIG)
     raises_config(b'"just a string"', NOT_A_JSON_CONFIG)
     raises_config(b"", NOT_A_JSON_CONFIG)
+    raises_config((GOOD + GOOD).encode(), NOT_A_JSON_CONFIG)
+    # A repeated member is refused at any depth, even when it is not the one being read.
+    raises_config(('{"cpus":2,"cpus":2,' + GOOD[1:]).encode(), NOT_A_JSON_CONFIG)
+    raises_config(('{"shim":{"port":1,"port":1},' + GOOD[1:]).encode(), NOT_A_JSON_CONFIG)
     # cvm-version is a string; no other value is read as its text.
     for value in ("null", "0.15", "1", "true", '["a"]', '{"a":"b"}'):
         raises_config(f'{{"cvm-version":{value}}}'.encode(), NOT_A_JSON_CONFIG)
@@ -340,8 +348,9 @@ def test_config_decode_rejects() -> None:
     raises_config(f'{{"a":{GOOD}}}'.encode(), NOT_A_JSON_CONFIG)
     raises_config(b'{"cvm-version":', NOT_A_JSON_CONFIG)
     raises_config(b'{"cvm-version":"\xff"}', NOT_A_JSON_CONFIG)
-    # Objects nested deeper than the parser allows are an error, not a crash.
+    # Nesting deeper than the parser allows is an error, not a crash.
     depth = 20_000
+    raises_config(b'{"a":' + b"[" * depth + b"]" * depth + b"," + GOOD.encode()[1:], NOT_A_JSON_CONFIG)
     raises_config(b'{"a":' + b'{"b":' * depth + b"1" + b"}" * depth + b"," + GOOD.encode()[1:], NOT_A_JSON_CONFIG)
     # The parser's reason is kept as the cause.
     with pytest.raises(RuntimeConfigError) as info:
@@ -352,9 +361,11 @@ def test_config_decode_rejects() -> None:
 @pytest.mark.parametrize(
     "config",
     [
-        pytest.param(f'cvm-version: "0.15.5@sha256:{DIGEST}"\n', id="double-quoted"),
-        pytest.param(f"cvm-version: '0.15.5@sha256:{DIGEST}'\n", id="single-quoted"),
-        pytest.param(f"{{cvm-version: 0.15.5@sha256:{DIGEST}}}\n", id="flow style"),
+        pytest.param(f"cvm-version: 0.15.4@sha256:{DIGEST}\ncpus: 2\n", id="block style, 0.15.4"),
+        pytest.param(f"cvm-version: 0.15.5-rc.1@sha256:{DIGEST}\ncpus: 2\n", id="block style, 0.15.5-rc.1"),
+        pytest.param(f'cvm-version: "0.15.0@sha256:{DIGEST}"\n', id="double-quoted"),
+        pytest.param(f"cvm-version: '0.15.0@sha256:{DIGEST}'\n", id="single-quoted"),
+        pytest.param(f"{{cvm-version: 0.15.0@sha256:{DIGEST}}}\n", id="flow style"),
         pytest.param("---\n" + GOOD, id="JSON after a document start"),
         pytest.param(GOOD + "\n...\n", id="JSON before a document end"),
         pytest.param("# c\n" + GOOD, id="JSON after a comment"),
@@ -366,112 +377,15 @@ def test_config_decode_rejects_yaml_syntax(config: str) -> None:
     raises_config(config.encode(), NOT_A_JSON_CONFIG)
 
 
-# --- the config is JSON in its one byte form ---------------------------------
-#
-# From cvm-version 0.15.5-rc.1 a config is canonical JSON. The YAML that
-# earlier versions measure is not read.
-
-
-def json_config(version: str) -> str:
-    return f'{{"containers":[],"cpus":2,"cvm-version":"{version}@sha256:{DIGEST}","shim":{{"upstream-port":8080}}}}'
-
-
-def yaml_config(version: str) -> str:
-    return f"cvm-version: {version}@sha256:{DIGEST}\ncpus: 2\n"
-
-
-CANONICAL = json_config("0.15.5-rc.1")
-MAX_JSON_INTEGER = 2**53 - 1
-BELOW_THE_FIRST_JSON_VERSION = "^a JSON config pins cvm-version v0.15.5-rc.1 or later"
-
-
-def replaced(old: str, new: str) -> str:
-    """The canonical config with one piece of its text replaced."""
-    assert old in CANONICAL
-    return CANONICAL.replace(old, new, 1)
-
-
 @pytest.mark.parametrize(
-    ("config", "tag"),
+    "config",
     [
-        pytest.param(json_config("0.15.5-rc.1"), "v0.15.5-rc.1", id="JSON at the first JSON version"),
-        pytest.param(json_config("v0.15.5-rc.1"), "v0.15.5-rc.1", id="JSON with a v prefix"),
-        pytest.param(json_config("0.15.5-rc.1+gpu"), "v0.15.5-rc.1+gpu", id="JSON with build metadata"),
-        pytest.param(json_config("0.15.5"), "v0.15.5", id="JSON for the release"),
-        pytest.param(json_config("0.16.0"), "v0.16.0", id="JSON for a later version"),
-        pytest.param(replaced('"cpus":2', f'"cpus":{MAX_JSON_INTEGER}'), "v0.15.5-rc.1", id="largest integer"),
-        pytest.param(replaced('"cpus":2', f'"cpus":-{MAX_JSON_INTEGER}'), "v0.15.5-rc.1", id="smallest integer"),
+        pytest.param(GOOD.replace(":", " : ", 1) + "\n", id="whitespace and a trailing newline"),
+        pytest.param('{"shim":{},' + GOOD[1:-1] + ',"cpus":2}', id="members in any order"),
+        pytest.param('{"cpus":null,' + GOOD[1:], id="null in another member"),
+        pytest.param('{"cpus":2.5,' + GOOD[1:], id="fraction in another member"),
     ],
 )
-def test_config_format_accepts(config: str, tag: str) -> None:
-    assert runtime_from_config(config.encode()) == RuntimeReference(repo=RUNTIME_REPO, tag=tag, digest=DIGEST)
-
-
-@pytest.mark.parametrize(
-    ("config", "match"),
-    [
-        pytest.param(yaml_config("0.15.5-rc.1"), NOT_A_JSON_CONFIG, id="YAML at the first JSON version"),
-        pytest.param(yaml_config("0.15.5-rc.1+gpu"), NOT_A_JSON_CONFIG, id="YAML with build metadata"),
-        pytest.param(yaml_config("1.0.0"), NOT_A_JSON_CONFIG, id="YAML for a later version"),
-        pytest.param(yaml_config("0.15.5-rc.0"), NOT_A_JSON_CONFIG, id="YAML before the first JSON version"),
-        pytest.param(yaml_config("0.15.4"), NOT_A_JSON_CONFIG, id="YAML for an earlier release"),
-        pytest.param(json_config("0.15.5-rc.0"), BELOW_THE_FIRST_JSON_VERSION, id="JSON before the first JSON version"),
-        pytest.param(json_config("0.15.4"), BELOW_THE_FIRST_JSON_VERSION, id="JSON for an earlier release"),
-        pytest.param(
-            json_config("0.15.4") + "\n", BELOW_THE_FIRST_JSON_VERSION, id="JSON for an earlier release, not canonical"
-        ),
-        pytest.param(replaced('"cpus":2', '"cpus": 2'), "canonical form", id="whitespace"),
-        pytest.param(CANONICAL + "\n", "canonical form", id="trailing newline"),
-        pytest.param(
-            replaced('"containers":[],"cpus":2,', '"cpus":2,"containers":[],'),
-            "canonical form",
-            id="members out of order",
-        ),
-        # The escape is assembled so that the config holds a backslash, not the letter that it names.
-        pytest.param(replaced('"cpus"', '"' + "\\" + 'u0063pus"'), "canonical form", id="escaped character"),
-        pytest.param(replaced('"cpus":2', '"cpus":null'), "null is not allowed", id="null"),
-        pytest.param(replaced('"cpus":2', '"cpus":2.5'), "number 2.5 .* is not an integer", id="fraction"),
-        pytest.param(replaced('"cpus":2', '"cpus":2e0'), "number 2e0 .* is not an integer", id="exponent"),
-        pytest.param(replaced('"cpus":2', '"cpus":2.0'), "number 2.0 .* is not an integer", id="integral fraction"),
-        pytest.param(
-            replaced('"cpus":2', f'"cpus":{MAX_JSON_INTEGER + 1}'), "is not an integer between", id="integer too large"
-        ),
-        pytest.param(
-            replaced('"cpus":2', f'"cpus":-{MAX_JSON_INTEGER + 1}'), "is not an integer between", id="integer too small"
-        ),
-        # More digits than the interpreter converts to an integer.
-        pytest.param(replaced('"cpus":2', '"cpus":' + "9" * 5000), "is not an integer between", id="integer too long"),
-        pytest.param(replaced('"cpus":2', '"cpus":-0'), "canonical form", id="negative zero"),
-        pytest.param(replaced('"upstream-port":8080', '"upstream-port":null'), "null is not allowed", id="nested null"),
-        pytest.param(replaced('"containers":[]', '"containers":[1.5]'), "is not an integer", id="fraction in an array"),
-        pytest.param(replaced('"cpus":2,', '"cpus":2,"cpus":2,'), NOT_A_JSON_CONFIG, id="repeated member"),
-        pytest.param(
-            replaced('"upstream-port":8080', '"upstream-port":8080,"upstream-port":8080'),
-            NOT_A_JSON_CONFIG,
-            id="repeated nested member",
-        ),
-        pytest.param(
-            replaced('"containers":[]', '"containers":' + "[" * 20_000 + "]" * 20_000),
-            NOT_A_JSON_CONFIG,
-            id="nesting beyond the parser's bound",
-        ),
-        pytest.param(CANONICAL + CANONICAL, NOT_A_JSON_CONFIG, id="second value"),
-        pytest.param(replaced("@sha256:" + DIGEST, ""), "must pin", id="unpinned version"),
-        pytest.param(replaced("0.15.5-rc.1", "0.16"), "must be a full semantic version", id="partial version"),
-    ],
-)
-def test_config_format_rejects(config: str, match: str) -> None:
-    raises_config(config.encode(), match)
-
-
-def test_json_config_members_sort_by_utf16_code_units() -> None:
-    """The canonical order of member names is by UTF-16 code units. A name outside the Basic Multilingual Plane is a
-    surrogate pair there, which sorts below a name near the top of the plane although its code point is higher."""
-    astral, high = chr(0x1F600), chr(0xFB33)
-    assert astral > high
-    assert astral.encode("utf-16-be") < high.encode("utf-16-be")
-    pin = f'"cvm-version":"0.15.5-rc.1@sha256:{DIGEST}"'
-    by_code_unit = f'{{{pin},"{astral}":1,"{high}":2}}'.encode()
-    by_code_point = f'{{{pin},"{high}":2,"{astral}":1}}'.encode()
-    assert runtime_from_config(by_code_unit) == RuntimeReference(repo=RUNTIME_REPO, tag="v0.15.5-rc.1", digest=DIGEST)
-    raises_config(by_code_point, "canonical form")
+def test_config_decode_accepts(config: str) -> None:
+    """Any spelling of the JSON is read: the byte form of a config is the guest's to enforce."""
+    assert runtime_from_config(config.encode()) == WANT

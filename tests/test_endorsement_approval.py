@@ -195,10 +195,10 @@ def test_timestamp_core_canonicalization() -> None:
 
 def test_deployment_statement_requires_runtime_binding() -> None:
     world = World()
-    config = b'{"cvm-version":"0.15.5@sha256:' + b"ab" * 32 + b'"}'
+    config = b'{"cvm-version":"0.15.0@sha256:' + b"ab" * 32 + b'"}'
     payload = deployment_payload(world, world.now, config)
     parsed = parse_config_statement(payload)
-    assert parsed.predicate.runtime == RuntimeReference(RUNTIME_REPO, "v0.15.5", "ab" * 32)
+    assert parsed.predicate.runtime == RuntimeReference(RUNTIME_REPO, "v0.15.0", "ab" * 32)
     assert parsed.predicate.registry_id == PUBLIC_REGISTRY_ID
     assert config_timestamp_input(parsed).startswith(CONFIG_FRESHNESS_DOMAIN_V2)
     for _name, mutate, message in [
@@ -528,7 +528,7 @@ def test_scoped_config_certificate_and_timestamp_bindings() -> None:
     root_key = world.key
     leaf_key = pki.p256()
     certificate = world.scope_certificate(leaf_key, PUBLIC_REGISTRY_ID)
-    config = b'{"cvm-version":"0.15.5-rc.1@sha256:' + b"ab" * 32 + b'"}'
+    config = b'{"cvm-version":"0.15.3-rc.1@sha256:' + b"ab" * 32 + b'"}'
     payload = deployment_payload(world, world.now, config)
     bundle = world.certified_bundle(payload, certificate, leaf_key, world.now)
     verifier = ConfigVerifier(world.trusted_root(), [root_key.public_key()], root_keys=[root_key.public_key()])
@@ -544,7 +544,7 @@ def test_scoped_config_certificate_and_timestamp_bindings() -> None:
     assert approved.signature_time == world.now
     assert approved.approval_time == world.now
     assert approved.signing_key_hint == key_hint(leaf_key.public_key())
-    assert approved.runtime == RuntimeReference(RUNTIME_REPO, "v0.15.5-rc.1", "ab" * 32)
+    assert approved.runtime == RuntimeReference(RUNTIME_REPO, "v0.15.3-rc.1", "ab" * 32)
     assert verifier.verify_certified(config, as_json(bundle), certificate.issuer, registry_policy) == approved
     with pytest.raises(ApprovalError, match="requires an issuer certificate"):
         verifier.verify(None, as_json(bundle), registry_policy)
@@ -765,13 +765,13 @@ def test_verify_config_approval() -> None:
 
 def test_verify_config_digest_and_runtime() -> None:
     world = World()
-    config = b'{"cvm-version":"0.15.5@sha256:' + b"ab" * 32 + b'"}'
+    config = b'{"cvm-version":"0.15.0@sha256:' + b"ab" * 32 + b'"}'
     payload = deployment_payload(world, world.now, config)
     bundle = as_json(world.keyed_bundle(payload))
     got = config_verifier(world).verify(None, bundle, policy(world))
     assert got.digest == hashlib.sha256(config).hexdigest()
     assert got.name == NAME
-    assert got.runtime == RuntimeReference(RUNTIME_REPO, "v0.15.5", "ab" * 32)
+    assert got.runtime == RuntimeReference(RUNTIME_REPO, "v0.15.0", "ab" * 32)
     assert got.approval_time == world.now
     assert got.registry_id == ""
     assert config_verifier(world).verify(config, bundle, policy(world)) == got
@@ -784,7 +784,7 @@ def test_verify_config_digest_and_runtime() -> None:
         ("missing log", lambda b: b["verificationMaterial"].update(tlogEntries=[])),
         (
             "unsigned runtime change",
-            lambda b: b["dsseEnvelope"].update(payload=b64(payload.replace(b"v0.15.5", b"v0.16.0", 1))),
+            lambda b: b["dsseEnvelope"].update(payload=b64(payload.replace(b"v0.15.0", b"v0.16.0", 1))),
         ),
     ]:
         with pytest.raises(ApprovalError):
@@ -820,7 +820,7 @@ def test_deployment_approval_of_a_yaml_config_verifies_only_by_digest() -> None:
 
 def test_deployment_runtime_requires_approval_and_matches_config() -> None:
     world = World()
-    config = b'{"cvm-version":"0.15.5@sha256:' + b"ab" * 32 + b'"}'
+    config = b'{"cvm-version":"0.15.0@sha256:' + b"ab" * 32 + b'"}'
     core = deployment_core(config)
     token = world.timestamp(timestamp_input_of(CONFIG_FRESHNESS_DOMAIN_V2, core), world.now)
     altered = json.loads(json.dumps(core))

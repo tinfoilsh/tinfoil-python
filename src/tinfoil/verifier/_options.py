@@ -65,8 +65,7 @@ class EmbeddedConfig:
     """Trusts exact config bytes that the caller supplies, in place of a registry endorsement. ``name`` optionally
     associates them with a trusted ``/org/project/revision`` identity, which a ``project`` pin must then match. The
     config must come from trusted client configuration, and requires ``attestation-collaterals/v3``. The bytes must
-    be a JSON config, which is what ``cvm-version`` 0.15.5-rc.1 and later measure; ``EmbeddedConfigReference``
-    trusts the YAML config of an earlier version."""
+    be a JSON config; ``EmbeddedConfigReference`` trusts a config in any other format, such as YAML."""
 
     data: bytes
     name: str = ""
