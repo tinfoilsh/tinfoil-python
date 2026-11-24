@@ -72,7 +72,6 @@ from tinfoil.verifier._endorsement import time as approval_time
 from tinfoil.verifier._errors import LAYER_ENVELOPE, LAYER_POLICY, LAYER_PROVENANCE, LAYER_QUOTE
 from tinfoil.verifier._policy import ARTIFACT_FORMAT
 from tinfoil.verifier._quote import quote
-from tinfoil.verifier._runtime import RuntimeConfigError, runtime_from_config
 from tinfoil.verifier._sigstore import bundle as sigstore_bundle
 from tinfoil.verifier._sigstore import timestamp as sigstore_timestamp
 from tinfoil.verifier._sigstore import trusted_root as sigstore_trusted_root
@@ -95,7 +94,6 @@ STAGE_ASSEMBLE_POLICY = "v3-assemble-policy"
 STAGE_AUTHENTICATE_QUOTE = "v3-authenticate-quote"
 STAGE_AUTHENTICATE_APPROVAL = "v3-authenticate-approval"
 STAGE_VERIFY_TIMESTAMP = "v3-verify-timestamp"
-STAGE_READ_CONFIG_RUNTIME = "v3-read-config-runtime"
 STAGE_LIVE_VERIFY = "live-verify"
 STAGE_CAPTURE = "capture"
 
@@ -109,7 +107,6 @@ ALL_STAGES = (
     STAGE_AUTHENTICATE_QUOTE,
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
-    STAGE_READ_CONFIG_RUNTIME,
 )
 STAGES_SUPPORTED: tuple[str, ...] = (
     STAGE_VERIFY,
@@ -119,7 +116,6 @@ STAGES_SUPPORTED: tuple[str, ...] = (
     STAGE_AUTHENTICATE_QUOTE,
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
-    STAGE_READ_CONFIG_RUNTIME,
 )
 
 # The measurement types of the wire contract.
@@ -369,8 +365,6 @@ def _run_stage(stage: str, raw: Any) -> Result:
         return _authenticate_quote(decoded)
     if stage == STAGE_VERIFY_TIMESTAMP:
         return _verify_timestamp(decoded)
-    if stage == STAGE_READ_CONFIG_RUNTIME:
-        return _read_config_runtime(decoded)
     return _unsupported(stage)
 
 
@@ -686,30 +680,6 @@ def _verify_timestamp(decoded: Input) -> Result:
         return _rejected(STAGE_VERIFY_TIMESTAMP, PROVENANCE_REJECTED)
     outputs = {"timestamp": gen_time.strftime("%Y-%m-%dT%H:%M:%SZ")}
     return Result({"stage": STAGE_VERIFY_TIMESTAMP, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
-
-
-def _read_config_runtime(decoded: Input) -> Result:
-    """The runtime pin that the config in the document states. The stage reads the config; it does not authenticate
-    it.
-
-    An injected Sigstore root that does not parse or a document that does
-    not decode is malformed input. A document without a config entry, one
-    whose entry carries no config bytes and a config whose pin does not
-    read are provenance rejections.
-    """
-    stage = STAGE_READ_CONFIG_RUNTIME
-    if not _injected_sigstore_root_parses(decoded):
-        return _malformed(stage)
-    try:
-        parsed = _decode_document(decoded)
-    except MalformedInput:
-        return _malformed(stage)
-    try:
-        runtime = runtime_from_config(parsed.config_endorsement().config or b"")
-    except (NotFoundError, RuntimeConfigError):
-        return _rejected(stage, PROVENANCE_REJECTED)
-    outputs = {"runtime": {"repo": runtime.repo, "tag": runtime.tag, "digest": runtime.digest}}
-    return Result({"stage": stage, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
 
 
 # --- the integration lane -----------------------------------------------------------------------
