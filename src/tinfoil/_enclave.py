@@ -19,7 +19,7 @@ from tinfoil._errors import (
     from_verify,
 )
 from tinfoil._fetch import fetch_document, fetch_document_async, is_authority
-from tinfoil._types import DEFAULT_HTTP_TIMEOUT, OnVerification, TimeoutTypes, VerificationCheck
+from tinfoil._types import DEFAULT_HTTP_TIMEOUT, OnVerificationAttempt, TimeoutTypes, VerificationCheck
 from tinfoil.verifier import (
     CRYPTO_MATERIAL_ID_HPKE,
     CRYPTO_MATERIAL_ID_TLS,
@@ -94,8 +94,8 @@ class Enclave:
     is the policy, which several enclaves can share; None selects the defaults.
     ``verification_check``, when set, is called with the verified facts of
     each verification that passes the verifier; raising rejects it without
-    a retry. ``on_verification``, when set, is what ``notify`` reports each
-    attempt to.
+    a retry. ``on_verification_attempt``, when set, is what ``notify``
+    reports each attempt to.
     ``fetch_document`` and ``fetch_document_async``, when set, obtain the
     raw document in place of a direct fetch from ``host`` or ``relay``.
 
@@ -107,7 +107,7 @@ class Enclave:
         "_check",
         "_fetch",
         "_fetch_async",
-        "_on_verification",
+        "_on_verification_attempt",
         "fetch_document",
         "fetch_document_async",
         "host",
@@ -124,7 +124,7 @@ class Enclave:
         relay: str = "",
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
-        on_verification: OnVerification | None = None,
+        on_verification_attempt: OnVerificationAttempt | None = None,
         fetch_document: DocumentFetch | None = None,
         fetch_document_async: AsyncDocumentFetch | None = None,
         _fetch: Fetch | None = None,
@@ -148,7 +148,7 @@ class Enclave:
         self.pin = pin
         self.verifier = verifier
         self._check = verification_check
-        self._on_verification = on_verification
+        self._on_verification_attempt = on_verification_attempt
         self.fetch_document = fetch_document
         self.fetch_document_async = fetch_document_async
         self._fetch = _fetch
@@ -201,16 +201,16 @@ class Enclave:
         return await self._verify_async(CANDIDATE_VERIFICATION_RETRIES, timeout, deadline, retried)
 
     def notify(self, report: VerificationReport | None, error: TinfoilError | None) -> None:
-        """Reports the outcome of an attempt to verify the enclave to the ``on_verification`` callback, if there is
-        one. The caller must hold no lock that the callback could need. The callback cannot change the outcome, so an
-        exception that it raises is logged rather than raised: raised, a client error from it would read as a failed
-        verification to router discovery and the gateway's replica fallback."""
-        if self._on_verification is None:
+        """Reports the outcome of an attempt to verify the enclave to the ``on_verification_attempt`` callback, if
+        there is one. The caller must hold no lock that the callback could need. The callback cannot change the
+        outcome, so an exception that it raises is logged rather than raised: raised, a client error from it would
+        read as a failed verification to router discovery and the gateway's replica fallback."""
+        if self._on_verification_attempt is None:
             return
         try:
-            self._on_verification(self.host, report, error)
+            self._on_verification_attempt(self.host, report, error)
         except Exception:
-            _LOG.exception("on_verification callback for %s raised", self.host)
+            _LOG.exception("on_verification_attempt callback for %s raised", self.host)
 
     def _verify(
         self, retries: int, timeout: TimeoutTypes, deadline: float | None, retried: Retried | None

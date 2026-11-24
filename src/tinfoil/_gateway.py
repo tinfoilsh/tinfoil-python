@@ -50,6 +50,7 @@ from tinfoil._errors import (
 from tinfoil._fetch import get_bounded, get_bounded_async
 from tinfoil._transport import (
     CLIENT_CLOSED,
+    NO_ATTEMPT,
     USE_CLIENT_DEFAULT,
     AsyncAttestedTransport,
     AsyncEHBPMode,
@@ -60,7 +61,13 @@ from tinfoil._transport import (
     UseClientDefault,
     _cancelling,
 )
-from tinfoil._types import DEFAULT_HTTP_TIMEOUT, LastVerification, OnVerification, TimeoutTypes, VerificationCheck
+from tinfoil._types import (
+    DEFAULT_HTTP_TIMEOUT,
+    OnVerificationAttempt,
+    TimeoutTypes,
+    VerificationAttempt,
+    VerificationCheck,
+)
 from tinfoil.verifier import Pin, Policy, VerificationReport, Verifier, parse_reference
 
 DEFAULT_GATEWAY_URL = "https://inference-gateway.tinfoil.sh/v1/"
@@ -118,23 +125,28 @@ class ModelPin:
 
 @dataclass(frozen=True, slots=True)
 class ReplicaVerification:
-    """A gateway replica's last attempt at verification: its report if the attempt passed, and otherwise the error
-    that the client reported for it, as ``EnclaveHTTPClient.last_verification`` returns them. When the verifier
-    rejected the replica's document, the verifier's ``VerificationError`` and its report are the error's
-    ``__cause__``. A replica's earlier success is not kept once a later attempt for it fails."""
+    """A gateway replica that the client has tried to verify: its host, the models requested through it, its
+    trusted reference and pinned model, the report of the verification that its requests are bound to now
+    (``current``), and its last attempt at verification (``last_attempt``)."""
 
     host: str
-    """The replica that the attempt verified."""
+    """The replica's host."""
     models: tuple[str, ...]
     """The models requested through the replica: request labels, not attested identities."""
     reference: str
     """The repository reference that the replica was verified against."""
     pinned_model: str
     """The pinned model that the verification serves."""
-    report: VerificationReport | None
-    """The report, if the last attempt passed. It may have expired or been invalidated since."""
-    error: TinfoilError | None
-    """The error, if the last attempt failed."""
+    current: VerificationReport | None
+    """The report of the replica's verification that requests are bound to now: set while that verification is
+    fresh and has not been discarded or rejected, and None otherwise, as ``EnclaveHTTPClient.current_verification``
+    describes."""
+    last_attempt: VerificationAttempt
+    """The replica's most recent attempt at verification, as ``(report, error)``, as
+    ``EnclaveHTTPClient.last_verification_attempt`` returns it. When the verifier rejected the replica's document,
+    the verifier's ``VerificationError`` and its report are the error's ``__cause__``. A failed attempt replaces an
+    earlier success here, though ``current`` keeps that success while a failure of a category other than
+    AttestationError leaves it valid."""
 
 
 def fetch_catalog(host: str, *, timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT) -> Catalog:
@@ -466,15 +478,23 @@ _T = TypeVar("_T", "ReplicaTransport", "AsyncReplicaTransport")
 class Keyed(Protocol):
     """What a replica transport reads from its attested transport."""
 
-    def last_verification(self) -> LastVerification: ...
+    def current_verification(self) -> VerificationReport | None: ...
+
+    def last_verification_attempt(self) -> VerificationAttempt: ...
 
     def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = ...) -> VerificationReport: ...
 
+    def reverify(self, *, timeout: TimeoutTypes | UseClientDefault = ...) -> VerificationReport: ...
+
 
 class AsyncKeyed(Protocol):
-    def last_verification(self) -> LastVerification: ...
+    def current_verification(self) -> VerificationReport | None: ...
+
+    def last_verification_attempt(self) -> VerificationAttempt: ...
 
     async def ensure_verified(self) -> VerificationReport: ...
+
+    async def reverify(self) -> VerificationReport: ...
 
 
 class ReplicaTransport:
@@ -524,7 +544,7 @@ class _Shared(Generic[_T]):
         model_pins: Mapping[str, ModelPin] | None,
         policy: Policy | None,
         verification_check: VerificationCheck | None,
-        on_verification: OnVerification | None,
+        on_verification_attempt: OnVerificationAttempt | None,
         user_cache_secret: str | None,
         timeout: TimeoutTypes,
     ) -> None:
@@ -532,7 +552,7 @@ class _Shared(Generic[_T]):
         self.base_url = base_url
         self.relay = relay
         self.check = verification_check
-        self.on_verification = on_verification
+        self.on_verification_attempt = on_verification_attempt
         self.secret = _cachesecret.resolve(user_cache_secret)
         self.timeout = timeout
         self.lock = threading.Lock()
@@ -559,7 +579,7 @@ class _Shared(Generic[_T]):
             relay=self.relay,
             verifier=self.policy.verifier_for(replica),
             verification_check=self.check,
-            on_verification=self.on_verification,
+            on_verification_attempt=self.on_verification_attempt,
         )
 
     def rerouted_host(self, prefix: str) -> str:
@@ -587,23 +607,27 @@ class _Shared(Generic[_T]):
             models.append(model)
         return sorted(models)
 
-    def last_verification(self) -> list[ReplicaVerification]:
-        """One entry for each retained replica that has been tried, failed replicas included, holding its last
-        attempt. It reads each replica's attempt after releasing the lock, which guards only the table."""
+    def replicas(self) -> list[ReplicaVerification]:
+        """One entry for each retained replica that has been tried, failed replicas included, holding its current
+        verification and its last attempt. It reads each replica's state after releasing the lock, which guards
+        only the table."""
         with self.lock:
             entries = list(self.enclaves.items())
         results: list[ReplicaVerification] = []
         for replica, transport in entries:
-            report, error = transport.keyed.last_verification()
-            if report is not None or error is not None:
+            # Read the current verification first: an attempt that completes in between then shows as the last
+            # attempt, which can only be newer than the current one.
+            current = transport.keyed.current_verification()
+            attempt = transport.keyed.last_verification_attempt()
+            if attempt != NO_ATTEMPT:
                 results.append(
                     ReplicaVerification(
                         host=replica.host,
                         models=tuple(sorted(transport.models)),
                         reference=replica.ref,
                         pinned_model=replica.model,
-                        report=report,
-                        error=error,
+                        current=current,
+                        last_attempt=attempt,
                     )
                 )
         results.sort(key=lambda r: (r.host, r.reference, r.pinned_model))
@@ -733,7 +757,7 @@ class GatewayTransport(httpx.BaseTransport):
         model_pins: Mapping[str, ModelPin] | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
-        on_verification: OnVerification | None = None,
+        on_verification_attempt: OnVerificationAttempt | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         _build: Callable[[_Replica], ReplicaTransport] | None = None,
@@ -745,7 +769,7 @@ class GatewayTransport(httpx.BaseTransport):
             model_pins=model_pins,
             policy=policy,
             verification_check=verification_check,
-            on_verification=on_verification,
+            on_verification_attempt=on_verification_attempt,
             user_cache_secret=user_cache_secret,
             timeout=timeout,
         )
@@ -783,20 +807,40 @@ class GatewayTransport(httpx.BaseTransport):
     ) -> VerificationReport:
         """The report of a valid verification of a replica serving ``model``. Replicas are tried in a fixed order
         for the model, so repeated calls verify the same replica while it stays valid."""
+        return self._verify_model(model, timeout, force=False)
+
+    def reverify(
+        self, model: str, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT
+    ) -> VerificationReport:
+        """Verifies again the replica that ``ensure_verified`` would return for ``model``. It tries replicas in
+        ``ensure_verified``'s order, verifying each again, and stops at the first that passes, or that fails but
+        keeps a valid verification, which requests for ``model`` still use. A replica whose verification the
+        failure discarded, or that had none, is passed over as ``ensure_verified`` passes it over."""
+        return self._verify_model(model, timeout, force=True)
+
+    def replicas(self) -> list[ReplicaVerification]:
+        """An entry for each retained replica tried so far, failed replicas included, without I/O."""
+        return self._shared.replicas()
+
+    def _verify_model(self, model: str, timeout: TimeoutTypes | UseClientDefault, *, force: bool) -> VerificationReport:
         self._check_open()
         hosts, replica = self._shared.resolve(model, self.catalog(timeout))
         failure: TinfoilError | None = None
         for host in rank(hosts, model, ""):
+            transport: ReplicaTransport | None = None
             try:
-                return self._verified(replace(replica, host=host), timeout)[1]
+                transport = self._transport(replace(replica, host=host))
+                if force:
+                    return transport.keyed.reverify(timeout=timeout)
+                return transport.keyed.ensure_verified(timeout=timeout)
             except TinfoilError as err:
+                # A failure that keeps a valid verification leaves requests for the model on this replica, so it
+                # is the outcome to report.
+                if force and transport is not None and transport.keyed.current_verification() is not None:
+                    raise
                 failure = err
         assert failure is not None
         raise failure
-
-    def last_verification(self) -> list[ReplicaVerification]:
-        """The last attempt of each retained replica tried so far, failed replicas included, without I/O."""
-        return self._shared.last_verification()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         self._check_open()
@@ -964,7 +1008,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
         model_pins: Mapping[str, ModelPin] | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
-        on_verification: OnVerification | None = None,
+        on_verification_attempt: OnVerificationAttempt | None = None,
         user_cache_secret: str | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
         _build: Callable[[_Replica], AsyncReplicaTransport] | None = None,
@@ -976,7 +1020,7 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
             model_pins=model_pins,
             policy=policy,
             verification_check=verification_check,
-            on_verification=on_verification,
+            on_verification_attempt=on_verification_attempt,
             user_cache_secret=user_cache_secret,
             timeout=timeout,
         )
@@ -1008,19 +1052,33 @@ class AsyncGatewayTransport(httpx.AsyncBaseTransport):
 
     async def ensure_verified(self, model: str) -> VerificationReport:
         """The report of a valid verification of a replica serving ``model``."""
+        return await self._verify_model(model, force=False)
+
+    async def reverify(self, model: str) -> VerificationReport:
+        """Verifies again the replica that ``ensure_verified`` would return for ``model``, as for
+        ``GatewayTransport.reverify``."""
+        return await self._verify_model(model, force=True)
+
+    def replicas(self) -> list[ReplicaVerification]:
+        return self._shared.replicas()
+
+    async def _verify_model(self, model: str, *, force: bool) -> VerificationReport:
         self._check_open()
         hosts, replica = self._shared.resolve(model, await self.catalog())
         failure: TinfoilError | None = None
         for host in rank(hosts, model, ""):
+            transport: AsyncReplicaTransport | None = None
             try:
-                return (await self._verified(replace(replica, host=host)))[1]
+                transport = self._transport(replace(replica, host=host))
+                if force:
+                    return await transport.keyed.reverify()
+                return await transport.keyed.ensure_verified()
             except TinfoilError as err:
+                if force and transport is not None and transport.keyed.current_verification() is not None:
+                    raise
                 failure = err
         assert failure is not None
         raise failure
-
-    def last_verification(self) -> list[ReplicaVerification]:
-        return self._shared.last_verification()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self._check_open()

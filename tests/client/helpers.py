@@ -35,7 +35,7 @@ from tests import pki
 from tinfoil._enclave import Enclave
 from tinfoil._errors import TinfoilError
 from tinfoil._transport import AsyncAttestedTransport, AttestedTransport
-from tinfoil._types import LastVerification, OnVerification
+from tinfoil._types import OnVerificationAttempt, VerificationAttempt
 from tinfoil.verifier import (
     CRYPTO_MATERIAL_ID_HPKE,
     CRYPTO_MATERIAL_ID_TLS,
@@ -133,7 +133,7 @@ def fake_enclave(
     host: str = HOST,
     repo: str = "org/repo",
     check: Callable[[VerifiedFacts], None] | None = None,
-    on_verification: OnVerification | None = None,
+    on_verification_attempt: OnVerificationAttempt | None = None,
 ) -> Enclave:
     """An enclave that verifies by calling ``fetch`` instead of fetching and verifying a document."""
     fetch_report = reporting(fetch)
@@ -145,7 +145,7 @@ def fake_enclave(
         host,
         Pin(repo=repo),
         verification_check=check,
-        on_verification=on_verification,
+        on_verification_attempt=on_verification_attempt,
         _fetch=fetch_report,
         _fetch_async=fetch_async,
     )
@@ -159,18 +159,18 @@ def facts_of(report: VerificationReport | None) -> VerifiedFacts:
 
 
 class _HasLast(Protocol):
-    def last_verification(self) -> LastVerification: ...
+    def last_verification_attempt(self) -> VerificationAttempt: ...
 
 
 def last_facts(client: _HasLast) -> VerifiedFacts | None:
     """The verified facts of the client's last attempt, or None when it failed or there was none."""
-    report, _ = client.last_verification()
+    report, _ = client.last_verification_attempt()
     return None if report is None else report.verified_facts
 
 
 def last_error(client: _HasLast) -> TinfoilError | None:
     """The error of the client's last attempt, or None when it passed or there was none."""
-    return client.last_verification()[1]
+    return client.last_verification_attempt()[1]
 
 
 def current_facts(keyed: AttestedTransport | AsyncAttestedTransport) -> VerifiedFacts | None:

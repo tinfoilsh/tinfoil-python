@@ -63,7 +63,15 @@ _IGNORED_OPTIONS = ("base_url", "data_residency")
 so that they have no effect, as the ``OPENAI_BASE_URL`` environment variable has none."""
 
 ROUTE_OPTIONS = frozenset(
-    {"transport", "policy", "verification_check", "on_verification", "user_cache_secret", "http_timeout", "api_path"}
+    {
+        "transport",
+        "policy",
+        "verification_check",
+        "on_verification_attempt",
+        "user_cache_secret",
+        "http_timeout",
+        "api_path",
+    }
 )
 """The options that configure a route or an API path, which the drop-in ``Client`` and ``AsyncClient`` refuse."""
 

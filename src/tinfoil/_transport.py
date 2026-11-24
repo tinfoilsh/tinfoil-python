@@ -12,9 +12,9 @@ request verifies again; any other failure keeps a verification that is still
 fresh, and no request is sent under a discarded verification again.
 
 Every attempt to verify, retried or final, becomes the transport's
-``last_verification`` once its outcome is decided, and is reported to the
-enclave's ``on_verification`` callback once the refresh that made it is
-done, outside the transport's lock and after the refresh is forgotten, so
+``last_verification_attempt`` once its outcome is decided, and is reported to
+the enclave's ``on_verification_attempt`` callback once the refresh that made
+it is done, outside the transport's lock and after the refresh is forgotten, so
 that a callback that calls the client starts a refresh of its own rather
 than waiting for the one that is calling it.
 """
@@ -35,7 +35,7 @@ from tinfoil._enclave import DEADLINE_EXCEEDED, FRESHNESS_EXPIRED, Enclave, is_f
 from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, TinfoilError
 from tinfoil._keys import PeerLacksKeyError, key_rejection
 from tinfoil._tls import NO_TLS, AsyncPinnedTransport, PinnedTransport
-from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP, TLS, LastVerification, TimeoutTypes, Transport
+from tinfoil._types import DEFAULT_HTTP_TIMEOUT, EHBP, TLS, TimeoutTypes, Transport, VerificationAttempt
 from tinfoil._url import validate_proxy_url
 from tinfoil.verifier import VerificationReport, VerifiedFacts
 
@@ -54,8 +54,8 @@ _T = TypeVar("_T", "RetiringTransport", "AsyncRetiringTransport")
 VerifyMethod = Callable[..., VerificationReport]
 AsyncVerifyMethod = Callable[..., Coroutine[Any, Any, VerificationReport]]
 
-NO_ATTEMPT: LastVerification = (None, None)
-"""What ``last_verification`` returns before the first attempt."""
+NO_ATTEMPT: VerificationAttempt = (None, None)
+"""What ``last_verification_attempt`` returns before the first attempt."""
 
 
 class Mode(Protocol):
@@ -242,7 +242,7 @@ class AttestedTransport(httpx.BaseTransport):
         self.timeout = timeout
         self._lock = threading.Lock()
         self._current: _State[RetiringTransport] | None = None
-        self._last: LastVerification = NO_ATTEMPT
+        self._last: VerificationAttempt = NO_ATTEMPT
         self._refresh: _Refresh | None = None
         self._closed = False
 
@@ -276,11 +276,19 @@ class AttestedTransport(httpx.BaseTransport):
         quickly. ``deadline`` is a ``time.monotonic`` instant the attempt must finish by."""
         return self._verified(True, Enclave.verify_once, self._timeout(timeout), deadline).report
 
-    def last_verification(self) -> LastVerification:
+    def current_verification(self) -> VerificationReport | None:
+        """The report of the verification that requests are bound to now, without I/O: the current verification's
+        while it is fresh and has not been discarded or rejected, and otherwise None. Reports are immutable, so the
+        caller can keep it."""
+        with self._lock:
+            state = self._current
+            return state.report if state is not None and state.valid() else None
+
+    def last_verification_attempt(self) -> VerificationAttempt:
         """The outcome of the most recent attempt to verify the enclave, without I/O, as ``(report, error)``: its
         report if it passed, and otherwise no report and the error that the transport reported for it;
         ``(None, None)`` before the first attempt. A report that it returns may have expired or been
-        invalidated since; ``ensure_verified`` returns one that is valid."""
+        invalidated since; ``current_verification`` returns one that has not."""
         with self._lock:
             return self._last
 
@@ -314,7 +322,7 @@ class AttestedTransport(httpx.BaseTransport):
                 if refresh is None:
                     refresh = self._refresh = _Refresh()
             if owner:
-                attempts: list[LastVerification] = []
+                attempts: list[VerificationAttempt] = []
                 try:
                     self._refresh_once(verify, timeout, deadline, attempts)
                 except BaseException as err:
@@ -336,7 +344,7 @@ class AttestedTransport(httpx.BaseTransport):
             force = False
 
     def _refresh_once(
-        self, verify: VerifyMethod, timeout: TimeoutTypes, deadline: float | None, attempts: list[LastVerification]
+        self, verify: VerifyMethod, timeout: TimeoutTypes, deadline: float | None, attempts: list[VerificationAttempt]
     ) -> None:
         """Verifies once, with the enclave's retries, and publishes the result. Each attempt, retried or final,
         becomes the last verification as soon as its outcome is decided, and is appended to ``attempts`` for the
@@ -357,7 +365,7 @@ class AttestedTransport(httpx.BaseTransport):
             self._record((None, err), attempts)
             raise
 
-    def _record(self, attempt: LastVerification, attempts: list[LastVerification]) -> None:
+    def _record(self, attempt: VerificationAttempt, attempts: list[VerificationAttempt]) -> None:
         with self._lock:
             self._last = attempt
         attempts.append(attempt)
@@ -368,7 +376,7 @@ class AttestedTransport(httpx.BaseTransport):
         timeout: TimeoutTypes,
         deadline: float | None,
         retried: Callable[[TinfoilError], None],
-        attempts: list[LastVerification],
+        attempts: list[VerificationAttempt],
     ) -> None:
         report = verify(self.enclave, timeout=timeout, deadline=deadline, retried=retried)
         facts = _facts(report)
@@ -414,7 +422,7 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
         self.mode = mode
         self.timeout = timeout
         self._current: _State[AsyncRetiringTransport] | None = None
-        self._last: LastVerification = NO_ATTEMPT
+        self._last: VerificationAttempt = NO_ATTEMPT
         self._refresh: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -448,9 +456,15 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
         state = await self._verified(True, Enclave.verify_once_async, self._timeout(timeout), deadline)
         return state.report
 
-    def last_verification(self) -> LastVerification:
+    def current_verification(self) -> VerificationReport | None:
+        """The report of the verification that requests are bound to now, without I/O, as for
+        ``AttestedTransport.current_verification``."""
+        state = self._current
+        return state.report if state is not None and state.valid() else None
+
+    def last_verification_attempt(self) -> VerificationAttempt:
         """The outcome of the most recent attempt to verify the enclave, without I/O, as for
-        ``AttestedTransport.last_verification``."""
+        ``AttestedTransport.last_verification_attempt``."""
         return self._last
 
     async def aclose(self) -> None:
@@ -506,7 +520,7 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
         """``AttestedTransport._refresh_once`` in the refresh's own task. The attempts are reported once the
         outcome is decided, after the refresh is forgotten, so that a callback that starts a verification starts
         a refresh of its own."""
-        attempts: list[LastVerification] = []
+        attempts: list[VerificationAttempt] = []
         try:
             await self._attempt(verify, timeout, deadline, attempts)
         finally:
@@ -516,7 +530,11 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
                 self.enclave.notify(report, error)
 
     async def _attempt(
-        self, verify: AsyncVerifyMethod, timeout: TimeoutTypes, deadline: float | None, attempts: list[LastVerification]
+        self,
+        verify: AsyncVerifyMethod,
+        timeout: TimeoutTypes,
+        deadline: float | None,
+        attempts: list[VerificationAttempt],
     ) -> None:
         replacing = self._current
 
@@ -533,7 +551,7 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
             self._record((None, err), attempts)
             raise
 
-    def _record(self, attempt: LastVerification, attempts: list[LastVerification]) -> None:
+    def _record(self, attempt: VerificationAttempt, attempts: list[VerificationAttempt]) -> None:
         self._last = attempt
         attempts.append(attempt)
 
@@ -543,7 +561,7 @@ class AsyncAttestedTransport(httpx.AsyncBaseTransport):
         timeout: TimeoutTypes,
         deadline: float | None,
         retried: Callable[[TinfoilError], None],
-        attempts: list[LastVerification],
+        attempts: list[VerificationAttempt],
     ) -> None:
         report = await verify(self.enclave, timeout=timeout, deadline=deadline, retried=retried)
         facts = _facts(report)

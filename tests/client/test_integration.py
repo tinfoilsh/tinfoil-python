@@ -44,7 +44,7 @@ needs_api_key = pytest.mark.skipif(not API_KEY, reason="TINFOIL_API_KEY is not s
 @pytest.mark.parametrize("mode", [TLS(), EHBP()])
 def test_enclave_client(mode: Transport) -> None:
     with EnclaveHTTPClient(ENCLAVE, RepoPin(REPO), transport=mode) as client:
-        last, error = client.last_verification()
+        last, error = client.last_verification_attempt()
         assert last is not None, "the client is verified when it's returned"
         assert error is None
         assert all(step.status == STEP_PASSED for step in last.steps), "a live code release is endorsed"
@@ -54,7 +54,7 @@ def test_enclave_client(mode: Transport) -> None:
         assert before is last, "the constructor's verification is reused"
         after = client.reverify()
         assert after.metadata.verified_at >= before.metadata.verified_at
-        assert client.last_verification() == (after, None)
+        assert client.last_verification_attempt() == (after, None)
         headers = {"Authorization": f"Bearer {API_KEY}"} if API_KEY else {}
         reply = client.http_client.get(client.base_url + "v1/models", headers=headers)
         assert reply.status_code == 200
@@ -67,7 +67,7 @@ def test_router_openai_client(mode: Transport) -> None:
     with OpenAIClient(attested, api_key=API_KEY) as client:
         assert client.http_client is attested
         verified = attested.ensure_verified()
-        assert verified is attested.last_verification()[0], "a valid verification is reused"
+        assert verified is attested.last_verification_attempt()[0], "a valid verification is reused"
         assert attested.base_url == f"https://{attested.enclave}/", "the enclave is the router discovery chose"
         completion = client.chat.completions.create(
             model=MODEL, messages=[{"role": "user", "content": "Is this a test?"}]
@@ -121,7 +121,7 @@ async def test_async_router_client() -> None:
         )
         collected = "".join([chunk.choices[0].delta.content or "" async for chunk in stream if chunk.choices])
         assert collected
-        assert router.last_verification()[0] is not None
+        assert router.last_verification_attempt()[0] is not None
     finally:
         await client.close()
     drop_in = await create_async_client(api_key=API_KEY)
@@ -135,7 +135,7 @@ async def test_async_router_client() -> None:
 
 def test_router_discovery() -> None:
     with RouterHTTPClient(transport=EHBP()) as client:
-        last, _ = client.last_verification()
+        last, _ = client.last_verification_attempt()
         assert last is not None
         assert client.base_url == f"https://{client.enclave}/"
         assert client.ensure_verified() is last
@@ -155,4 +155,4 @@ def test_gateway() -> None:
         verified = gateway.ensure_verified(model).verified_facts
         assert verified is not None
         assert verified.hpke_public_key
-        assert [v.host for v in gateway.last_verification() if v.report is not None]
+        assert [v.host for v in gateway.replicas() if v.current is not None]
