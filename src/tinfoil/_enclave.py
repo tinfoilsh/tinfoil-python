@@ -8,6 +8,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from tinfoil._errors import (
@@ -28,6 +29,7 @@ from tinfoil.verifier import (
     ConfigTrust,
     Pin,
     Policy,
+    VerificationError,
     VerificationReport,
     VerifiedFacts,
     Verifier,
@@ -220,12 +222,14 @@ class Enclave:
             try:
                 check_deadline(deadline)
                 verified = self._fetch() if self._fetch is not None else self._fetch_verification(timeout, deadline)
+                verified = self._name_host(verified)
                 self._admit(verified)
                 # The verification and the check are not bounded by the fetch's timeouts, so the deadline is
                 # checked again before the result is accepted.
                 check_deadline(deadline)
                 return verified
             except TinfoilError as err:
+                self._name_rejected_host(err)
                 if attempt == retries or not retryable(err) or not _retry_fits(deadline):
                     if first is not None:
                         err.__context__ = first
@@ -247,10 +251,12 @@ class Enclave:
                     verified = await self._fetch_async()
                 else:
                     verified = await self._fetch_verification_async(timeout, deadline)
+                verified = self._name_host(verified)
                 self._admit(verified)
                 check_deadline(deadline)
                 return verified
             except TinfoilError as err:
+                self._name_rejected_host(err)
                 if attempt == retries or not retryable(err) or not _retry_fits(deadline):
                     if first is not None:
                         err.__context__ = first
@@ -260,6 +266,23 @@ class Enclave:
                     retried(err)
             await asyncio.sleep(VERIFICATION_RETRY_DELAY)
         raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
+
+    def _name_host(self, report: VerificationReport) -> VerificationReport:
+        """``report`` with the enclave's host in its metadata, since the verifier doesn't know which host the
+        document came from. Every report that a client hands out passes through here or through
+        ``_name_rejected_host``. Reports are immutable, so this builds a copy."""
+        if report.metadata.host == self.host:
+            return report
+        return replace(report, metadata=replace(report.metadata, host=self.host))
+
+    def _name_rejected_host(self, err: TinfoilError) -> None:
+        """Names the enclave's host in the report of the verifier's ``VerificationError`` that ``err`` was raised
+        from, when the verifier rejected the document."""
+        rejected = err.__cause__
+        if isinstance(rejected, VerificationError) and rejected.report is not None:
+            rejected.report = self._name_host(rejected.report)
+            # The error is rebuilt from its arguments when it is copied or pickled.
+            rejected.args = (rejected.layer, rejected.message, rejected.report)
 
     def _admit(self, report: VerificationReport) -> None:
         """Checks that a fetched verification is fresh and that its verified facts pass the verification check. The

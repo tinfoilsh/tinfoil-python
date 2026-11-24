@@ -79,14 +79,20 @@ class SoftwareIdentity:
 
 @dataclass(frozen=True, slots=True)
 class VerificationMetadata:
-    """How a verification was performed. The verifier fills it in from its own state; none of it is attested by or
-    checked against the document."""
+    """How a verification was performed. The verifier and the client that called it fill it in from their own
+    state; none of it is attested by or checked against the document."""
 
     verifier: SoftwareIdentity
     """The SDK that performed the verification."""
     verified_at: datetime
     """The instant that the document was appraised at: read once from the local clock by ``verify_v3``, or the caller's
     verification time for ``verify_v3_at``. It is not a freshness guarantee."""
+    host: str | None = None
+    """The enclave that the client contacted for the document, a host with an optional port: for a router client the
+    router that it chose, and for a gateway client the replica. It is what the client connected to, not an attested
+    fact, so it proves nothing about the enclave. The verifier doesn't know the host and leaves it None; the clients
+    set it on every report that they produce, and a caller that calls the verifier itself can set it on the report
+    that it gets, with ``dataclasses.replace``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

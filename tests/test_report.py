@@ -231,6 +231,18 @@ def test_report_metadata_names_the_verifier_only_when_its_version_is_known() -> 
         assert report.to_dict()["metadata"] == {"verified_at": "2026-08-06T12:00:00Z"}
 
 
+def test_report_metadata_names_the_host_only_when_a_client_set_it() -> None:
+    """The verifier doesn't know which host a document came from, so its report has no host; a client sets one, and
+    the JSON form writes it under the same schema version."""
+    report = sample_report()
+    assert report.metadata.host is None
+    assert "host" not in report.to_dict()["metadata"]
+    named = dataclasses.replace(report, metadata=dataclasses.replace(report.metadata, host="enclave.example:8443"))
+    assert named.to_dict()["metadata"]["host"] == "enclave.example:8443"
+    assert named.to_dict()["schema_version"] == 1
+    assert json.loads(named.to_json())["metadata"]["host"] == "enclave.example:8443"
+
+
 def _expected(launch: bytes) -> ExpectedFacts:
     return ExpectedFacts(
         config_repo="org/repo",

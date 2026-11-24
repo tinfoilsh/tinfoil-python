@@ -176,7 +176,8 @@ class VerificationReport:
               },
               "metadata": {
                 "verified_at": "<RFC 3339, UTC>",
-                "verifier": {"name": "tinfoil-python", "version": "<version>"}
+                "verifier": {"name": "tinfoil-python", "version": "<version>"},
+                "host": "<host[:port]>"
               }
             }
 
@@ -184,7 +185,9 @@ class VerificationReport:
         established is left out, but an established fact that is empty is kept, as in ``"measured": {}``; no member
         is None or ``""``. Exactly one of ``verified_facts`` and ``partial_facts`` is present, and ``partial_facts``
         is present only on a rejection. A step's message is present only for a failed or skipped step.
-        ``metadata.verifier`` is present only when the installed package names its version.
+        ``metadata.verifier`` is present only when the installed package names its version. ``metadata.host`` is
+        present only in a report that a client produced: it names the host that the client contacted, which is not
+        attested, so it proves nothing about the enclave.
 
         The JSON is for display and transport only, and it authorizes nothing: nothing in this SDK parses it back
         into a report or into verified facts, and a holder of the JSON cannot tell whether a verifier produced it, so
@@ -271,11 +274,14 @@ def _step_dict(step: Step) -> dict[str, Any]:
 
 
 def _metadata_dict(metadata: VerificationMetadata) -> dict[str, Any]:
-    """``metadata`` as ``{"verified_at", "verifier"}``, with the verifier only when its name and version are known."""
+    """``metadata`` as ``{"verified_at", "verifier", "host"}``, with the verifier only when its name and version are
+    known and the host only when a client set it."""
     out: dict[str, Any] = {"verified_at": time_str(metadata.verified_at)}
     verifier = metadata.verifier
     if verifier.name and verifier.version and verifier.version != UNKNOWN_VERSION:
         out["verifier"] = {"name": verifier.name, "version": verifier.version}
+    if metadata.host:
+        out["host"] = metadata.host
     return out
 
 

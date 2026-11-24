@@ -8,6 +8,7 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import pickle
 import threading
 import time
 from collections.abc import Callable
@@ -1177,3 +1178,108 @@ async def test_async_gateway_reverify(network: Network) -> None:
     with pytest.raises(ConfigurationError, match="not pinned"):
         await gateway.reverify("unpinned")
     await gateway.close()
+
+
+def assert_names_host(report: VerificationReport | None, host: str) -> None:
+    """``report`` names ``host`` in its metadata and in its JSON form."""
+    assert report is not None
+    assert report.metadata.host == host
+    assert json.loads(report.to_json())["metadata"]["host"] == host
+
+
+def rejected_report(err: TinfoilError | None) -> VerificationReport | None:
+    """The report of the verifier's ``VerificationError`` that ``err`` was raised from."""
+    assert err is not None
+    assert isinstance(err.__cause__, VerificationError)
+    return err.__cause__.report
+
+
+class TestReportHost:
+    """Every report that a client hands out names the host that it contacted, since the verifier doesn't know it."""
+
+    def test_an_enclave_clients_reports_name_its_host(self, network: Network) -> None:
+        document = network.serve("enclave.example")
+        unnamed = network.verify(document.code_tag.encode(), b"", Pin(repo="org/repo"))
+        assert unnamed.metadata.host is None, "the verifier names no host"
+        assert "host" not in json.loads(unnamed.to_json())["metadata"]
+        attempts = Attempts()
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
+        assert_names_host(client.ensure_verified(), "enclave.example")
+        assert_names_host(client.reverify(), "enclave.example")
+        assert_names_host(client.current_verification(), "enclave.example")
+        assert_names_host(client.last_verification_attempt()[0], "enclave.example")
+        assert len(attempts.calls) == 2
+        for _, report, _ in attempts.calls:
+            assert_names_host(report, "enclave.example")
+        client.close()
+
+    def test_a_rejections_report_names_the_host(self, network: Network, monkeypatch: pytest.MonkeyPatch) -> None:
+        network.serve("enclave.example")
+        attempts = Attempts()
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
+        rejecting_verifier(monkeypatch)
+        with pytest.raises(AttestationError) as raised:
+            client.reverify()
+        assert_names_host(rejected_report(raised.value), "enclave.example")
+        assert_names_host(rejected_report(client.last_verification_attempt()[1]), "enclave.example")
+        for _, _, error in attempts.calls[1:]:
+            assert_names_host(rejected_report(error), "enclave.example")
+        clone = pickle.loads(pickle.dumps(raised.value.__cause__))
+        assert_names_host(clone.report, "enclave.example")
+        client.close()
+
+    def test_router_discovery_names_each_router(self, network: Network, monkeypatch: pytest.MonkeyPatch) -> None:
+        network.handler = lambda _: response(200, b'["a.example", "b.example"]')
+        network.serve("a.example")
+        network.serve("b.example")
+
+        def reject_a(self: Verifier, doc: bytes, nonce: bytes, pin: Pin) -> VerificationReport:
+            return (real_rejection if doc == b"a.example" else network.verify)(doc, nonce, pin)
+
+        monkeypatch.setattr(Verifier, "verify_v3", reject_a)
+        attempts = Attempts()
+        client = RouterHTTPClient(transport=EHBP(), user_cache_secret="s", on_verification_attempt=attempts)
+        assert attempts.hosts == ["a.example", "b.example"]
+        assert_names_host(rejected_report(attempts.calls[0][2]), "a.example")
+        assert_names_host(attempts.calls[1][1], "b.example")
+        assert_names_host(client.current_verification(), "b.example")
+        assert_names_host(client.last_verification_attempt()[0], "b.example")
+        assert_names_host(client.ensure_verified(), "b.example")
+        client.close()
+
+    def test_a_gateways_reports_name_each_replica(self, network: Network) -> None:
+        entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("a.example", "b.example"))}
+        order = list(rank(("a.example", "b.example"), "m", ""))
+        network.documents[order[0]] = AttestationError("document fails verification")
+        network.serve(order[1])
+        client = GatewayHTTPClient(
+            model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
+        )
+        assert_names_host(client.ensure_verified("m"), order[1])
+        assert_names_host(client.reverify("m"), order[1])
+        entry = {entry.host: entry for entry in client.replicas()}[order[1]]
+        assert_names_host(entry.current, order[1])
+        assert_names_host(entry.last_attempt[0], order[1])
+        client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_clients_name_the_host(network: Network, monkeypatch: pytest.MonkeyPatch) -> None:
+    network.serve("enclave.example")
+    attempts = Attempts()
+    client = await AsyncEnclaveHTTPClient.create(
+        "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+    )
+    assert_names_host(await client.ensure_verified(), "enclave.example")
+    assert_names_host(client.current_verification(), "enclave.example")
+    assert_names_host(attempts.calls[0][1], "enclave.example")
+    rejecting_verifier(monkeypatch)
+    with pytest.raises(AttestationError) as raised:
+        await client.reverify()
+    assert_names_host(rejected_report(raised.value), "enclave.example")
+    assert_names_host(rejected_report(client.last_verification_attempt()[1]), "enclave.example")
+    await client.close()
