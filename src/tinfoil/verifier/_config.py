@@ -258,10 +258,10 @@ def _authenticate_containers(trust: TrustPolicy, doc: Document, digest: bytes) -
     data = trust.embedded.config_data
     if data is None:
         try:
-            data = doc.config_endorsement().config or b""
+            data = doc.config_endorsement().config
         except NotFoundError:
             return
-        if hashlib.sha256(data).digest() != digest:
+        if not data or hashlib.sha256(data).digest() != digest:
             return
     authenticate_containers(trust.endorsements, data, doc.container_provenance)
 
