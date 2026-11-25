@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 _IMAGE_DIGEST_PREFIX = "@sha256:"
 _IMAGE_DIGEST_LENGTH = 64
 _PROVENANCE_MEMBERS = ("github",)
-_GITHUB_MEMBERS = ("repository", "repository_id", "workflow", "ref")
+_GITHUB_MEMBERS = ("repository", "repository_id", "workflow", "ref", "commit")
 
 # Accepts every GitHub signing identity. The identity of a container build is
 # compared as text once its bundle verifies.
@@ -40,20 +40,18 @@ _GITHUB_URL_PREFIX = "https://github.com/"
 _GITHUB_WORKFLOWS_PATH = "/.github/workflows/"
 _WORKFLOW_REF_SEPARATOR = "@"
 
-_REF_SEGMENT_SEPARATOR = "/"
-_REF_WILDCARD = "*"
-
 
 @dataclass(frozen=True, slots=True)
 class ContainerProvenance:
     """The build that a config requires for the container image with the lowercase hex SHA-256 ``digest``: a run of a
-    GitHub Actions workflow of a repository. In ``ref``, ``*`` stands for any run of characters other than ``/``."""
+    GitHub Actions workflow of a repository, at a ref and a source commit."""
 
     digest: str
     repository: str
     repository_id: str
     workflow: str
     ref: str
+    commit: str
 
 
 def container_provenance_from_config(data: bytes) -> tuple[ContainerProvenance, ...]:
@@ -118,60 +116,26 @@ def authenticate_containers(
 
 def authenticate_container(client: ProvenanceClient, bundle: _json.JsonValue, required: ContainerProvenance) -> None:
     """Verify that ``bundle`` is a SLSA build attestation of the image with ``required.digest``, signed on a
-    GitHub-hosted runner by the required workflow of the required repository, at a ref that ``required.ref``
-    matches."""
+    GitHub-hosted runner by the required workflow of the required repository, at the required ref and commit."""
     try:
         verified, statement = client.verify_bundle_with_identity(bundle, _GITHUB_IDENTITY, required.digest)
     except ProvenanceError as err:
         raise ProvenanceError(f"verifying container provenance: {err}") from err
     if statement.type != IN_TOTO_STATEMENT_V1 or statement.predicate_type != SLSA_PROVENANCE_V1:
         raise ProvenanceError("container provenance must use SLSA v1")
-    # The source fields name the repository and ref that the run built. The
-    # identity names the workflow file that signed, which must be that
-    # repository's own file at that ref and not one called from elsewhere.
+    # The source fields name the repository, ref and commit that the run
+    # built. The identity names the workflow file that signed, which must be
+    # that repository's own file at that ref and not one called from elsewhere.
     extensions = verified.extensions
-    source_ref = extensions.source_repository_ref
     repository = _GITHUB_URL_PREFIX + required.repository
-    identity = repository + _GITHUB_WORKFLOWS_PATH + required.workflow + _WORKFLOW_REF_SEPARATOR + source_ref
-    # Verification accepted the certificate's one URI subject alternative name.
-    signer = uri_sans(verified.leaf)[0]
-    if extensions.source_repository_uri != repository:
-        raise ProvenanceError(
-            f"container provenance source repository {extensions.source_repository_uri!r} is not {repository!r}"
-        )
-    if extensions.source_repository_identifier != required.repository_id:
-        raise ProvenanceError(
-            f"container provenance source repository ID {extensions.source_repository_identifier!r} "
-            f"is not {required.repository_id!r}"
-        )
-    if signer != identity:
-        raise ProvenanceError(f"container provenance workflow identity {signer!r} is not {identity!r}")
-    if not ref_matches(required.ref, source_ref):
-        raise ProvenanceError(f"container provenance source ref {source_ref!r} does not match {required.ref!r}")
-
-
-def ref_matches(pattern: str, ref: str) -> bool:
-    """Whether the whole of ``ref`` matches ``pattern``, in which ``*`` stands for any run of characters, possibly
-    empty, other than ``/``, and every other character stands for itself. It takes time bounded by the product of
-    the two lengths."""
-    patterns, segments = pattern.split(_REF_SEGMENT_SEPARATOR), ref.split(_REF_SEGMENT_SEPARATOR)
-    return len(patterns) == len(segments) and all(map(_ref_segment_matches, patterns, segments))
-
-
-def _ref_segment_matches(pattern: str, segment: str) -> bool:
-    """``ref_matches`` for one segment of each."""
-    pieces = pattern.split(_REF_WILDCARD)
-    first, last = pieces[0], pieces[-1]
-    if len(pieces) == 1:
-        return segment == first
-    if len(segment) < len(first) + len(last) or not segment.startswith(first) or not segment.endswith(last):
-        return False
-    # Each piece between the first and the last is taken at its earliest
-    # occurrence, which leaves the most room for those after it.
-    rest = segment[len(first) : len(segment) - len(last)]
-    for piece in pieces[1:-1]:
-        found = rest.find(piece)
-        if found < 0:
-            return False
-        rest = rest[found + len(piece) :]
-    return True
+    identity = repository + _GITHUB_WORKFLOWS_PATH + required.workflow + _WORKFLOW_REF_SEPARATOR + required.ref
+    for what, got, want in (
+        ("source repository", extensions.source_repository_uri, repository),
+        ("source repository ID", extensions.source_repository_identifier, required.repository_id),
+        # Verification accepted the certificate's one URI subject alternative name.
+        ("workflow identity", uri_sans(verified.leaf)[0], identity),
+        ("source ref", extensions.source_repository_ref, required.ref),
+        ("source commit", extensions.source_repository_digest, required.commit),
+    ):
+        if got != want:
+            raise ProvenanceError(f"container provenance {what} {got!r} is not {want!r}")
