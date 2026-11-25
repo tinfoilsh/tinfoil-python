@@ -31,6 +31,7 @@ from tinfoil.verifier._canonical import decode_base64, decode_lower_hex, is_lowe
 from tinfoil.verifier._document.collateral import entry as _entry
 from tinfoil.verifier._document.collateral.collateral import (
     ARTIFACT_FRESHNESS_V1_FORMAT,
+    CONTAINER_PROVENANCE_V1_FORMAT,
     FORMAT_V2,
     FORMAT_V3,
     SIGSTORE_CODE_V1_FORMAT,
@@ -243,6 +244,16 @@ class Document:
 
     def config_platform(self) -> SigstoreRef:
         return self._collateral.config_platform()
+
+    def container_provenance(self, digest: str) -> _json.JsonValue:
+        """The unauthenticated build attestation, a Sigstore bundle, of the container image with the given lowercase
+        hex SHA-256 digest. Raises NotFoundError without one."""
+        bundle = self._collateral.containers.get(digest)
+        if bundle is None:
+            raise NotFoundError(
+                f"document carries no {CONTAINER_PROVENANCE_V1_FORMAT} reference-values entry for sha256:{digest}"
+            )
+        return bundle
 
     def expected_report_data(self) -> bytes | None:
         """The REPORT_DATA that the document's CPU quote must bind, recomputed by ``parse`` from the caller's nonce and

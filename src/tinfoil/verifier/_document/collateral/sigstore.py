@@ -1,10 +1,11 @@
-"""Sigstore reference-values collateral: release bundles and freshness witnesses."""
+"""Sigstore reference-values collateral: release bundles, freshness witnesses and container build attestations."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from tinfoil.verifier import _json
+from tinfoil.verifier._canonical import decode_lower_hex
 from tinfoil.verifier._document.collateral.entry import Entry, unmarshal_data
 
 
@@ -37,6 +38,8 @@ class Freshness:
 
 _REF_MEMBERS = ("repo", "tag", "digest", "sigstore_bundle")
 _FRESHNESS_MEMBERS = ("sigstore_bundle",)
+_CONTAINER_MEMBERS = ("digest", "sigstore_bundle")
+_CONTAINER_DIGEST_SIZE = 32
 
 
 def decode_sigstore_ref(entry: Entry) -> SigstoreRef:
@@ -53,6 +56,14 @@ def decode_sigstore_ref(entry: Entry) -> SigstoreRef:
 def decode_freshness(entry: Entry) -> Freshness:
     data = unmarshal_data(entry, entry.format, _FRESHNESS_MEMBERS)
     return Freshness(format=entry.format, bundle=_require_bundle(entry, data))
+
+
+def decode_container_provenance(entry: Entry) -> tuple[str, _json.JsonValue]:
+    """The lowercase hex SHA-256 digest of a container image and the Sigstore bundle that attests its build."""
+    data = unmarshal_data(entry, entry.format, _CONTAINER_MEMBERS)
+    digest = _json.string(data, "digest")
+    decode_lower_hex("container digest", digest, _CONTAINER_DIGEST_SIZE)
+    return digest, _require_bundle(entry, data)
 
 
 def _require_bundle(entry: Entry, data: _json.JsonObject) -> _json.JsonValue:
