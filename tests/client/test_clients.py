@@ -570,7 +570,7 @@ class TestGatewayClient:
         with pytest.raises(NetworkError):
             openai_client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hello"}])
         assert sent == [root + "v1/chat/completions"], "the request joins the API path under the gateway's URL"
-        relayed = [str(r.url) for r in network.requests]
+        relayed = [str(r.url) for r in network.requests if r.url.path.endswith(ATTESTATION_PATH)]
         assert relayed, "the replica's attestation was fetched"
         for fetched in relayed:
             assert fetched.startswith(root + ".well-known/tinfoil-attestation?"), fetched

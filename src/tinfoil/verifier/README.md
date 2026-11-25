@@ -275,8 +275,8 @@ when the installed package names its version. `metadata.host` names the host
 that a client contacted for the document (the router that a router client
 chose, or a gateway replica). The clients set it on every report that they
 produce or return, and the verifier, which doesn't know the host, leaves it
-out; set it yourself with `dataclasses.replace` on a report that you get from
-the verifier. It is what the client connected to, not an attested fact, so it
+out. To name it on a report that you get from the verifier, build a copy:
+`dataclasses.replace(report, metadata=dataclasses.replace(report.metadata, host=host))`. It is what the client connected to, not an attested fact, so it
 proves nothing about the enclave. `REPORT_SCHEMA_VERSION` is the
 form's version: adding a member keeps it, and removing, renaming or
 redefining one bumps it.

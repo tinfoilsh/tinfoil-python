@@ -149,7 +149,8 @@ class ReplicaVerification:
     describes."""
     last_attempt: VerificationAttempt
     """The replica's most recent attempt at verification, as ``(report, error)``, as
-    ``EnclaveHTTPClient.last_verification_attempt`` returns it. When the verifier rejected the replica's document,
+    ``EnclaveHTTPClient.last_verification_attempt`` returns it: the report and None if the attempt passed, and
+    None and the client error that it raised if it failed. When the verifier rejected the replica's document,
     the verifier's ``VerificationError`` and its report are the error's ``__cause__``. A failed attempt replaces an
     earlier success here, though ``current`` keeps that success while a failure of a category other than
     AttestationError leaves it valid."""
