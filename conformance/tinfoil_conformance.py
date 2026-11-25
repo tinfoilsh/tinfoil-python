@@ -9,7 +9,7 @@ Test tooling, not part of the published package. Run from a source checkout:
         [--nonce HEX]
 
 The exit code is the verdict that the suite reads; stdout is diagnostic. The
-contract is tinfoil-conformance ``docs/CONFORMANCE_ADAPTER_SPEC.md`` v1.2.0.
+contract is tinfoil-conformance ``docs/CONFORMANCE_ADAPTER_SPEC.md`` v1.3.0.
 
 Every v3 stage decodes its Input first, so malformed input is reported as such
 (exit 30) before anything else. The full-verify stage is one ``verify_v3_at``
