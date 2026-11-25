@@ -67,7 +67,7 @@ from tinfoil.verifier import (
 )
 from tinfoil.verifier._document import document
 from tinfoil.verifier._document.collateral.collateral import NotFoundError
-from tinfoil.verifier._endorsement import approval, provenance, reference
+from tinfoil.verifier._endorsement import approval, container, provenance, reference
 from tinfoil.verifier._endorsement import time as approval_time
 from tinfoil.verifier._errors import LAYER_ENVELOPE, LAYER_POLICY, LAYER_PROVENANCE, LAYER_QUOTE
 from tinfoil.verifier._policy import ARTIFACT_FORMAT
@@ -94,6 +94,7 @@ STAGE_ASSEMBLE_POLICY = "v3-assemble-policy"
 STAGE_AUTHENTICATE_QUOTE = "v3-authenticate-quote"
 STAGE_AUTHENTICATE_APPROVAL = "v3-authenticate-approval"
 STAGE_VERIFY_TIMESTAMP = "v3-verify-timestamp"
+STAGE_AUTHENTICATE_CONTAINERS = "v3-authenticate-containers"
 STAGE_LIVE_VERIFY = "live-verify"
 STAGE_CAPTURE = "capture"
 
@@ -107,6 +108,7 @@ ALL_STAGES = (
     STAGE_AUTHENTICATE_QUOTE,
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
+    STAGE_AUTHENTICATE_CONTAINERS,
 )
 STAGES_SUPPORTED: tuple[str, ...] = (
     STAGE_VERIFY,
@@ -116,6 +118,7 @@ STAGES_SUPPORTED: tuple[str, ...] = (
     STAGE_AUTHENTICATE_QUOTE,
     STAGE_AUTHENTICATE_APPROVAL,
     STAGE_VERIFY_TIMESTAMP,
+    STAGE_AUTHENTICATE_CONTAINERS,
 )
 
 # The measurement types of the wire contract.
@@ -365,6 +368,8 @@ def _run_stage(stage: str, raw: Any) -> Result:
         return _authenticate_quote(decoded)
     if stage == STAGE_VERIFY_TIMESTAMP:
         return _verify_timestamp(decoded)
+    if stage == STAGE_AUTHENTICATE_CONTAINERS:
+        return _authenticate_containers(decoded)
     return _unsupported(stage)
 
 
@@ -651,6 +656,30 @@ def _verify_timestamp(decoded: Input) -> Result:
         return _rejected(STAGE_VERIFY_TIMESTAMP, PROVENANCE_REJECTED)
     outputs = {"timestamp": gen_time.strftime("%Y-%m-%dT%H:%M:%SZ")}
     return Result({"stage": STAGE_VERIFY_TIMESTAMP, "accepted": True, "outputs": outputs}, EXIT_ACCEPTED)
+
+
+def _authenticate_containers(decoded: Input) -> Result:
+    """The builds that the document's config requires, each against the build attestation that the document carries
+    for its image.
+
+    The stage takes the config as given: it authenticates the builds that
+    the config requires, not the config. An injected trusted root that does
+    not parse or a document that does not decode is malformed input. A
+    document without a config entry, requirements that cannot be read and
+    every verification failure are provenance rejections.
+    """
+    stage = STAGE_AUTHENTICATE_CONTAINERS
+    try:
+        client = provenance.ProvenanceClient(_trusted_root(decoded))
+        parsed = _decode_document(decoded)
+    except (sigstore_trusted_root.TrustedRootError, MalformedInput):
+        return _malformed(stage)
+    try:
+        config = parsed.config_endorsement().config or b""
+        container.authenticate_containers(client, config, parsed.container_provenance)
+    except (NotFoundError, ValueError):
+        return _rejected(stage, PROVENANCE_REJECTED)
+    return Result({"stage": stage, "accepted": True}, EXIT_ACCEPTED)
 
 
 # --- the integration lane -----------------------------------------------------------------------
