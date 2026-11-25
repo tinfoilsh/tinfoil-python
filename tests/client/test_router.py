@@ -58,7 +58,7 @@ def probing(verdicts: dict[str, Exception | None], probes: list[str]) -> Callabl
             enclave.pin,
             verifier=enclave.verifier,
             verification_check=enclave._check,
-            on_verification=enclave._on_verification,
+            on_verification_attempt=enclave._on_verification_attempt,
             _fetch=reporting(fetch),
         )
         return AttestedTransport(test_enclave, FakeMode())

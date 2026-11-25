@@ -8,6 +8,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from tinfoil._errors import (
@@ -19,7 +20,7 @@ from tinfoil._errors import (
     from_verify,
 )
 from tinfoil._fetch import fetch_document, fetch_document_async, is_authority
-from tinfoil._types import DEFAULT_HTTP_TIMEOUT, OnVerification, TimeoutTypes, VerificationCheck
+from tinfoil._types import DEFAULT_HTTP_TIMEOUT, OnVerificationAttempt, TimeoutTypes, VerificationCheck
 from tinfoil.verifier import (
     CRYPTO_MATERIAL_ID_HPKE,
     CRYPTO_MATERIAL_ID_TLS,
@@ -28,6 +29,7 @@ from tinfoil.verifier import (
     ConfigTrust,
     Pin,
     Policy,
+    VerificationError,
     VerificationReport,
     VerifiedFacts,
     Verifier,
@@ -88,16 +90,15 @@ class VerificationRejected(Exception):
 class Enclave:
     """One enclave and the policy its attestation is verified against.
 
-    ``host`` is the enclave, a host with an optional port. ``relay``, when
-    set, is a host that fetches attestation from the enclave on the
-    client's behalf. ``pin`` is the ``Pin`` it is verified against. ``verifier``
+    ``host`` is the enclave, a host with an optional port. ``pin`` is the
+    ``Pin`` it is verified against. ``verifier``
     is the policy, which several enclaves can share; None selects the defaults.
     ``verification_check``, when set, is called with the verified facts of
     each verification that passes the verifier; raising rejects it without
-    a retry. ``on_verification``, when set, is what ``notify`` reports each
-    attempt to.
+    a retry. ``on_verification_attempt``, when set, is what ``notify``
+    reports each attempt to.
     ``fetch_document`` and ``fetch_document_async``, when set, obtain the
-    raw document in place of a direct fetch from ``host`` or ``relay``.
+    raw document in place of a direct fetch from ``host``.
 
     Construction checks ``pin`` against the verifier's rules and does no
     network I/O.
@@ -107,12 +108,11 @@ class Enclave:
         "_check",
         "_fetch",
         "_fetch_async",
-        "_on_verification",
+        "_on_verification_attempt",
         "fetch_document",
         "fetch_document_async",
         "host",
         "pin",
-        "relay",
         "verifier",
     )
 
@@ -121,10 +121,9 @@ class Enclave:
         host: str,
         pin: Pin,
         *,
-        relay: str = "",
         verifier: Verifier | None = None,
         verification_check: VerificationCheck | None = None,
-        on_verification: OnVerification | None = None,
+        on_verification_attempt: OnVerificationAttempt | None = None,
         fetch_document: DocumentFetch | None = None,
         fetch_document_async: AsyncDocumentFetch | None = None,
         _fetch: Fetch | None = None,
@@ -132,11 +131,8 @@ class Enclave:
     ) -> None:
         if not host:
             raise ConfigurationError("enclave host is required")
-        if relay and (fetch_document is not None or fetch_document_async is not None):
-            raise ConfigurationError("an enclave fetches through a relay host or a document fetcher, not both")
-        for authority in (host, relay):
-            if authority and not is_authority(authority):
-                raise ConfigurationError(f"invalid host {authority!r}: want a host with an optional port")
+        if not is_authority(host):
+            raise ConfigurationError(f"invalid host {host!r}: want a host with an optional port")
         if verifier is None:
             verifier = Verifier()
         try:
@@ -144,11 +140,10 @@ class Enclave:
         except VerifyError as err:
             raise from_verify(err) from err
         self.host = host
-        self.relay = relay
         self.pin = pin
         self.verifier = verifier
         self._check = verification_check
-        self._on_verification = on_verification
+        self._on_verification_attempt = on_verification_attempt
         self.fetch_document = fetch_document
         self.fetch_document_async = fetch_document_async
         self._fetch = _fetch
@@ -201,16 +196,16 @@ class Enclave:
         return await self._verify_async(CANDIDATE_VERIFICATION_RETRIES, timeout, deadline, retried)
 
     def notify(self, report: VerificationReport | None, error: TinfoilError | None) -> None:
-        """Reports the outcome of an attempt to verify the enclave to the ``on_verification`` callback, if there is
-        one. The caller must hold no lock that the callback could need. The callback cannot change the outcome, so an
-        exception that it raises is logged rather than raised: raised, a client error from it would read as a failed
-        verification to router discovery and the gateway's replica fallback."""
-        if self._on_verification is None:
+        """Reports the outcome of an attempt to verify the enclave to the ``on_verification_attempt`` callback, if
+        there is one. The caller must hold no lock that the callback could need. The callback cannot change the
+        outcome, so an exception that it raises is logged rather than raised: raised, a client error from it would
+        read as a failed verification to router discovery and the gateway's replica fallback."""
+        if self._on_verification_attempt is None:
             return
         try:
-            self._on_verification(self.host, report, error)
+            self._on_verification_attempt(self.host, report, error)
         except Exception:
-            _LOG.exception("on_verification callback for %s raised", self.host)
+            _LOG.exception("on_verification_attempt callback for %s raised", self.host)
 
     def _verify(
         self, retries: int, timeout: TimeoutTypes, deadline: float | None, retried: Retried | None
@@ -220,12 +215,14 @@ class Enclave:
             try:
                 check_deadline(deadline)
                 verified = self._fetch() if self._fetch is not None else self._fetch_verification(timeout, deadline)
+                verified = self._name_host(verified)
                 self._admit(verified)
                 # The verification and the check are not bounded by the fetch's timeouts, so the deadline is
                 # checked again before the result is accepted.
                 check_deadline(deadline)
                 return verified
             except TinfoilError as err:
+                self._name_rejected_host(err)
                 if attempt == retries or not retryable(err) or not _retry_fits(deadline):
                     if first is not None:
                         err.__context__ = first
@@ -247,10 +244,12 @@ class Enclave:
                     verified = await self._fetch_async()
                 else:
                     verified = await self._fetch_verification_async(timeout, deadline)
+                verified = self._name_host(verified)
                 self._admit(verified)
                 check_deadline(deadline)
                 return verified
             except TinfoilError as err:
+                self._name_rejected_host(err)
                 if attempt == retries or not retryable(err) or not _retry_fits(deadline):
                     if first is not None:
                         err.__context__ = first
@@ -260,6 +259,23 @@ class Enclave:
                     retried(err)
             await asyncio.sleep(VERIFICATION_RETRY_DELAY)
         raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
+
+    def _name_host(self, report: VerificationReport) -> VerificationReport:
+        """``report`` with the enclave's host in its metadata, since the verifier doesn't know which host the
+        document came from. Every report that a client hands out passes through here or through
+        ``_name_rejected_host``. Reports are immutable, so this builds a copy."""
+        if report.metadata.host == self.host:
+            return report
+        return replace(report, metadata=replace(report.metadata, host=self.host))
+
+    def _name_rejected_host(self, err: TinfoilError) -> None:
+        """Names the enclave's host in the report of the verifier's ``VerificationError`` that ``err`` was raised
+        from, when the verifier rejected the document."""
+        rejected = err.__cause__
+        if isinstance(rejected, VerificationError) and rejected.report is not None:
+            rejected.report = self._name_host(rejected.report)
+            # The error is rebuilt from its arguments when it is copied or pickled.
+            rejected.args = (rejected.layer, rejected.message, rejected.report)
 
     def _admit(self, report: VerificationReport) -> None:
         """Checks that a fetched verification is fresh and that its verified facts pass the verification check. The
@@ -283,7 +299,7 @@ class Enclave:
         elif self.fetch_document_async is not None:
             raise ConfigurationError("the enclave's document fetcher is asynchronous; verify it on the event loop")
         else:
-            doc = fetch_document(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
+            doc = fetch_document(self.host, "", nonce, timeout=timeout, deadline=deadline)
         return self._verify_document(doc, nonce)
 
     async def _fetch_verification_async(self, timeout: TimeoutTypes, deadline: float | None) -> VerificationReport:
@@ -293,7 +309,7 @@ class Enclave:
         elif self.fetch_document is not None:
             raise ConfigurationError("the enclave's document fetcher is synchronous; verify it with verify")
         else:
-            doc = await fetch_document_async(self.host, self.relay, nonce, timeout=timeout, deadline=deadline)
+            doc = await fetch_document_async(self.host, "", nonce, timeout=timeout, deadline=deadline)
         # VerifiedFacts is CPU-bound, so it runs off the event loop.
         return await asyncio.to_thread(self._verify_document, doc, nonce)
 

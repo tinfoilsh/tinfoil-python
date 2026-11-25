@@ -157,7 +157,7 @@ class TestCustomFetchers:
     def test_the_fetcher_serves_every_verification_of_an_enclave_client(self, direct: Recorder) -> None:
         calls = Calls()
         client = EnclaveHTTPClient("enclave.example", RepoPin("o/r"), transport=EHBP(), fetch_attestation=calls.fetch)
-        assert facts_of(client.last_verification()[0]).code_tag == "doc:enclave.example"
+        assert facts_of(client.last_verification_attempt()[0]).code_tag == "doc:enclave.example"
         client.reverify()
         assert calls.hosts == ["enclave.example", "enclave.example"]
         assert len(set(calls.nonces)) == 2, "each verification has a fresh nonce"
@@ -302,8 +302,6 @@ class TestAsync:
             _enclave.Enclave("enclave.example", Pin(repo="o/r"), fetch_document_async=fetch_async).verify()
         with pytest.raises(ConfigurationError, match="synchronous"):
             asyncio.run(_enclave.Enclave("enclave.example", Pin(repo="o/r"), fetch_document=fetch).verify_async())
-        with pytest.raises(ConfigurationError, match="not both"):
-            _enclave.Enclave("enclave.example", Pin(repo="o/r"), relay="relay.example", fetch_document=fetch)
         assert direct.requests == []
 
     @pytest.mark.asyncio

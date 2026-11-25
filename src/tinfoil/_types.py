@@ -29,24 +29,25 @@ the enclave's keys. Raising rejects the enclave; the exception becomes the cause
 retried. It never sees a report or partial facts: it decides about trust, so it sees only facts that were
 verified."""
 
-LastVerification: TypeAlias = tuple[VerificationReport | None, TinfoilError | None]
-"""The outcome of a client's most recent verification attempt, as ``(report, error)``: the report and None when
-the attempt passed, None and the client error that it reported when it failed, and ``(None, None)`` before the
-first attempt. When the verifier rejected the document, the verifier's ``VerificationError``, whose ``report``
-shows the failed step and the partial facts, is the error's ``__cause__``. A failed fetch, a
-``verification_check`` rejection and a document whose keys the client cannot use come after or before the
-verifier, so no report is reachable from them."""
+VerificationAttempt: TypeAlias = tuple[VerificationReport | None, TinfoilError | None]
+"""The outcome of one verification attempt, as ``(report, error)``: the report and None when the attempt passed,
+None and the client error that it reported when it failed, and ``(None, None)`` for no attempt, which
+``last_verification_attempt`` returns before the first one. When the verifier rejected the document, the
+verifier's ``VerificationError``, whose ``report`` shows the failed step and the partial facts, is the error's
+``__cause__``. A failed fetch, a ``verification_check`` rejection and a document whose keys the client cannot use
+come after or before the verifier, so no report is reachable from them."""
 
-OnVerification: TypeAlias = Callable[[str, VerificationReport | None, TinfoilError | None], None]
-"""A caller's callback that a client calls once for every verification attempt, after the attempt's outcome is decided,
-with the host of the enclave that it verified and the attempt's ``(report, error)``, as ``last_verification`` returns
-them: the first verification, a retry, a refresh after expiry or a key rotation, an explicit ``reverify``, each
-router that discovery tries and each gateway replica. A verification that concurrent requests share is one attempt.
-The client holds none of its locks while it calls it, so the callback may call the client, for example
-``last_verification``. It returns nothing and cannot change the outcome: an ``Exception`` that it raises is logged to
-the ``tinfoil`` logger and otherwise ignored, so that it never turns a verification into a failure or makes discovery
-or the gateway skip a router or replica. A decision about trust belongs in the ``verification_check``. A callback
-that blocks or raises is a bug in the caller's code."""
+OnVerificationAttempt: TypeAlias = Callable[[str, VerificationReport | None, TinfoilError | None], None]
+"""A caller's callback that a client calls once for every verification attempt, after the attempt's outcome is
+decided, with the host of the enclave that it verified and the attempt's ``(report, error)``, as
+``last_verification_attempt`` returns them: the first verification, a retry, a refresh after expiry or a key
+rotation, an explicit ``reverify``, each router that discovery tries and each gateway replica. A verification that
+concurrent requests share is one attempt. The client holds none of its locks while it calls it, so the callback
+may call the client, for example ``last_verification_attempt`` or ``current_verification``. It returns nothing and
+cannot change the outcome: an ``Exception`` that it raises is logged to the ``tinfoil`` logger and otherwise
+ignored, so that it never turns a verification into a failure or makes discovery or the gateway skip a router or
+replica. A decision about trust belongs in the ``verification_check``. A callback that blocks or raises is a bug
+in the caller's code."""
 
 
 @final
@@ -91,9 +92,9 @@ __all__ = [
     "DEFAULT_HTTP_TIMEOUT",
     "EHBP",
     "TLS",
-    "LastVerification",
-    "OnVerification",
+    "OnVerificationAttempt",
     "TimeoutTypes",
     "Transport",
+    "VerificationAttempt",
     "VerificationCheck",
 ]

@@ -50,7 +50,7 @@ from tinfoil._gateway import (
 )
 from tinfoil._keys import PeerLacksKeyError, key_rejection
 from tinfoil._transport import CLIENT_CLOSED
-from tinfoil._types import LastVerification, TimeoutTypes
+from tinfoil._types import TimeoutTypes, VerificationAttempt
 from tinfoil.verifier import EndorsedArtifacts, Policy, VerificationReport
 
 MODEL = "test-model"
@@ -75,10 +75,17 @@ class FakeKeyed:
         self.connect = connect
         self.transport: httpx.BaseTransport | None = None
         self.verified = report_of(verification(host))
-        self.last: LastVerification = (None, None)
+        self.last: VerificationAttempt = (None, None)
 
-    def last_verification(self) -> LastVerification:
+    def last_verification_attempt(self) -> VerificationAttempt:
         return self.last
+
+    def current_verification(self) -> VerificationReport | None:
+        return self.verified if self.transport is not None else None
+
+    def reverify(self, *, timeout: object = None) -> VerificationReport:
+        self.transport = None
+        return self.ensure_verified(timeout=timeout)
 
     def ensure_verified(self, *, timeout: object = None) -> VerificationReport:
         if self.transport is None:
@@ -113,8 +120,7 @@ def seal_transport(
 
     entries = catalog() if catalog_entries is None else catalog_entries
     return GatewayTransport(
-        base_url="https://gateway.example/v1/",
-        relay="gateway.example",
+        base_url="https://gateway.example/",
         catalog=lambda: entries,
         model_pins=PINS,
         user_cache_secret=secret,
@@ -493,8 +499,7 @@ class TestMultipart:
     ) -> None:
         monkeypatch.setattr(_gateway, "MAX_MULTIPART_BODY_SIZE", 64)
         seal = AsyncGatewayTransport(
-            base_url="https://gateway.example/v1/",
-            relay="gateway.example",
+            base_url="https://gateway.example/",
             catalog=catalog,
             model_pins=PINS,
             user_cache_secret="",
@@ -771,11 +776,11 @@ class TestVerifications:
         seal = seal_transport(lambda _: httpx.MockTransport(fixed_response(204)))
         for host in ("b.example", "a.example"):
             seal._transport(_Replica(host, "tinfoilsh/model", MODEL)).keyed.ensure_verified()
-        got = seal.last_verification()
+        got = seal.replicas()
         assert [v.host for v in got] == ["a.example", "b.example"]
         assert got[0].reference == "tinfoilsh/model"
         assert got[0].pinned_model == MODEL
-        assert seal_transport(lambda _: httpx.MockTransport(fixed_response(204))).last_verification() == []
+        assert seal_transport(lambda _: httpx.MockTransport(fixed_response(204))).replicas() == []
 
     def test_ensure_verified_falls_over(self) -> None:
         hosts = ("a.example", "b.example", "c.example")
@@ -792,12 +797,13 @@ class TestVerifications:
         verified = facts_of(seal.ensure_verified(MODEL))
         assert verified.code_tag == order[2]
         assert attempts == order, "replicas are tried in the model's fixed order until one verifies"
-        entries = {v.host: v for v in seal.last_verification()}
+        entries = {v.host: v for v in seal.replicas()}
         assert sorted(entries) == sorted(order), "every replica tried has an entry, failed ones included"
-        assert facts_of(entries[order[2]].report).code_tag == order[2]
+        assert facts_of(entries[order[2]].last_attempt[0]).code_tag == order[2]
         for host in order[:2]:
-            assert entries[host].report is None, "each replica's entry holds its own last attempt"
-            assert isinstance(entries[host].error, NetworkError)
+            assert entries[host].last_attempt[0] is None, "each replica's entry holds its own last attempt"
+            assert isinstance(entries[host].last_attempt[1], NetworkError)
+            assert entries[host].current is None, "a failed replica's entry has no current verification"
         unreachable = seal_transport(
             lambda _: (_ for _ in ()).throw(network_error("verification failed")), catalog_entries=catalog(hosts)
         )
@@ -834,20 +840,20 @@ class TestVerifications:
 
         post().read()
         streaming = post("/stream")  # a response in flight through a.example
-        assert [v.host for v in seal.last_verification()] == ["a.example"]
+        assert [v.host for v in seal.replicas()] == ["a.example"]
         entries["current"] = catalog(("a.example",))  # equal content: nothing changes
         post().read()
         assert closes == {}
         entries["current"] = catalog(("b.example",))
         post().read()
-        assert [v.host for v in seal.last_verification()] == ["b.example"], "a.example is no longer retained"
+        assert [v.host for v in seal.replicas()] == ["b.example"], "a.example is no longer retained"
         assert closes == {}, "the evicted replica stays open while its response is in flight"
         streaming.close()
         assert closes == {"a.example": 1}, "and closes once the response is done"
         entries["current"] = catalog(("a.example",))
         post().read()
         assert closes == {"a.example": 1, "b.example": 1}, "an idle evicted replica closes at once"
-        assert [v.host for v in seal.last_verification()] == ["a.example"], "a relisted host gets a new transport"
+        assert [v.host for v in seal.replicas()] == ["a.example"], "a relisted host gets a new transport"
         seal.close()
         assert closes == {"a.example": 2, "b.example": 1}
 
@@ -862,8 +868,7 @@ class TestVerifications:
             return ReplicaTransport(keyed, FakeChain(keyed))
 
         seal = GatewayTransport(
-            base_url="https://gateway.example/v1/",
-            relay="gateway.example",
+            base_url="https://gateway.example/",
             catalog=catalog,
             model_pins=PINS,
             _build=build,
@@ -1135,7 +1140,7 @@ class TestCatalogCache:
             cache.get(5.0)
         assert fetches == 0
         monkeypatch.setattr(_gateway, "fetch_catalog", lambda *_, **__: pytest.fail("a closed transport fetched"))
-        seal = GatewayTransport(model_pins=PINS, base_url="https://gateway.example/v1/", relay="gateway.example")
+        seal = GatewayTransport(model_pins=PINS, base_url="https://gateway.example/")
         seal.close()
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
             seal.catalog()
@@ -1160,7 +1165,7 @@ class TestCatalogCache:
             pytest.fail("a closed transport fetched")
 
         monkeypatch.setattr(_gateway, "fetch_catalog_async", fetch_catalog_async)
-        seal = AsyncGatewayTransport(model_pins=PINS, base_url="https://gateway.example/v1/", relay="gateway.example")
+        seal = AsyncGatewayTransport(model_pins=PINS, base_url="https://gateway.example/")
         await seal.aclose()
         with pytest.raises(ConfigurationError, match=CLIENT_CLOSED):
             await seal.catalog()
@@ -1172,14 +1177,13 @@ def test_models_and_current_without_network(monkeypatch: pytest.MonkeyPatch) -> 
         "unpinned": CatalogEntry("tinfoilsh/unpinned", ("b.example",)),
     }
     seal = GatewayTransport(
-        base_url="https://gateway.example/v1/",
-        relay="gateway.example",
+        base_url="https://gateway.example/",
         catalog=lambda: entries,
         model_pins={"pinned": ModelPin("tinfoilsh/pinned@v1")},
         user_cache_secret="test-secret",
     )
     assert seal.models() == ["pinned"]
-    assert seal.last_verification() == []
+    assert seal.replicas() == []
     with pytest.raises(ConfigurationError, match="is not pinned"):
         seal.ensure_verified("unpinned")
 
@@ -1188,10 +1192,9 @@ def test_a_model_that_a_refresh_adds_is_refused(monkeypatch: pytest.MonkeyPatch)
     """A model that a refreshed catalog adds is not served unless it is pinned, and no replica is contacted."""
     monkeypatch.setattr(_gateway, "CATALOG_REFRESH_INTERVAL", 0)
     served: list[Catalog] = [{"pinned": CatalogEntry("tinfoilsh/pinned", ("a.example",))}]
-    monkeypatch.setattr(_gateway, "fetch_catalog", lambda *_, **__: served[0])
+    monkeypatch.setattr(_gateway, "fetch_catalog_at", lambda *_, **__: served[0])
     seal = GatewayTransport(
-        base_url="https://gateway.example/v1/",
-        relay="gateway.example",
+        base_url="https://gateway.example/",
         model_pins={"pinned": ModelPin("tinfoilsh/pinned")},
         user_cache_secret="",
         _build=lambda _: pytest.fail("no replica is contacted for an unpinned model"),
@@ -1213,7 +1216,7 @@ def test_a_model_that_a_refresh_adds_is_refused(monkeypatch: pytest.MonkeyPatch)
     )
     with pytest.raises(ConfigurationError, match='model "added" is not pinned'):
         seal.handle_request(request)
-    assert seal.last_verification() == []
+    assert seal.replicas() == []
     seal.close()
 
 
@@ -1226,10 +1229,16 @@ async def test_async_gateway_transport() -> None:
             self.host = host
             self.verified = report_of(verification(host))
 
-        def last_verification(self) -> LastVerification:
+        def last_verification_attempt(self) -> VerificationAttempt:
             return (self.verified, None)
 
+        def current_verification(self) -> VerificationReport | None:
+            return self.verified
+
         async def ensure_verified(self) -> VerificationReport:
+            return self.verified
+
+        async def reverify(self) -> VerificationReport:
             return self.verified
 
     class AsyncFakeChain(httpx.AsyncBaseTransport):
@@ -1246,8 +1255,7 @@ async def test_async_gateway_transport() -> None:
         return AsyncReplicaTransport(AsyncFakeKeyed(replica.host), AsyncFakeChain(replica.host))
 
     seal = AsyncGatewayTransport(
-        base_url="https://gateway.example/v1/",
-        relay="gateway.example",
+        base_url="https://gateway.example/",
         catalog=catalog,
         model_pins=PINS,
         user_cache_secret="test-secret",
@@ -1265,7 +1273,7 @@ async def test_async_gateway_transport() -> None:
     assert bodies[0] == bodies[1]
     assert json.loads(bodies[0])["cache_salt"] == SPEC_SALT
     assert facts_of(await seal.ensure_verified(MODEL)).code_tag == INITIAL
-    assert [v.host for v in seal.last_verification()] == [INITIAL, "next.example"]
+    assert [v.host for v in seal.replicas()] == [INITIAL, "next.example"]
     await seal.aclose()
     with pytest.raises(ConfigurationError, match="closed"):
         await seal.models()

@@ -8,6 +8,7 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import pickle
 import threading
 import time
 from collections.abc import Callable
@@ -30,7 +31,7 @@ from tinfoil._clients import (
     RouterHTTPClient,
 )
 from tinfoil._errors import AttestationError, ConfigurationError, NetworkError, TinfoilError
-from tinfoil._gateway import Catalog, CatalogEntry, ModelPin, rank
+from tinfoil._gateway import Catalog, CatalogEntry, ModelPin, ReplicaVerification, rank
 from tinfoil._transport import CLIENT_CLOSED
 from tinfoil._trust import AuthorizedBy, EitherPin, EmbeddedConfig, ProjectPin, RepoPin, SignedBy, Trust
 from tinfoil._types import EHBP
@@ -501,7 +502,7 @@ class TestGatewayClient:
     @pytest.mark.parametrize("model_pins", [None, {}])
     def test_requires_a_model_pin(self, network: Network, model_pins: dict[str, ModelPin] | None) -> None:
         with pytest.raises(ConfigurationError, match="at least one model pin"):
-            GatewayHTTPClient(url="https://gateway.example/v1/", model_pins=model_pins)
+            GatewayHTTPClient(url="https://gateway.example/", model_pins=model_pins)
         assert network.requests == [], "a client without pins is refused before the catalog is fetched"
 
     def test_refused_gateway_url_is_not_echoed(self, network: Network) -> None:
@@ -518,14 +519,63 @@ class TestGatewayClient:
 
     def test_fetches_the_catalog_before_returning(self, network: Network) -> None:
         with pytest.raises(NetworkError):
-            GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/v1/")
+            GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/")
         assert network.hosts() == ["gateway.example"]
         network.handler = lambda _: response(200, b'{"m": {"repo": "tinfoilsh/m", "hosts": ["a.example"]}}')
-        client = GatewayHTTPClient(model_pins=PINS, url="https://gateway.example/v1")
-        assert client.base_url == "https://gateway.example/v1/"
+        client = GatewayHTTPClient(model_pins=PINS, url="https://gateway.example")
+        assert client.base_url == "https://gateway.example/"
         assert client.models() == ["m"]
-        assert client.last_verification() == []
+        assert client.replicas() == []
         client.close()
+
+    @pytest.mark.parametrize(
+        ("url", "root"),
+        [
+            (None, "https://inference-gateway.tinfoil.sh/"),
+            ("https://gateway.example", "https://gateway.example/"),
+            ("https://gateway.example/", "https://gateway.example/"),
+            ("https://gateway.example/mount", "https://gateway.example/mount/"),
+            ("https://gateway.example/mount/", "https://gateway.example/mount/"),
+            ("https://gateway.example:8443/a/b", "https://gateway.example:8443/a/b/"),
+        ],
+    )
+    def test_joins_its_endpoints_under_its_url(
+        self, network: Network, monkeypatch: pytest.MonkeyPatch, url: str | None, root: str
+    ) -> None:
+        """The gateway's URL is its origin or the URL that it is mounted under: the catalog fetch, the attestation
+        relay and an OpenAI client's requests all join under it, as under an ``EHBP`` proxy URL, whether or not it
+        has a path and ends with a slash."""
+        from tinfoil import OpenAIClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == root + "catalog":
+                return response(200, b'{"m": {"repo": "tinfoilsh/m", "hosts": ["replica.example"]}}')
+            raise NetworkError("no replica in this test")
+
+        network.handler = handler
+        client = GatewayHTTPClient(model_pins=PINS, url=url, user_cache_secret="s")
+        assert [str(r.url) for r in network.requests] == [root + "catalog"], "the catalog joins under the URL"
+        assert client.base_url == root
+        network.requests = []
+        sent: list[str] = []
+        handle = client._transport.handle_request
+
+        def record(request: httpx.Request) -> httpx.Response:
+            sent.append(str(request.url))
+            return handle(request)
+
+        monkeypatch.setattr(client._transport, "handle_request", record)
+        openai_client = OpenAIClient(client, api_key="k", max_retries=0)
+        assert openai_client.base_url == root + "v1/"
+        with pytest.raises(NetworkError):
+            openai_client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hello"}])
+        assert sent == [root + "v1/chat/completions"], "the request joins the API path under the gateway's URL"
+        relayed = [str(r.url) for r in network.requests if r.url.path.endswith(ATTESTATION_PATH)]
+        assert relayed, "the replica's attestation was fetched"
+        for fetched in relayed:
+            assert fetched.startswith(root + ".well-known/tinfoil-attestation?"), fetched
+            assert "&enclave=replica.example" in fetched
+        openai_client.close()
 
     def test_serves_pinned_models_without_network(self, network: Network) -> None:
         entries: Catalog = {
@@ -537,14 +587,14 @@ class TestGatewayClient:
             model_pins={"pinned": ModelPin("tinfoilsh/pinned@v1"), "absent": ModelPin("tinfoilsh/absent")},
             user_cache_secret="test-secret",
         )
-        assert client.base_url == "https://inference-gateway.tinfoil.sh/v1/"
+        assert client.base_url == "https://inference-gateway.tinfoil.sh/"
         assert client.models() == ["pinned"], "pins may name models the catalog doesn't list"
-        assert client.last_verification() == [], "a model's replicas are verified on its first request"
+        assert client.replicas() == [], "a model's replicas are verified on its first request"
         with pytest.raises(ConfigurationError, match='model "unpinned" is not pinned'):
             client.ensure_verified("unpinned")
         with pytest.raises(ConfigurationError, match='model "unpinned" is not pinned'):
             client.http_client.post(client.base_url + "chat/completions", json={"model": "unpinned"})
-        assert client.last_verification() == [], "no replica is verified for an unpinned model"
+        assert client.replicas() == [], "no replica is verified for an unpinned model"
         assert network.requests == [], "no replica is contacted for an unpinned model"
         with pytest.raises(ConfigurationError, match="refusing to send request"):
             client.http_client.get("https://elsewhere.example/v1/models")
@@ -554,7 +604,7 @@ class TestGatewayClient:
         entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("replica.example",))}
         network.serve("replica.example")
         client = GatewayHTTPClient(
-            model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s"
+            model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
         )
         verified = facts_of(client.ensure_verified("m"))
         assert verified.code_tag == "replica.example"
@@ -564,7 +614,7 @@ class TestGatewayClient:
         fetched = network.requests[-1]
         assert fetched.url.host == "gateway.example", "attestation is fetched through the gateway"
         assert fetched.url.params["enclave"] == "replica.example"
-        assert [v.host for v in client.last_verification()] == ["replica.example"]
+        assert [v.host for v in client.replicas()] == ["replica.example"]
         client.close()
         with pytest.raises(ConfigurationError, match="closed"):
             client.models()
@@ -573,19 +623,22 @@ class TestGatewayClient:
         entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("replica.example",))}
         first = network.serve("replica.example", deadline=datetime.now(UTC) + timedelta(seconds=0.2))
         client = GatewayHTTPClient(
-            model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s"
+            model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
         )
         client.ensure_verified("m")
-        [entry] = client.last_verification()
+        [entry] = client.replicas()
         assert entry.host == "replica.example"
-        assert facts_of(entry.report) is first
+        assert facts_of(entry.last_attempt[0]) is first
+        assert entry.current is entry.last_attempt[0], "the fresh verification is the replica's current one"
         time.sleep(0.25)
         network.documents["replica.example"] = AttestationError("document fails verification")
         with pytest.raises(AttestationError, match="fails verification") as failed:
             client.ensure_verified("m")
-        [entry] = client.last_verification()
-        assert entry.report is None, "the replica's earlier success is not kept once a later attempt fails"
-        assert entry.error is failed.value
+        [entry] = client.replicas()
+        assert entry.last_attempt == (None, failed.value), (
+            "the replica's earlier success is not kept once a later attempt fails"
+        )
+        assert entry.current is None, "the attestation failure discarded the replica's verification"
         network.serve("replica.example", tag="second")
         assert facts_of(client.ensure_verified("m")).code_tag == "second"
         client.close()
@@ -617,14 +670,17 @@ async def test_async_clients(network: Network) -> None:
 
     first = network.serve("enclave.example", tag="first")
     client = await AsyncEnclaveHTTPClient.create("enclave.example", RepoPin("org/repo"), transport=EHBP())
+    assert facts_of(client.current_verification()) is first
     network.documents["enclave.example"] = NetworkError("attestation source unreachable")
     with pytest.raises(NetworkError):
         await client.reverify()
-    assert facts_of(await client.ensure_verified()) is first, "a network failure keeps the cached verification"
+    assert facts_of(client.current_verification()) is first, "a network failure keeps the cached verification"
+    assert facts_of(await client.ensure_verified()) is first
     network.documents["enclave.example"] = AttestationError("document fails verification")
     with pytest.raises(AttestationError, match="fails verification"):
         await client.reverify()
     assert last_facts(client) is None, "an attestation failure discards it, and is the last verification"
+    assert client.current_verification() is None
     with pytest.raises(AttestationError, match="fails verification"):
         await client.http_client.post("https://enclave.example/v1/x", content=b"hi")
     assert isinstance(last_error(client), AttestationError)
@@ -644,11 +700,11 @@ async def test_async_clients(network: Network) -> None:
     no_pins_cases: tuple[dict[str, ModelPin] | None, ...] = (None, {})
     for no_pins in no_pins_cases:
         with pytest.raises(ConfigurationError, match="at least one model pin"):
-            await AsyncGatewayHTTPClient.create(url="https://gateway.example/v1/", model_pins=no_pins)
+            await AsyncGatewayHTTPClient.create(url="https://gateway.example/", model_pins=no_pins)
     entries = {**entries, "unpinned": CatalogEntry("tinfoilsh/unpinned", ("unpinned.example",))}
     requests = len(network.requests)
     gateway = await AsyncGatewayHTTPClient.create(
-        model_pins=PINS, url="https://gateway.example/v1/", catalog=lambda: entries, user_cache_secret="s"
+        model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
     )
     assert await gateway.models() == ["m"]
     with pytest.raises(ConfigurationError, match='model "unpinned" is not pinned'):
@@ -657,12 +713,12 @@ async def test_async_clients(network: Network) -> None:
         await gateway.http_client.post(gateway.base_url + "chat/completions", json={"model": "unpinned"})
     assert len(network.requests) == requests, "no pins, and an unpinned model, contact nothing"
     assert facts_of(await gateway.ensure_verified("m")).code_tag == "replica.example"
-    assert [v.host for v in gateway.last_verification()] == ["replica.example"]
+    assert [v.host for v in gateway.replicas()] == ["replica.example"]
     await gateway.close()
 
 
 class Attempts:
-    """An ``on_verification`` callback that records every call, and optionally runs ``during`` inside it."""
+    """An ``on_verification_attempt`` callback that records every call, and optionally runs ``during`` inside it."""
 
     def __init__(self, during: Callable[[], None] | None = None) -> None:
         self.calls: list[tuple[str, VerificationReport | None, TinfoilError | None]] = []
@@ -695,17 +751,20 @@ def rejecting_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestVerificationReports:
-    """The verification report conformance cases: what ``last_verification`` returns and ``on_verification``
-    receives for every kind of attempt."""
+    """The verification report conformance cases: what ``last_verification_attempt`` returns and
+    ``on_verification_attempt`` receives for every kind of attempt."""
 
     def test_initial_verification(self, network: Network) -> None:
         document = network.serve("enclave.example")
         attempts = Attempts()
-        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification=attempts)
-        report, error = client.last_verification()
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
+        report, error = client.last_verification_attempt()
         assert error is None
         assert facts_of(report) is document
         assert attempts.calls == [("enclave.example", report, None)], "called once, with the same report"
+        assert client.current_verification() is report
         assert client.ensure_verified() is report
         assert len(attempts.calls) == 1, "a valid verification is not an attempt"
         client.close()
@@ -715,7 +774,9 @@ class TestVerificationReports:
     ) -> None:
         network.serve("enclave.example")
         attempts = Attempts()
-        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification=attempts)
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
         rejecting_verifier(monkeypatch)
         with pytest.raises(AttestationError) as raised:
             client.reverify()
@@ -733,7 +794,8 @@ class TestVerificationReports:
         assert measured is not None
         assert measured.tls_public_key_fp == document_builder.TLS_KEY.hex()
         assert measured.hpke_public_key_fp == hashlib.sha256(document_builder.HPKE_KEY).hexdigest()
-        assert client.last_verification() == (None, err), "the same error, and no report"
+        assert client.last_verification_attempt() == (None, err), "the same error, and no report"
+        assert client.current_verification() is None, "the rejection discarded the verification"
         assert attempts.calls[-1] == ("enclave.example", None, err)
         assert len(attempts.calls) == 3, "the first verification, then the rejection and its retry"
         client.close()
@@ -741,11 +803,13 @@ class TestVerificationReports:
     def test_a_failed_fetch_has_no_report(self, network: Network) -> None:
         network.serve("enclave.example")
         attempts = Attempts()
-        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification=attempts)
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
         network.documents["enclave.example"] = NetworkError("attestation source unreachable")
         with pytest.raises(NetworkError) as raised:
             client.reverify()
-        assert client.last_verification() == (None, raised.value)
+        assert client.last_verification_attempt() == (None, raised.value)
         assert raised.value.__cause__ is None or not isinstance(raised.value.__cause__, VerificationError)
         assert attempts.calls[-1] == ("enclave.example", None, raised.value)
         client.close()
@@ -753,11 +817,11 @@ class TestVerificationReports:
     def test_a_failed_reverification_replaces_the_earlier_success(self, network: Network) -> None:
         network.serve("enclave.example")
         client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP())
-        assert client.last_verification()[0] is not None
+        assert client.last_verification_attempt()[0] is not None
         network.documents["enclave.example"] = AttestationError("document fails verification")
         with pytest.raises(AttestationError) as raised:
             client.reverify()
-        assert client.last_verification() == (None, raised.value)
+        assert client.last_verification_attempt() == (None, raised.value)
         client.close()
 
     def test_a_retried_failure_and_its_retry_are_two_attempts(
@@ -773,7 +837,9 @@ class TestVerificationReports:
 
         monkeypatch.setattr(Verifier, "verify_v3", first_rejected)
         attempts = Attempts()
-        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification=attempts)
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
         assert attempts.hosts == ["enclave.example", "enclave.example"], "the rejection and its retry"
         _, first_report, first_error = attempts.calls[0]
         assert first_report is None
@@ -781,7 +847,8 @@ class TestVerificationReports:
         assert isinstance(first_error.__cause__, VerificationError)
         _, second_report, second_error = attempts.calls[1]
         assert second_error is None
-        assert client.last_verification() == (second_report, None), "the last verification is the retry"
+        assert client.last_verification_attempt() == (second_report, None), "the last verification is the retry"
+        assert client.current_verification() is second_report
         assert facts_of(second_report) is document
         client.close()
 
@@ -789,7 +856,9 @@ class TestVerificationReports:
         network.serve("enclave.example", tag="first")
         network.handler = network.ehbp.handle
         attempts = Attempts()
-        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification=attempts)
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
         network.ehbp.rotated = True
         rotated = EHBPServer()
         second = network.serve("enclave.example", tag="second", hpke=rotated.public_key_hex)
@@ -810,7 +879,9 @@ class TestVerificationReports:
     def test_concurrent_requests_share_one_attempt(self, network: Network, monkeypatch: pytest.MonkeyPatch) -> None:
         network.serve("enclave.example", deadline=datetime.now(UTC) + timedelta(seconds=0.3))
         attempts = Attempts()
-        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification=attempts)
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
         time.sleep(0.35)
         network.serve("enclave.example")
         release = threading.Event()
@@ -838,11 +909,12 @@ class TestVerificationReports:
         network.documents["a.example"] = NetworkError("a.example is down")
         chosen = network.serve("b.example")
         attempts = Attempts()
-        client = RouterHTTPClient(transport=EHBP(), user_cache_secret="s", on_verification=attempts)
+        client = RouterHTTPClient(transport=EHBP(), user_cache_secret="s", on_verification_attempt=attempts)
         assert attempts.hosts == ["a.example", "b.example"], "the skipped router and the chosen one, each with its own"
         assert attempts.calls[0][1] is None
         assert isinstance(attempts.calls[0][2], NetworkError)
         assert last_facts(client) is chosen, "the last verification describes the chosen router"
+        assert facts_of(client.current_verification()) is chosen, "and so does the current one"
         client.close()
 
     def test_a_gateway_keeps_each_replicas_last_attempt(self, network: Network) -> None:
@@ -852,19 +924,21 @@ class TestVerificationReports:
         attempts = Attempts()
         client = GatewayHTTPClient(
             model_pins=PINS,
-            url="https://gateway.example/v1/",
+            url="https://gateway.example/",
             catalog=lambda: entries,
             user_cache_secret="s",
-            on_verification=attempts,
+            on_verification_attempt=attempts,
         )
         order = list(rank(("a.example", "b.example"), "m", ""))
         good = network.serve(order[1])
         assert facts_of(client.ensure_verified("m")) is good
-        entries_by_host = {entry.host: entry for entry in client.last_verification()}
-        assert entries_by_host[order[0]].report is None
-        assert isinstance(entries_by_host[order[0]].error, NetworkError)
-        assert facts_of(entries_by_host[order[1]].report) is good
-        assert entries_by_host[order[1]].error is None
+        entries_by_host = {entry.host: entry for entry in client.replicas()}
+        assert entries_by_host[order[0]].last_attempt[0] is None
+        assert isinstance(entries_by_host[order[0]].last_attempt[1], NetworkError)
+        assert entries_by_host[order[0]].current is None, "the failed replica has no current verification"
+        assert facts_of(entries_by_host[order[1]].last_attempt[0]) is good
+        assert entries_by_host[order[1]].last_attempt[1] is None
+        assert entries_by_host[order[1]].current is entries_by_host[order[1]].last_attempt[0]
         assert attempts.hosts == [order[0], order[0], order[1]], "the failed replica and its retry, then the good one"
         client.close()
 
@@ -879,7 +953,7 @@ class TestVerificationReports:
             RepoPin("org/repo"),
             transport=EHBP(),
             verification_check=checked.append,
-            on_verification=attempts,
+            on_verification_attempt=attempts,
         )
         assert len(checked) == 1
         assert isinstance(checked[0], VerifiedFacts)
@@ -897,7 +971,7 @@ class TestVerificationReports:
         refused._attested.keyed.enclave._check = reject
         with pytest.raises(AttestationError, match="not this enclave") as raised:
             refused.reverify()
-        assert refused.last_verification() == (None, raised.value), "a check's rejection has no report"
+        assert refused.last_verification_attempt() == (None, raised.value), "a check's rejection has no report"
         assert not isinstance(raised.value.__cause__, VerificationError)
         client.close()
         refused.close()
@@ -911,12 +985,14 @@ class TestVerificationReports:
         def during() -> None:
             if not holder:
                 return
-            seen.append(holder[0].last_verification())
+            seen.append(holder[0].last_verification_attempt())
             if len(seen) == 1:
                 reverified.append(holder[0].reverify())
 
         attempts = Attempts(during)
-        client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification=attempts)
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
         holder.append(client)
         done = threading.Event()
 
@@ -942,7 +1018,7 @@ class TestVerificationReports:
         with pytest.raises(AttributeError):
             report.steps.append(report.steps[0])  # type: ignore[attr-defined]
         assert facts_of(client.ensure_verified()) is document
-        assert facts_of(client.last_verification()[0]).code_tag == document.code_tag
+        assert facts_of(client.last_verification_attempt()[0]).code_tag == document.code_tag
         client.close()
 
 
@@ -951,9 +1027,9 @@ async def test_async_clients_report_every_attempt(network: Network, monkeypatch:
     network.serve("enclave.example")
     attempts = Attempts()
     client = await AsyncEnclaveHTTPClient.create(
-        "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification=attempts
+        "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
     )
-    report, error = client.last_verification()
+    report, error = client.last_verification_attempt()
     assert error is None
     assert attempts.calls == [("enclave.example", report, None)]
     rejecting_verifier(monkeypatch)
@@ -961,7 +1037,7 @@ async def test_async_clients_report_every_attempt(network: Network, monkeypatch:
         await client.reverify()
     assert isinstance(raised.value.__cause__, VerificationError)
     assert raised.value.__cause__.report is not None
-    assert client.last_verification() == (None, raised.value)
+    assert client.last_verification_attempt() == (None, raised.value)
     assert attempts.calls[-1] == ("enclave.example", None, raised.value)
     assert len(attempts.calls) == 3
     monkeypatch.setattr(Verifier, "verify_v3", network.verify)
@@ -976,7 +1052,9 @@ async def test_async_clients_report_every_attempt(network: Network, monkeypatch:
     network.documents["a.example"] = NetworkError("a.example is down")
     chosen = network.serve("b.example")
     routers = Attempts()
-    router = await AsyncRouterHTTPClient.create(transport=EHBP(), user_cache_secret="s", on_verification=routers)
+    router = await AsyncRouterHTTPClient.create(
+        transport=EHBP(), user_cache_secret="s", on_verification_attempt=routers
+    )
     assert routers.hosts == ["a.example", "b.example"]
     assert last_facts(router) is chosen
     await router.close()
@@ -986,33 +1064,296 @@ async def test_async_clients_report_every_attempt(network: Network, monkeypatch:
     replicas = Attempts()
     gateway = await AsyncGatewayHTTPClient.create(
         model_pins=PINS,
-        url="https://gateway.example/v1/",
+        url="https://gateway.example/",
         catalog=lambda: entries,
         user_cache_secret="s",
-        on_verification=replicas,
+        on_verification_attempt=replicas,
     )
     verified = await gateway.ensure_verified("m")
     assert replicas.calls == [("replica.example", verified, None)]
-    [entry] = gateway.last_verification()
-    assert entry.report is verified
+    [entry] = gateway.replicas()
+    assert entry.last_attempt == (verified, None)
+    assert entry.current is verified
     await gateway.close()
 
 
 def test_a_raising_callback_changes_no_outcome(network: Network, caplog: pytest.LogCaptureFixture) -> None:
-    """An exception from ``on_verification`` is logged, and neither fails the verification nor makes discovery
+    """An exception from ``on_verification_attempt`` is logged, and neither fails the verification nor makes discovery
     skip a router that verified."""
 
     def boom(host: str, report: VerificationReport | None, error: TinfoilError | None) -> None:
         raise NetworkError("the callback failed")
 
     document = network.serve("enclave.example")
-    client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification=boom)
+    client = EnclaveHTTPClient("enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=boom)
     assert last_facts(client) is document
-    assert "on_verification callback for enclave.example raised" in caplog.text
+    assert "on_verification_attempt callback for enclave.example raised" in caplog.text
     client.close()
     network.handler = lambda _: response(200, b'["a.example"]')
     chosen = network.serve("a.example")
-    router = RouterHTTPClient(transport=EHBP(), user_cache_secret="s", on_verification=boom)
+    router = RouterHTTPClient(transport=EHBP(), user_cache_secret="s", on_verification_attempt=boom)
     assert router.enclave == "a.example", "the router that verified is kept"
     assert last_facts(router) is chosen
     router.close()
+
+
+def attestation_fetches(network: Network) -> list[str]:
+    """The hosts whose attestation documents were fetched since the last call, in order."""
+    fetched = [
+        r.url.params.get("enclave", r.url.host) for r in network.requests if r.url.path.endswith(ATTESTATION_PATH)
+    ]
+    network.requests = []
+    return fetched
+
+
+class TestGatewayReverify:
+    """The gateway client's ``reverify(model)`` conformance cases: it verifies again the replica that
+    ``ensure_verified(model)`` would return, in the same order, and each replica's entry follows the
+    ``current_verification`` rule."""
+
+    HOSTS = ("a.example", "b.example")
+
+    def gateway(self, network: Network) -> tuple[GatewayHTTPClient, list[str]]:
+        entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", self.HOSTS), "other": CatalogEntry("tinfoilsh/o", ("o",))}
+        order = list(rank(self.HOSTS, "m", ""))
+        for host in order:
+            network.serve(host, tag=f"{host}#1")
+        client = GatewayHTTPClient(
+            model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
+        )
+        assert facts_of(client.ensure_verified("m")).code_tag == f"{order[0]}#1"
+        assert attestation_fetches(network) == [order[0]]
+        return client, order
+
+    def entry(self, client: GatewayHTTPClient, host: str) -> ReplicaVerification:
+        return {entry.host: entry for entry in client.replicas()}[host]
+
+    def test_verifies_the_replica_in_use_again(self, network: Network) -> None:
+        client, order = self.gateway(network)
+        second = network.serve(order[0], tag=f"{order[0]}#2")
+        reverified = client.reverify("m")
+        assert facts_of(reverified) is second
+        assert attestation_fetches(network) == [order[0]], "no other replica is verified"
+        entry = self.entry(client, order[0])
+        assert entry.current is reverified
+        assert entry.last_attempt == (reverified, None)
+        assert client.ensure_verified("m") is reverified
+        client.close()
+
+    def test_reports_a_failure_that_keeps_the_verification(self, network: Network) -> None:
+        client, order = self.gateway(network)
+        first = client.ensure_verified("m")
+        network.documents[order[0]] = NetworkError(f"{order[0]} is unreachable")
+        with pytest.raises(NetworkError, match="unreachable") as raised:
+            client.reverify("m")
+        assert attestation_fetches(network) == [order[0], order[0]], "the replica and its retry, and no other"
+        entry = self.entry(client, order[0])
+        assert entry.current is first, "the replica keeps its fresh verification"
+        assert entry.last_attempt == (None, raised.value)
+        assert client.ensure_verified("m") is first, "requests for the model still go to the replica"
+        client.close()
+
+    def test_moves_on_after_a_discard(self, network: Network) -> None:
+        client, order = self.gateway(network)
+        network.documents[order[0]] = AttestationError("document fails verification")
+        reverified = client.reverify("m")
+        assert facts_of(reverified).code_tag == f"{order[1]}#1", "the next replica that passes"
+        assert self.entry(client, order[0]).current is None, "the failure discarded the replica's verification"
+        assert self.entry(client, order[1]).current is reverified
+        assert client.ensure_verified("m") is reverified, "which ensure_verified then returns"
+        client.close()
+
+    def test_raises_the_last_failure_when_nothing_passes(self, network: Network) -> None:
+        client, order = self.gateway(network)
+        network.documents[order[0]] = AttestationError("document fails verification")
+        network.documents[order[1]] = NetworkError(f"{order[1]} is unreachable")
+        with pytest.raises(NetworkError, match="unreachable"):
+            client.reverify("m")
+        assert [entry.current for entry in client.replicas()] == [None, None]
+        client.close()
+
+    def test_refuses_an_unpinned_model(self, network: Network) -> None:
+        client, _ = self.gateway(network)
+        with pytest.raises(ConfigurationError, match='model "other" is not pinned'):
+            client.reverify("other")
+        assert attestation_fetches(network) == [], "nothing is verified"
+        client.close()
+
+    def test_a_replicas_current_verification_expires(self, network: Network) -> None:
+        entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("replica.example",))}
+        first = network.serve("replica.example", deadline=datetime.now(UTC) + timedelta(seconds=0.1))
+        client = GatewayHTTPClient(
+            model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
+        )
+        ensured = client.ensure_verified("m")
+        assert facts_of(ensured) is first
+        assert self.entry(client, "replica.example").current is ensured
+        time.sleep(0.15)
+        [entry] = client.replicas()
+        assert entry.current is None, "the replica's verification has expired"
+        assert entry.last_attempt == (ensured, None), "the last attempt is still the success"
+        client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_gateway_reverify(network: Network) -> None:
+    hosts = ("a.example", "b.example")
+    entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", hosts)}
+    order = list(rank(hosts, "m", ""))
+    for host in order:
+        network.serve(host, tag=f"{host}#1")
+    gateway = await AsyncGatewayHTTPClient.create(
+        model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
+    )
+    first = await gateway.ensure_verified("m")
+    second = network.serve(order[0], tag=f"{order[0]}#2")
+    attestation_fetches(network)
+    assert facts_of(await gateway.reverify("m")) is second
+    assert attestation_fetches(network) == [order[0]]
+    network.documents[order[0]] = NetworkError("unreachable")
+    with pytest.raises(NetworkError):
+        await gateway.reverify("m")
+    [entry] = gateway.replicas()
+    assert facts_of(entry.current) is second, "a network failure keeps the replica's verification"
+    assert isinstance(entry.last_attempt[1], NetworkError)
+    network.documents[order[0]] = AttestationError("document fails verification")
+    moved = await gateway.reverify("m")
+    assert facts_of(moved).code_tag == f"{order[1]}#1"
+    by_host = {entry.host: entry for entry in gateway.replicas()}
+    assert by_host[order[0]].current is None
+    assert by_host[order[1]].current is moved
+    assert await gateway.ensure_verified("m") is moved
+    assert first is not moved
+    with pytest.raises(ConfigurationError, match="not pinned"):
+        await gateway.reverify("unpinned")
+    await gateway.close()
+
+
+def assert_names_host(report: VerificationReport | None, host: str) -> None:
+    """``report`` names ``host`` in its metadata and in its JSON form."""
+    assert report is not None
+    assert report.metadata.host == host
+    assert json.loads(report.to_json())["metadata"]["host"] == host
+
+
+def rejected_report(err: TinfoilError | None) -> VerificationReport | None:
+    """The report of the verifier's ``VerificationError`` that ``err`` was raised from."""
+    assert err is not None
+    assert isinstance(err.__cause__, VerificationError)
+    return err.__cause__.report
+
+
+class TestReportHost:
+    """Every report that a client hands out names the host that it contacted, since the verifier doesn't know it."""
+
+    def test_an_enclave_clients_reports_name_its_host(self, network: Network) -> None:
+        document = network.serve("enclave.example")
+        unnamed = network.verify(document.code_tag.encode(), b"", Pin(repo="org/repo"))
+        assert unnamed.metadata.host is None, "the verifier names no host"
+        assert "host" not in json.loads(unnamed.to_json())["metadata"]
+        attempts = Attempts()
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
+        assert_names_host(client.ensure_verified(), "enclave.example")
+        assert_names_host(client.reverify(), "enclave.example")
+        assert_names_host(client.current_verification(), "enclave.example")
+        assert_names_host(client.last_verification_attempt()[0], "enclave.example")
+        assert len(attempts.calls) == 2
+        for _, report, _ in attempts.calls:
+            assert_names_host(report, "enclave.example")
+        client.close()
+
+    def test_a_rejections_report_names_the_host(self, network: Network, monkeypatch: pytest.MonkeyPatch) -> None:
+        network.serve("enclave.example")
+        attempts = Attempts()
+        client = EnclaveHTTPClient(
+            "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+        )
+        rejecting_verifier(monkeypatch)
+        with pytest.raises(AttestationError) as raised:
+            client.reverify()
+        assert_names_host(rejected_report(raised.value), "enclave.example")
+        assert_names_host(rejected_report(client.last_verification_attempt()[1]), "enclave.example")
+        for _, _, error in attempts.calls[1:]:
+            assert_names_host(rejected_report(error), "enclave.example")
+        clone = pickle.loads(pickle.dumps(raised.value.__cause__))
+        assert_names_host(clone.report, "enclave.example")
+        client.close()
+
+    def test_router_discovery_names_each_router(self, network: Network, monkeypatch: pytest.MonkeyPatch) -> None:
+        network.handler = lambda _: response(200, b'["a.example", "b.example"]')
+        network.serve("a.example")
+        network.serve("b.example")
+
+        def reject_a(self: Verifier, doc: bytes, nonce: bytes, pin: Pin) -> VerificationReport:
+            return (real_rejection if doc == b"a.example" else network.verify)(doc, nonce, pin)
+
+        monkeypatch.setattr(Verifier, "verify_v3", reject_a)
+        attempts = Attempts()
+        client = RouterHTTPClient(transport=EHBP(), user_cache_secret="s", on_verification_attempt=attempts)
+        assert attempts.hosts == ["a.example", "b.example"]
+        assert_names_host(rejected_report(attempts.calls[0][2]), "a.example")
+        assert_names_host(attempts.calls[1][1], "b.example")
+        assert_names_host(client.current_verification(), "b.example")
+        assert_names_host(client.last_verification_attempt()[0], "b.example")
+        assert_names_host(client.ensure_verified(), "b.example")
+        client.close()
+
+    def test_a_gateways_reports_name_each_replica(self, network: Network) -> None:
+        entries: Catalog = {"m": CatalogEntry("tinfoilsh/m", ("a.example", "b.example"))}
+        order = list(rank(("a.example", "b.example"), "m", ""))
+        network.documents[order[0]] = AttestationError("document fails verification")
+        network.serve(order[1])
+        client = GatewayHTTPClient(
+            model_pins=PINS, url="https://gateway.example/", catalog=lambda: entries, user_cache_secret="s"
+        )
+        assert_names_host(client.ensure_verified("m"), order[1])
+        assert_names_host(client.reverify("m"), order[1])
+        entry = {entry.host: entry for entry in client.replicas()}[order[1]]
+        assert_names_host(entry.current, order[1])
+        assert_names_host(entry.last_attempt[0], order[1])
+        client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_clients_name_the_host(network: Network, monkeypatch: pytest.MonkeyPatch) -> None:
+    network.serve("enclave.example")
+    attempts = Attempts()
+    client = await AsyncEnclaveHTTPClient.create(
+        "enclave.example", RepoPin("org/repo"), transport=EHBP(), on_verification_attempt=attempts
+    )
+    assert_names_host(await client.ensure_verified(), "enclave.example")
+    assert_names_host(client.current_verification(), "enclave.example")
+    assert_names_host(attempts.calls[0][1], "enclave.example")
+    rejecting_verifier(monkeypatch)
+    with pytest.raises(AttestationError) as raised:
+        await client.reverify()
+    assert_names_host(rejected_report(raised.value), "enclave.example")
+    assert_names_host(rejected_report(client.last_verification_attempt()[1]), "enclave.example")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_gateway_joins_its_endpoints_under_its_url(network: Network) -> None:
+    from tinfoil import AsyncOpenAIClient
+
+    root = "https://gateway.example/mount/"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == root + "catalog":
+            return response(200, b'{"m": {"repo": "tinfoilsh/m", "hosts": ["replica.example"]}}')
+        raise NetworkError("no replica in this test")
+
+    network.handler = handler
+    gateway = await AsyncGatewayHTTPClient.create(model_pins=PINS, url="https://gateway.example/mount")
+    assert [str(r.url) for r in network.requests] == [root + "catalog"]
+    assert gateway.base_url == root
+    network.requests = []
+    with pytest.raises(NetworkError):
+        await gateway.ensure_verified("m")
+    relayed = [str(r.url) for r in network.requests]
+    assert relayed
+    assert all(url.startswith(root + ".well-known/tinfoil-attestation?") for url in relayed), relayed
+    assert AsyncOpenAIClient(gateway, api_key="k").base_url == root + "v1/"
+    await gateway.close()

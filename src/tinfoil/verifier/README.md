@@ -194,7 +194,8 @@ A `VerificationReport` describes one verification, step by step:
 - `partial_facts`: what a rejected verification established before the step
   that failed. It is set if and only if a step failed.
 - `metadata`: the verifier's identity and the appraisal instant,
-  `verified_at`, which the verifier supplies rather than the document.
+  `verified_at`, which the verifier supplies rather than the document, and
+  `host`, which the verifier leaves `None` and a client sets (see below).
 
 `verify_v3` returns a report only for a document that it accepts. A rejected
 document raises a `VerificationError` whose `report` has the failed step and
@@ -254,7 +255,8 @@ JSON form that every Tinfoil SDK writes, as a `dict` of JSON values, and
   },
   "metadata": {
     "verified_at": "2026-11-24T16:00:00Z",
-    "verifier": {"name": "tinfoil-python", "version": "<version>"}
+    "verifier": {"name": "tinfoil-python", "version": "<version>"},
+    "host": "inference.tinfoil.sh"
   }
 }
 ```
@@ -269,7 +271,13 @@ in `"measured": {}`. A measurement names its platform and its registers:
 measurement leaves out the registers that the release leaves to the platform.
 The channel keys appear only in `verified_facts.crypto_material`. A step has a
 `message` only when it failed or was skipped. `metadata.verifier` is present
-when the installed package names its version. `REPORT_SCHEMA_VERSION` is the
+when the installed package names its version. `metadata.host` names the host
+that a client contacted for the document (the router that a router client
+chose, or a gateway replica). The clients set it on every report that they
+produce or return, and the verifier, which doesn't know the host, leaves it
+out. To name it on a report that you get from the verifier, build a copy:
+`dataclasses.replace(report, metadata=dataclasses.replace(report.metadata, host=host))`. It is what the client connected to, not an attested fact, so it
+proves nothing about the enclave. `REPORT_SCHEMA_VERSION` is the
 form's version: adding a member keeps it, and removing, renaming or
 redefining one bumps it.
 

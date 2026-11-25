@@ -1024,7 +1024,7 @@ def waiting_on_refresh(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
 
 
 class Raising:
-    """An ``on_verification`` callback that records each call and then raises."""
+    """An ``on_verification_attempt`` callback that records each call and then raises."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, VerificationReport | None, TinfoilError | None]] = []
@@ -1050,7 +1050,7 @@ def test_a_raising_callback_leaves_the_outcome_to_every_waiting_caller(monkeypat
         return verification(f"v{calls}")
 
     callback = Raising()
-    keyed = AttestedTransport(fake_enclave(fetch, on_verification=callback), FakeMode())
+    keyed = AttestedTransport(fake_enclave(fetch, on_verification_attempt=callback), FakeMode())
     results: list[VerificationReport | BaseException] = []
 
     def call() -> None:
@@ -1073,7 +1073,7 @@ def test_a_raising_callback_leaves_the_outcome_to_every_waiting_caller(monkeypat
     assert all(isinstance(result, VerificationReport) for result in results), results
     assert results[0] is results[1], "the waiting caller got the same outcome"
     assert calls == 1
-    assert keyed.last_verification() == (results[0], None)
+    assert keyed.last_verification_attempt() == (results[0], None)
     assert len(callback.calls) == 1
     later = keyed.reverify()
     assert facts_of(later).code_tag == "v2"
@@ -1093,7 +1093,7 @@ async def test_async_a_raising_callback_leaves_the_outcome_to_every_waiting_call
         return verification(f"v{calls}")
 
     callback = Raising()
-    enclave = fake_enclave(lambda: verification("unused"), on_verification=callback)
+    enclave = fake_enclave(lambda: verification("unused"), on_verification_attempt=callback)
     enclave._fetch_async = reporting_async(fetch_async)
     keyed = AsyncAttestedTransport(enclave, AsyncFakeMode())
     owner = asyncio.create_task(keyed.ensure_verified())
@@ -1104,7 +1104,7 @@ async def test_async_a_raising_callback_leaves_the_outcome_to_every_waiting_call
     first, second = await asyncio.gather(owner, waiter)
     assert first is second, "the waiting caller got the same outcome"
     assert calls == 1
-    assert keyed.last_verification() == (first, None)
+    assert keyed.last_verification_attempt() == (first, None)
     assert len(callback.calls) == 1
     later = await keyed.reverify()
     assert facts_of(later).code_tag == "v2"
@@ -1125,7 +1125,7 @@ def test_a_raising_callback_leaves_a_failure_to_every_waiting_caller(monkeypatch
         raise AttestationError("rejected")
 
     callback = Raising()
-    keyed = AttestedTransport(fake_enclave(fetch, on_verification=callback), FakeMode())
+    keyed = AttestedTransport(fake_enclave(fetch, on_verification_attempt=callback), FakeMode())
     results: list[BaseException | VerificationReport] = []
 
     def call() -> None:
@@ -1148,5 +1148,116 @@ def test_a_raising_callback_leaves_a_failure_to_every_waiting_caller(monkeypatch
     assert all(isinstance(result, AttestationError) for result in results), results
     assert results[0] is results[1], "the waiting caller got the same failure, not the callback's exception"
     assert fetches == 2, "one verification, with its retry, that both callers shared"
-    assert keyed.last_verification() == (None, results[0])
+    assert keyed.last_verification_attempt() == (None, results[0])
     assert callback.calls[-1] == (HOST, None, results[0])
+
+
+def current_tag(keyed: AttestedTransport | AsyncAttestedTransport) -> str | None:
+    """The code tag of the transport's current verification, or None when it has none."""
+    current = keyed.current_verification()
+    return None if current is None else facts_of(current).code_tag
+
+
+class TestCurrentVerification:
+    """The ``current_verification`` conformance cases: the report of the verification that requests are bound to
+    now, never one that has expired or that a failure discarded."""
+
+    def test_none_before_the_first_success(self) -> None:
+        enclave, keyed = scripted()
+        assert keyed.current_verification() is None
+        enclave.failure = network_error("unreachable")
+        with pytest.raises(NetworkError):
+            keyed.ensure_verified()
+        assert keyed.current_verification() is None
+        assert enclave.verifications == 0
+
+    def test_is_the_fresh_verification(self) -> None:
+        enclave, keyed = scripted()
+        ensured = keyed.ensure_verified()
+        assert keyed.current_verification() is ensured, "the report that ensure_verified returned"
+        assert keyed.last_verification_attempt() == (ensured, None)
+        assert enclave.verifications == 1, "reading it performs no verification"
+
+    @pytest.mark.parametrize(
+        "failure",
+        [network_error("attestation source unreachable"), ConfigurationError("misconfigured fetcher")],
+        ids=["network", "configuration"],
+    )
+    def test_kept_after_a_failure_that_keeps_the_verification(self, failure: TinfoilError) -> None:
+        enclave, keyed = scripted()
+        ensured = keyed.ensure_verified()
+        enclave.failure = failure
+        with pytest.raises(type(failure)) as raised:
+            keyed.reverify()
+        assert keyed.current_verification() is ensured, "the cached verification is still the current one"
+        assert keyed.last_verification_attempt() == (None, raised.value), "the last attempt is the failure"
+        sent(get(keyed))
+        assert enclave.sent_under == ["v1"], "requests still go through under it"
+
+    def test_none_after_an_attestation_failure(self) -> None:
+        enclave, keyed = scripted()
+        keyed.ensure_verified()
+        enclave.failure = AttestationError("nonce mismatch")
+        with pytest.raises(AttestationError):
+            keyed.reverify()
+        assert keyed.current_verification() is None, "the failure discarded the verification"
+        enclave.failure = None
+        reverified = keyed.ensure_verified()
+        assert keyed.current_verification() is reverified
+        assert current_tag(keyed) == "v2"
+
+    def test_none_after_a_key_rejection(self) -> None:
+        def build(_: VerifiedFacts) -> httpx.BaseTransport:
+            def reject(_: httpx.Request) -> httpx.Response:
+                raise PeerLacksKeyError(AttestationError(CERT_MISMATCH))
+
+            return httpx.MockTransport(reject)
+
+        keyed = transport(lambda: verification("key"), FakeMode(build))
+        keyed.ensure_verified()
+        with pytest.raises(AttestationError):
+            get(keyed)
+        assert keyed.current_verification() is None, "the rejection marked the verification stale"
+
+    def test_none_after_expiry(self) -> None:
+        verifications = 0
+
+        def fetch() -> VerifiedFacts:
+            nonlocal verifications
+            verifications += 1
+            return verification("key", tag=f"v{verifications}", deadline=datetime.now(UTC) + timedelta(seconds=0.1))
+
+        keyed = transport(fetch)
+        first = keyed.ensure_verified()
+        assert keyed.current_verification() is first
+        time.sleep(0.15)
+        assert keyed.current_verification() is None, "the verification has expired"
+        assert verifications == 1, "reading it starts no verification"
+        assert keyed.last_verification_attempt() == (first, None), "the last attempt is still the success"
+        second = keyed.ensure_verified()
+        assert keyed.current_verification() is second
+        assert current_tag(keyed) == "v2"
+
+
+@pytest.mark.asyncio
+async def test_async_current_verification() -> None:
+    enclave, keyed = scripted_async()
+    assert keyed.current_verification() is None
+    ensured = await keyed.ensure_verified()
+    assert keyed.current_verification() is ensured
+    enclave.failure = network_error("attestation source unreachable")
+    with pytest.raises(NetworkError) as raised:
+        await keyed.reverify()
+    assert keyed.current_verification() is ensured, "a network failure keeps the fresh verification current"
+    assert keyed.last_verification_attempt() == (None, raised.value)
+    await async_sent(keyed)
+    enclave.failure = AttestationError("nonce mismatch")
+    with pytest.raises(AttestationError):
+        await keyed.reverify()
+    assert keyed.current_verification() is None, "an attestation failure discards it"
+    enclave.failure = None
+    assert keyed.current_verification() is None
+    reverified = await keyed.ensure_verified()
+    assert keyed.current_verification() is reverified
+    assert current_tag(keyed) == "v2"
+    await keyed.aclose()

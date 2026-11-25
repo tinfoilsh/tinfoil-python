@@ -14,7 +14,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from types import TracebackType
 from typing import Self, TypeAlias
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -64,10 +63,10 @@ from tinfoil._transport import (
 from tinfoil._trust import Trust, verifier_inputs
 from tinfoil._types import (
     DEFAULT_HTTP_TIMEOUT,
-    LastVerification,
-    OnVerification,
+    OnVerificationAttempt,
     TimeoutTypes,
     Transport,
+    VerificationAttempt,
     VerificationCheck,
 )
 from tinfoil._url import (
@@ -152,15 +151,27 @@ class _AttestedClient:
         an ``EHBP`` proxy URL."""
         return self._attested.keyed.enclave.host
 
-    def last_verification(self) -> LastVerification:
+    def current_verification(self) -> VerificationReport | None:
+        """The report of the verification that requests are bound to now, without I/O, or None. It is the report
+        of the latest successful verification while that verification is fresh and no failure has discarded it,
+        and None before the first success, after a re-verification that failed with an AttestationError or a key
+        rejection, and once the verification's freshness deadline has passed, until a later verification
+        succeeds. A failure of any other category, such as a NetworkError, leaves it unchanged while the
+        verification is fresh. The client doesn't verify again in the background, so it is None between expiry
+        and the next request or ``ensure_verified``; a readiness check calls ``ensure_verified`` instead. Its
+        answer holds at the moment that it is called. For a router client it describes the router that the
+        client chose."""
+        return self._attested.keyed.current_verification()
+
+    def last_verification_attempt(self) -> VerificationAttempt:
         """The most recent verification attempt, without I/O, as ``(report, error)``: the report and None if it
         passed, and None and the client error that it raised if it failed, with the verifier's
         ``VerificationError`` and its report as that error's ``__cause__`` when the verifier rejected the
         document. Every attempt counts: the first verification, its retry, a refresh after expiry or a key
         rotation, and ``reverify``. A report that it returns may have expired or been rejected since;
-        ``ensure_verified`` returns one that is valid. For a router client it describes the router that the
+        ``current_verification`` returns one that has not. For a router client it describes the router that the
         client chose."""
-        return self._attested.keyed.last_verification()
+        return self._attested.keyed.last_verification_attempt()
 
     def ensure_verified(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> VerificationReport:
         """The report of a verification that is valid now, verifying first only if the cached one has expired or
@@ -214,10 +225,15 @@ class _AsyncAttestedClient:
         """The host of the enclave the client verifies."""
         return self._attested.keyed.enclave.host
 
-    def last_verification(self) -> LastVerification:
+    def current_verification(self) -> VerificationReport | None:
+        """The report of the verification that requests are bound to now, without I/O, or None, as for the
+        synchronous client. It is not a coroutine."""
+        return self._attested.keyed.current_verification()
+
+    def last_verification_attempt(self) -> VerificationAttempt:
         """The most recent verification attempt, without I/O, as for the synchronous client. It is not a
         coroutine."""
-        return self._attested.keyed.last_verification()
+        return self._attested.keyed.last_verification_attempt()
 
     async def ensure_verified(self) -> VerificationReport:
         """The report of a verification that is valid now, verifying first only if the cached one has expired or
@@ -251,7 +267,7 @@ def _enclave_parts(
     transport: Transport | None,
     policy: Policy | None,
     verification_check: VerificationCheck | None,
-    on_verification: OnVerification | None,
+    on_verification_attempt: OnVerificationAttempt | None,
     fetch_attestation: object,
     *,
     asynchronous: bool,
@@ -272,7 +288,7 @@ def _enclave_parts(
         inputs.pin,
         verifier=verifier,
         verification_check=verification_check,
-        on_verification=on_verification,
+        on_verification_attempt=on_verification_attempt,
         fetch_document=fetch_document,
         fetch_document_async=fetch_document_async,
     )
@@ -296,10 +312,11 @@ class EnclaveHTTPClient(_AttestedClient):
     ``verification_check``, when set, is called with the verified facts of
     each verification that passes the trust and the policy before the client
     uses the enclave's keys; raising rejects the enclave, and the rejection
-    is not retried. ``on_verification``, when set, is called with the
+    is not retried. ``on_verification_attempt``, when set, is called with the
     enclave's host and the outcome of every verification attempt, as
-    ``OnVerification`` describes; ``last_verification`` returns the most
-    recent one. ``timeout`` is
+    ``OnVerificationAttempt`` describes; ``last_verification_attempt`` returns
+    the most recent one, and ``current_verification`` the report of the
+    verification that requests are bound to now. ``timeout`` is
     the ``httpx`` timeout of ``http_client`` and of the client's own
     attestation fetches, which are bounded as a whole besides, at 30
     seconds each; it defaults to ``DEFAULT_HTTP_TIMEOUT``.
@@ -324,12 +341,19 @@ class EnclaveHTTPClient(_AttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
-        on_verification: OnVerification | None = None,
+        on_verification_attempt: OnVerificationAttempt | None = None,
         fetch_attestation: AttestationFetcher | AttestationRelay | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
         enclave, resolved, proxy_url, self._trust = _enclave_parts(
-            host, trust, transport, policy, verification_check, on_verification, fetch_attestation, asynchronous=False
+            host,
+            trust,
+            transport,
+            policy,
+            verification_check,
+            on_verification_attempt,
+            fetch_attestation,
+            asynchronous=False,
         )
         keyed = AttestedTransport(enclave, mode_for(resolved), timeout=timeout)
         self._attested = _Attested(keyed, proxy_url, "")
@@ -365,12 +389,19 @@ class AsyncEnclaveHTTPClient(_AsyncAttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
-        on_verification: OnVerification | None = None,
+        on_verification_attempt: OnVerificationAttempt | None = None,
         fetch_attestation: AsyncAttestationFetcher | AttestationRelay | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
         enclave, resolved, proxy_url, copied = _enclave_parts(
-            host, trust, transport, policy, verification_check, on_verification, fetch_attestation, asynchronous=True
+            host,
+            trust,
+            transport,
+            policy,
+            verification_check,
+            on_verification_attempt,
+            fetch_attestation,
+            asynchronous=True,
         )
         keyed = AsyncAttestedTransport(enclave, async_mode_for(resolved), timeout=timeout)
         client = cls(_attested=_AsyncAttested(keyed, proxy_url, ""), _trust=copied)
@@ -415,7 +446,7 @@ class RouterHTTPClient(_AttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
-        on_verification: OnVerification | None = None,
+        on_verification_attempt: OnVerificationAttempt | None = None,
         user_cache_secret: str | None = None,
         fetch_attestation: AttestationFetcher | AttestationRelay | None = None,
         fetch_router_list: RouterListFetcher | RouterListRelay | None = None,
@@ -434,7 +465,7 @@ class RouterHTTPClient(_AttestedClient):
             timeout=timeout,
             list_routers=list_routers,
             fetch_document=fetch_document,
-            on_verification=on_verification,
+            on_verification_attempt=on_verification_attempt,
         )
         self._attested = _Attested(keyed, proxy_url, secret)
         # Discovery leaves its fallback unverified.
@@ -460,7 +491,7 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
         transport: Transport | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
-        on_verification: OnVerification | None = None,
+        on_verification_attempt: OnVerificationAttempt | None = None,
         user_cache_secret: str | None = None,
         fetch_attestation: AsyncAttestationFetcher | AttestationRelay | None = None,
         fetch_router_list: AsyncRouterListFetcher | RouterListRelay | None = None,
@@ -479,7 +510,7 @@ class AsyncRouterHTTPClient(_AsyncAttestedClient):
             timeout=timeout,
             list_routers=list_routers,
             fetch_document=fetch_document,
-            on_verification=on_verification,
+            on_verification_attempt=on_verification_attempt,
         )
         client = cls(_attested=_AsyncAttested(keyed, proxy_url, secret))
         try:
@@ -497,8 +528,9 @@ GATEWAY_URL_INVALID = (
 credentials."""
 
 
-def _gateway_url(url: str | None) -> tuple[str, str]:
-    """The gateway base URL, with a trailing slash, and its host, which attestation is fetched through."""
+def _gateway_url(url: str | None) -> str:
+    """The gateway's URL, with a trailing slash, which requests are sent to and which the catalog and the
+    attestation relay join under."""
     base_url = url or DEFAULT_GATEWAY_URL
     try:
         origin = origin_of(base_url)
@@ -506,7 +538,7 @@ def _gateway_url(url: str | None) -> tuple[str, str]:
         raise ConfigurationError(GATEWAY_URL_INVALID) from None
     if not origin.startswith("https://") or has_query_or_fragment(base_url):
         raise ConfigurationError(GATEWAY_URL_INVALID)
-    return with_trailing_slash(base_url), urlsplit(base_url).netloc
+    return with_trailing_slash(base_url)
 
 
 class GatewayHTTPClient:
@@ -522,14 +554,23 @@ class GatewayHTTPClient:
     every pin sets its own; a pin's own policy replaces it entirely for that
     model. ``verification_check`` is called with each
     replica's verified facts; a replica that it rejects is skipped for the
-    next replica of the model. ``on_verification`` is called with the
+    next replica of the model. ``on_verification_attempt`` is called with the
     replica's host and the outcome of every attempt to verify a replica, and
-    ``last_verification`` returns each replica's last attempt. ``user_cache_secret`` empty selects the random
+    ``replicas`` returns each replica's current verification and last attempt.
+    ``user_cache_secret`` empty selects the random
     secret that is generated once per process, as on ``RouterHTTPClient``,
     whose constructor fails the same way when that secret can't be generated;
     the gateway sees a cache prefix keyed on it, never the secret. ``url``
-    is the gateway's base URL, exposed as ``base_url`` with a trailing
-    slash; None selects Tinfoil's gateway. ``catalog`` is read on every request and
+    is the gateway's URL: its origin, or the URL that it is mounted under,
+    exposed as ``base_url`` with a trailing slash; None selects Tinfoil's
+    gateway, ``https://inference-gateway.tinfoil.sh/``. Its path, if any, is
+    where the gateway is mounted, not the API path, as for an ``EHBP``
+    proxy URL: the catalog, the attestation relay and an ``OpenAIClient``'s
+    ``api_path``, ``/v1/`` by default, all join under it, so that
+    ``https://gateway.example/tinfoil`` sends chat completions to
+    ``https://gateway.example/tinfoil/v1/chat/completions``. It must use
+    HTTPS, and a URL with user information, a query or a fragment is a
+    ConfigurationError. ``catalog`` is read on every request and
     must return an immutable mapping; None fetches the gateway's catalog
     when the client is created and refreshes it every 10 seconds while the
     client is used, keeping the last catalog when a refresh fails.
@@ -551,21 +592,20 @@ class GatewayHTTPClient:
         model_pins: Mapping[str, ModelPin] | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
-        on_verification: OnVerification | None = None,
+        on_verification_attempt: OnVerificationAttempt | None = None,
         user_cache_secret: str | None = None,
         url: str | None = None,
         catalog: Callable[[], Catalog] | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
-        base_url, relay = _gateway_url(url)
+        base_url = _gateway_url(url)
         self._transport = GatewayTransport(
             base_url=base_url,
-            relay=relay,
             catalog=catalog,
             model_pins=model_pins,
             policy=policy,
             verification_check=verification_check,
-            on_verification=on_verification,
+            on_verification_attempt=on_verification_attempt,
             user_cache_secret=user_cache_secret,
             timeout=timeout,
         )
@@ -590,7 +630,8 @@ class GatewayHTTPClient:
 
     @property
     def base_url(self) -> str:
-        """The gateway's base URL, which requests are sent to."""
+        """The gateway's URL, which requests are sent to and which an ``OpenAIClient`` joins its API path under: the
+        ``url`` option with a trailing slash, as ``EnclaveHTTPClient.base_url`` returns an ``EHBP`` proxy URL."""
         return self._base_url
 
     def models(self, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT) -> list[str]:
@@ -610,12 +651,29 @@ class GatewayHTTPClient:
         fetch as a whole is bounded besides, at 10 seconds for the catalog and 30 for an attestation."""
         return self._transport.ensure_verified(model, timeout=timeout)
 
-    def last_verification(self) -> list[ReplicaVerification]:
+    def reverify(
+        self, model: str, *, timeout: TimeoutTypes | UseClientDefault = USE_CLIENT_DEFAULT
+    ) -> VerificationReport:
+        """Verifies again the replica that ``ensure_verified(model)`` would return, even if its cached
+        verification is still valid, and returns the new report. It tries the model's replicas in the order that
+        ``ensure_verified`` tries them, verifying each again, and stops at the first that passes, or at the first
+        that fails but keeps a valid verification, which requests for ``model`` still use; it then raises that
+        failure. Each failure follows the rule that ``EnclaveHTTPClient.reverify`` describes, for its replica:
+        an AttestationError discards the replica's cached verification, so that ``reverify`` moves on to the
+        next replica, as ``ensure_verified`` then does, and a failure of any other category keeps it while it is
+        still valid. A replica that had no verification to keep is passed over too. When no replica passes or
+        keeps a valid verification, it raises the last failure. A model without a pin is a ConfigurationError,
+        and nothing is verified. ``timeout`` is as for ``ensure_verified``."""
+        return self._transport.reverify(model, timeout=timeout)
+
+    def replicas(self) -> list[ReplicaVerification]:
         """One entry for each replica that the client has tried to verify and that the catalog still lists, failed
-        replicas included, each holding that replica's last attempt, without I/O: its report if the attempt
-        passed, and otherwise its error. A replica's earlier success is not kept once a later attempt for it
-        fails. Reports may have expired or been rejected since."""
-        return self._transport.last_verification()
+        replicas included, sorted by host, without I/O. An entry's ``current`` follows the rule of
+        ``EnclaveHTTPClient.current_verification`` for that replica: the report of the replica's verification
+        while it is fresh and has not been discarded, and otherwise None. Its ``last_attempt`` holds the
+        replica's most recent attempt, as ``last_verification_attempt`` describes: a failed attempt replaces an
+        earlier success there, though ``current`` keeps that success while the failure leaves it valid."""
+        return self._transport.replicas()
 
     def close(self) -> None:
         """Releases every replica's connections and stops catalog refreshes; one in flight finishes on its own
@@ -660,21 +718,20 @@ class AsyncGatewayHTTPClient:
         model_pins: Mapping[str, ModelPin] | None = None,
         policy: Policy | None = None,
         verification_check: VerificationCheck | None = None,
-        on_verification: OnVerification | None = None,
+        on_verification_attempt: OnVerificationAttempt | None = None,
         user_cache_secret: str | None = None,
         url: str | None = None,
         catalog: Callable[[], Catalog] | None = None,
         timeout: TimeoutTypes = DEFAULT_HTTP_TIMEOUT,
     ) -> Self:
-        base_url, relay = _gateway_url(url)
+        base_url = _gateway_url(url)
         transport = AsyncGatewayTransport(
             base_url=base_url,
-            relay=relay,
             catalog=catalog,
             model_pins=model_pins,
             policy=policy,
             verification_check=verification_check,
-            on_verification=on_verification,
+            on_verification_attempt=on_verification_attempt,
             user_cache_secret=user_cache_secret,
             timeout=timeout,
         )
@@ -694,7 +751,7 @@ class AsyncGatewayHTTPClient:
 
     @property
     def base_url(self) -> str:
-        """The gateway's base URL, which requests are sent to: the ``url`` option with a trailing slash."""
+        """The gateway's URL, which requests are sent to: the ``url`` option with a trailing slash."""
         return self._base_url
 
     async def models(self) -> list[str]:
@@ -705,10 +762,15 @@ class AsyncGatewayHTTPClient:
         """The report of a verification that is valid now of a replica serving ``model``."""
         return await self._transport.ensure_verified(model)
 
-    def last_verification(self) -> list[ReplicaVerification]:
-        """Each tried replica's last attempt, without I/O, as for the synchronous client. It is not a
-        coroutine."""
-        return self._transport.last_verification()
+    async def reverify(self, model: str) -> VerificationReport:
+        """Verifies again the replica that ``ensure_verified(model)`` would return, as for the synchronous
+        client."""
+        return await self._transport.reverify(model)
+
+    def replicas(self) -> list[ReplicaVerification]:
+        """An entry for each tried replica, with its current verification and its last attempt, without I/O, as
+        for the synchronous client. It is not a coroutine."""
+        return self._transport.replicas()
 
     async def close(self) -> None:
         """Releases every replica's connections and stops catalog refreshes; see the synchronous client for what
