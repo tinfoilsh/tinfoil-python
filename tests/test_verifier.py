@@ -1192,6 +1192,7 @@ def test_container_provenance() -> None:
         ("authorized, unknown kind", authorizer, [carried(unreadable), proof], LAYER_PROVENANCE),
         ("embedded, proven", embedded, [proof], LAYER_QUOTE),
         ("embedded, no entry", embedded, [], LAYER_PROVENANCE),
+        ("embedded, unknown kind", EmbeddedConfig(data=unreadable), [proof], LAYER_PROVENANCE),
         ("reference, document's bytes, proven", reference, [carried(requiring), proof], LAYER_QUOTE),
         ("reference, document's bytes, no entry", reference, [carried(requiring)], LAYER_PROVENANCE),
         ("reference, no bytes", reference, [], LAYER_QUOTE),
@@ -1203,9 +1204,6 @@ def test_container_provenance() -> None:
         with pytest.raises(VerificationError) as rejected:
             vf.embedded_verifier(dataclasses.replace(inputs, config=config)).verify_v3(raw, nonce, Pin())
         assert rejected.value.layer == want, name
-
-    with pytest.raises(UsageError, match="unknown object member name"):
-        vf.embedded_verifier(dataclasses.replace(inputs, config=EmbeddedConfig(data=unreadable)))
 
 
 # --- freshness ------------------------------------------------------------------------------

@@ -10,7 +10,6 @@ import pytest
 
 from tinfoil.verifier import _json
 from tinfoil.verifier._endorsement.container import (
-    ContainerConfigError,
     ContainerProvenance,
     authenticate_container,
     container_provenance_from_config,
@@ -117,7 +116,7 @@ def required(digest: str) -> ContainerProvenance:
 def test_container_provenance_from_config(text: str, want: tuple[ContainerProvenance, ...] | None) -> None:
     """The requirements that a config declares, or None for a config that is rejected."""
     if want is None:
-        with pytest.raises(ContainerConfigError):
+        with pytest.raises(ProvenanceError):
             container_provenance_from_config(text.encode())
     else:
         assert container_provenance_from_config(text.encode()) == want

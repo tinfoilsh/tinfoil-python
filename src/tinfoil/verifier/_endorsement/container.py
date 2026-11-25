@@ -44,10 +44,6 @@ _REF_SEGMENT_SEPARATOR = "/"
 _REF_WILDCARD = "*"
 
 
-class ContainerConfigError(ValueError):
-    """A config whose container build requirements cannot be read."""
-
-
 @dataclass(frozen=True, slots=True)
 class ContainerProvenance:
     """The build that a config requires for the container image with the lowercase hex SHA-256 ``digest``: a run of a
@@ -70,16 +66,16 @@ def container_provenance_from_config(data: bytes) -> tuple[ContainerProvenance, 
     try:
         config = _json.object_(_json.strict_parse(data), "config")
     except _json.JsonError as err:
-        raise ContainerConfigError(f"parsing config containers: {err}") from err
+        raise ProvenanceError(f"parsing config containers: {err}") from err
     if "containers" not in config:
         return ()
     containers = config["containers"]
     if not isinstance(containers, tuple):
-        raise ContainerConfigError("config containers must be an array of objects")
+        raise ProvenanceError("config containers must be an array of objects")
     required = []
     for index, container in enumerate(containers):
         if not isinstance(container, _json.JsonObject):
-            raise ContainerConfigError("config containers must be an array of objects")
+            raise ProvenanceError("config containers must be an array of objects")
         if "provenance" not in container:
             continue
         try:
@@ -88,10 +84,10 @@ def container_provenance_from_config(data: bytes) -> tuple[ContainerProvenance, 
             fields = {name: _json.string(github, name) for name in _GITHUB_MEMBERS}
             image = _json.string(container, "image")
         except _json.JsonError as err:
-            raise ContainerConfigError(f"containers[{index}]: {err}") from err
+            raise ProvenanceError(f"containers[{index}]: {err}") from err
         split = len(image) - _IMAGE_DIGEST_LENGTH
         if split < 0 or not image[:split].endswith(_IMAGE_DIGEST_PREFIX) or not is_lower_hex(image[split:]):
-            raise ContainerConfigError(
+            raise ProvenanceError(
                 f"containers[{index}].image must end with {_IMAGE_DIGEST_PREFIX} and a lowercase hex digest"
             )
         required.append(ContainerProvenance(digest=image[split:], **fields))
