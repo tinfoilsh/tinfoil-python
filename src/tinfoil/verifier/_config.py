@@ -15,6 +15,7 @@ from tinfoil.verifier._document.collateral.collateral import (
     ARTIFACT_FRESHNESS_V1_FORMAT,
     FRESHNESS_ID_PLATFORM,
     FRESHNESS_ID_RUNTIME,
+    NotFoundError,
 )
 from tinfoil.verifier._document.collateral.runtime import RuntimeReference
 from tinfoil.verifier._document.document import Document
@@ -33,6 +34,7 @@ from tinfoil.verifier._endorsement.approval import (
     FreshnessVerifier,
     parse_name,
 )
+from tinfoil.verifier._endorsement.container import authenticate_containers
 from tinfoil.verifier._endorsement.provenance import ProvenanceClient
 from tinfoil.verifier._endorsement.reference import AuthenticatedArtifact, ReleaseReferenceError, parse_reference
 from tinfoil.verifier._errors import LAYER_PROVENANCE, UsageError, VerificationError
@@ -189,6 +191,7 @@ def config_references(trust: TrustPolicy, doc: Document, ref: str, now: datetime
     pins = replace(pins, now=now, max_age=trust.freshness_max_age)
     expected_runtime, approved = _resolve_config(trust, doc, pins)
     digest = decode_lower_hex("config digest", approved.digest, _CONFIG_DIGEST_SIZE)
+    _authenticate_containers(trust, doc, digest)
     manifest, runtime_trust = _resolve_runtime(trust, doc, expected_runtime, now)
     platform, platform_trust = _resolve_platform(trust, doc, now)
     return EndorsementResult(
@@ -246,6 +249,21 @@ def _resolve_config(
         registry_id=approved.registry_id,
         signature_time=approved.signature_time,
     )
+
+
+def _authenticate_containers(trust: TrustPolicy, doc: Document, digest: bytes) -> None:
+    """Authenticate the container builds that the config with the verified ``digest`` requires. They are read from
+    config bytes that have that digest: the caller's, or else the document's. Without such bytes there is nothing
+    to check."""
+    data = trust.embedded.config_data
+    if data is None:
+        try:
+            data = doc.config_endorsement().config
+        except NotFoundError:
+            return
+        if not data or hashlib.sha256(data).digest() != digest:
+            return
+    authenticate_containers(trust.endorsements, data, doc.container_provenance)
 
 
 def _resolve_runtime(

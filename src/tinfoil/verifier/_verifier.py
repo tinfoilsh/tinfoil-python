@@ -332,6 +332,7 @@ class _ConfigChoice:
     registry_ids: tuple[str, ...] | None = None
     authorizer: Callable[..., None] | None = None
     embedded: EmbeddedConfigReference | None = None
+    config_data: bytes | None = None
 
 
 def _config_choice(config: object, runtime: bytes | None) -> _ConfigChoice:
@@ -359,6 +360,10 @@ def _config_choice(config: object, runtime: bytes | None) -> _ConfigChoice:
         if not callable(config.authorize):
             raise UsageError("config authorizer must be callable")
         return _ConfigChoice(authorizer=config.authorize)
+    if isinstance(config, EmbeddedConfig) and isinstance(config.data, bytes | bytearray | memoryview):
+        # The reference and the kept bytes come from one copy.
+        config = replace(config, data=bytes(config.data))
+        return _ConfigChoice(embedded=resolve_config(config, runtime), config_data=config.data)
     if isinstance(config, EmbeddedConfig | EmbeddedConfigReference):
         return _ConfigChoice(embedded=resolve_config(config, runtime))
     raise UsageError(
@@ -411,7 +416,12 @@ def _trust_policy(config: object, policy: object, *, overrides: Overrides | None
         max_age = freshness_max_age
     artifacts, freshness_keys = _artifact_choice(policy.artifacts)
     choice = _config_choice(config, artifacts.runtime)
-    embedded = ResolvedReferences(config=choice.embedded, runtime=artifacts.runtime, platform=artifacts.platform)
+    embedded = ResolvedReferences(
+        config=choice.embedded,
+        runtime=artifacts.runtime,
+        platform=artifacts.platform,
+        config_data=choice.config_data,
+    )
 
     try:
         if overrides is None or overrides.sigstore_root is None:

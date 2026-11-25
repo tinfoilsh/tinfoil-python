@@ -14,7 +14,7 @@ from tests import document_builder as builder
 from tinfoil.verifier._document import document as doc
 from tinfoil.verifier._document.collateral import collateral, entry
 from tinfoil.verifier._document.collateral.collateral import NotFoundError
-from tinfoil.verifier._json import JsonObject
+from tinfoil.verifier._json import JsonObject, strict_parse
 
 
 def test_build_and_verify() -> None:
@@ -381,6 +381,39 @@ def test_freshness_selects_artifact_id() -> None:
     for witness_id in ("", "missing-freshness"):
         with pytest.raises(NotFoundError):
             parsed.freshness(witness_id)
+
+
+def test_container_provenance_is_keyed_by_image_digest() -> None:
+    nonce = builder.test_nonce()
+    first, second = "ab" * 32, "cd" * 32
+
+    def parse(*entries: tuple[str, dict[str, Any]]) -> doc.Document:
+        role, format_ = entry.ROLE_REFERENCE_VALUES, collateral.CONTAINER_PROVENANCE_V1_FORMAT
+        _, doc_bytes = builder.build(
+            nonce,
+            collateral_entries=[{"id": id_, "role": role, "format": format_, "data": data} for id_, data in entries],
+        )
+        return doc.parse(doc_bytes, nonce)
+
+    parsed = parse(
+        ("one", {"digest": first, "sigstore_bundle": {"a": 1}}),
+        ("two", {"digest": second, "sigstore_bundle": {"b": 2}}),
+        ("again", {"digest": first, "sigstore_bundle": {"c": 3}}),
+    )
+    assert parsed.container_provenance(first) == strict_parse(b'{"a":1}'), "the first entry for a digest is used"
+    assert parsed.container_provenance(second) == strict_parse(b'{"b":2}')
+    with pytest.raises(NotFoundError):
+        parsed.container_provenance("ef" * 32)
+
+    malformed: list[tuple[dict[str, Any], str]] = [
+        ({"digest": first.upper(), "sigstore_bundle": {}}, "container digest is not lowercase hex"),
+        ({"digest": "sha256:" + first, "sigstore_bundle": {}}, "container digest is not lowercase hex"),
+        ({"digest": first}, "is missing sigstore_bundle"),
+        ({"digest": first, "sigstore_bundle": {}, "repo": "o/r"}, "unknown object member name"),
+    ]
+    for data, message in malformed:
+        with pytest.raises(doc.DocumentError, match=message):
+            parse(("one", data))
 
 
 def test_sigstore_references() -> None:

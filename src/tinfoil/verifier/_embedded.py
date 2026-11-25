@@ -21,11 +21,13 @@ _CONFIG_DIGEST_SIZE = 32
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResolvedReferences:
-    """Embedded references after validation, with config bytes reduced to their reference."""
+    """Embedded references after validation, with config bytes reduced to their reference and kept beside it."""
 
     config: EmbeddedConfigReference | None = None
     runtime: bytes | None = None
     platform: bytes | None = None
+    config_data: bytes | None = None
+    """The bytes of a config that the caller embedded in full. A config embedded by reference has none."""
 
 
 def resolve_artifacts(artifacts: EmbeddedArtifacts) -> ResolvedReferences:

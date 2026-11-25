@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from tinfoil.verifier import _json
 from tinfoil.verifier._document.collateral.config import (
     CONFIG_FORMATS,
     CONFIG_ID,
@@ -29,6 +30,7 @@ from tinfoil.verifier._document.collateral.sev import AMDCRL, AMDVCEK, decode_am
 from tinfoil.verifier._document.collateral.sigstore import (
     Freshness,
     SigstoreRef,
+    decode_container_provenance,
     decode_freshness,
     decode_sigstore_ref,
 )
@@ -56,6 +58,8 @@ SIGSTORE_FRESHNESS_V1_FORMAT = "https://tinfoil.sh/collateral/sigstore-freshness
 """A freshness witness for a Sigstore reference-values artifact."""
 ARTIFACT_FRESHNESS_V1_FORMAT = "https://tinfoil.sh/collateral/artifact-freshness/v1"
 """A Tinfoil-signed release approval."""
+CONTAINER_PROVENANCE_V1_FORMAT = "https://tinfoil.sh/collateral/container-provenance/v1"
+"""The build attestation of one container image {digest, sigstore_bundle}."""
 
 # Freshness entry ids associate each witness with the reference-values entry that it refreshes.
 FRESHNESS_ID_CODE = "code-freshness"
@@ -102,6 +106,8 @@ class Set:
     runtime: Runtime | None = None
     freshness: dict[str, Freshness] = field(default_factory=dict)
     """The freshness witnesses by entry id."""
+    containers: dict[str, _json.JsonValue] = field(default_factory=dict)
+    """The container build attestations, as Sigstore bundles, by image digest."""
     platform_count: int = 0
     config_platform_ref: SigstoreRef | None = None
 
@@ -134,6 +140,7 @@ def decode(entries: tuple[Entry, ...]) -> Set:
     config: ConfigEndorsement | None = None
     runtime: Runtime | None = None
     freshness: dict[str, Freshness] = {}
+    containers: dict[str, _json.JsonValue] = {}
     platform_count = 0
     config_platform_ref: SigstoreRef | None = None
 
@@ -179,6 +186,9 @@ def decode(entries: tuple[Entry, ...]) -> Set:
                 sigstore_platform = decoded_ref
             if entry.id == PLATFORM_ID:
                 config_platform_ref = decoded_ref
+        elif entry.role == ROLE_REFERENCE_VALUES and entry.format == CONTAINER_PROVENANCE_V1_FORMAT:
+            digest, bundle = decode_container_provenance(entry)
+            containers.setdefault(digest, bundle)
         elif entry.role == ROLE_REFERENCE_VALUES and entry.format == SIGSTORE_FRESHNESS_V1_FORMAT:
             # validate already rejected duplicate ids.
             freshness[entry.id] = decode_freshness(entry)
@@ -190,6 +200,7 @@ def decode(entries: tuple[Entry, ...]) -> Set:
         config=config,
         runtime=runtime,
         freshness=freshness,
+        containers=containers,
         platform_count=platform_count,
         config_platform_ref=config_platform_ref,
     )
