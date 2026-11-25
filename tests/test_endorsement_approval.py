@@ -64,7 +64,7 @@ from tinfoil.verifier._x509.certificate import load_public_key_pem
 
 IDENTITY = "/tinfoil/model-router"
 NAME = IDENTITY + "/v0.0.155"
-CONFIG = b"# Approved config bytes\nname: gpt-oss-120b\n"
+CONFIG = b'{"name":"gpt-oss-120b"}'
 MAX_REVISION_LENGTH = 128
 ONE_US = timedelta(microseconds=1)
 PRIVATE_REGISTRY_ID = REGISTRY_ID_PREFIX + "9c4a7f21e0b836d56a13c8fe42d907ab"
@@ -108,8 +108,7 @@ def config_payload(world: World, at: datetime, config: bytes = CONFIG, name: str
 
 
 def deployment_core(config: bytes, registry_id: str = PUBLIC_REGISTRY_ID) -> dict[str, Any]:
-    version = config.decode().split("cvm-version: ")[1].strip()
-    tag, digest = version.split("@sha256:")
+    tag, digest = json.loads(config)["cvm-version"].split("@sha256:")
     runtime = RuntimeReference(repo=RUNTIME_REPO, tag="v" + tag.removeprefix("v"), digest=digest)
     return config_core(NAME, hashlib.sha256(config).hexdigest(), registry_id=registry_id, runtime=runtime)
 
@@ -196,7 +195,7 @@ def test_timestamp_core_canonicalization() -> None:
 
 def test_deployment_statement_requires_runtime_binding() -> None:
     world = World()
-    config = b"cvm-version: 0.15.0@sha256:" + b"ab" * 32 + b"\n"
+    config = b'{"cvm-version":"0.15.0@sha256:' + b"ab" * 32 + b'"}'
     payload = deployment_payload(world, world.now, config)
     parsed = parse_config_statement(payload)
     assert parsed.predicate.runtime == RuntimeReference(RUNTIME_REPO, "v0.15.0", "ab" * 32)
@@ -529,7 +528,7 @@ def test_scoped_config_certificate_and_timestamp_bindings() -> None:
     root_key = world.key
     leaf_key = pki.p256()
     certificate = world.scope_certificate(leaf_key, PUBLIC_REGISTRY_ID)
-    config = b"cvm-version: 0.15.3-rc.1@sha256:" + b"ab" * 32 + b"\n"
+    config = b'{"cvm-version":"0.15.3-rc.1@sha256:' + b"ab" * 32 + b'"}'
     payload = deployment_payload(world, world.now, config)
     bundle = world.certified_bundle(payload, certificate, leaf_key, world.now)
     verifier = ConfigVerifier(world.trusted_root(), [root_key.public_key()], root_keys=[root_key.public_key()])
@@ -766,7 +765,7 @@ def test_verify_config_approval() -> None:
 
 def test_verify_config_digest_and_runtime() -> None:
     world = World()
-    config = b"cvm-version: 0.15.0@sha256:" + b"ab" * 32 + b"\n"
+    config = b'{"cvm-version":"0.15.0@sha256:' + b"ab" * 32 + b'"}'
     payload = deployment_payload(world, world.now, config)
     bundle = as_json(world.keyed_bundle(payload))
     got = config_verifier(world).verify(None, bundle, policy(world))
@@ -808,7 +807,7 @@ def test_verify_config_digest_and_runtime() -> None:
 
 def test_deployment_runtime_requires_approval_and_matches_config() -> None:
     world = World()
-    config = b"cvm-version: 0.15.0@sha256:" + b"ab" * 32 + b"\n"
+    config = b'{"cvm-version":"0.15.0@sha256:' + b"ab" * 32 + b'"}'
     core = deployment_core(config)
     token = world.timestamp(timestamp_input_of(CONFIG_FRESHNESS_DOMAIN_V2, core), world.now)
     altered = json.loads(json.dumps(core))

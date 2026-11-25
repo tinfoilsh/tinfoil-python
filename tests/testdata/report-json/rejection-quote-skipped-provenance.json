@@ -34,7 +34,7 @@
         "config": {
           "source": "embedded",
           "name": "/org/project/v1",
-          "digest": "5e94e4abf0cfe92821a95eca84e554953d3c64a5496390615fabd5c9ca848aaf"
+          "digest": "f1e341bd4c45556b6548f3f114d424bf029d1bce31f8cebbaa405bb27602051b"
         },
         "platform": {
           "source": "embedded",

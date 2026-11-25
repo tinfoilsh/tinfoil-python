@@ -1089,7 +1089,7 @@ def test_configured_keys_preserve_proof_verification() -> None:
     world = World()
     other = World()
     trusted_root = world.trusted_root_json(fulcio=False, ctlogs=False)
-    config = b"cvm-version: 0.15.0@sha256:" + b"ab" * 32 + b"\n"
+    config = b'{"cvm-version":"0.15.0@sha256:' + b"ab" * 32 + b'"}'
     payload = config_payload(world, world.now, config, vf.EMBEDDED_CONFIG_NAME)
     config_data = {
         "endorsement_ref": endorsement_reference(payload),

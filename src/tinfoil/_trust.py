@@ -82,7 +82,7 @@ class AuthorizedBy:
 @final
 @dataclass(frozen=True, slots=True)
 class EmbeddedConfig:
-    """Trusts ``attestation-collaterals/v3`` collateral for exactly the config bytes ``data`` that the caller
+    """Trusts ``attestation-collaterals/v3`` collateral for exactly the JSON config bytes ``data`` that the caller
     supplies, which must come from trusted client configuration. ``name`` optionally associates them with a
     ``/org/project/revision`` identity. It has no pin, because a pin would only compare the caller's input against
     the caller's input."""

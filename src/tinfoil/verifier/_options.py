@@ -62,7 +62,7 @@ class ConfigAuthorizer:
 @final
 @dataclass(frozen=True, slots=True)
 class EmbeddedConfig:
-    """Trusts exact config bytes that the caller supplies, in place of a registry endorsement. ``name`` optionally
+    """Trusts exact JSON config bytes that the caller supplies, in place of a registry endorsement. ``name`` optionally
     associates them with a trusted ``/org/project/revision`` identity, which a ``project`` pin must then match. The
     config must come from trusted client configuration, and requires ``attestation-collaterals/v3``."""
 

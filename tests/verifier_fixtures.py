@@ -45,7 +45,7 @@ def manifest_bytes(version: str = "v0.15.0", snp_launch: str = SNP_LAUNCH, mrtd:
 
 def config_bytes(manifest: bytes, version: str = "0.15.0") -> bytes:
     """A config whose ``cvm-version`` pins ``manifest``."""
-    return f"cvm-version: {version}@sha256:{hashlib.sha256(manifest).hexdigest()}\n".encode()
+    return f'{{"cvm-version":"{version}@sha256:{hashlib.sha256(manifest).hexdigest()}"}}'.encode()
 
 
 def platform_bytes() -> bytes:
