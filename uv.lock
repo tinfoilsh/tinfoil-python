@@ -936,7 +936,7 @@ wheels = [
 
 [[package]]
 name = "tinfoil"
-version = "0.16.0rc3"
+version = "0.16.0rc4"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
