@@ -1,5 +1,6 @@
 """The verifier: its options and their conflicts, the pipeline's layer attribution, repository pins, embedded
-references, caller-authorized configs, endorsed configs over a synthetic Sigstore world, and freshness deadlines."""
+references, caller-authorized configs, endorsed configs over a synthetic Sigstore world, container provenance, and
+freshness deadlines."""
 
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from tests.test_endorsement_approval import (
     config_payload,
     freshness_payload,
 )
+from tests.test_endorsement_container import RECORDED_BUNDLE, RECORDED_DIGEST, RECORDED_IMAGE, RECORDED_PROVENANCE
 from tinfoil.verifier._config import (
     ReferencesError,
     _authenticate_artifact_freshness,
@@ -35,6 +37,7 @@ from tinfoil.verifier._document.collateral.collateral import (
     AMD_CRL_V1_FORMAT,
     AMD_VCEK_V1_FORMAT,
     ARTIFACT_FRESHNESS_V1_FORMAT,
+    CONTAINER_PROVENANCE_V1_FORMAT,
     FORMAT_V2,
     FORMAT_V3,
     FRESHNESS_ID_PLATFORM,
@@ -75,6 +78,7 @@ from tinfoil.verifier._measurement import SEVSNP, ExpectedSEVSNP, ExpectedTDX
 from tinfoil.verifier._options import (
     ConfigAuthorizer,
     ConfigSigningKeys,
+    ConfigTrust,
     EmbeddedArtifacts,
     EmbeddedConfig,
     EmbeddedConfigReference,
@@ -871,6 +875,7 @@ def test_option_fields_of_the_wrong_type_are_usage_errors() -> None:
     assert embedded.runtime == inputs.runtime
     assert embedded.platform == inputs.platform
     assert embedded.config.digest == digest
+    assert embedded.config_data == inputs.config.data
     assert isinstance(embedded.runtime, bytes)
     assert isinstance(embedded.platform, bytes)
 
@@ -1143,6 +1148,64 @@ def test_configured_keys_preserve_proof_verification() -> None:
             )
         with pytest.raises(ReferencesError, match="pinned identity"):
             config_references(trust_of(v), doc, "org/other", now)
+
+
+# --- container provenance ---------------------------------------------------------------------
+
+
+def requiring_provenance(config: bytes, provenance: str) -> bytes:
+    """``config`` with a container that runs the recorded image under the given provenance member."""
+    container = f'{{"name":"app","image":"{RECORDED_IMAGE}","provenance":{provenance}}}'
+    return config.removesuffix(b"}") + f',"containers":[{container}]}}'.encode()
+
+
+def test_container_provenance() -> None:
+    """A config's container builds are authenticated wherever the verifier holds the config's bytes. A document here
+    has no authentic quote, so one whose provenance passes is rejected at the quote layer."""
+    inputs = vf.embedded_inputs()
+    assert isinstance(inputs.config, EmbeddedConfig)
+    plain = inputs.config.data
+    requiring = requiring_provenance(plain, RECORDED_PROVENANCE)
+    another_workflow = requiring_provenance(plain, RECORDED_PROVENANCE.replace("build.yml", "release.yml"))
+    unreadable = requiring_provenance(plain, '{"gitlab":{}}')
+    not_json = b"containers: []\n"
+    authorizer = ConfigAuthorizer(authorize_all)
+    embedded = EmbeddedConfig(data=requiring)
+
+    def referring(config: bytes) -> EmbeddedConfigReference:
+        return EmbeddedConfigReference(digest=hashlib.sha256(config).hexdigest(), runtime=runtime_from_config(plain))
+
+    reference = referring(requiring)
+    proof = vf.reference_entry(
+        "container:sha256:" + RECORDED_DIGEST,
+        CONTAINER_PROVENANCE_V1_FORMAT,
+        {"digest": RECORDED_DIGEST, "sigstore_bundle": json.loads(RECORDED_BUNDLE.read_bytes())},
+    )
+
+    def carried(config: bytes) -> dict[str, Any]:
+        return config_entry(CONFIG_V1_FORMAT, config_base64=b64(config))
+
+    cases: list[tuple[str, ConfigTrust, list[dict[str, Any]], str]] = [
+        ("authorized, proven", authorizer, [carried(requiring), proof], LAYER_QUOTE),
+        ("authorized, no entry", authorizer, [carried(requiring)], LAYER_PROVENANCE),
+        ("authorized, another workflow", authorizer, [carried(another_workflow), proof], LAYER_PROVENANCE),
+        ("authorized, unknown kind", authorizer, [carried(unreadable), proof], LAYER_PROVENANCE),
+        ("embedded, proven", embedded, [proof], LAYER_QUOTE),
+        ("embedded, no entry", embedded, [], LAYER_PROVENANCE),
+        ("reference, document's bytes, proven", reference, [carried(requiring), proof], LAYER_QUOTE),
+        ("reference, document's bytes, no entry", reference, [carried(requiring)], LAYER_PROVENANCE),
+        ("reference, no bytes", reference, [], LAYER_QUOTE),
+        ("reference, bytes of another config", reference, [carried(unreadable)], LAYER_QUOTE),
+        ("reference, document's bytes are not JSON", referring(not_json), [carried(not_json)], LAYER_PROVENANCE),
+    ]
+    for name, config, entries, want in cases:
+        raw, nonce, _ = vf.embedded_document(FORMAT_V3, *entries)
+        with pytest.raises(VerificationError) as rejected:
+            vf.embedded_verifier(dataclasses.replace(inputs, config=config)).verify_v3(raw, nonce, Pin())
+        assert rejected.value.layer == want, name
+
+    with pytest.raises(UsageError, match="unknown object member name"):
+        vf.embedded_verifier(dataclasses.replace(inputs, config=EmbeddedConfig(data=unreadable)))
 
 
 # --- freshness ------------------------------------------------------------------------------

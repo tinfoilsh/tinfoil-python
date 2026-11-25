@@ -64,7 +64,8 @@ class ConfigAuthorizer:
 class EmbeddedConfig:
     """Trusts exact JSON config bytes that the caller supplies, in place of a registry endorsement. ``name`` optionally
     associates them with a trusted ``/org/project/revision`` identity, which a ``project`` pin must then match. The
-    config must come from trusted client configuration, and requires ``attestation-collaterals/v3``."""
+    config must come from trusted client configuration, and requires ``attestation-collaterals/v3``. The document
+    must still prove every container build that the config requires."""
 
     data: bytes
     name: str = ""
@@ -74,7 +75,8 @@ class EmbeddedConfig:
 @dataclass(frozen=True, slots=True)
 class EmbeddedConfigReference:
     """Trusts an exact config, identified by the SHA-256 ``digest`` of its bytes, and the runtime that it pins, in
-    place of a registry endorsement. Otherwise it is ``EmbeddedConfig``."""
+    place of a registry endorsement. Otherwise it is ``EmbeddedConfig``, except that the container builds that the
+    config requires are checked only when the document carries the config bytes."""
 
     digest: str
     """SHA-256 of the config bytes, lowercase hex."""

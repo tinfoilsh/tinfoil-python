@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from tinfoil.verifier._canonical import EncodingError, decode_lower_hex
 from tinfoil.verifier._document.collateral.runtime import RuntimeCollateralError, RuntimeReference
 from tinfoil.verifier._endorsement.approval import MAX_CONFIG_SIZE, ApprovalError, parse_name
+from tinfoil.verifier._endorsement.container import ContainerConfigError, container_provenance_from_config
 from tinfoil.verifier._errors import UsageError
 from tinfoil.verifier._options import EmbeddedArtifacts, EmbeddedConfig, EmbeddedConfigReference
 from tinfoil.verifier._policy import ARTIFACT_FORMAT_V2, PolicyError
@@ -21,11 +22,13 @@ _CONFIG_DIGEST_SIZE = 32
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResolvedReferences:
-    """Embedded references after validation, with config bytes reduced to their reference."""
+    """Embedded references after validation, with config bytes reduced to their reference and kept beside it."""
 
     config: EmbeddedConfigReference | None = None
     runtime: bytes | None = None
     platform: bytes | None = None
+    config_data: bytes | None = None
+    """The bytes of a config that the caller embedded in full. A config embedded by reference has none."""
 
 
 def resolve_artifacts(artifacts: EmbeddedArtifacts) -> ResolvedReferences:
@@ -59,7 +62,8 @@ def resolve_artifacts(artifacts: EmbeddedArtifacts) -> ResolvedReferences:
 def resolve_config(config: EmbeddedConfig | EmbeddedConfigReference, runtime: bytes | None) -> EmbeddedConfigReference:
     """Check a caller-trusted config, and reduce config bytes to their reference.
 
-    Config bytes must be within the size bounds and carry a runtime pin; a
+    Config bytes must be within the size bounds and carry a runtime pin, and
+    the container builds that they require must be readable; a
     config reference must have a well-formed name when it has one, a
     lowercase SHA-256 digest and a valid runtime pin whose repository, tag and
     digest are strings. ``runtime``, an embedded manifest that ``resolve_artifacts``
@@ -76,7 +80,8 @@ def resolve_config(config: EmbeddedConfig | EmbeddedConfigReference, runtime: by
             raise UsageError("embedded config size is outside allowed bounds")
         try:
             pinned = _runtime_from_config(data)
-        except RuntimeConfigError as err:
+            container_provenance_from_config(data)
+        except (RuntimeConfigError, ContainerConfigError) as err:
             raise UsageError(str(err)) from err
         reference = EmbeddedConfigReference(name=config.name, digest=hashlib.sha256(data).hexdigest(), runtime=pinned)
     else:

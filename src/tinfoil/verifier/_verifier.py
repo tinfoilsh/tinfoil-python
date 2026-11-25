@@ -411,7 +411,12 @@ def _trust_policy(config: object, policy: object, *, overrides: Overrides | None
         max_age = freshness_max_age
     artifacts, freshness_keys = _artifact_choice(policy.artifacts)
     choice = _config_choice(config, artifacts.runtime)
-    embedded = ResolvedReferences(config=choice.embedded, runtime=artifacts.runtime, platform=artifacts.platform)
+    embedded = ResolvedReferences(
+        config=choice.embedded,
+        runtime=artifacts.runtime,
+        platform=artifacts.platform,
+        config_data=bytes(config.data) if isinstance(config, EmbeddedConfig) else None,
+    )
 
     try:
         if overrides is None or overrides.sigstore_root is None:
